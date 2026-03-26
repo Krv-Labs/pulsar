@@ -1,0 +1,43 @@
+# Pulsar parameter sweep configuration
+# Inspired by Weights & Biases sweep files.
+#
+# Sweep parameters support three specification styles:
+#   values: [2, 3, 5]                       → use list directly (grid search)
+#   range: {min: 0.1, max: 1.0, steps: 10}  → np.linspace
+#   distribution: {type: uniform, min, max}  → reserved for random search
+
+run:
+  name: my_experiment         # optional label for output files
+  data: path/to/data.csv      # CSV or parquet
+
+preprocessing:
+  drop_columns: []            # column names to drop before fitting
+
+  impute:                     # one entry per column that has missing values
+    age:
+      method: sample_normal   # sample_normal | sample_categorical |
+      seed: 42                # fill_mean | fill_median | fill_mode
+
+    category:
+      method: sample_categorical
+      seed: 7
+
+sweep:
+  pca:
+    dimensions:
+      values: [2, 3, 5]       # grid over these n_components values
+    seed:
+      values: [42, 7, 13]     # grid over these random seeds
+
+  ball_mapper:
+    epsilon:
+      values: [0.3, 0.5, 0.8]
+      # alternative — sweep a linspace:
+      # range: {min: 0.1, max: 1.5, steps: 8}
+
+cosmic_graph:
+  threshold: 0.0              # minimum edge weight to include in binary adjacency
+  neighborhood: node          # node (default) | cc (connected components, future)
+
+output:
+  n_reps: 4                   # number of representative ball maps to select
