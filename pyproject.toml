@@ -24,8 +24,9 @@ dev = [
 ]
 
 [tool.maturin]
-features    = ["pyo3/extension-module"]
-module-name = "pulsar._pulsar"
+features        = ["pyo3/extension-module"]
+module-name     = "pulsar._pulsar"
+python-packages = ["pulsar"]
 
 [dependency-groups]
 dev = [
