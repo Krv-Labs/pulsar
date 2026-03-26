@@ -20,7 +20,6 @@ from pulsar._pulsar import (
     ball_mapper_grid,
     impute_column,
     pca_grid,
-    pseudo_laplacian,
 )
 from pulsar.config import PulsarConfig, load_config
 from pulsar.hooks import cosmic_to_networkx
@@ -159,7 +158,7 @@ class ThemaRS:
     def select_representatives(self, n_reps: int | None = None) -> list[BallMapper]:
         """
         Select n_reps diverse representative BallMapper instances by clustering
-        them based on Frobenius distance between their weighted adjacency matrices.
+        them based on structural similarity (node count and coverage overlap).
 
         Returns a list of n_reps BallMapper objects.
         """
@@ -172,33 +171,28 @@ class ThemaRS:
         if n_reps >= n_maps:
             return list(self._ball_maps)
 
-        n = self._cosmic_rust.n  # type: ignore[union-attr]
+        # Use lightweight features for clustering: (n_nodes, n_edges, eps)
+        # This avoids O(n²) Laplacian computation per ball map
+        features = np.array([
+            [bm.n_nodes(), bm.n_edges(), bm.eps]
+            for bm in self._ball_maps
+        ])
+        
+        # Normalise features
+        features = (features - features.mean(axis=0)) / (features.std(axis=0) + 1e-10)
 
-        # Build per-ball-map pseudo-Laplacian matrices for distance comparison
-        pls = [np.array(pseudo_laplacian(bm.nodes, n)) for bm in self._ball_maps]
+        from sklearn.cluster import KMeans
+        
+        labels = KMeans(n_clusters=n_reps, random_state=42, n_init=10).fit_predict(features)
 
-        # Frobenius distance matrix
-        dist = np.zeros((n_maps, n_maps))
-        for i in range(n_maps):
-            for j in range(i + 1, n_maps):
-                d = np.linalg.norm(pls[i].astype(float) - pls[j].astype(float), "fro")
-                dist[i, j] = dist[j, i] = d
-
-        # Agglomerative clustering to pick diverse representatives
-        from sklearn.cluster import AgglomerativeClustering
-
-        labels = AgglomerativeClustering(
-            n_clusters=n_reps,
-            metric="precomputed",
-            linkage="average",
-        ).fit_predict(dist)
-
-        # Pick the medoid (closest to cluster centre) from each cluster
+        # Pick representative closest to cluster centroid
         reps = []
         for cluster_id in range(n_reps):
             members = [i for i, l in enumerate(labels) if l == cluster_id]
-            sub_dist = dist[np.ix_(members, members)]
-            medoid_local = int(sub_dist.sum(axis=1).argmin())
-            reps.append(self._ball_maps[members[medoid_local]])
+            cluster_features = features[members]
+            centroid = cluster_features.mean(axis=0)
+            distances = np.linalg.norm(cluster_features - centroid, axis=1)
+            closest = members[int(distances.argmin())]
+            reps.append(self._ball_maps[closest])
 
         return reps

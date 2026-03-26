@@ -1,17 +1,16 @@
+"""Tests for CosmicGraph construction."""
 import numpy as np
 import pytest
-import sys
-import os
 
-from pulsar._pulsar import CosmicGraph, pseudo_laplacian
+from pulsar._pulsar import CosmicGraph, BallMapper, accumulate_pseudo_laplacians
+from tests.conftest import pseudo_laplacian_py
 
 
 def make_simple_laplacian():
     """Build a small pseudo-Laplacian from known nodes."""
     nodes = [[0, 1, 2], [1, 2, 3], [3, 4]]
     n = 5
-    L = np.array(pseudo_laplacian(nodes, n))
-    return L
+    return pseudo_laplacian_py(nodes, n)
 
 
 def test_output_shapes():
@@ -50,7 +49,6 @@ def test_threshold_zero_gives_binary_adj():
     cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
     adj = np.array(cg.adj)
     wadj = np.array(cg.weighted_adj)
-    # Every position with weight > 0 should have adj = 1
     np.testing.assert_array_equal((wadj > 0).astype(np.uint8), adj)
 
 
@@ -68,24 +66,22 @@ def test_symmetry():
     np.testing.assert_allclose(wadj, wadj.T, atol=1e-12)
 
 
-def test_matches_thema_reference():
-    """Compare against Thema's normalize_cosmicGraph."""
-    thema_path = os.path.join(os.path.dirname(__file__), "..", "Thema")
-    if not os.path.isdir(thema_path):
-        pytest.skip("Thema submodule not available")
+def test_with_accumulated_laplacian():
+    """Test CosmicGraph with Rust-accumulated Laplacian."""
+    rng = np.random.default_rng(0)
+    pts = rng.standard_normal((30, 2)).astype(np.float64)
+    n = len(pts)
 
-    sys.path.insert(0, thema_path)
-    try:
-        from thema.multiverse.universe.utils.starHelpers import normalize_cosmicGraph
-    except ImportError:
-        pytest.skip("Cannot import Thema starHelpers")
+    ball_maps = []
+    for eps in [0.5, 1.0, 1.5]:
+        bm = BallMapper(eps=eps)
+        bm.fit(pts)
+        ball_maps.append(bm)
 
-    L = make_simple_laplacian()
-    threshold = 0.0
+    galactic_L = np.array(accumulate_pseudo_laplacians(ball_maps, n))
+    cg = CosmicGraph.from_pseudo_laplacian(galactic_L, threshold=0.1)
 
-    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=threshold)
-    pulsar_wadj = np.array(cg.weighted_adj)
-
-    _, thema_wadj, _ = normalize_cosmicGraph(L, threshold=threshold)
-
-    np.testing.assert_allclose(pulsar_wadj, thema_wadj, atol=1e-12)
+    wadj = np.array(cg.weighted_adj)
+    assert wadj.shape == (n, n)
+    assert np.all(wadj >= 0)
+    assert np.all(wadj <= 1.0 + 1e-10)

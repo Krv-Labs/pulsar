@@ -18,3 +18,20 @@ def array_with_nans():
 def categorical_array():
     # Encoded as float: 0.0, 1.0, 2.0
     return np.array([0.0, 1.0, np.nan, 0.0, np.nan, 1.0])
+
+
+def pseudo_laplacian_py(nodes, n):
+    """Pure Python pseudo-Laplacian for testing.
+    
+    This replaces the removed Rust single-ball-map function.
+    The Rust accumulate_pseudo_laplacians is the production API.
+    """
+    L = np.zeros((n, n), dtype=np.int64)
+    for members in nodes:
+        for i in members:
+            for j in members:
+                if i == j:
+                    L[i, j] += 1
+                else:
+                    L[i, j] -= 1
+    return L

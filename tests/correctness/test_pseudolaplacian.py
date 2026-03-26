@@ -1,143 +1,96 @@
 """
-Correctness tests for pseudolaplacian.rs — pseudo_laplacian.
+Correctness tests for pseudo-Laplacian via accumulate_pseudo_laplacians.
 
-The Python reference is a literal translation of the Rust nested loop:
-
+The Python reference is the same formula used by the Rust implementation:
     L = zeros(n, n)
     for members in nodes:
         for i in members:
             for j in members:
                 L[i, j] += 1 if i == j else -1
-
-Both implementations are integer arithmetic on the same inputs, so the
-outputs must be bit-identical (assert_array_equal, not allclose).
 """
 import numpy as np
 import pytest
 
-from pulsar._pulsar import pseudo_laplacian
+from pulsar._pulsar import BallMapper, accumulate_pseudo_laplacians
+from tests.conftest import pseudo_laplacian_py
 
 
-# ---------------------------------------------------------------------------
-# Python reference implementation
-# ---------------------------------------------------------------------------
+def test_single_ballmap_matches_reference():
+    """Single BallMapper accumulated matches Python reference."""
+    rng = np.random.default_rng(0)
+    pts = rng.standard_normal((20, 2)).astype(np.float64)
+    n = len(pts)
 
-def py_pseudo_laplacian(nodes, n):
-    """Pseudo-Laplacian from Ball Mapper node membership.
+    bm = BallMapper(eps=1.0)
+    bm.fit(pts)
 
-    For each ball (list of member point indices):
-      - Increment L[i, i] by 1 for every member i  (diagonal: how many balls
-        contain point i)
-      - Decrement L[i, j] by 1 for every pair i≠j  (off-diagonal: negated
-        count of balls containing both i and j)
+    rust_L = np.array(accumulate_pseudo_laplacians([bm], n))
+    py_L = pseudo_laplacian_py(bm.nodes, n)
 
-    This mirrors the Rust implementation exactly.
-    """
-    L = np.zeros((n, n), dtype=np.int64)
-    for members in nodes:
-        for i in members:
-            for j in members:
-                if i == j:
-                    L[i, j] += 1
-                else:
-                    L[i, j] -= 1
-    return L
+    np.testing.assert_array_equal(rust_L, py_L)
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
+def test_multiple_ballmaps_matches_reference():
+    """Multiple BallMappers accumulated matches summed Python reference."""
+    rng = np.random.default_rng(42)
+    pts = rng.standard_normal((30, 3)).astype(np.float64)
+    n = len(pts)
 
-def test_matches_reference_simple():
-    """Smallest non-trivial case: two overlapping balls."""
-    nodes = [[0, 1, 2], [1, 2, 3]]
-    n = 4
-    expected = py_pseudo_laplacian(nodes, n)
-    actual = np.array(pseudo_laplacian(nodes, n))
-    np.testing.assert_array_equal(actual, expected,
-                                  err_msg="Rust output differs from Python reference")
+    ball_maps = []
+    for eps in [0.5, 1.0, 1.5, 2.0]:
+        bm = BallMapper(eps=eps)
+        bm.fit(pts)
+        ball_maps.append(bm)
 
+    rust_L = np.array(accumulate_pseudo_laplacians(ball_maps, n))
 
-def test_matches_reference_disjoint_balls():
-    """Two disjoint balls: cross-ball entries should be zero."""
-    nodes = [[0, 1], [2, 3]]
-    n = 4
-    expected = py_pseudo_laplacian(nodes, n)
-    actual = np.array(pseudo_laplacian(nodes, n))
-    np.testing.assert_array_equal(actual, expected)
+    py_L = np.zeros((n, n), dtype=np.int64)
+    for bm in ball_maps:
+        py_L += pseudo_laplacian_py(bm.nodes, n)
 
-
-def test_matches_reference_single_ball():
-    nodes = [[0, 1, 2, 3]]
-    n = 4
-    expected = py_pseudo_laplacian(nodes, n)
-    actual = np.array(pseudo_laplacian(nodes, n))
-    np.testing.assert_array_equal(actual, expected)
-
-
-def test_matches_reference_many_balls():
-    """Larger random case: 8 points, 4 overlapping balls."""
-    nodes = [[0, 1, 2], [1, 2, 3], [4, 5], [5, 6, 7]]
-    n = 8
-    expected = py_pseudo_laplacian(nodes, n)
-    actual = np.array(pseudo_laplacian(nodes, n))
-    np.testing.assert_array_equal(actual, expected)
-
-
-def test_matches_reference_empty_nodes():
-    n = 5
-    expected = py_pseudo_laplacian([], n)
-    actual = np.array(pseudo_laplacian([], n))
-    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(rust_L, py_L)
 
 
 def test_symmetry():
-    """The pseudo-Laplacian is always symmetric: L[i,j] == L[j,i]."""
-    nodes = [[0, 1, 2], [1, 2, 3], [2, 3, 4]]
-    n = 5
-    actual = np.array(pseudo_laplacian(nodes, n))
-    np.testing.assert_array_equal(actual, actual.T,
-                                  err_msg="pseudo-Laplacian must be symmetric")
+    """Accumulated pseudo-Laplacian is symmetric."""
+    rng = np.random.default_rng(123)
+    pts = rng.standard_normal((25, 2)).astype(np.float64)
+    n = len(pts)
+
+    ball_maps = []
+    for eps in [0.8, 1.2]:
+        bm = BallMapper(eps=eps)
+        bm.fit(pts)
+        ball_maps.append(bm)
+
+    L = np.array(accumulate_pseudo_laplacians(ball_maps, n))
+    np.testing.assert_array_equal(L, L.T)
 
 
 def test_diagonal_is_membership_count():
-    """L[i, i] must equal the number of balls that contain point i."""
-    nodes = [[0, 1, 2], [0, 3], [0, 1]]
-    n = 4
-    actual = np.array(pseudo_laplacian(nodes, n))
+    """Diagonal equals total membership count across all ball maps."""
+    rng = np.random.default_rng(7)
+    pts = rng.standard_normal((15, 2)).astype(np.float64)
+    n = len(pts)
 
-    # Point 0 is in all three balls → L[0,0] = 3
-    assert actual[0, 0] == 3, f"L[0,0] = {actual[0,0]}, expected 3"
-    # Points 1 is in balls 0 and 2 → L[1,1] = 2
-    assert actual[1, 1] == 2, f"L[1,1] = {actual[1,1]}, expected 2"
-    # Point 3 is only in ball 1 → L[3,3] = 1
-    assert actual[3, 3] == 1, f"L[3,3] = {actual[3,3]}, expected 1"
+    ball_maps = []
+    for eps in [0.5, 1.0]:
+        bm = BallMapper(eps=eps)
+        bm.fit(pts)
+        ball_maps.append(bm)
 
+    L = np.array(accumulate_pseudo_laplacians(ball_maps, n))
 
-def test_offdiagonal_is_negative_shared_count():
-    """L[i,j] (i≠j) must equal the negative number of balls containing both i and j."""
-    nodes = [[0, 1, 2], [0, 1, 3]]  # points 0 and 1 share 2 balls
-    n = 4
-    actual = np.array(pseudo_laplacian(nodes, n))
-
-    assert actual[0, 1] == -2, f"L[0,1] = {actual[0,1]}, expected -2"
-    assert actual[1, 0] == -2, f"L[1,0] = {actual[1,0]}, expected -2"
-    # Point 2 and 3 share no ball
-    assert actual[2, 3] == 0, f"L[2,3] = {actual[2,3]}, expected 0"
+    # Count memberships manually
+    for i in range(n):
+        expected_count = sum(
+            1 for bm in ball_maps for node in bm.nodes if i in node
+        )
+        assert L[i, i] == expected_count
 
 
-def test_accumulation_matches_summed_reference():
-    """Accumulating pseudo-Laplacians across multiple BallMappers must equal
-    the reference sum."""
-    nodes_list = [
-        [[0, 1], [1, 2]],
-        [[0, 2], [2, 3]],
-        [[1, 3]],
-    ]
-    n = 4
-    galactic_L = np.zeros((n, n), dtype=np.int64)
-    for nodes in nodes_list:
-        galactic_L += np.array(pseudo_laplacian(nodes, n))
-
-    expected = sum(py_pseudo_laplacian(nodes, n) for nodes in nodes_list)
-    np.testing.assert_array_equal(galactic_L, expected)
+def test_empty_ballmaps_zero_matrix():
+    """Empty ball map list produces zero matrix."""
+    n = 10
+    L = np.array(accumulate_pseudo_laplacians([], n))
+    np.testing.assert_array_equal(L, np.zeros((n, n), dtype=np.int64))

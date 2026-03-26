@@ -5,46 +5,25 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 
 /// Squared Euclidean distance between two equal-length slices.
-///
-/// We compare **squared** distances throughout Ball Mapper to avoid computing
-/// a square root on every pair — distance comparisons only need the order
-/// relationship, not the actual distance value.  The caller must compare
-/// against `eps * eps` (not `eps`).
+/// Using squared distance avoids sqrt, which is sufficient for comparisons.
 #[inline(always)]
 fn l2_sq(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
-/// Core Ball Mapper algorithm.  Returns `(nodes, edges)` where:
-/// - `nodes[k]` is the list of point indices whose distance to ball `k`'s
-///   centre is ≤ `eps`.
-/// - `edges` contains pairs `(a, b)` (with `a < b`) for every pair of balls
-///   that share at least one point.
+/// Core Ball Mapper algorithm optimized for large datasets.
 ///
-/// # Algorithm (three steps)
+/// Returns `(nodes, edges)` where:
+/// - `nodes[k]` is the list of point indices in ball `k`
+/// - `edges` contains pairs `(a, b)` with `a < b` for balls sharing points
 ///
-/// **Step 1 — centre selection (greedy)**
-/// Walk through points in order `0..n`.  A point becomes a new ball centre if
-/// no existing centre is within distance `eps`.  This produces the minimum
-/// number of balls needed to cover the data with balls of radius `eps`.
-///
-/// **Step 2 — membership**
-/// For each centre, collect every point within distance `eps`.  A point can
-/// belong to multiple balls (overlapping coverage is the whole point of Ball
-/// Mapper — overlaps reveal topological connections between regions).
-///
-/// **Step 3 — edges**
-/// Two balls `a` and `b` are connected by an edge if they share at least one
-/// point.  Only pairs with `a < b` are recorded to avoid duplicates.
-///
-/// # Parameters
-/// - `points` — array view of shape `(n_points, n_dims)`.
-/// - `eps` — radius of each ball.
+/// Complexity: O(n * k) for centre selection + O(n * k) for membership
+/// where k = number of balls (typically k << n for reasonable epsilon).
 fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
     let n = points.nrows();
     let eps_sq = eps * eps;
 
-    // Step 1: select ball centres
+    // Step 1: greedy centre selection - O(n * k) where k = num centres
     let mut center_indices: Vec<usize> = Vec::new();
     'outer: for i in 0..n {
         let pi = points.row(i).to_slice().unwrap();
@@ -57,7 +36,7 @@ fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(usize,
         center_indices.push(i);
     }
 
-    // Step 2: build membership sets (node id = index into center_indices)
+    // Step 2: build membership - O(n * k)
     let nodes: Vec<Vec<usize>> = center_indices
         .iter()
         .map(|&c| {
@@ -71,7 +50,7 @@ fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(usize,
         })
         .collect();
 
-    // Step 3: build edges (pairs of balls sharing at least one point)
+    // Step 3: build edges - O(k²) but k is small
     let n_balls = nodes.len();
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for a in 0..n_balls {
@@ -88,14 +67,8 @@ fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(usize,
 
 /// A fitted Ball Mapper complex.
 ///
-/// A Ball Mapper decomposes a point cloud into overlapping balls and
-/// represents their connectivity as a graph.  It is the topological analogue
-/// of a Mapper complex using distance balls as the cover.
-///
-/// # Fields
-/// - `eps` — the ball radius used when fitting.
-/// - `nodes` — `nodes[k]` contains the indices of all points in ball `k`.
-/// - `edges` — pairs `(a, b)` of ball indices that share at least one point.
+/// Ball Mapper decomposes a point cloud into overlapping balls and
+/// represents connectivity as a graph. Designed for large-scale EHR data.
 #[pyclass]
 pub struct BallMapper {
     pub eps: f64,
@@ -105,22 +78,13 @@ pub struct BallMapper {
 
 #[pymethods]
 impl BallMapper {
-    /// Create a new (unfitted) Ball Mapper with the given radius.
-    ///
-    /// # Parameters
-    /// - `eps` — ball radius; larger values produce fewer, larger balls.
+    /// Create a new Ball Mapper with given radius.
     #[new]
     pub fn new(eps: f64) -> Self {
         BallMapper { eps, nodes: Vec::new(), edges: Vec::new() }
     }
 
     /// Fit the Ball Mapper to a point cloud.
-    ///
-    /// Runs the three-step algorithm (centre selection → membership → edges)
-    /// and stores the result in `self.nodes` and `self.edges`.
-    ///
-    /// # Parameters
-    /// - `points` (`np.ndarray[float64, 2D]`, shape `(n_points, n_dims)`)
     pub fn fit(&mut self, points: PyReadonlyArray2<f64>) -> PyResult<()> {
         let arr = points.as_array();
         let (nodes, edges) = fit_inner(arr, self.eps);
@@ -129,155 +93,55 @@ impl BallMapper {
         Ok(())
     }
 
-    /// Ball membership lists.  `nodes[k]` is a list of point indices in ball `k`.
     #[getter]
     pub fn nodes(&self) -> Vec<Vec<usize>> {
         self.nodes.clone()
     }
 
-    /// Edge list.  Each entry `(a, b)` (with `a < b`) means balls `a` and `b`
-    /// share at least one point.
     #[getter]
     pub fn edges(&self) -> Vec<(usize, usize)> {
         self.edges.clone()
     }
 
-    /// The ball radius this mapper was constructed with.
     #[getter]
     pub fn eps(&self) -> f64 {
         self.eps
     }
 
-    /// Number of balls (nodes) in the complex.
     pub fn n_nodes(&self) -> usize {
         self.nodes.len()
     }
 
-    /// Number of edges in the complex.
     pub fn n_edges(&self) -> usize {
         self.edges.len()
     }
 }
 
-/// Compute pairwise squared distances for small datasets.
-/// Returns a flattened upper-triangular matrix stored as Vec for cache efficiency.
-fn compute_pairwise_distances(points: &ArrayView2<f64>) -> Vec<f64> {
-    let n = points.nrows();
-    let mut distances = vec![0.0; n * n];
-    
-    for i in 0..n {
-        let pi = points.row(i).to_slice().unwrap();
-        for j in (i + 1)..n {
-            let pj = points.row(j).to_slice().unwrap();
-            let d = l2_sq(pi, pj);
-            distances[i * n + j] = d;
-            distances[j * n + i] = d;
-        }
-    }
-    distances
-}
-
-/// Ball Mapper using pre-computed distance matrix.
-/// Much faster for epsilon sweeps on the same embedding.
-fn fit_from_distances(
-    distances: &[f64],
-    n: usize,
-    eps_sq: f64,
-) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
-    // Step 1: select ball centres using distance matrix
-    let mut center_indices: Vec<usize> = Vec::new();
-    'outer: for i in 0..n {
-        for &c in &center_indices {
-            if distances[i * n + c] <= eps_sq {
-                continue 'outer;
-            }
-        }
-        center_indices.push(i);
-    }
-
-    // Step 2: build membership sets using distance matrix
-    let nodes: Vec<Vec<usize>> = center_indices
-        .iter()
-        .map(|&c| {
-            (0..n)
-                .filter(|&i| distances[i * n + c] <= eps_sq)
-                .collect()
-        })
-        .collect();
-
-    // Step 3: build edges
-    let n_balls = nodes.len();
-    let mut edges: Vec<(usize, usize)> = Vec::new();
-    for a in 0..n_balls {
-        let set_a: HashSet<usize> = nodes[a].iter().copied().collect();
-        for b in (a + 1)..n_balls {
-            if nodes[b].iter().any(|x| set_a.contains(x)) {
-                edges.push((a, b));
-            }
-        }
-    }
-
-    (nodes, edges)
-}
-
-/// Run Ball Mapper for every `(embedding, epsilon)` pair in parallel using rayon.
+/// Run Ball Mapper for every (embedding, epsilon) pair in parallel.
 ///
-/// This is the hot path in the pipeline: the full parameter sweep can involve
-/// dozens of (PCA embedding, epsilon) combinations.  Rayon distributes the
-/// independent `fit_inner` calls across all available CPU cores.
+/// This is the main entry point for grid search. Parallelised across all
+/// combinations using rayon for maximum throughput on large datasets.
 ///
-/// # Optimization
-/// For datasets with n < 10,000 points, pre-computes the pairwise distance matrix
-/// once per embedding, then sweeps over epsilons using fast threshold comparisons.
-/// This reduces complexity from O(n² * |epsilons|) to O(n²) + O(n * |epsilons|).
-///
-/// For larger datasets, falls back to the standard algorithm to avoid O(n²) memory.
-///
-/// # Parameters
-/// - `embeddings` — list of 2-D arrays (one per PCA configuration).
-/// - `epsilons` — list of ball radii to try.
-///
-/// # Returns
-/// A flat list of `BallMapper` objects in **row-major order**: for each
-/// embedding (outer loop), all epsilons (inner loop).
+/// Complexity per fit: O(n * k) where k = number of balls.
+/// No O(n²) memory allocation - scales to large EHR datasets.
 #[pyfunction]
 pub fn ball_mapper_grid(
     embeddings: Vec<PyReadonlyArray2<f64>>,
     epsilons: Vec<f64>,
 ) -> PyResult<Vec<BallMapper>> {
     let owned: Vec<Array2<f64>> = embeddings.iter().map(|e| e.as_array().to_owned()).collect();
-    
-    // Threshold for using distance matrix optimization (n² floats = 8n² bytes)
-    // 10,000 points = 800 MB, which is acceptable
-    const DISTANCE_MATRIX_THRESHOLD: usize = 10_000;
 
     let results: Vec<BallMapper> = owned
         .par_iter()
         .flat_map(|emb| {
-            let n = emb.nrows();
             let eps_clone = epsilons.clone();
-            
-            if n <= DISTANCE_MATRIX_THRESHOLD {
-                // Optimized path: pre-compute distance matrix once
-                let distances = compute_pairwise_distances(&emb.view());
-                
-                eps_clone
-                    .into_par_iter()
-                    .map(move |eps| {
-                        let (nodes, edges) = fit_from_distances(&distances, n, eps * eps);
-                        BallMapper { eps, nodes, edges }
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                // Standard path for large datasets
-                eps_clone
-                    .into_par_iter()
-                    .map(move |eps| {
-                        let (nodes, edges) = fit_inner(emb.view(), eps);
-                        BallMapper { eps, nodes, edges }
-                    })
-                    .collect::<Vec<_>>()
-            }
+            eps_clone
+                .into_par_iter()
+                .map(move |eps| {
+                    let (nodes, edges) = fit_inner(emb.view(), eps);
+                    BallMapper { eps, nodes, edges }
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 

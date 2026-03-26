@@ -1,31 +1,24 @@
-//! # `pulsar._pulsar` — Rust extension module for the Pulsar pipeline
+//! # `pulsar._pulsar` — Rust extension module for large-scale topological data analysis
 //!
-//! This crate is compiled by [maturin](https://github.com/PyO3/maturin) into a
-//! Python extension module named `pulsar._pulsar` (the leading underscore
-//! signals that it is a private implementation detail, not the public API).
+//! Optimized for large EHR datasets. All algorithms avoid O(n²) memory where possible
+//! and use parallel execution via rayon.
 //!
-//! The public Python API is re-exported through the `pulsar` package
-//! (`pulsar/__init__.py`).
+//! ## Core functions
 //!
-//! ## Module contents
+//! | Function | Description |
+//! |---|---|
+//! | `pca_grid` | Randomized PCA across dimensions/seeds (parallel) |
+//! | `ball_mapper_grid` | Ball Mapper across embeddings/epsilons (parallel) |
+//! | `accumulate_pseudo_laplacians` | Fused Laplacian accumulation (parallel) |
 //!
-//! | Python name | Rust source | Description |
-//! |---|---|---|
-//! | `impute_column` | `impute.rs` | Fill NaN values in a 1-D column |
-//! | `StandardScaler` | `scale.rs` | Fit/transform z-score normalisation |
-//! | `PCA` | `pca.rs` | Exact SVD-based dimensionality reduction |
-//! | `BallMapper` | `ballmapper.rs` | Topological Ball Mapper complex |
-//! | `ball_mapper_grid` | `ballmapper.rs` | Parallel sweep over (embedding, epsilon) pairs |
-//! | `pseudo_laplacian` | `pseudolaplacian.rs` | Build pseudo-Laplacian from ball membership |
-//! | `CosmicGraph` | `cosmic.rs` | Normalised adjacency from accumulated pseudo-Laplacian |
+//! ## Classes
 //!
-//! ## Naming note
-//!
-//! Cargo cannot compile a `cdylib` whose crate name starts with `_`.  The
-//! `[lib]` section in `Cargo.toml` therefore omits the `name` field, letting
-//! Cargo use the package name `pulsar`.  Maturin then renames the compiled
-//! `.so` file to `_pulsar.so` (or platform equivalent) according to the
-//! `module-name = "pulsar._pulsar"` setting in `pyproject.toml`.
+//! | Class | Description |
+//! |---|---|
+//! | `PCA` | Randomized SVD-based dimensionality reduction |
+//! | `StandardScaler` | Z-score normalisation |
+//! | `BallMapper` | Topological Ball Mapper complex |
+//! | `CosmicGraph` | Normalised adjacency from accumulated Laplacian |
 
 use pyo3::prelude::*;
 
@@ -37,20 +30,27 @@ mod ballmapper;
 mod pseudolaplacian;
 mod cosmic;
 
-/// Register all public symbols with the Python module.
-///
-/// The function name `_pulsar` must exactly match the last component of
-/// `module-name` in `pyproject.toml`.
 #[pymodule]
 fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Imputation
     m.add_function(wrap_pyfunction!(impute::impute_column, m)?)?;
+    
+    // Scaling
     m.add_class::<scale::StandardScaler>()?;
+    
+    // PCA (randomized SVD only - optimized for large datasets)
     m.add_class::<pca::PCA>()?;
     m.add_function(wrap_pyfunction!(pca::pca_grid, m)?)?;
+    
+    // Ball Mapper
     m.add_class::<ballmapper::BallMapper>()?;
     m.add_function(wrap_pyfunction!(ballmapper::ball_mapper_grid, m)?)?;
-    m.add_function(wrap_pyfunction!(pseudolaplacian::pseudo_laplacian, m)?)?;
+    
+    // Pseudo-Laplacian (fused accumulation only)
     m.add_function(wrap_pyfunction!(pseudolaplacian::accumulate_pseudo_laplacians, m)?)?;
+    
+    // Cosmic Graph
     m.add_class::<cosmic::CosmicGraph>()?;
+    
     Ok(())
 }

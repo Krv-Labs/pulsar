@@ -53,7 +53,6 @@ from pulsar._pulsar import (
     ball_mapper_grid,
     impute_column,
     pca_grid,
-    pseudo_laplacian,
 )
 from pulsar.config import load_config
 from pulsar.hooks import cosmic_to_networkx
