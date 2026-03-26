@@ -1,0 +1,21 @@
+[package]
+name = "pulsar"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3       = { version = "0.22", features = ["extension-module"] }
+numpy      = "0.22"
+ndarray    = "0.16"
+nalgebra   = "0.33"
+rand       = "0.8"
+rand_distr = "0.4"
+rayon      = "1"
+thiserror  = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1

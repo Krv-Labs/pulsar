@@ -1,3 +1,16 @@
+# Python
+python-version
+
+# Rust
+/target/
+Cargo.lock
+
+# maturin build artifacts
+*.pyd
+*.dylib
+*.dylib.dSYM/
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
