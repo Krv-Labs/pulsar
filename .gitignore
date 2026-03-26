@@ -1,5 +1,6 @@
 # Python
 python-version
+uv.lock
 
 # Rust
 /target/
@@ -9,6 +10,9 @@ Cargo.lock
 *.pyd
 *.dylib
 *.dylib.dSYM/
+
+# Data
+*.csv
 
 
 # Byte-compiled / optimized / DLL files
