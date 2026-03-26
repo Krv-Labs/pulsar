@@ -16,8 +16,10 @@ from pulsar._pulsar import (
     CosmicGraph,
     PCA,
     StandardScaler,
+    accumulate_pseudo_laplacians,
     ball_mapper_grid,
     impute_column,
+    pca_grid,
     pseudo_laplacian,
 )
 from pulsar.config import PulsarConfig, load_config
@@ -106,20 +108,17 @@ class ThemaRS:
         scaler = StandardScaler()
         X_scaled = np.array(scaler.fit_transform(X))
 
-        # 5. PCA grid
-        embeddings: list[np.ndarray] = []
-        for dim, seed in itertools.product(cfg.pca.dimensions, cfg.pca.seeds):
-            pca = PCA(n_components=dim, seed=seed)
-            emb = np.array(pca.fit_transform(X_scaled))
-            embeddings.append(emb)
+        # 5. PCA grid (randomized SVD, parallelised across seeds)
+        embeddings = [
+            np.ascontiguousarray(emb)
+            for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
+        ]
 
         # 6. BallMapper grid (Rust parallel)
         self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)
 
-        # 7. Accumulate pseudo-Laplacians
-        galactic_L = np.zeros((n, n), dtype=np.int64)
-        for bm in self._ball_maps:
-            galactic_L += np.array(pseudo_laplacian(bm.nodes, n))
+        # 7. Accumulate pseudo-Laplacians (Rust parallel)
+        galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
 
         # 8. CosmicGraph
         self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
