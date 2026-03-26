@@ -1,0 +1,28 @@
+# Pulsar demo — US Coal Plants dataset
+# Grid: 10 PCA dims × 8 seeds × 50 epsilons = 4000 ball maps
+# (approximates the ~4000-graph cosmic used in the Nature paper)
+#
+# Preprocessing (drop_columns, impute) is injected dynamically by run_demo.py
+# based on the actual dtypes and NaN pattern of the CSV.
+
+run:
+  name: coal_plants_grid_search
+  data: demo/us_coal_plants_dataset.csv
+
+sweep:
+  pca:
+    dimensions:
+      values: [2, 3, 4, 5, 6, 7, 8, 10, 12, 15]   # 10 dimensionalities
+    seed:
+      values: [42, 7, 13, 99, 123, 456, 789, 1000]  # 8 seeds → 80 total embeddings
+
+  ball_mapper:
+    epsilon:
+      range: {min: 0.3, max: 2.5, steps: 50}   # 50 cover radii → 80 × 50 = 4000 ball maps
+
+cosmic_graph:
+  threshold: 0.0
+  neighborhood: node
+
+output:
+  n_reps: 6
