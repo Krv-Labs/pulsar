@@ -10,7 +10,6 @@ Usage (from repo root):
 
 from __future__ import annotations
 
-import csv
 import time
 import urllib.request
 from pathlib import Path
@@ -37,15 +36,12 @@ from pulsar.pipeline import ThemaRS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = REPO_ROOT / "demo"
-RESULTS_DIR = DEMO_DIR / "results"
 CSV_PATH = DEMO_DIR / "us_coal_plants_dataset.csv"
-PARAMS_PATH = DEMO_DIR / "params.yaml"
+PARAMS_PATH = DEMO_DIR / "coal_params.yaml"
 DATA_URL = (
     "https://raw.githubusercontent.com/Krv-Labs/retire/main/"
     "retire/resources/us_coal_plants_dataset.csv"
 )
-
-RESULTS_DIR.mkdir(exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -201,16 +197,6 @@ class TimedThemaRS(ThemaRS):
         print(f"{'TOTAL':<{col_w}}  {total:>10.4f}  {'100.0%':>10}")
         print()
 
-    def save_csv(self, path: Path) -> None:
-        total = sum(self.timings.values())
-        with open(path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["stage", "time_s", "pct_of_total"])
-            for stage, secs in self.timings.items():
-                pct = 100.0 * secs / total if total else 0.0
-                writer.writerow([stage, f"{secs:.6f}", f"{pct:.2f}"])
-            writer.writerow(["TOTAL", f"{total:.6f}", "100.00"])
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -263,10 +249,6 @@ def main() -> None:
           f" {model.cosmic_graph.number_of_edges()} edges")
 
     model.print_report()
-
-    out_path = RESULTS_DIR / "timing_summary.csv"
-    model.save_csv(out_path)
-    print(f"[saved]  {out_path}")
 
 
 if __name__ == "__main__":
