@@ -33,3 +33,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.7",
 ]
+
+[[tool.uv.index]]
+name = "research"
+url = "https://api.pyx.dev/simple/krv/research"
+publish-url = "https://api.pyx.dev/v1/upload/krv/research"
+explicit=true
