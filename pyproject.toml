@@ -5,7 +5,10 @@ build-backend = "maturin"
 [project]
 name = "pulsar"
 version = "0.1.0"
-description = "Rust backend for the Thema data science library"
+authors = [
+    { name = "Krv Labs", email = "team@krv.ai" },
+]
+description = "Blazing fast implementation of the Thema algorithm."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
