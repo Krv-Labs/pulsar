@@ -1,6 +1,9 @@
 use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2};
 use pyo3::prelude::*;
+use rayon::prelude::*;
+
+use crate::ballmapper::BallMapper;
 
 /// Compute the pseudo-Laplacian matrix from a Ball Mapper's node membership.
 ///
@@ -73,4 +76,50 @@ pub fn pseudo_laplacian<'py>(
 ) -> PyResult<Bound<'py, PyArray2<i64>>> {
     let l = pseudo_laplacian_inner(&nodes, n);
     Ok(l.into_pyarray_bound(py))
+}
+
+/// Accumulate pseudo-Laplacians from all ball maps in parallel.
+///
+/// This is the optimised version that replaces the Python loop:
+/// ```python
+/// # Old (slow — 4000 Python/Rust crossings):
+/// galactic_L = np.zeros((n, n), dtype=np.int64)
+/// for bm in ball_maps:
+///     galactic_L += pseudo_laplacian(bm.nodes, n)
+///
+/// # New (fast — single call):
+/// galactic_L = accumulate_pseudo_laplacians(ball_maps, n)
+/// ```
+///
+/// Uses rayon to compute individual Laplacians in parallel, then reduces
+/// them into the final accumulated matrix.
+///
+/// # Parameters
+/// - `ball_maps` — list of BallMapper objects from `ball_mapper_grid`.
+/// - `n` — number of data points (size of the output matrix).
+///
+/// # Returns
+/// `np.ndarray[int64, 2D]` of shape `(n, n)` — the accumulated "galactic" Laplacian.
+#[pyfunction]
+pub fn accumulate_pseudo_laplacians<'py>(
+    py: Python<'py>,
+    ball_maps: Vec<PyRef<'py, BallMapper>>,
+    n: usize,
+) -> PyResult<Bound<'py, PyArray2<i64>>> {
+    // Extract node membership lists from all ball maps
+    let all_nodes: Vec<&Vec<Vec<usize>>> = ball_maps.iter().map(|bm| &bm.nodes).collect();
+
+    // Parallel map-reduce: compute Laplacians and sum them
+    let galactic_l: Array2<i64> = all_nodes
+        .par_iter()
+        .map(|nodes| pseudo_laplacian_inner(nodes, n))
+        .reduce(
+            || Array2::<i64>::zeros((n, n)),
+            |mut acc, l| {
+                acc += &l;
+                acc
+            },
+        );
+
+    Ok(galactic_l.into_pyarray_bound(py))
 }
