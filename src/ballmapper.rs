@@ -159,11 +159,79 @@ impl BallMapper {
     }
 }
 
+/// Compute pairwise squared distances for small datasets.
+/// Returns a flattened upper-triangular matrix stored as Vec for cache efficiency.
+fn compute_pairwise_distances(points: &ArrayView2<f64>) -> Vec<f64> {
+    let n = points.nrows();
+    let mut distances = vec![0.0; n * n];
+    
+    for i in 0..n {
+        let pi = points.row(i).to_slice().unwrap();
+        for j in (i + 1)..n {
+            let pj = points.row(j).to_slice().unwrap();
+            let d = l2_sq(pi, pj);
+            distances[i * n + j] = d;
+            distances[j * n + i] = d;
+        }
+    }
+    distances
+}
+
+/// Ball Mapper using pre-computed distance matrix.
+/// Much faster for epsilon sweeps on the same embedding.
+fn fit_from_distances(
+    distances: &[f64],
+    n: usize,
+    eps_sq: f64,
+) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
+    // Step 1: select ball centres using distance matrix
+    let mut center_indices: Vec<usize> = Vec::new();
+    'outer: for i in 0..n {
+        for &c in &center_indices {
+            if distances[i * n + c] <= eps_sq {
+                continue 'outer;
+            }
+        }
+        center_indices.push(i);
+    }
+
+    // Step 2: build membership sets using distance matrix
+    let nodes: Vec<Vec<usize>> = center_indices
+        .iter()
+        .map(|&c| {
+            (0..n)
+                .filter(|&i| distances[i * n + c] <= eps_sq)
+                .collect()
+        })
+        .collect();
+
+    // Step 3: build edges
+    let n_balls = nodes.len();
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for a in 0..n_balls {
+        let set_a: HashSet<usize> = nodes[a].iter().copied().collect();
+        for b in (a + 1)..n_balls {
+            if nodes[b].iter().any(|x| set_a.contains(x)) {
+                edges.push((a, b));
+            }
+        }
+    }
+
+    (nodes, edges)
+}
+
 /// Run Ball Mapper for every `(embedding, epsilon)` pair in parallel using rayon.
 ///
 /// This is the hot path in the pipeline: the full parameter sweep can involve
 /// dozens of (PCA embedding, epsilon) combinations.  Rayon distributes the
 /// independent `fit_inner` calls across all available CPU cores.
+///
+/// # Optimization
+/// For datasets with n < 10,000 points, pre-computes the pairwise distance matrix
+/// once per embedding, then sweeps over epsilons using fast threshold comparisons.
+/// This reduces complexity from O(n² * |epsilons|) to O(n²) + O(n * |epsilons|).
+///
+/// For larger datasets, falls back to the standard algorithm to avoid O(n²) memory.
 ///
 /// # Parameters
 /// - `embeddings` — list of 2-D arrays (one per PCA configuration).
@@ -171,29 +239,45 @@ impl BallMapper {
 ///
 /// # Returns
 /// A flat list of `BallMapper` objects in **row-major order**: for each
-/// embedding (outer loop), all epsilons (inner loop).  So if you have 3
-/// embeddings and 2 epsilons you get 6 results:
-/// `[(emb0, eps0), (emb0, eps1), (emb1, eps0), (emb1, eps1), ...]`
-///
-/// # Note on result ordering
-/// Rayon's `flat_map` with `into_par_iter` preserves the logical order of the
-/// outer iterator but parallelises the inner loop, so the index mapping above
-/// holds even though execution is concurrent.
+/// embedding (outer loop), all epsilons (inner loop).
 #[pyfunction]
 pub fn ball_mapper_grid(
     embeddings: Vec<PyReadonlyArray2<f64>>,
     epsilons: Vec<f64>,
 ) -> PyResult<Vec<BallMapper>> {
     let owned: Vec<Array2<f64>> = embeddings.iter().map(|e| e.as_array().to_owned()).collect();
+    
+    // Threshold for using distance matrix optimization (n² floats = 8n² bytes)
+    // 10,000 points = 800 MB, which is acceptable
+    const DISTANCE_MATRIX_THRESHOLD: usize = 10_000;
 
     let results: Vec<BallMapper> = owned
         .par_iter()
         .flat_map(|emb| {
+            let n = emb.nrows();
             let eps_clone = epsilons.clone();
-            eps_clone.into_par_iter().map(move |eps| {
-                let (nodes, edges) = fit_inner(emb.view(), eps);
-                BallMapper { eps, nodes, edges }
-            })
+            
+            if n <= DISTANCE_MATRIX_THRESHOLD {
+                // Optimized path: pre-compute distance matrix once
+                let distances = compute_pairwise_distances(&emb.view());
+                
+                eps_clone
+                    .into_par_iter()
+                    .map(move |eps| {
+                        let (nodes, edges) = fit_from_distances(&distances, n, eps * eps);
+                        BallMapper { eps, nodes, edges }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                // Standard path for large datasets
+                eps_clone
+                    .into_par_iter()
+                    .map(move |eps| {
+                        let (nodes, edges) = fit_inner(emb.view(), eps);
+                        BallMapper { eps, nodes, edges }
+                    })
+                    .collect::<Vec<_>>()
+            }
         })
         .collect();
 
