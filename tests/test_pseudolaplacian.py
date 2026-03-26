@@ -1,6 +1,5 @@
 """Tests for pseudo-Laplacian computation via accumulate_pseudo_laplacians."""
 import numpy as np
-import pytest
 
 from pulsar._pulsar import BallMapper, accumulate_pseudo_laplacians
 from tests.conftest import pseudo_laplacian_py

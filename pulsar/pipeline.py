@@ -4,7 +4,6 @@ ThemaRS — orchestrates the full Pulsar pipeline.
 
 from __future__ import annotations
 
-import itertools
 from typing import Union
 
 import networkx as nx
@@ -14,7 +13,6 @@ import pandas as pd
 from pulsar._pulsar import (
     BallMapper,
     CosmicGraph,
-    PCA,
     StandardScaler,
     accumulate_pseudo_laplacians,
     ball_mapper_grid,
@@ -188,7 +186,7 @@ class ThemaRS:
         # Pick representative closest to cluster centroid
         reps = []
         for cluster_id in range(n_reps):
-            members = [i for i, l in enumerate(labels) if l == cluster_id]
+            members = [i for i, lbl in enumerate(labels) if lbl == cluster_id]
             cluster_features = features[members]
             centroid = cluster_features.mean(axis=0)
             distances = np.linalg.norm(cluster_features - centroid, axis=1)

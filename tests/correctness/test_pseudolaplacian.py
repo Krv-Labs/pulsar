@@ -9,7 +9,6 @@ The Python reference is the same formula used by the Rust implementation:
                 L[i, j] += 1 if i == j else -1
 """
 import numpy as np
-import pytest
 
 from pulsar._pulsar import BallMapper, accumulate_pseudo_laplacians
 from tests.conftest import pseudo_laplacian_py

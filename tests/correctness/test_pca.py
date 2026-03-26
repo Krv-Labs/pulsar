@@ -12,7 +12,6 @@ Unlike exact SVD, randomized SVD won't match the Python reference exactly,
 but the subspace quality should be high for well-conditioned matrices.
 """
 import numpy as np
-import pytest
 
 from pulsar._pulsar import PCA
 

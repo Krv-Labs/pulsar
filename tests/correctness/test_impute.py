@@ -15,7 +15,6 @@ NOTE on sampling methods (sample_normal, sample_categorical):
     - The mean and std of sampled values are plausible.
 """
 import numpy as np
-import pytest
 from collections import Counter
 
 from pulsar._pulsar import impute_column

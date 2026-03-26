@@ -12,7 +12,6 @@ normalize_cosmicGraph:
     adj[i,i] = 0  (diagonal is always zero)
 """
 import numpy as np
-import pytest
 
 from pulsar._pulsar import CosmicGraph, BallMapper, accumulate_pseudo_laplacians
 from tests.conftest import pseudo_laplacian_py

@@ -11,7 +11,6 @@ Because the algorithm is fully deterministic (no RNG), the Rust and Python
 outputs must agree exactly: same node sets, same edges.
 """
 import numpy as np
-import pytest
 
 from pulsar._pulsar import BallMapper, ball_mapper_grid
 

@@ -5,14 +5,12 @@ Downloads the dataset (once), runs a large grid search through the full
 ThemaRS pipeline, and prints per-stage wall-clock timings.
 
 Usage (from repo root):
-    uv run python demo/run_demo.py
+    uv run python demo/coal.py
 """
 
 from __future__ import annotations
 
 import csv
-import itertools
-import os
 import time
 import urllib.request
 from pathlib import Path
@@ -20,6 +18,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
+
+from pulsar._pulsar import (
+    CosmicGraph,
+    StandardScaler,
+    accumulate_pseudo_laplacians,
+    ball_mapper_grid,
+    impute_column,
+    pca_grid,
+)
+from pulsar.config import load_config
+from pulsar.hooks import cosmic_to_networkx
+from pulsar.pipeline import ThemaRS
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -36,27 +46,6 @@ DATA_URL = (
 )
 
 RESULTS_DIR.mkdir(exist_ok=True)
-
-# ---------------------------------------------------------------------------
-# Imports (after sys.path is stable — repo root must be on path)
-# ---------------------------------------------------------------------------
-
-import sys
-sys.path.insert(0, str(REPO_ROOT))
-
-from pulsar._pulsar import (
-    BallMapper,
-    CosmicGraph,
-    PCA,
-    StandardScaler,
-    accumulate_pseudo_laplacians,
-    ball_mapper_grid,
-    impute_column,
-    pca_grid,
-)
-from pulsar.config import load_config
-from pulsar.hooks import cosmic_to_networkx
-from pulsar.pipeline import ThemaRS
 
 
 # ---------------------------------------------------------------------------

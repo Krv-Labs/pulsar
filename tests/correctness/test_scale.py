@@ -11,7 +11,6 @@ We verify that the Rust output matches the Python reference to machine
 precision (atol=1e-12).
 """
 import numpy as np
-import pytest
 
 from pulsar._pulsar import StandardScaler
 
@@ -58,12 +57,7 @@ def test_fit_transform_matches_reference(rng_data):
 
 
 def test_transform_matches_reference(rng_data, small_data):
-    _, means, stds = py_fit_transform(rng_data)
-    expected = py_transform(small_data, means[:small_data.shape[1]],
-                            stds[:small_data.shape[1]])
-
     # Use a dataset with the same number of columns (small_data has 3, rng_data 4)
-    # Re-fit on a 50×3 slice instead
     data3 = rng_data[:, :3]
     _, means3, stds3 = py_fit_transform(data3)
     expected3 = py_transform(small_data, means3, stds3)
