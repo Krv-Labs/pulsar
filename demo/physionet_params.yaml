@@ -1,0 +1,44 @@
+# Pulsar demo — PhysioNet EHR dataset (eICU-style patient data)
+# Grid: 6 PCA dims × 6 seeds × 40 epsilons = 1440 ball maps
+#
+# This config is for static/aggregated EHR features (per-patient summary).
+# Time-series data should be averaged or summarized before using this pipeline.
+#
+# Preprocessing (drop_columns, impute) is injected dynamically by physionet.py
+# based on the actual dtypes and NaN pattern of the data.
+
+run:
+  name: physionet_ehr_demo
+  data: demo/eicu_patient_static.csv
+
+# Preprocessing is auto-detected, but you can override here:
+# preprocessing:
+#   drop_columns: [patient_id, encounter_id]
+#   impute:
+#     bmi:
+#       method: sample_normal
+#       seed: 42
+#     lactate:
+#       method: sample_normal
+#       seed: 42
+#     ethnicity:
+#       method: sample_categorical
+#       seed: 42
+
+sweep:
+  pca:
+    dimensions:
+      values: [2, 3, 5, 8, 10, 12]  # 6 dimensionalities
+    seed:
+      values: [42, 7, 13, 99, 123, 456]  # 6 seeds → 36 total embeddings
+
+  ball_mapper:
+    epsilon:
+      range: {min: 0.4, max: 2.5, steps: 40}  # 40 cover radii → 36 × 40 = 1440 ball maps
+
+cosmic_graph:
+  threshold: 0.0
+  neighborhood: node
+
+output:
+  n_reps: 5
