@@ -42,10 +42,10 @@ fn qr_q(a: &Array2<f64>) -> Array2<f64> {
 
 /// Internal PCA state stored after fitting.
 ///
-/// Uses randomized SVD (Halko et al. 2011) for efficiency on large datasets.
+/// Supports both exact and randomized SVD solvers.
 pub struct PCAInner {
-    /// Number of principal components retained (stored for potential future use).
-    #[allow(dead_code)]
+    /// Number of principal components retained.
+    #[allow(dead_code)] // Used for potential validation in future
     n_components: usize,
     /// Principal component directions, shape `(n_components, n_features)`.
     /// Each row is a unit vector in feature space. Signs are normalised so
@@ -61,8 +61,10 @@ pub struct PCAInner {
 impl PCAInner {
     /// Fit PCA using exact SVD of the covariance matrix.
     ///
-    /// This is the deterministic reference implementation. For production use,
-    /// prefer `fit_randomized` which is faster for large datasets.
+    /// Deterministic and matches sklearn's default PCA exactly. Use for:
+    /// - Small datasets where speed isn't critical
+    /// - When exact reproducibility with sklearn is needed
+    /// - Debugging/validation against randomized SVD
     ///
     /// # Algorithm
     /// 1. **Centre** — subtract column means: `X_c = X − μ`
@@ -70,8 +72,7 @@ impl PCAInner {
     /// 3. **SVD** — `C = U Σ Vᵀ` via nalgebra
     /// 4. **Sign flip** — make max-abs element positive per component
     /// 5. **Variance** — singular values stored as `explained_variance`
-    #[allow(dead_code)]
-    fn fit_exact(data: &Array2<f64>, n_components: usize) -> Result<PCAInner, PulsarError> {
+    pub fn fit_exact(data: &Array2<f64>, n_components: usize) -> Result<PCAInner, PulsarError> {
         let (nrows, ncols) = (data.nrows(), data.ncols());
         if n_components > ncols {
             return Err(PulsarError::InvalidParameter {
@@ -255,47 +256,70 @@ impl PCAInner {
     }
 }
 
-/// Python-facing PCA class using randomized SVD.
+/// Python-facing PCA class with configurable SVD solver.
 ///
 /// ```python
 /// from pulsar._pulsar import PCA
 ///
+/// # Randomized SVD (default) - fast, stochastic
 /// pca = PCA(n_components=3, seed=42)
-/// X_reduced = pca.fit_transform(X)       # fit and project in one call
-/// X_new_reduced = pca.transform(X_new)   # project new data
-/// variances = pca.explained_variance     # per-component variances
+/// X_reduced = pca.fit_transform(X)
+///
+/// # Exact SVD - deterministic, matches sklearn
+/// pca_exact = PCA(n_components=3, seed=0, svd_solver="exact")
+/// X_exact = pca_exact.fit_transform(X)
 /// ```
 ///
-/// Uses randomized SVD (Halko et al. 2011) which is faster for large datasets
-/// and produces stochastic variation controlled by `seed`. Different seeds
-/// yield slightly different (but equally valid) principal components.
+/// SVD solvers:
+/// - `"randomized"` (default): Halko et al. 2011, faster for large data,
+///   seed controls stochastic variation
+/// - `"exact"`: Full SVD of covariance matrix, deterministic, matches sklearn
 #[pyclass]
 pub struct PCA {
     n_components: usize,
     seed: u64,
     n_oversamples: usize,
     n_power_iter: usize,
+    svd_solver: String,
     inner: Option<PCAInner>,
 }
 
 #[pymethods]
 impl PCA {
-    /// Create a new unfitted PCA with randomized SVD.
+    /// Create a new unfitted PCA.
     ///
     /// # Parameters
     /// - `n_components` — number of principal components to keep.
-    /// - `seed` — random seed for the stochastic projection.
-    /// - `n_oversamples` — extra dimensions for approximation quality (default: 10).
-    /// - `n_power_iter` — power iterations for slowly decaying spectra (default: 2).
+    /// - `seed` — random seed (only used for randomized SVD).
+    /// - `n_oversamples` — extra dimensions for randomized SVD (default: 10).
+    /// - `n_power_iter` — power iterations for randomized SVD (default: 2).
+    /// - `svd_solver` — "randomized" (default) or "exact".
     #[new]
-    #[pyo3(signature = (n_components, seed, n_oversamples=10, n_power_iter=2))]
-    pub fn new(n_components: usize, seed: u64, n_oversamples: usize, n_power_iter: usize) -> Self {
-        PCA { n_components, seed, n_oversamples, n_power_iter, inner: None }
+    #[pyo3(signature = (n_components, seed, n_oversamples=10, n_power_iter=2, svd_solver="randomized"))]
+    pub fn new(
+        n_components: usize,
+        seed: u64,
+        n_oversamples: usize,
+        n_power_iter: usize,
+        svd_solver: &str,
+    ) -> PyResult<Self> {
+        let solver = svd_solver.to_lowercase();
+        if solver != "randomized" && solver != "exact" {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("svd_solver must be 'randomized' or 'exact', got '{}'", svd_solver)
+            ));
+        }
+        Ok(PCA {
+            n_components,
+            seed,
+            n_oversamples,
+            n_power_iter,
+            svd_solver: solver,
+            inner: None,
+        })
     }
 
     /// Fit PCA on `data` and return the low-dimensional projection.
-    ///
-    /// Uses randomized SVD for efficiency on large datasets.
     ///
     /// # Parameters
     /// - `data` (`np.ndarray[float64, 2D]`, shape `(n_samples, n_features)`)
@@ -308,13 +332,17 @@ impl PCA {
         data: PyReadonlyArray2<'py, f64>,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let arr = data.as_array().to_owned();
-        let inner = PCAInner::fit_randomized(
-            &arr,
-            self.n_components,
-            self.seed,
-            self.n_oversamples,
-            self.n_power_iter,
-        )?;
+        let inner = if self.svd_solver == "exact" {
+            PCAInner::fit_exact(&arr, self.n_components)?
+        } else {
+            PCAInner::fit_randomized(
+                &arr,
+                self.n_components,
+                self.seed,
+                self.n_oversamples,
+                self.n_power_iter,
+            )?
+        };
         let projection = inner.transform(&arr)?;
         self.inner = Some(inner);
         Ok(projection.into_pyarray_bound(py))
@@ -351,13 +379,14 @@ impl PCA {
 /// Compute PCA embeddings for multiple dimensions and seeds in parallel.
 ///
 /// This is the optimized entry point for grid search over PCA configurations.
-/// For each unique seed, it computes one randomized SVD at the maximum dimension,
+/// For each unique seed, it computes one SVD at the maximum dimension,
 /// then slices to produce embeddings for all requested dimensions.
 ///
 /// # Parameters
 /// - `data` — input matrix of shape `(n_samples, n_features)`
 /// - `dimensions` — list of target dimensionalities (e.g., `[2, 3, 5, 10]`)
 /// - `seeds` — list of random seeds for stochastic variation
+/// - `svd_solver` — "randomized" (default) or "exact"
 ///
 /// # Returns
 /// List of 2D arrays in row-major order: for each seed (outer), all dimensions (inner).
@@ -366,8 +395,12 @@ impl PCA {
 /// # Performance
 /// - Computes `len(seeds)` SVDs instead of `len(seeds) * len(dimensions)` SVDs
 /// - Parallelised across seeds using rayon
+///
+/// # Note on exact solver
+/// When `svd_solver="exact"`, seeds are ignored (exact SVD is deterministic).
+/// All seeds will produce identical embeddings, so you may want to use just one seed.
 #[pyfunction]
-#[pyo3(signature = (data, dimensions, seeds, n_oversamples=10, n_power_iter=2))]
+#[pyo3(signature = (data, dimensions, seeds, n_oversamples=10, n_power_iter=2, svd_solver="randomized"))]
 pub fn pca_grid<'py>(
     py: Python<'py>,
     data: PyReadonlyArray2<'py, f64>,
@@ -375,18 +408,32 @@ pub fn pca_grid<'py>(
     seeds: Vec<u64>,
     n_oversamples: usize,
     n_power_iter: usize,
+    svd_solver: &str,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
+    let solver = svd_solver.to_lowercase();
+    if solver != "randomized" && solver != "exact" {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("svd_solver must be 'randomized' or 'exact', got '{}'", svd_solver)
+        ));
+    }
+
     let arr = data.as_array().to_owned();
     let max_dim = *dimensions.iter().max().ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err("dimensions list cannot be empty")
     })?;
+
+    let use_exact = solver == "exact";
 
     // Compute one PCA per seed at max dimension, then slice
     // We need to collect results because we can't hold py across thread boundaries
     let embeddings: Result<Vec<Vec<Array2<f64>>>, PulsarError> = seeds
         .par_iter()
         .map(|&seed| {
-            let inner = PCAInner::fit_randomized(&arr, max_dim, seed, n_oversamples, n_power_iter)?;
+            let inner = if use_exact {
+                PCAInner::fit_exact(&arr, max_dim)?
+            } else {
+                PCAInner::fit_randomized(&arr, max_dim, seed, n_oversamples, n_power_iter)?
+            };
             let full_proj = inner.transform(&arr)?;
 
             // Slice for each requested dimension
