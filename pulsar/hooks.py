@@ -50,6 +50,7 @@ def cosmic_clusters(
 
     if method == "agglomerative":
         from sklearn.cluster import AgglomerativeClustering
+
         return AgglomerativeClustering(
             n_clusters=n_clusters,
             metric="precomputed",
@@ -58,6 +59,7 @@ def cosmic_clusters(
 
     if method == "spectral":
         from sklearn.cluster import SpectralClustering
+
         return SpectralClustering(
             n_clusters=n_clusters,
             affinity="precomputed",

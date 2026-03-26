@@ -171,17 +171,18 @@ class ThemaRS:
 
         # Use lightweight features for clustering: (n_nodes, n_edges, eps)
         # This avoids O(n²) Laplacian computation per ball map
-        features = np.array([
-            [bm.n_nodes(), bm.n_edges(), bm.eps]
-            for bm in self._ball_maps
-        ])
-        
+        features = np.array(
+            [[bm.n_nodes(), bm.n_edges(), bm.eps] for bm in self._ball_maps]
+        )
+
         # Normalise features
         features = (features - features.mean(axis=0)) / (features.std(axis=0) + 1e-10)
 
         from sklearn.cluster import KMeans
-        
-        labels = KMeans(n_clusters=n_reps, random_state=42, n_init=10).fit_predict(features)
+
+        labels = KMeans(n_clusters=n_reps, random_state=42, n_init=10).fit_predict(
+            features
+        )
 
         # Pick representative closest to cluster centroid
         reps = []

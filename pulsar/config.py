@@ -19,6 +19,7 @@ import yaml
 # Parameter grid helpers
 # ---------------------------------------------------------------------------
 
+
 def _expand_param(spec: Any) -> list:
     """Expand a sweep parameter spec into a flat list of values."""
     if isinstance(spec, list):
@@ -44,9 +45,12 @@ def _expand_param(spec: Any) -> list:
 # Config dataclasses
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ImputeSpec:
-    method: str   # sample_normal | sample_categorical | fill_mean | fill_median | fill_mode
+    method: (
+        str  # sample_normal | sample_categorical | fill_mean | fill_median | fill_mode
+    )
     seed: int = 42
 
 
@@ -82,6 +86,7 @@ class PulsarConfig:
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
+
 
 def load_config(path_or_dict: str | dict) -> PulsarConfig:
     """Load a PulsarConfig from a YAML file path or a raw dict."""
