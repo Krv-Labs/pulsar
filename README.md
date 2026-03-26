@@ -27,12 +27,29 @@ reps  = model.select_representatives(n_reps=4)
 
 Copy `params.yaml.sample` to `params.yaml` and edit it for your dataset.
 
-## Demo
+## Demos
 
-`demo/coal.py` runs the full pipeline on the US Coal Plants dataset with a ~4000 ball-map grid search (10 PCA dims × 8 seeds × 50 epsilons) and prints per-stage wall-clock timings:
+Demo scripts and their parameter files live under `demos/`:
+
+- `demos/coal.py` with `demos/coal_params.yaml`
+- `demos/physionet.py` with `demos/physionet_params.yaml`
+
+Run the coal demo (US Coal Plants):
 
 ```bash
-uv run python demo/coal.py
+uv run python demos/coal.py
+```
+
+Run the PhysioNet demo (synthetic mode):
+
+```bash
+uv run python demos/physionet.py --synthetic
+```
+
+Run the PhysioNet demo with a real eICU CSV export:
+
+```bash
+uv run python demos/physionet.py --data path/to/eicu_patient_static.csv
 ```
 
 ## Configuration
@@ -40,14 +57,14 @@ uv run python demo/coal.py
 ```yaml
 run:
   name: my_experiment
-  data: path/to/data.csv  # CSV or parquet
+  data: path/to/data.csv # CSV or parquet
 
 preprocessing:
   drop_columns: [id, timestamp]
   impute:
     age:
-      method: sample_normal       # fill_mean | fill_median | fill_mode |
-      seed: 42                    # sample_normal | sample_categorical
+      method: sample_normal # fill_mean | fill_median | fill_mode |
+      seed: 42 # sample_normal | sample_categorical
     category:
       method: sample_categorical
       seed: 7
@@ -60,7 +77,7 @@ sweep:
       values: [42, 7, 13]
   ball_mapper:
     epsilon:
-      range: {min: 0.1, max: 1.5, steps: 8}  # or: values: [0.3, 0.5, 0.8]
+      range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
 
 cosmic_graph:
   threshold: 0.0
