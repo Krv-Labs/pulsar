@@ -1,479 +1,487 @@
 """
-Pulsar demo — PhysioNet EHR dataset (eICU Collaborative Research Database)
-===========================================================================
-Uses the eICU patient table aggregated to per-patient static features.
-This avoids time-series complexity by using summary statistics per patient.
+Pulsar demo — Longitudinal ICU Vital Signs (True Temporal Approach)
+====================================================================
 
-The dataset requires PhysioNet credentialed access. This demo expects a
-local CSV export of the patient table with selected features.
+This demo showcases the full TemporalCosmicGraph for longitudinal time-series data,
+where the same patients are observed across multiple time steps.
 
-If you don't have eICU access, the demo includes a synthetic generator that
-mimics the statistical properties of typical ICU patient cohorts.
+Dataset: Simulated ICU vital sign trajectories
+- ~500 patients observed over 72 hours (hourly measurements)
+- 8 vital signs per time step
+- 5 patient archetypes with distinct temporal patterns
 
-Usage (from repo root):
-    uv run python demo/physionet.py
-    uv run python demo/physionet.py --synthetic  # use synthetic data
+Approach:
+1. Generate synthetic ICU trajectories with known temporal patterns
+2. Build TemporalCosmicGraph with 3D tensor W[i, j, t]
+3. Compare different aggregation strategies (persistence, trend, volatility)
+4. Show how different aggregations reveal different patient groupings
+
+This demonstrates the "true longitudinal" approach — essential when:
+- Temporal trajectory patterns are clinically meaningful
+- Patients with similar current state may have different trajectories
+- Early warning / trend detection is important
+
+Usage:
+    uv run python demos/physionet.py
+    uv run python demos/physionet.py --n-patients 200 --n-hours 48
 """
 
 from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 
-from pulsar._pulsar import (
-    CosmicGraph,
-    StandardScaler,
-    accumulate_pseudo_laplacians,
-    ball_mapper_grid,
-    find_stable_thresholds,
-    impute_column,
-    pca_grid,
-)
 from pulsar.config import load_config
-from pulsar.hooks import cosmic_to_networkx
-from pulsar.pipeline import ThemaRS
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEMO_DIR = REPO_ROOT / "demo"
-CSV_PATH = DEMO_DIR / "eicu_patient_static.csv"
-PARAMS_PATH = DEMO_DIR / "physionet_params.yaml"
+from pulsar.temporal import TemporalCosmicGraph
 
 
 # ---------------------------------------------------------------------------
-# Synthetic EHR data generator (mimics eICU patient table statistics)
+# Simulated ICU Data Generator
 # ---------------------------------------------------------------------------
 
-def generate_synthetic_ehr(n_patients: int = 2000, seed: int = 42) -> pd.DataFrame:
+VITAL_SIGNS = [
+    "heart_rate",
+    "systolic_bp",
+    "diastolic_bp",
+    "map",
+    "respiratory_rate",
+    "spo2",
+    "temperature",
+    "gcs",
+]
+
+NORMAL_RANGES = {
+    "heart_rate": (60, 100),
+    "systolic_bp": (90, 140),
+    "diastolic_bp": (60, 90),
+    "map": (70, 105),
+    "respiratory_rate": (12, 20),
+    "spo2": (95, 100),
+    "temperature": (36.5, 37.5),
+    "gcs": (14, 15),
+}
+
+ABNORMAL_RANGES = {
+    "heart_rate": (100, 140),
+    "systolic_bp": (70, 90),
+    "diastolic_bp": (40, 60),
+    "map": (50, 70),
+    "respiratory_rate": (22, 35),
+    "spo2": (85, 94),
+    "temperature": (38.0, 39.5),
+    "gcs": (8, 12),
+}
+
+
+def generate_patient_trajectory(
+    archetype: str,
+    n_hours: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
     """
-    Generate synthetic EHR data mimicking eICU patient table structure.
-    
-    Features are based on typical ICU patient characteristics:
-    - Demographics: age, gender, ethnicity, BMI
-    - Admission info: admission source, unit type, hospital stay length
-    - Vitals (admission): heart rate, MAP, temperature, SpO2, respiratory rate
-    - Labs (admission): creatinine, BUN, glucose, WBC, hemoglobin, platelets
-    - Comorbidities: binary flags for common conditions
-    - Severity scores: APACHE IV, predicted mortality
-    - Outcomes: ICU LOS, hospital mortality
+    Generate vital sign trajectory for a single patient.
+
+    Parameters
+    ----------
+    archetype : str
+        One of: "stable", "improving", "deteriorating", "fluctuating", "sudden_event"
+    n_hours : int
+        Number of hourly observations
+    rng : np.random.Generator
+        Random number generator
+
+    Returns
+    -------
+    np.ndarray
+        Shape (n_hours, 8) — vital signs at each hour
+    """
+    trajectory = np.zeros((n_hours, len(VITAL_SIGNS)))
+
+    for v_idx, vital in enumerate(VITAL_SIGNS):
+        normal_low, normal_high = NORMAL_RANGES[vital]
+        abnormal_low, abnormal_high = ABNORMAL_RANGES[vital]
+
+        normal_mean = (normal_low + normal_high) / 2
+        normal_std = (normal_high - normal_low) / 4
+
+        abnormal_mean = (abnormal_low + abnormal_high) / 2
+        abnormal_std = (abnormal_high - abnormal_low) / 4
+
+        if archetype == "stable":
+            # Stay in normal range throughout
+            base = rng.uniform(normal_low, normal_high)
+            noise = rng.normal(0, normal_std * 0.2, n_hours)
+            trajectory[:, v_idx] = base + noise
+
+        elif archetype == "improving":
+            # Start abnormal, trend toward normal
+            start_val = rng.uniform(abnormal_low, abnormal_high)
+            end_val = rng.uniform(normal_low, normal_high)
+
+            # Exponential decay toward normal
+            decay_rate = rng.uniform(0.03, 0.08)
+            t = np.arange(n_hours)
+            trend = start_val + (end_val - start_val) * (1 - np.exp(-decay_rate * t))
+            noise = rng.normal(0, normal_std * 0.3, n_hours)
+            trajectory[:, v_idx] = trend + noise
+
+        elif archetype == "deteriorating":
+            # Start normal, trend toward abnormal
+            start_val = rng.uniform(normal_low, normal_high)
+            end_val = rng.uniform(abnormal_low, abnormal_high)
+
+            # Gradual linear + accelerating deterioration
+            t = np.linspace(0, 1, n_hours)
+            trend = start_val + (end_val - start_val) * (t**1.5)
+            noise = rng.normal(0, normal_std * 0.3, n_hours)
+            trajectory[:, v_idx] = trend + noise
+
+        elif archetype == "fluctuating":
+            # High volatility, swinging between normal and abnormal
+            base = rng.uniform(normal_low, normal_high)
+            amplitude = (abnormal_mean - normal_mean) * 0.8
+            frequency = rng.uniform(0.05, 0.15)
+            phase = rng.uniform(0, 2 * np.pi)
+
+            t = np.arange(n_hours)
+            oscillation = amplitude * np.sin(2 * np.pi * frequency * t + phase)
+            noise = rng.normal(0, normal_std * 0.5, n_hours)
+            trajectory[:, v_idx] = base + oscillation + noise
+
+        elif archetype == "sudden_event":
+            # Stable then acute change (cardiac arrest, hemorrhage, etc.)
+            event_hour = rng.integers(n_hours // 3, 2 * n_hours // 3)
+
+            # Before event: stable normal
+            pre_event = rng.uniform(normal_low, normal_high)
+            trajectory[:event_hour, v_idx] = pre_event + rng.normal(
+                0, normal_std * 0.2, event_hour
+            )
+
+            # After event: acute change then partial recovery or continued abnormal
+            post_event_start = rng.uniform(abnormal_low, abnormal_high)
+            # Recovery target: between abnormal and normal
+            recovery_low = min(abnormal_mean, normal_mean)
+            recovery_high = max(abnormal_mean, normal_mean)
+            post_event_end = rng.uniform(recovery_low, recovery_high)
+
+            n_post = n_hours - event_hour
+            t = np.linspace(0, 1, n_post)
+            recovery = post_event_start + (post_event_end - post_event_start) * (
+                1 - np.exp(-2 * t)
+            )
+            trajectory[event_hour:, v_idx] = recovery + rng.normal(
+                0, normal_std * 0.4, n_post
+            )
+
+        # Clip to physiological bounds
+        if vital == "spo2":
+            trajectory[:, v_idx] = np.clip(trajectory[:, v_idx], 70, 100)
+        elif vital == "gcs":
+            trajectory[:, v_idx] = np.clip(trajectory[:, v_idx], 3, 15)
+        elif vital == "temperature":
+            trajectory[:, v_idx] = np.clip(trajectory[:, v_idx], 34, 42)
+        else:
+            trajectory[:, v_idx] = np.clip(trajectory[:, v_idx], 0, 300)
+
+    return trajectory
+
+
+def generate_icu_dataset(
+    n_patients: int = 500,
+    n_hours: int = 72,
+    seed: int = 42,
+) -> tuple[list[np.ndarray], pd.DataFrame]:
+    """
+    Generate synthetic ICU vital sign dataset.
+
+    Returns
+    -------
+    snapshots : list[np.ndarray]
+        List of T arrays, each of shape (n_patients, n_vitals)
+    labels : pd.DataFrame
+        Patient metadata including archetype
     """
     rng = np.random.default_rng(seed)
-    
-    # Demographics
-    age = rng.normal(65, 15, n_patients).clip(18, 100)
-    gender = rng.choice([0, 1], n_patients)  # 0=F, 1=M
-    ethnicity = rng.choice([0, 1, 2, 3, 4], n_patients, p=[0.65, 0.15, 0.10, 0.05, 0.05])
-    bmi = rng.normal(28, 6, n_patients).clip(15, 60)
-    
-    # Admission info
-    admission_source = rng.choice([0, 1, 2, 3], n_patients, p=[0.4, 0.3, 0.2, 0.1])
-    unit_type = rng.choice([0, 1, 2, 3, 4], n_patients, p=[0.35, 0.25, 0.20, 0.12, 0.08])
-    
-    # Vitals at admission (with physiological correlations)
-    heart_rate = rng.normal(88, 20, n_patients).clip(40, 180)
-    map_bp = rng.normal(75, 15, n_patients).clip(40, 140)
-    temperature = rng.normal(37.2, 0.8, n_patients).clip(34, 42)
-    spo2 = rng.beta(20, 1, n_patients) * 15 + 85  # skewed toward high values
-    respiratory_rate = rng.normal(20, 6, n_patients).clip(8, 45)
-    
-    # Labs at admission
-    creatinine = rng.lognormal(0.5, 0.8, n_patients).clip(0.3, 15)
-    bun = rng.lognormal(2.8, 0.6, n_patients).clip(5, 150)
-    glucose = rng.lognormal(4.8, 0.4, n_patients).clip(40, 600)
-    wbc = rng.lognormal(2.3, 0.5, n_patients).clip(1, 50)
-    hemoglobin = rng.normal(11, 2.5, n_patients).clip(5, 18)
-    platelets = rng.lognormal(5.2, 0.5, n_patients).clip(20, 800)
-    lactate = rng.lognormal(0.7, 0.7, n_patients).clip(0.5, 20)
-    
-    # Comorbidities (binary, with realistic prevalence)
-    hypertension = rng.binomial(1, 0.55, n_patients)
-    diabetes = rng.binomial(1, 0.30, n_patients)
-    copd = rng.binomial(1, 0.15, n_patients)
-    chf = rng.binomial(1, 0.20, n_patients)
-    ckd = rng.binomial(1, 0.18, n_patients)
-    liver_disease = rng.binomial(1, 0.08, n_patients)
-    cancer = rng.binomial(1, 0.12, n_patients)
-    
-    # Severity scores (correlated with vitals/labs)
-    apache_base = (
-        0.02 * age
-        + 0.01 * np.abs(heart_rate - 80)
-        + 0.02 * np.abs(map_bp - 70)
-        + 0.5 * np.log1p(creatinine)
-        + 0.3 * np.log1p(lactate)
-        + 0.1 * (100 - spo2)
-        + 2 * chf
-        + 1.5 * ckd
-    )
-    apache_score = (apache_base * 3 + rng.normal(0, 5, n_patients)).clip(0, 150).astype(int)
-    
-    # Predicted mortality (logistic based on severity)
-    logit = -4 + 0.05 * apache_score + 0.02 * age - 0.01 * map_bp
-    predicted_mortality = 1 / (1 + np.exp(-logit))
-    
-    # Outcomes
-    icu_los_days = rng.lognormal(1.0, 0.8, n_patients).clip(0.5, 60)
-    hospital_mortality = (rng.random(n_patients) < predicted_mortality).astype(int)
-    
-    # Introduce missing values (realistic patterns)
-    missing_mask = rng.random(n_patients) < 0.05
-    bmi_with_nan = np.where(missing_mask, np.nan, bmi)
-    
-    missing_mask = rng.random(n_patients) < 0.08
-    lactate_with_nan = np.where(missing_mask, np.nan, lactate)
-    
-    missing_mask = rng.random(n_patients) < 0.03
-    ethnicity_with_nan = np.where(missing_mask, np.nan, ethnicity)
-    
-    df = pd.DataFrame({
-        "patient_id": np.arange(n_patients),
-        "age": age,
-        "gender": gender,
-        "ethnicity": ethnicity_with_nan,
-        "bmi": bmi_with_nan,
-        "admission_source": admission_source,
-        "unit_type": unit_type,
-        "heart_rate": heart_rate,
-        "mean_arterial_pressure": map_bp,
-        "temperature": temperature,
-        "spo2": spo2,
-        "respiratory_rate": respiratory_rate,
-        "creatinine": creatinine,
-        "bun": bun,
-        "glucose": glucose,
-        "wbc": wbc,
-        "hemoglobin": hemoglobin,
-        "platelets": platelets,
-        "lactate": lactate_with_nan,
-        "hypertension": hypertension,
-        "diabetes": diabetes,
-        "copd": copd,
-        "chf": chf,
-        "ckd": ckd,
-        "liver_disease": liver_disease,
-        "cancer": cancer,
-        "apache_score": apache_score,
-        "predicted_mortality": predicted_mortality,
-        "icu_los_days": icu_los_days,
-        "hospital_mortality": hospital_mortality,
-    })
-    
-    return df
 
+    # Archetype distribution
+    archetypes = {
+        "stable": 0.40,
+        "improving": 0.20,
+        "deteriorating": 0.15,
+        "fluctuating": 0.15,
+        "sudden_event": 0.10,
+    }
 
-# ---------------------------------------------------------------------------
-# Auto-detect preprocessing from the raw data
-# ---------------------------------------------------------------------------
+    archetype_names = list(archetypes.keys())
+    archetype_probs = list(archetypes.values())
 
-def build_preprocessing(df: pd.DataFrame, id_col: str = "patient_id") -> tuple[list[str], dict]:
-    """
-    Return (drop_columns, impute_dict).
-    
-    Strategy:
-    - Drop ID columns (not useful for clustering)
-    - Categorical (non-numeric) columns: keep, impute with sample_categorical
-    - Numeric columns with NaN: impute with sample_normal
-    """
-    drop_cols = [id_col] if id_col in df.columns else []
-    
-    df_work = df.drop(columns=drop_cols, errors="ignore")
-    cat_cols = df_work.select_dtypes(exclude="number").columns.tolist()
-    numeric_df = df_work.drop(columns=cat_cols, errors="ignore")
-    
-    impute: dict = {}
-    
-    # Categorical NaN columns
-    for col in cat_cols:
-        if df_work[col].isna().any():
-            impute[col] = {"method": "sample_categorical", "seed": 42}
-    
-    # Numeric NaN columns
-    for col in numeric_df.columns:
-        if numeric_df[col].isna().any():
-            impute[col] = {"method": "sample_normal", "seed": 42}
-    
-    return drop_cols, impute
+    patient_archetypes = rng.choice(archetype_names, size=n_patients, p=archetype_probs)
 
+    # Generate all trajectories: shape (n_patients, n_hours, n_vitals)
+    all_trajectories = np.zeros((n_patients, n_hours, len(VITAL_SIGNS)))
 
-# ---------------------------------------------------------------------------
-# Timed pipeline (reused from coal.py)
-# ---------------------------------------------------------------------------
-
-class TimedThemaRS(ThemaRS):
-    """ThemaRS with per-stage wall-clock timing."""
-
-    def __init__(self, config):
-        super().__init__(config)
-        self.timings: dict[str, float] = {}
-
-    def fit(self, data: pd.DataFrame | None = None) -> "TimedThemaRS":
-        cfg = self.config
-
-        # ── 1. Load ──────────────────────────────────────────────────────────
-        t0 = time.perf_counter()
-        if data is None:
-            if not cfg.data:
-                raise ValueError("No data path in config and no DataFrame provided")
-            if cfg.data.endswith(".parquet"):
-                data = pd.read_parquet(cfg.data)
-            else:
-                data = pd.read_csv(cfg.data)
-        self._data = data.copy()
-        self.timings["load"] = time.perf_counter() - t0
-
-        # ── 2. Preprocess (encode + drop + impute + dropna) ─────────────────
-        t0 = time.perf_counter()
-        drop = [c for c in cfg.drop_columns if c in data.columns]
-        df = data.drop(columns=drop)
-
-        cat_cols = df.select_dtypes(exclude="number").columns.tolist()
-        for col in cat_cols:
-            codes = pd.Categorical(df[col]).codes.astype(np.float64)
-            df[col] = np.where(codes == -1, np.nan, codes)
-
-        flag_cols = {
-            f"{col}_was_missing": df[col].isna().astype(np.float64)
-            for col in cfg.impute
-            if col in df.columns
-        }
-        if flag_cols:
-            df = pd.concat([df, pd.DataFrame(flag_cols, index=df.index)], axis=1)
-
-        for col, spec in cfg.impute.items():
-            if col not in df.columns:
-                continue
-            arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-            imputed = impute_column(arr, spec.method, spec.seed)
-            df[col] = imputed
-
-        df = df.dropna(axis=0)
-        X_raw = df.to_numpy(dtype=np.float64)
-        n = X_raw.shape[0]
-        self.timings["preprocess"] = time.perf_counter() - t0
-
-        # ── 3. Scale ─────────────────────────────────────────────────────────
-        t0 = time.perf_counter()
-        scaler = StandardScaler()
-        X_scaled = np.array(scaler.fit_transform(X_raw))
-        self.timings["scale"] = time.perf_counter() - t0
-
-        # ── 4. PCA grid (randomized SVD, parallel across seeds) ─────────────
-        t0 = time.perf_counter()
-        embeddings = [
-            np.ascontiguousarray(emb)
-            for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
-        ]
-        self.timings["pca_grid"] = time.perf_counter() - t0
-
-        # ── 5. BallMapper grid ───────────────────────────────────────────────
-        t0 = time.perf_counter()
-        self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)
-        self.timings["ball_mapper_grid"] = time.perf_counter() - t0
-
-        # ── 6. Accumulate pseudo-Laplacians (Rust parallel) ──────────────────
-        t0 = time.perf_counter()
-        galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
-        self.timings["laplacian"] = time.perf_counter() - t0
-
-        # ── 7. CosmicGraph (initial, threshold=0 to get weighted adj) ────────
-        t0 = time.perf_counter()
-        cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
-        self._weighted_adjacency = np.array(cg_temp.weighted_adj)
-        self.timings["cosmic_graph_init"] = time.perf_counter() - t0
-
-        # ── 8. Threshold stability analysis (if auto) ────────────────────────
-        threshold = cfg.cosmic_graph.threshold
-        if threshold == "auto":
-            t0 = time.perf_counter()
-            self._stability_result = find_stable_thresholds(self._weighted_adjacency)
-            threshold = self._stability_result.optimal_threshold
-            self.timings["stability_analysis"] = time.perf_counter() - t0
-        else:
-            self._stability_result = None
-        self._resolved_threshold = float(threshold)
-
-        # ── 9. CosmicGraph (final, with resolved threshold) ───────────────────
-        t0 = time.perf_counter()
-        self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-            galactic_L, self._resolved_threshold
+    for i in range(n_patients):
+        all_trajectories[i] = generate_patient_trajectory(
+            patient_archetypes[i], n_hours, rng
         )
-        self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
-        self.timings["cosmic_graph_final"] = time.perf_counter() - t0
 
-        return self
+    # Convert to list of snapshots (one per time step)
+    snapshots = [all_trajectories[:, t, :].copy() for t in range(n_hours)]
 
-    def print_report(self) -> None:
-        total = sum(self.timings.values())
-        col_w = 22
+    # Create labels dataframe
+    labels = pd.DataFrame(
+        {
+            "patient_id": np.arange(n_patients),
+            "archetype": patient_archetypes,
+            "age": rng.normal(65, 12, n_patients).clip(18, 95).astype(int),
+            "sex": rng.choice(["M", "F"], n_patients),
+            "admission_type": rng.choice(
+                ["medical", "surgical", "trauma"], n_patients, p=[0.5, 0.35, 0.15]
+            ),
+        }
+    )
 
-        header = f"{'Stage':<{col_w}}  {'Time (s)':>10}  {'% of total':>10}"
-        rule = "─" * len(header)
-        print()
-        print(header)
-        print(rule)
-        for stage, secs in self.timings.items():
-            pct = 100.0 * secs / total if total else 0.0
-            print(f"{stage:<{col_w}}  {secs:>10.4f}  {pct:>9.1f}%")
-        print(rule)
-        print(f"{'TOTAL':<{col_w}}  {total:>10.4f}  {'100.0%':>10}")
-        print()
+    return snapshots, labels
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main Demo
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="PhysioNet EHR demo for Pulsar")
-    parser.add_argument(
-        "--synthetic",
-        action="store_true",
-        help="Use synthetic EHR data instead of real PhysioNet data",
+    parser = argparse.ArgumentParser(
+        description="Longitudinal ICU demo - true temporal approach"
     )
     parser.add_argument(
         "--n-patients",
         type=int,
-        default=2000,
-        help="Number of patients for synthetic data (default: 2000)",
+        default=500,
+        help="Number of patients (default: 500)",
     )
     parser.add_argument(
-        "--data",
-        type=str,
-        default=None,
-        help="Path to real EHR CSV file (eICU patient table export)",
+        "--n-hours",
+        type=int,
+        default=72,
+        help="Number of hours to simulate (default: 72)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed (default: 42)",
     )
     args = parser.parse_args()
 
-    # Load or generate data
-    if args.synthetic or not (args.data or CSV_PATH.exists()):
-        print(f"[data] generating synthetic EHR data ({args.n_patients} patients) ...")
-        df_raw = generate_synthetic_ehr(n_patients=args.n_patients)
-        print(f"[data] synthetic dataset shape: {df_raw.shape[0]} rows × {df_raw.shape[1]} cols")
-        data_source = "synthetic"
-    else:
-        data_path = Path(args.data) if args.data else CSV_PATH
-        if not data_path.exists():
-            print(f"[error] Data file not found: {data_path}")
-            print("[error] Use --synthetic flag to generate synthetic data, or")
-            print("[error] provide a path to eICU patient table CSV with --data")
-            return
-        print(f"[data] loading {data_path} ...")
-        df_raw = pd.read_csv(data_path)
-        print(f"[data] dataset shape: {df_raw.shape[0]} rows × {df_raw.shape[1]} cols")
-        data_source = str(data_path)
+    print("=" * 70)
+    print("Longitudinal ICU Demo — True Temporal Approach")
+    print("=" * 70)
+    print()
 
-    # Detect preprocessing requirements
-    print("[config] detecting column types and NaN patterns ...")
-    drop_columns, impute_specs = build_preprocessing(df_raw)
-    
-    cat_cols = df_raw.select_dtypes(exclude="number").columns.tolist()
-    cat_nan = sum(1 for c in cat_cols if df_raw[c].isna().any())
-    num_nan = sum(1 for c, s in impute_specs.items() if s["method"] == "sample_normal")
-    
-    print(f"[config] dropping {len(drop_columns)} ID columns: {drop_columns}")
-    print(f"[config] imputing {cat_nan} categorical NaN cols (sample_categorical)")
-    print(f"[config] imputing {num_nan} numeric NaN cols (sample_normal/Gaussian)")
+    # Generate data
+    print(f"[data] Generating ICU trajectories...")
+    print(f"       {args.n_patients} patients × {args.n_hours} hours × {len(VITAL_SIGNS)} vitals")
+    t0 = time.perf_counter()
+    snapshots, labels = generate_icu_dataset(
+        n_patients=args.n_patients,
+        n_hours=args.n_hours,
+        seed=args.seed,
+    )
+    print(f"[data] Generated in {time.perf_counter() - t0:.2f}s")
+    print()
+
+    print("[data] Archetype distribution:")
+    for archetype, count in labels["archetype"].value_counts().items():
+        print(f"       {archetype}: {count} ({100*count/len(labels):.1f}%)")
+    print()
 
     # Build config
-    raw_cfg = {
-        "run": {
-            "name": "physionet_ehr_demo",
-            "data": data_source,
-        },
-        "preprocessing": {
-            "drop_columns": drop_columns,
-            "impute": impute_specs,
-        },
-        "sweep": {
-            "pca": {
-                "dimensions": {"values": [2, 3, 5, 8, 10, 12]},
-                "seed": {"values": [42, 7, 13, 99, 123, 456]},
+    config = load_config(
+        {
+            "run": {"name": "longitudinal_icu_demo"},
+            "preprocessing": {"drop_columns": [], "impute": {}},
+            "sweep": {
+                "pca": {
+                    "dimensions": {"values": [3, 5, 7]},
+                    "seed": {"values": [42, 7, 13]},
+                },
+                "ball_mapper": {
+                    "epsilon": {"range": {"min": 0.5, "max": 2.5, "steps": 15}},
+                },
             },
-            "ball_mapper": {
-                "epsilon": {"range": {"min": 0.4, "max": 2.5, "steps": 40}},
-            },
-        },
-        "cosmic_graph": {
-            "threshold": 0.0,
-            "neighborhood": "node",
-        },
-        "output": {
-            "n_reps": 5,
-        },
-    }
-
-    cfg = load_config(raw_cfg)
-    n_pca = len(cfg.pca.dimensions) * len(cfg.pca.seeds)
-    n_maps = n_pca * len(cfg.ball_mapper.epsilons)
-    
-    print(
-        f"[grid]   {len(cfg.pca.dimensions)} dims × {len(cfg.pca.seeds)} seeds"
-        f" × {len(cfg.ball_mapper.epsilons)} epsilons"
-        f" = {n_maps} ball maps"
+            "cosmic_graph": {"threshold": 0.0},
+            "output": {"n_reps": 3},
+        }
     )
+
+    n_maps = (
+        len(config.pca.dimensions)
+        * len(config.pca.seeds)
+        * len(config.ball_mapper.epsilons)
+    )
+    print(f"[grid] {len(config.pca.dimensions)} dims × {len(config.pca.seeds)} seeds × {len(config.ball_mapper.epsilons)} epsilons = {n_maps} ball maps per time step")
+    print(f"[grid] Total: {n_maps} × {args.n_hours} time steps = {n_maps * args.n_hours} ball maps")
     print()
-    print("[run]    starting pipeline ...")
 
-    model = TimedThemaRS(cfg)
-    t_wall_start = time.perf_counter()
-    model.fit(df_raw)
-    t_wall_total = time.perf_counter() - t_wall_start
+    # Build TemporalCosmicGraph
+    print("[temporal] Building TemporalCosmicGraph...")
+    t0 = time.perf_counter()
+    tcg = TemporalCosmicGraph.from_snapshots(snapshots, config, threshold=0.0)
+    t_build = time.perf_counter() - t0
+    print(f"[temporal] Built in {t_build:.2f}s")
+    print(f"[temporal] Tensor shape: {tcg.shape} (n × n × T)")
+    print()
 
-    print(f"[run]    done  (wall clock: {t_wall_total:.3f}s)")
+    # Compute aggregations
+    print("[aggregation] Computing temporal aggregations...")
+    t0 = time.perf_counter()
 
-    # Print stability analysis results if auto threshold was used
-    if model._stability_result is not None:
-        sr = model._stability_result
-        best_plateau = sr.plateaus[0] if sr.plateaus else None
-        print(f"[stability] optimal threshold: {sr.optimal_threshold:.4f}")
-        if best_plateau:
-            print(
-                f"[stability] longest plateau: {best_plateau.start_threshold:.3f} → "
-                f"{best_plateau.end_threshold:.3f} ({best_plateau.component_count} components)"
+    agg_persistence = tcg.persistence_graph(threshold=0.1)
+    agg_mean = tcg.mean_graph()
+    agg_recency = tcg.recency_graph(decay=0.9)
+    agg_volatility = tcg.volatility_graph()
+    agg_trend = tcg.trend_graph()
+    agg_change = tcg.change_point_graph()
+
+    t_agg = time.perf_counter() - t0
+    print(f"[aggregation] Computed 6 aggregations in {t_agg:.3f}s")
+    print()
+
+    # Summary statistics for each aggregation
+    print("Aggregation Statistics:")
+    print("-" * 70)
+    print(f"{'Aggregation':<20} {'Min':>10} {'Max':>10} {'Mean':>10} {'Std':>10}")
+    print("-" * 70)
+
+    for name, agg in [
+        ("Persistence", agg_persistence),
+        ("Mean", agg_mean),
+        ("Recency (λ=0.9)", agg_recency),
+        ("Volatility", agg_volatility),
+        ("Trend", agg_trend),
+        ("Change-point", agg_change),
+    ]:
+        # Exclude diagonal
+        mask = ~np.eye(agg.shape[0], dtype=bool)
+        vals = agg[mask]
+        print(
+            f"{name:<20} {vals.min():>10.4f} {vals.max():>10.4f} "
+            f"{vals.mean():>10.4f} {vals.std():>10.4f}"
+        )
+    print("-" * 70)
+    print()
+
+    # Convert to NetworkX graphs and analyze clusters
+    print("Cluster Analysis by Aggregation Strategy:")
+    print("-" * 70)
+
+    def analyze_graph(G: nx.Graph, name: str, labels_df: pd.DataFrame) -> None:
+        """Analyze connected components and archetype distribution."""
+        components = list(nx.connected_components(G))
+        n_clusters = len(components)
+
+        # Assign cluster IDs
+        cluster_labels = {}
+        for cluster_id, component in enumerate(components):
+            for node in component:
+                cluster_labels[node] = cluster_id
+
+        # Cross-tabulate
+        cluster_df = pd.DataFrame(
+            {
+                "patient_id": list(cluster_labels.keys()),
+                "cluster": list(cluster_labels.values()),
+            }
+        )
+        cluster_df = cluster_df.merge(
+            labels_df[["patient_id", "archetype"]], on="patient_id"
+        )
+
+        print(f"\n{name}:")
+        print(f"  Edges: {G.number_of_edges()}, Components: {n_clusters}")
+
+        if n_clusters > 1 and n_clusters <= 20:
+            # Show archetype distribution in top clusters
+            cluster_sizes = (
+                cluster_df.groupby("cluster").size().sort_values(ascending=False)
             )
-    else:
-        print(f"[threshold] using manual threshold: {model._resolved_threshold:.4f}")
+            print(f"  Top clusters by archetype composition:")
 
-    print(
-        f"[run]    cosmic graph: {model.cosmic_graph.number_of_nodes()} nodes,"
-        f" {model.cosmic_graph.number_of_edges()} edges"
-    )
+            for cluster_id in cluster_sizes.head(5).index:
+                members = cluster_df[cluster_df["cluster"] == cluster_id]
+                size = len(members)
+                arch_dist = members["archetype"].value_counts()
+                dominant = arch_dist.head(2)
+                arch_str = ", ".join([f"{a}:{c}" for a, c in dominant.items()])
+                print(f"    Cluster {cluster_id}: {size} patients — {arch_str}")
 
-    model.print_report()
+    # Analyze each aggregation
+    for name, agg, threshold in [
+        ("Persistence (τ=0.1)", agg_persistence, 0.3),
+        ("Mean", agg_mean, 0.2),
+        ("Recency (λ=0.9)", agg_recency, 0.2),
+        ("Volatility", agg_volatility, 0.02),
+        ("Trend (positive)", agg_trend, 0.005),
+    ]:
+        # Build graph from aggregation matrix
+        G = nx.Graph()
+        G.add_nodes_from(range(args.n_patients))
+        n = agg.shape[0]
 
-    # Print some EHR-specific analysis
+        for i in range(n):
+            for j in range(i + 1, n):
+                w = agg[i, j]
+                if name.startswith("Volatility"):
+                    # High volatility = similar unstable trajectory
+                    if w > threshold:
+                        G.add_edge(i, j, weight=float(w))
+                elif name.startswith("Trend"):
+                    # Both positive trend = converging patients
+                    if w > threshold:
+                        G.add_edge(i, j, weight=float(w))
+                else:
+                    if w > threshold:
+                        G.add_edge(i, j, weight=float(w))
+
+        analyze_graph(G, name, labels)
+
     print()
-    print("=" * 60)
-    print("EHR Analysis Summary")
-    print("=" * 60)
-    
-    n_nodes = model.cosmic_graph.number_of_nodes()
-    n_edges = model.cosmic_graph.number_of_edges()
-    
-    print(f"Patients analyzed:        {df_raw.shape[0]}")
-    print(f"Features used:            {df_raw.shape[1] - len(drop_columns)}")
-    print(f"Cosmic graph nodes:       {n_nodes}")
-    print(f"Cosmic graph edges:       {n_edges}")
-    
-    # Edge weight distribution
-    weights = np.array([d["weight"] for _, _, d in model.cosmic_graph.edges(data=True)])
-    if len(weights) > 0:
-        print()
-        print("Edge Weight Distribution:")
-        print(f"  Min:                    {weights.min():.4f}")
-        print(f"  25th percentile:        {np.percentile(weights, 25):.4f}")
-        print(f"  Median:                 {np.median(weights):.4f}")
-        print(f"  75th percentile:        {np.percentile(weights, 75):.4f}")
-        print(f"  Max:                    {weights.max():.4f}")
-        print(f"  Mean:                   {weights.mean():.4f}")
-        print(f"  Std dev:                {weights.std():.4f}")
+    print("-" * 70)
+    print()
+
+    # Key insights
+    print("=" * 70)
+    print("Key Insights from Temporal Analysis")
+    print("=" * 70)
+    print()
+    print("1. PERSISTENCE graph clusters patients with STABLE similarity over time.")
+    print("   → 'Stable' archetype patients should cluster together")
+    print("   → Useful for identifying robust phenotype subgroups")
+    print()
+    print("2. VOLATILITY graph clusters patients with UNSTABLE relationships.")
+    print("   → 'Fluctuating' patients should appear together")
+    print("   → Useful for identifying patients needing closer monitoring")
+    print()
+    print("3. TREND graph clusters patients whose similarity is CHANGING.")
+    print("   → 'Improving' and 'Deteriorating' patients separate here")
+    print("   → Positive trend = converging trajectories")
+    print("   → Useful for trajectory-based patient matching")
+    print()
+    print("4. RECENCY graph emphasizes CURRENT similarity over history.")
+    print("   → Useful for real-time clinical decision support")
+    print("   → Patients may cluster differently than in persistence graph")
+    print()
+    print("5. CHANGE-POINT graph highlights SUDDEN state transitions.")
+    print("   → 'Sudden event' patients should be detectable")
+    print("   → Useful for event detection and anomaly identification")
+    print()
+    print("=" * 70)
+    print("Demo complete.")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
