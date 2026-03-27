@@ -33,6 +33,7 @@ mod ballmapper;
 mod pseudolaplacian;
 mod cosmic;
 mod ph;
+mod temporal;
 
 #[pymodule]
 fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -60,6 +61,10 @@ fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ph::PyPlateau>()?;
     m.add_class::<ph::PyStabilityResult>()?;
     m.add_function(wrap_pyfunction!(ph::py_find_stable_thresholds, m)?)?;
+    
+    // Temporal Cosmic Graph
+    m.add_function(wrap_pyfunction!(temporal::accumulate_temporal_pseudo_laplacians, m)?)?;
+    m.add_function(wrap_pyfunction!(temporal::py_normalize_temporal_laplacian, m)?)?;
     
     Ok(())
 }
