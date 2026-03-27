@@ -20,7 +20,7 @@ Given the 3D tensor, we provide several methods to collapse into summary 2D grap
 |--------|---------|------------------|
 | persistence | mean_t(W > τ) | Stable relationships across time |
 | mean | mean_t(W) | Average similarity |
-| recency | Σ λ^(T-t) · W / Σ λ^(T-t) | Current state emphasis |
+| recency | Σ λ^(T-1-t) · W / Σ λ^(T-1-t) | Current state emphasis |
 | volatility | var_t(W) | Relationship instability |
 | trend | slope of linear fit | Converging/diverging trajectories |
 | change_point | max |W[t+1] - W[t]| | Sudden state transitions |
@@ -233,7 +233,7 @@ class TemporalCosmicGraph:
         """
         Compute recency-weighted graph: exponentially decayed sum favoring recent observations.
 
-        W_recent[i,j] = Σ_t λ^(T-t) · W[i,j,t] / Σ_t λ^(T-t)
+        W_recent[i,j] = Σ_t λ^(T-1-t) · W[i,j,t] / Σ_t λ^(T-1-t)
 
         where λ ∈ (0, 1) is the decay factor.
 
@@ -380,9 +380,11 @@ class TemporalCosmicGraph:
             "persistence", "mean", "recency", "volatility", "trend", "change_point".
         threshold : float, optional
             Edge weight threshold for including edges. Defaults to instance threshold.
+            For aggregation="persistence", this value is also used as the persistence
+            threshold passed to `persistence_graph`.
         **kwargs
-            Additional arguments passed to the aggregation method
-            (e.g., decay=0.9 for recency_graph).
+            Additional arguments passed through to the selected aggregation method
+            (e.g., decay=0.9 for recency_graph). Unsupported arguments raise TypeError.
 
         Returns
         -------
@@ -405,12 +407,10 @@ class TemporalCosmicGraph:
             )
 
         # Get aggregated 2D matrix
-        if aggregation in ("persistence",) and threshold is not None:
+        if aggregation == "persistence" and threshold is not None:
             adj = aggregators[aggregation](threshold=threshold, **kwargs)
-        elif aggregation == "recency" and "decay" in kwargs:
-            adj = aggregators[aggregation](**kwargs)
         else:
-            adj = aggregators[aggregation]()
+            adj = aggregators[aggregation](**kwargs)
 
         # Apply threshold for edge inclusion
         edge_threshold = threshold if threshold is not None else self._threshold

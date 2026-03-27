@@ -5,6 +5,7 @@ Tests for TemporalCosmicGraph functionality.
 import numpy as np
 import pytest
 
+from pulsar.config import load_config
 from pulsar.temporal import TemporalCosmicGraph
 
 
@@ -114,7 +115,7 @@ class TestRecencyGraph:
     """Test recency-weighted graph aggregation."""
 
     def test_recency_recent_only(self):
-        """With high decay, recent values dominate."""
+        """Recent values still receive the highest per-step weight."""
         tensor = np.zeros((2, 2, 10))
         tensor[0, 1, -1] = 1.0  # Only last time step has value
         tensor[1, 0, -1] = 1.0
@@ -316,6 +317,67 @@ class TestToNetworkX:
         # High threshold: only high-weight edge
         G_high = tcg.to_networkx(aggregation="mean", threshold=0.3)
         assert G_high.number_of_edges() == 1
+
+    def test_to_networkx_recency_kwargs_passthrough(self):
+        """Aggregation kwargs should be passed to the selected method."""
+        tensor = np.zeros((3, 3, 4))
+        tensor[0, 1, :] = [0.0, 0.0, 0.0, 1.0]
+        tensor[1, 0, :] = [0.0, 0.0, 0.0, 1.0]
+        tcg = TemporalCosmicGraph(tensor)
+
+        G = tcg.to_networkx(aggregation="recency", threshold=0.2, decay=0.2)
+        assert G.has_edge(0, 1)
+
+
+class TestFromSnapshots:
+    """Test TemporalCosmicGraph.from_snapshots end-to-end behavior."""
+
+    def test_from_snapshots_builds_symmetric_tensor(self):
+        """from_snapshots should produce an (n, n, T) symmetric tensor with zero diagonal."""
+        snapshots = [
+            np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+            np.array(
+                [
+                    [0.1, 0.0, 0.0],
+                    [1.1, 0.0, 0.0],
+                    [0.0, 1.1, 0.0],
+                    [1.0, 1.2, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+        ]
+
+        config = load_config(
+            {
+                "run": {"name": "test_temporal_from_snapshots"},
+                "preprocessing": {"drop_columns": [], "impute": {}},
+                "sweep": {
+                    "pca": {
+                        "dimensions": {"values": [2]},
+                        "seed": {"values": [42]},
+                    },
+                    "ball_mapper": {
+                        "epsilon": {"values": [0.8]},
+                    },
+                },
+                "cosmic_graph": {"threshold": 0.0},
+                "output": {"n_reps": 1},
+            }
+        )
+
+        tcg = TemporalCosmicGraph.from_snapshots(snapshots=snapshots, config=config)
+
+        assert tcg.shape == (4, 4, 2)
+        np.testing.assert_array_equal(np.diagonal(tcg.tensor, axis1=0, axis2=1), 0.0)
+        np.testing.assert_allclose(tcg.tensor, np.swapaxes(tcg.tensor, 0, 1))
 
 
 class TestRepr:

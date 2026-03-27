@@ -16,7 +16,7 @@
 //! Time steps are processed in parallel using rayon. Each time step's ball maps
 //! are accumulated independently, then results are combined into the 3D tensor.
 
-use ndarray::{Array2, Array3};
+use ndarray::{Array2, Array3, Axis};
 use numpy::{IntoPyArray, PyArray3};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -76,11 +76,7 @@ pub fn accumulate_temporal_pseudo_laplacians_inner(
     // Stack into 3D tensor (n, n, T)
     let mut tensor = Array3::<i64>::zeros((n, n, t_steps));
     for (t, laplacian) in laplacians.into_iter().enumerate() {
-        for i in 0..n {
-            for j in 0..n {
-                tensor[[i, j, t]] = laplacian[[i, j]];
-            }
-        }
+        tensor.index_axis_mut(Axis(2), t).assign(&laplacian);
     }
 
     tensor
