@@ -22,7 +22,7 @@ def categorical_array():
 
 def pseudo_laplacian_py(nodes, n):
     """Pure Python pseudo-Laplacian for testing.
-    
+
     This replaces the removed Rust single-ball-map function.
     The Rust accumulate_pseudo_laplacians is the production API.
     """
