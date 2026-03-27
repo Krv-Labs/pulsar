@@ -110,13 +110,13 @@ pub fn normalize_temporal_laplacian(l: &Array3<i64>) -> Array3<f64> {
 
     for t in 0..t_steps {
         for i in 0..n {
-            for j in 0..n {
-                if i == j {
-                    continue;
-                }
+            // Exploit symmetry: compute only for j > i and mirror to (j, i)
+            for j in (i + 1)..n {
                 let denom = l[[i, i, t]] + l[[j, j, t]] + l[[i, j, t]];
                 if denom > 0 {
-                    w[[i, j, t]] = -(l[[i, j, t]] as f64) / (denom as f64);
+                    let weight = -(l[[i, j, t]] as f64) / (denom as f64);
+                    w[[i, j, t]] = weight;
+                    w[[j, i, t]] = weight;
                 }
             }
         }
