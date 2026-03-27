@@ -10,6 +10,7 @@
 //! | `pca_grid` | Randomized PCA across dimensions/seeds (parallel) |
 //! | `ball_mapper_grid` | Ball Mapper across embeddings/epsilons (parallel) |
 //! | `accumulate_pseudo_laplacians` | Fused Laplacian accumulation (parallel) |
+//! | `find_stable_thresholds` | Approximate H₀ persistent homology for threshold selection |
 //!
 //! ## Classes
 //!
@@ -19,6 +20,8 @@
 //! | `StandardScaler` | Z-score normalisation |
 //! | `BallMapper` | Topological Ball Mapper complex |
 //! | `CosmicGraph` | Normalised adjacency from accumulated Laplacian |
+//! | `StabilityResult` | Threshold stability analysis result |
+//! | `Plateau` | Stable region in component-vs-threshold curve |
 
 use pyo3::prelude::*;
 
@@ -29,6 +32,7 @@ mod pca;
 mod ballmapper;
 mod pseudolaplacian;
 mod cosmic;
+mod ph;
 
 #[pymodule]
 fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -51,6 +55,11 @@ fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     
     // Cosmic Graph
     m.add_class::<cosmic::CosmicGraph>()?;
+    
+    // Persistent Homology / Threshold Stability
+    m.add_class::<ph::PyPlateau>()?;
+    m.add_class::<ph::PyStabilityResult>()?;
+    m.add_function(wrap_pyfunction!(ph::py_find_stable_thresholds, m)?)?;
     
     Ok(())
 }
