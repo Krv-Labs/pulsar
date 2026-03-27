@@ -26,10 +26,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
+      - name: Run Rust tests
+        run: cargo test --lib
+
       - name: Build Rust extension
         run: uv run maturin develop --release
 
-      - name: Run tests
+      - name: Run Python tests
         run: uv run pytest -v
 
       - name: Run ruff formatting checks
