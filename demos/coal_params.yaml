@@ -12,17 +12,10 @@ run:
 sweep:
   pca:
     dimensions:
-      values: [2, 3, 4, 5, 6, 7, 8, 10, 12, 15]   # 10 dimensionalities
+      values: [2, 3, 4, 5, 6, 7, 8, 10, 12, 15] # 10 dimensionalities
     seed:
-      values: [42, 7, 13, 99, 123, 456, 789, 1000]  # 8 seeds → 80 total embeddings
+      values: [42, 7, 13, 99, 123, 456, 789, 1000] # 8 seeds → 80 total embeddings
 
   ball_mapper:
     epsilon:
-      range: {min: 0.3, max: 2.5, steps: 50}   # 50 cover radii → 80 × 50 = 4000 ball maps
-
-cosmic_graph:
-  threshold: 0.0
-  neighborhood: node
-
-output:
-  n_reps: 6
+      range: { min: 0.3, max: 2.5, steps: 50 } # 50 cover radii → 80 × 50 = 4000 ball maps

@@ -10,6 +10,7 @@ The Python reference implements the same three-step algorithm as the Rust code:
 Because the algorithm is fully deterministic (no RNG), the Rust and Python
 outputs must agree exactly: same node sets, same edges.
 """
+
 import numpy as np
 
 from pulsar._pulsar import BallMapper, ball_mapper_grid
@@ -18,6 +19,7 @@ from pulsar._pulsar import BallMapper, ball_mapper_grid
 # ---------------------------------------------------------------------------
 # Python reference implementation
 # ---------------------------------------------------------------------------
+
 
 def py_ball_mapper(pts, eps):
     """Ball Mapper: greedy cover → membership → edges.
@@ -44,8 +46,7 @@ def py_ball_mapper(pts, eps):
     # Step 2: membership (all points within eps of each centre)
     nodes = []
     for c in centers:
-        members = [i for i in range(n)
-                   if np.sum((pts[i] - pts[c]) ** 2) <= eps_sq]
+        members = [i for i in range(n) if np.sum((pts[i] - pts[c]) ** 2) <= eps_sq]
         nodes.append(members)
 
     # Step 3: edges (pairs of balls sharing at least one point)
@@ -62,6 +63,7 @@ def py_ball_mapper(pts, eps):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def _make_pts(n=30, d=2, seed=0):
     rng = np.random.default_rng(seed)
@@ -113,7 +115,9 @@ def test_nodes_and_edges_match_multiple_eps():
 
         assert len(bm.nodes) == len(expected_nodes), f"eps={eps}: node count mismatch"
         for k, (rust_m, py_m) in enumerate(zip(bm.nodes, expected_nodes)):
-            assert sorted(rust_m) == sorted(py_m), f"eps={eps}, ball {k}: member mismatch"
+            assert sorted(rust_m) == sorted(py_m), (
+                f"eps={eps}, ball {k}: member mismatch"
+            )
         assert set(bm.edges) == set(expected_edges), f"eps={eps}: edge mismatch"
 
 
@@ -131,8 +135,7 @@ def test_single_ball_large_eps():
 
 def test_isolated_balls_no_edges():
     """Well-separated clusters should produce no edges (no shared members)."""
-    pts = np.array([[0.0, 0.0], [0.1, 0.0],
-                    [10.0, 0.0], [10.1, 0.0]], dtype=np.float64)
+    pts = np.array([[0.0, 0.0], [0.1, 0.0], [10.0, 0.0], [10.1, 0.0]], dtype=np.float64)
     expected_nodes, expected_edges = py_ball_mapper(pts, eps=0.5)
 
     bm = BallMapper(eps=0.5)

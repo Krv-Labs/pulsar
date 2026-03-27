@@ -4,9 +4,9 @@ Analysis hooks — pure Python utilities that work on the outputs of the Rust la
 
 from __future__ import annotations
 
+import networkx as nx
 import numpy as np
 import pandas as pd
-import networkx as nx
 
 
 def label_points(ball_mapper, n: int) -> np.ndarray:
@@ -44,7 +44,7 @@ def cosmic_clusters(
     Run clustering on the cosmic graph adjacency matrix.
     Returns an (n,) int array of cluster labels.
 
-    method: "agglomerative" | "spectral" | "hdbscan"
+    method: "agglomerative" | "spectral"
     """
     adj = nx.to_numpy_array(cosmic_graph)
 
@@ -64,13 +64,6 @@ def cosmic_clusters(
             n_clusters=n_clusters,
             affinity="precomputed",
         ).fit_predict(adj)
-
-    if method == "hdbscan":
-        try:
-            from hdbscan import HDBSCAN
-        except ImportError:
-            raise ImportError("Install hdbscan: uv add hdbscan")
-        return HDBSCAN(metric="precomputed").fit_predict(1.0 - adj)
 
     raise ValueError(f"Unknown clustering method: {method!r}")
 

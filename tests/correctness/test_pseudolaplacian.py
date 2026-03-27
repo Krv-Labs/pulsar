@@ -8,6 +8,7 @@ The Python reference is the same formula used by the Rust implementation:
             for j in members:
                 L[i, j] += 1 if i == j else -1
 """
+
 import numpy as np
 
 from pulsar._pulsar import BallMapper, accumulate_pseudo_laplacians
@@ -82,9 +83,7 @@ def test_diagonal_is_membership_count():
 
     # Count memberships manually
     for i in range(n):
-        expected_count = sum(
-            1 for bm in ball_maps for node in bm.nodes if i in node
-        )
+        expected_count = sum(1 for bm in ball_maps for node in bm.nodes if i in node)
         assert L[i, i] == expected_count
 
 

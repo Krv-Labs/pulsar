@@ -11,6 +11,7 @@ on large datasets. This produces approximate principal components that:
 Unlike exact SVD, randomized SVD won't match the Python reference exactly,
 but the subspace quality should be high for well-conditioned matrices.
 """
+
 import numpy as np
 
 from pulsar._pulsar import PCA
@@ -19,6 +20,7 @@ from pulsar._pulsar import PCA
 # ---------------------------------------------------------------------------
 # Python reference implementation
 # ---------------------------------------------------------------------------
+
 
 def py_pca(X, n_components):
     """PCA via explicit covariance SVD — matches the Rust implementation.
@@ -58,6 +60,7 @@ def py_pca(X, n_components):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 def test_projection_captures_variance(rng_data):
     """Randomized PCA should capture similar variance to exact PCA."""
     n_components = 2
@@ -69,10 +72,11 @@ def test_projection_captures_variance(rng_data):
     # Randomized SVD should capture comparable variance
     expected_var = np.var(expected_proj, axis=0).sum()
     actual_var = np.var(actual_proj, axis=0).sum()
-    
+
     # Allow some variance loss due to approximation (should be within 50% for small data)
-    assert actual_var > 0.5 * expected_var, \
+    assert actual_var > 0.5 * expected_var, (
         f"Randomized PCA variance {actual_var:.4f} too low vs exact {expected_var:.4f}"
+    )
 
 
 def test_components_sign_convention(rng_data):
@@ -100,18 +104,24 @@ def test_explained_variance_positive_and_ordered(rng_data):
 
     assert len(actual_ev) == n_components
     assert np.all(actual_ev > 0), "Explained variance should be positive"
-    assert np.all(actual_ev[:-1] >= actual_ev[1:]), "Explained variance should be descending"
+    assert np.all(actual_ev[:-1] >= actual_ev[1:]), (
+        "Explained variance should be descending"
+    )
 
 
 def test_explained_variance_descending(rng_data):
     """Singular values must be in non-increasing order."""
     _, _, ev = py_pca(rng_data, 4)
-    assert np.all(ev[:-1] >= ev[1:]), "Python reference: explained variance not non-increasing"
+    assert np.all(ev[:-1] >= ev[1:]), (
+        "Python reference: explained variance not non-increasing"
+    )
 
     pca = PCA(n_components=4, seed=0)
     pca.fit_transform(rng_data)
     rust_ev = np.array(pca.explained_variance)
-    assert np.all(rust_ev[:-1] >= rust_ev[1:]), "Rust: explained variance not non-increasing"
+    assert np.all(rust_ev[:-1] >= rust_ev[1:]), (
+        "Rust: explained variance not non-increasing"
+    )
 
 
 def test_projection_shape(small_data):
@@ -126,8 +136,12 @@ def test_centering_property(rng_data):
     because PCA centres the data before projecting."""
     pca = PCA(n_components=2, seed=0)
     proj = np.array(pca.fit_transform(rng_data))
-    np.testing.assert_allclose(proj.mean(axis=0), 0.0, atol=1e-10,
-                               err_msg="Projected data should have ~zero column means")
+    np.testing.assert_allclose(
+        proj.mean(axis=0),
+        0.0,
+        atol=1e-10,
+        err_msg="Projected data should have ~zero column means",
+    )
 
 
 def test_transform_consistent_with_fit_transform(rng_data):

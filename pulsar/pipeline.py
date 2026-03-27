@@ -14,8 +14,10 @@ from pulsar._pulsar import (
     BallMapper,
     CosmicGraph,
     StandardScaler,
+    StabilityResult,
     accumulate_pseudo_laplacians,
     ball_mapper_grid,
+    find_stable_thresholds,
     impute_column,
     pca_grid,
 )
@@ -45,6 +47,8 @@ class ThemaRS:
         self._weighted_adjacency: np.ndarray | None = None
         self._cosmic_rust: CosmicGraph | None = None
         self._data: pd.DataFrame | None = None
+        self._stability_result: StabilityResult | None = None
+        self._resolved_threshold: float | None = None
 
     # ------------------------------------------------------------------
     # Main pipeline
@@ -118,10 +122,23 @@ class ThemaRS:
         galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
 
         # 8. CosmicGraph
-        self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-            galactic_L, cfg.cosmic_graph.threshold
-        )
-        self._weighted_adjacency = np.array(self._cosmic_rust.weighted_adj)
+        threshold = cfg.cosmic_graph.threshold
+        if threshold == "auto":
+            # Weighted adjacency is independent of threshold; compute once at 0.0
+            cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+            weighted_adj = np.array(cg_temp.weighted_adj)
+            self._stability_result = find_stable_thresholds(weighted_adj)
+            self._resolved_threshold = float(self._stability_result.optimal_threshold)
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_threshold
+            )
+        else:
+            self._resolved_threshold = float(threshold)
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_threshold
+            )
+            weighted_adj = np.array(self._cosmic_rust.weighted_adj)
+        self._weighted_adjacency = weighted_adj
         self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
 
         return self
@@ -148,6 +165,18 @@ class ThemaRS:
     def ball_maps(self) -> list[BallMapper]:
         """All fitted BallMapper objects across the parameter grid."""
         return self._ball_maps
+
+    @property
+    def stability_result(self) -> StabilityResult | None:
+        """Stability analysis result (only available if threshold='auto')."""
+        return self._stability_result
+
+    @property
+    def resolved_threshold(self) -> float:
+        """The actual threshold used (resolved from 'auto' or the manual value)."""
+        if self._resolved_threshold is None:
+            raise RuntimeError("Call fit() first")
+        return self._resolved_threshold
 
     # ------------------------------------------------------------------
     # Analysis

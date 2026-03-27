@@ -26,7 +26,7 @@ def test_subspace_quality(small_array):
     # Randomized SVD won't match sklearn exactly, but should capture similar variance
     pulsar_var = np.var(pulsar_result, axis=0).sum()
     sklearn_var = np.var(sklearn_result, axis=0).sum()
-    
+
     # The captured variance should be within 10% for well-conditioned data
     # (randomized SVD is approximate but should be close for top components)
     assert pulsar_var > 0.7 * sklearn_var, "Randomized PCA should capture most variance"
