@@ -5,6 +5,7 @@ These tests compare a readable Python reference implementation of each
 algorithm to the compiled Rust output.  The Python side is intentionally
 written in a "close to the math" style so you can audit it line by line.
 """
+
 import numpy as np
 import pytest
 

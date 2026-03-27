@@ -59,6 +59,8 @@ use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
+use crate::error::PulsarError;
+
 // ============================================================================
 // Union-Find data structure
 // ============================================================================
@@ -198,10 +200,11 @@ pub struct StabilityResult {
     /// may represent alternative clusterings at different granularities.
     pub plateaus: Vec<Plateau>,
 
-    /// Threshold values at which component count was measured.
+    /// Threshold change-points at which component count was measured.
     ///
-    /// These are the bin boundaries used in the sparse sweep, in descending
-    /// order (1.0 → 0.0). Use with `component_counts` for visualization.
+    /// These are descending bin boundaries (1.0 → 0.0) where component counts
+    /// changed, plus the final 0.0 boundary to close the curve for plotting.
+    /// Use with `component_counts` for visualization.
     pub thresholds: Vec<f64>,
 
     /// Component count at each threshold in `thresholds`.
@@ -236,25 +239,40 @@ pub const DEFAULT_NUM_BINS: usize = 256;
 /// A [`StabilityResult`] containing the optimal threshold, all plateaus, and
 /// curve data for visualization.
 ///
-/// # Panics
-/// Panics if `num_bins` is 0.
-pub fn find_stable_thresholds(weighted_adj: &Array2<f64>, num_bins: usize) -> StabilityResult {
-    assert!(num_bins > 0, "num_bins must be positive");
+/// # Errors
+/// Returns [`PulsarError::InvalidParameter`] if `num_bins == 0`.
+/// Returns [`PulsarError::ShapeMismatch`] if `weighted_adj` is not square.
+pub fn find_stable_thresholds(
+    weighted_adj: &Array2<f64>,
+    num_bins: usize,
+) -> Result<StabilityResult, PulsarError> {
+    if num_bins == 0 {
+        return Err(PulsarError::InvalidParameter {
+            msg: "num_bins must be positive".to_string(),
+        });
+    }
 
-    let n = weighted_adj.shape()[0];
+    let n = weighted_adj.nrows();
+    let m = weighted_adj.ncols();
+    if n != m {
+        return Err(PulsarError::ShapeMismatch {
+            expected: "square matrix (n, n)".to_string(),
+            got: format!("({n}, {m})"),
+        });
+    }
 
     // Handle degenerate cases
     if n == 0 {
-        return StabilityResult {
+        return Ok(StabilityResult {
             optimal_threshold: 0.5,
             plateaus: vec![],
             thresholds: vec![],
             component_counts: vec![],
-        };
+        });
     }
 
     if n == 1 {
-        return StabilityResult {
+        return Ok(StabilityResult {
             optimal_threshold: 0.5,
             plateaus: vec![Plateau {
                 start_threshold: 1.0,
@@ -263,7 +281,7 @@ pub fn find_stable_thresholds(weighted_adj: &Array2<f64>, num_bins: usize) -> St
             }],
             thresholds: vec![1.0, 0.0],
             component_counts: vec![1, 1],
-        };
+        });
     }
 
     // -------------------------------------------------------------------------
@@ -297,7 +315,7 @@ pub fn find_stable_thresholds(weighted_adj: &Array2<f64>, num_bins: usize) -> St
     // Check if graph has any edges
     let total_edges: usize = bins.iter().map(|b| b.len()).sum();
     if total_edges == 0 {
-        return StabilityResult {
+        return Ok(StabilityResult {
             optimal_threshold: 0.5,
             plateaus: vec![Plateau {
                 start_threshold: 1.0,
@@ -306,7 +324,7 @@ pub fn find_stable_thresholds(weighted_adj: &Array2<f64>, num_bins: usize) -> St
             }],
             thresholds: vec![1.0, 0.0],
             component_counts: vec![n, n],
-        };
+        });
     }
 
     // -------------------------------------------------------------------------
@@ -395,12 +413,20 @@ pub fn find_stable_thresholds(weighted_adj: &Array2<f64>, num_bins: usize) -> St
         }
     }
 
-    StabilityResult {
+    // Always include the final 0.0 boundary so step-curve plots are complete.
+    if let (Some(&last_threshold), Some(&last_count)) = (thresholds.last(), component_counts.last()) {
+        if dedup_thresholds.last().copied() != Some(last_threshold) {
+            dedup_thresholds.push(last_threshold);
+            dedup_counts.push(last_count);
+        }
+    }
+
+    Ok(StabilityResult {
         optimal_threshold,
         plateaus,
         thresholds: dedup_thresholds,
         component_counts: dedup_counts,
-    }
+    })
 }
 
 // ============================================================================
@@ -548,8 +574,8 @@ impl PyStabilityResult {
 /// A `StabilityResult` containing:
 /// - `optimal_threshold`: midpoint of the longest plateau
 /// - `plateaus`: all detected plateaus, sorted by length (use `plateaus[0].component_count` for the optimal component count)
-/// - `thresholds`: all threshold values tested
-/// - `component_counts`: component count at each threshold
+/// - `thresholds`: descending threshold change-points, plus 0.0
+/// - `component_counts`: component count at each threshold change-point
 ///
 /// # Scalability
 /// Uses O(n²) time and O(m + n) memory where m = number of edges. For sparse
@@ -580,7 +606,7 @@ pub fn py_find_stable_thresholds<'py>(
 ) -> PyResult<PyStabilityResult> {
     let arr = weighted_adj.as_array().to_owned();
     let bins = num_bins.unwrap_or(DEFAULT_NUM_BINS);
-    let result = find_stable_thresholds(&arr, bins);
+    let result = find_stable_thresholds(&arr, bins)?;
     Ok(PyStabilityResult { inner: result })
 }
 
@@ -636,7 +662,7 @@ mod tests {
         ]);
 
         // Use 100 bins for this test (finer than the weight differences)
-        let result = find_stable_thresholds(&w, 100);
+        let result = find_stable_thresholds(&w, 100).unwrap();
 
         // Check we have the expected component counts in the curve
         assert!(result.component_counts.contains(&4)); // initially disconnected
@@ -661,7 +687,7 @@ mod tests {
             [0.5, 0.5, 0.0],
         ]);
 
-        let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS);
+        let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS).unwrap();
 
         // At threshold below 0.5, should have 1 component
         assert!(result.component_counts.contains(&1));
@@ -679,7 +705,7 @@ mod tests {
             [0.0, 0.0, 0.0],
         ]);
 
-        let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS);
+        let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS).unwrap();
 
         // All nodes remain disconnected — single plateau covering entire range
         assert_eq!(result.plateaus.len(), 1);
@@ -691,7 +717,7 @@ mod tests {
     #[test]
     fn test_single_node() {
         let w = arr2(&[[0.0]]);
-        let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS);
+        let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS).unwrap();
 
         assert_eq!(result.optimal_threshold, 0.5);
         assert_eq!(result.plateaus[0].component_count, 1);
@@ -706,8 +732,8 @@ mod tests {
             [0.3, 0.3, 0.0],
         ]);
 
-        let result_coarse = find_stable_thresholds(&w, 10);
-        let result_fine = find_stable_thresholds(&w, 1000);
+        let result_coarse = find_stable_thresholds(&w, 10).unwrap();
+        let result_fine = find_stable_thresholds(&w, 1000).unwrap();
 
         // Both should identify the same number of distinct component counts
         let coarse_unique: std::collections::HashSet<_> =
@@ -735,5 +761,19 @@ mod tests {
 
         assert!((plateau.length() - 0.6).abs() < 1e-10);
         assert!((plateau.midpoint() - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_num_bins_zero_returns_error() {
+        let w = arr2(&[[0.0, 0.4], [0.4, 0.0]]);
+        let err = find_stable_thresholds(&w, 0).unwrap_err();
+        assert!(matches!(err, PulsarError::InvalidParameter { .. }));
+    }
+
+    #[test]
+    fn test_non_square_returns_error() {
+        let w = arr2(&[[0.0, 0.4, 0.2], [0.4, 0.0, 0.1]]);
+        let err = find_stable_thresholds(&w, DEFAULT_NUM_BINS).unwrap_err();
+        assert!(matches!(err, PulsarError::ShapeMismatch { .. }));
     }
 }

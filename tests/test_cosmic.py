@@ -1,4 +1,5 @@
 """Tests for CosmicGraph construction."""
+
 import numpy as np
 
 from pulsar._pulsar import CosmicGraph, BallMapper, accumulate_pseudo_laplacians

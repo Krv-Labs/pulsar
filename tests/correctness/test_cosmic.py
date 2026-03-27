@@ -11,6 +11,7 @@ normalize_cosmicGraph:
     adj[i,j] = 1 if W[i,j] > threshold else 0
     adj[i,i] = 0  (diagonal is always zero)
 """
+
 import numpy as np
 
 from pulsar._pulsar import CosmicGraph, BallMapper, accumulate_pseudo_laplacians

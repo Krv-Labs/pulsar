@@ -129,7 +129,9 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     # cosmic_graph section
     cg_raw = raw.get("cosmic_graph", {})
     threshold_raw = cg_raw.get("threshold", "auto")
-    threshold: float | Literal["auto"] = "auto" if threshold_raw == "auto" else float(threshold_raw)
+    threshold: float | Literal["auto"] = (
+        "auto" if threshold_raw == "auto" else float(threshold_raw)
+    )
     cosmic_graph = CosmicGraphSpec(
         threshold=threshold,
         neighborhood=str(cg_raw.get("neighborhood", "node")),

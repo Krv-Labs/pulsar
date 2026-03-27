@@ -38,7 +38,6 @@ import pandas as pd
 from pulsar.config import load_config
 from pulsar.temporal import TemporalCosmicGraph
 
-
 # ---------------------------------------------------------------------------
 # Simulated ICU Data Generator
 # ---------------------------------------------------------------------------
@@ -109,7 +108,6 @@ def generate_patient_trajectory(
         normal_std = (normal_high - normal_low) / 4
 
         abnormal_mean = (abnormal_low + abnormal_high) / 2
-        abnormal_std = (abnormal_high - abnormal_low) / 4
 
         if archetype == "stable":
             # Stay in normal range throughout
@@ -253,6 +251,7 @@ def generate_icu_dataset(
 # Main Demo
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Longitudinal ICU demo - true temporal approach"
@@ -283,8 +282,10 @@ def main() -> None:
     print()
 
     # Generate data
-    print(f"[data] Generating ICU trajectories...")
-    print(f"       {args.n_patients} patients × {args.n_hours} hours × {len(VITAL_SIGNS)} vitals")
+    print("[data] Generating ICU trajectories...")
+    print(
+        f"       {args.n_patients} patients × {args.n_hours} hours × {len(VITAL_SIGNS)} vitals"
+    )
     t0 = time.perf_counter()
     snapshots, labels = generate_icu_dataset(
         n_patients=args.n_patients,
@@ -296,7 +297,7 @@ def main() -> None:
 
     print("[data] Archetype distribution:")
     for archetype, count in labels["archetype"].value_counts().items():
-        print(f"       {archetype}: {count} ({100*count/len(labels):.1f}%)")
+        print(f"       {archetype}: {count} ({100 * count / len(labels):.1f}%)")
     print()
 
     # Build config
@@ -323,8 +324,12 @@ def main() -> None:
         * len(config.pca.seeds)
         * len(config.ball_mapper.epsilons)
     )
-    print(f"[grid] {len(config.pca.dimensions)} dims × {len(config.pca.seeds)} seeds × {len(config.ball_mapper.epsilons)} epsilons = {n_maps} ball maps per time step")
-    print(f"[grid] Total: {n_maps} × {args.n_hours} time steps = {n_maps * args.n_hours} ball maps")
+    print(
+        f"[grid] {len(config.pca.dimensions)} dims × {len(config.pca.seeds)} seeds × {len(config.ball_mapper.epsilons)} epsilons = {n_maps} ball maps per time step"
+    )
+    print(
+        f"[grid] Total: {n_maps} × {args.n_hours} time steps = {n_maps * args.n_hours} ball maps"
+    )
     print()
 
     # Build TemporalCosmicGraph
@@ -409,7 +414,7 @@ def main() -> None:
             cluster_sizes = (
                 cluster_df.groupby("cluster").size().sort_values(ascending=False)
             )
-            print(f"  Top clusters by archetype composition:")
+            print("  Top clusters by archetype composition:")
 
             for cluster_id in cluster_sizes.head(5).index:
                 members = cluster_df[cluster_df["cluster"] == cluster_id]

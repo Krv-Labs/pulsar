@@ -6,7 +6,7 @@ Performance-critical algorithms are written in Rust (PyO3/maturin) and exposed a
 
 ## Installation
 
-Requires Rust and Python 3.13+.
+Requires Rust and Python 3.10+.
 
 ```bash
 uv sync
@@ -22,7 +22,7 @@ model = ThemaRS("params.yaml").fit()
 
 graph = model.cosmic_graph        # networkx.Graph with 'weight' edge attributes
 adj   = model.weighted_adjacency  # np.ndarray, shape (n, n)
-reps  = model.select_representatives(n_reps=4)
+reps  = model.select_representatives()  # uses the configured default
 ```
 
 Copy `params.yaml.sample` to `params.yaml` and edit it for your dataset.
@@ -54,6 +54,8 @@ uv run python demos/physionet.py --data path/to/eicu_patient_static.csv
 
 ## Configuration
 
+Cosmic graph thresholding is automatic by default, and representative selection has a sensible default. Most users only need to configure data, preprocessing, and sweeps.
+
 ```yaml
 run:
   name: my_experiment
@@ -78,12 +80,6 @@ sweep:
   ball_mapper:
     epsilon:
       range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
-
-cosmic_graph:
-  threshold: 0.0
-
-output:
-  n_reps: 4
 ```
 
 ## Development

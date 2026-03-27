@@ -1,6 +1,7 @@
 """Unit tests for persistent homology / threshold stability functions."""
 
 import numpy as np
+import pytest
 from pulsar._pulsar import Plateau, StabilityResult, find_stable_thresholds
 
 
@@ -226,6 +227,20 @@ class TestNumBinsParameter:
         # Note: after deduplication, this isn't strictly true, but generally
         # finer bins should have at least as many thresholds
         assert len(result_fine.thresholds) >= len(result_coarse.thresholds) - 2
+
+    def test_zero_num_bins_raises(self):
+        w = make_two_cluster_adj()
+        with pytest.raises(ValueError, match="num_bins must be positive"):
+            find_stable_thresholds(w, num_bins=0)
+
+
+class TestInputValidation:
+    """Tests for shape validation at the Python boundary."""
+
+    def test_non_square_matrix_raises(self):
+        w = np.array([[0.0, 0.1, 0.2], [0.1, 0.0, 0.3]], dtype=np.float64)
+        with pytest.raises(ValueError, match="square matrix"):
+            find_stable_thresholds(w)
 
 
 class TestTopKMethods:

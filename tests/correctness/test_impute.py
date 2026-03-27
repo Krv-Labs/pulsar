@@ -14,6 +14,7 @@ NOTE on sampling methods (sample_normal, sample_categorical):
     - Imputed values come from the right support (e.g. observed categories).
     - The mean and std of sampled values are plausible.
 """
+
 import numpy as np
 from collections import Counter
 
@@ -23,6 +24,7 @@ from pulsar._pulsar import impute_column
 # ---------------------------------------------------------------------------
 # Python reference implementations
 # ---------------------------------------------------------------------------
+
 
 def py_fill_mean(arr):
     """Fill NaN with the mean of observed values."""
@@ -63,11 +65,16 @@ def py_fill_mode(arr):
 # fill_mean
 # ---------------------------------------------------------------------------
 
+
 def test_fill_mean_matches_reference(col_with_nans):
     expected = py_fill_mean(col_with_nans)
     actual = np.array(impute_column(col_with_nans, "fill_mean"))
-    np.testing.assert_allclose(actual, expected, atol=1e-15,
-                               err_msg="fill_mean: Rust result differs from Python reference")
+    np.testing.assert_allclose(
+        actual,
+        expected,
+        atol=1e-15,
+        err_msg="fill_mean: Rust result differs from Python reference",
+    )
 
 
 def test_fill_mean_all_nan_indices_replaced(col_with_nans):
@@ -86,6 +93,7 @@ def test_fill_mean_non_nan_unchanged(col_with_nans):
 # ---------------------------------------------------------------------------
 # fill_median
 # ---------------------------------------------------------------------------
+
 
 def test_fill_median_matches_reference_odd():
     """Odd number of observed values → exact middle element."""
@@ -112,6 +120,7 @@ def test_fill_median_matches_reference_fixture(col_with_nans):
 # ---------------------------------------------------------------------------
 # fill_mode
 # ---------------------------------------------------------------------------
+
 
 def test_fill_mode_matches_reference(col_with_nans):
     # col_with_nans = [1, 2, nan, 4, nan, 6] — all values unique, mode = 1.0
@@ -144,6 +153,7 @@ def test_fill_mode_categorical(categorical_col):
 # ---------------------------------------------------------------------------
 # sample_normal — distributional checks only (PRNG mismatch with numpy)
 # ---------------------------------------------------------------------------
+
 
 def test_sample_normal_no_nans_remain(col_with_nans):
     actual = np.array(impute_column(col_with_nans, "sample_normal", seed=42))
@@ -192,6 +202,7 @@ def test_sample_normal_deterministic():
 # sample_categorical — distributional checks only
 # ---------------------------------------------------------------------------
 
+
 def test_sample_categorical_no_nans_remain(categorical_col):
     actual = np.array(impute_column(categorical_col, "sample_categorical", seed=7))
     assert not np.any(np.isnan(actual))
@@ -202,14 +213,18 @@ def test_sample_categorical_values_from_observed(categorical_col):
     observed_set = set(categorical_col[~np.isnan(categorical_col)].tolist())
     actual = np.array(impute_column(categorical_col, "sample_categorical", seed=7))
     for v in actual:
-        assert v in observed_set, f"Imputed value {v} not in observed set {observed_set}"
+        assert v in observed_set, (
+            f"Imputed value {v} not in observed set {observed_set}"
+        )
 
 
 def test_sample_categorical_respects_frequencies():
     """When one category is much more frequent, it should dominate imputed values."""
     # category 1.0 appears 8×, category 0.0 appears 2×
-    arr = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
-                   + [np.nan] * 100, dtype=np.float64)
+    arr = np.array(
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0] + [np.nan] * 100,
+        dtype=np.float64,
+    )
     result = np.array(impute_column(arr, "sample_categorical", seed=0))
     imputed = result[np.isnan(arr)]
     frac_ones = (imputed == 1.0).mean()

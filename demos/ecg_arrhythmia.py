@@ -29,14 +29,10 @@ from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
 
 import networkx as nx
 import numpy as np
 import pandas as pd
-from scipy import signal
-from scipy.stats import skew, kurtosis
-
 from pulsar._pulsar import (
     CosmicGraph,
     StandardScaler,
@@ -44,9 +40,11 @@ from pulsar._pulsar import (
     ball_mapper_grid,
     pca_grid,
 )
+from scipy import signal
+from scipy.stats import kurtosis, skew
+
 from pulsar.config import load_config
 from pulsar.hooks import cosmic_to_networkx
-
 
 # ---------------------------------------------------------------------------
 # ECG Feature Extraction
@@ -138,7 +136,9 @@ def extract_ecg_features(ecg: np.ndarray, fs: int = 500) -> dict:
 
         # Heart rate
         features["hr_mean"] = 60000 / np.mean(rr_intervals)
-        features["hr_std"] = np.std(60000 / rr_intervals) if len(rr_intervals) > 1 else 0
+        features["hr_std"] = (
+            np.std(60000 / rr_intervals) if len(rr_intervals) > 1 else 0
+        )
 
         # HRV metrics (simplified)
         if len(rr_intervals) >= 3:
@@ -170,6 +170,7 @@ def extract_ecg_features(ecg: np.ndarray, fs: int = 500) -> dict:
 # Synthetic ECG Generator
 # ---------------------------------------------------------------------------
 
+
 def generate_synthetic_ecg(
     n_patients: int = 1000,
     n_samples: int = 5000,
@@ -190,14 +191,14 @@ def generate_synthetic_ecg(
 
     # Rhythm types with relative frequencies
     rhythm_types = {
-        "NSR": 0.50,      # Normal Sinus Rhythm
-        "AFIB": 0.15,     # Atrial Fibrillation
-        "SB": 0.10,       # Sinus Bradycardia
-        "ST": 0.08,       # Sinus Tachycardia
-        "PAC": 0.07,      # Premature Atrial Contraction
-        "PVC": 0.05,      # Premature Ventricular Contraction
-        "RBBB": 0.03,     # Right Bundle Branch Block
-        "LBBB": 0.02,     # Left Bundle Branch Block
+        "NSR": 0.50,  # Normal Sinus Rhythm
+        "AFIB": 0.15,  # Atrial Fibrillation
+        "SB": 0.10,  # Sinus Bradycardia
+        "ST": 0.08,  # Sinus Tachycardia
+        "PAC": 0.07,  # Premature Atrial Contraction
+        "PVC": 0.05,  # Premature Ventricular Contraction
+        "RBBB": 0.03,  # Right Bundle Branch Block
+        "LBBB": 0.02,  # Left Bundle Branch Block
     }
 
     rhythms = list(rhythm_types.keys())
@@ -266,7 +267,9 @@ def generate_synthetic_ecg(
                         r_amp *= 1.5  # Larger amplitude for PVC
 
                     qrs = r_amp * signal.windows.gaussian(qrs_width, qrs_width / 4)
-                    sig[sample_idx : sample_idx + qrs_width] += qrs[: n_samples - sample_idx]
+                    sig[sample_idx : sample_idx + qrs_width] += qrs[
+                        : n_samples - sample_idx
+                    ]
 
                     # T wave
                     t_delay = int(0.2 * fs)
@@ -299,6 +302,7 @@ def generate_synthetic_ecg(
 # ---------------------------------------------------------------------------
 # Main Pipeline
 # ---------------------------------------------------------------------------
+
 
 def extract_features_from_dataset(
     ecgs: np.ndarray,
@@ -368,9 +372,9 @@ def main() -> None:
         ecgs, labels = generate_synthetic_ecg(n_patients=args.n_patients)
         print(f"[data] Generated in {time.perf_counter() - t0:.2f}s")
         print(f"[data] ECG shape: {ecgs.shape} (patients × leads × samples)")
-        print(f"[data] Rhythm distribution:")
+        print("[data] Rhythm distribution:")
         for rhythm, count in labels["rhythm"].value_counts().items():
-            print(f"       {rhythm}: {count} ({100*count/len(labels):.1f}%)")
+            print(f"       {rhythm}: {count} ({100 * count / len(labels):.1f}%)")
     else:
         print(f"[data] Loading real ECG data from {args.data}...")
         print("[error] Real data loading not implemented in this demo.")
@@ -383,7 +387,9 @@ def main() -> None:
     print("[features] Extracting summary features from ECG signals...")
     t0 = time.perf_counter()
     features_df = extract_features_from_dataset(ecgs)
-    print(f"[features] Extracted {features_df.shape[1]} features in {time.perf_counter() - t0:.2f}s")
+    print(
+        f"[features] Extracted {features_df.shape[1]} features in {time.perf_counter() - t0:.2f}s"
+    )
 
     # Handle NaN values (from failed R-peak detection)
     n_nan_rows = features_df.isna().any(axis=1).sum()
@@ -392,7 +398,9 @@ def main() -> None:
         features_df = features_df.dropna()
         labels = labels.loc[features_df.index]
 
-    print(f"[features] Final dataset: {len(features_df)} patients × {features_df.shape[1]} features")
+    print(
+        f"[features] Final dataset: {len(features_df)} patients × {features_df.shape[1]} features"
+    )
     print()
 
     # Build Pulsar config
@@ -419,7 +427,9 @@ def main() -> None:
         * len(config.pca.seeds)
         * len(config.ball_mapper.epsilons)
     )
-    print(f"[grid] {len(config.pca.dimensions)} dims × {len(config.pca.seeds)} seeds × {len(config.ball_mapper.epsilons)} epsilons = {n_maps} ball maps")
+    print(
+        f"[grid] {len(config.pca.dimensions)} dims × {len(config.pca.seeds)} seeds × {len(config.ball_mapper.epsilons)} epsilons = {n_maps} ball maps"
+    )
     print()
 
     # Run pipeline
@@ -456,7 +466,9 @@ def main() -> None:
 
     # Build CosmicGraph
     t0 = time.perf_counter()
-    cosmic = CosmicGraph.from_pseudo_laplacian(galactic_L, config.cosmic_graph.threshold)
+    cosmic = CosmicGraph.from_pseudo_laplacian(
+        galactic_L, config.cosmic_graph.threshold
+    )
     G = cosmic_to_networkx(cosmic)
     t_cosmic = time.perf_counter() - t0
 
@@ -468,11 +480,11 @@ def main() -> None:
     # Timing report
     print("Timing Breakdown:")
     print("-" * 40)
-    print(f"  Scale:          {t_scale:>8.3f}s  ({100*t_scale/t_total:>5.1f}%)")
-    print(f"  PCA grid:       {t_pca:>8.3f}s  ({100*t_pca/t_total:>5.1f}%)")
-    print(f"  BallMapper:     {t_bm:>8.3f}s  ({100*t_bm/t_total:>5.1f}%)")
-    print(f"  Laplacian:      {t_lap:>8.3f}s  ({100*t_lap/t_total:>5.1f}%)")
-    print(f"  CosmicGraph:    {t_cosmic:>8.3f}s  ({100*t_cosmic/t_total:>5.1f}%)")
+    print(f"  Scale:          {t_scale:>8.3f}s  ({100 * t_scale / t_total:>5.1f}%)")
+    print(f"  PCA grid:       {t_pca:>8.3f}s  ({100 * t_pca / t_total:>5.1f}%)")
+    print(f"  BallMapper:     {t_bm:>8.3f}s  ({100 * t_bm / t_total:>5.1f}%)")
+    print(f"  Laplacian:      {t_lap:>8.3f}s  ({100 * t_lap / t_total:>5.1f}%)")
+    print(f"  CosmicGraph:    {t_cosmic:>8.3f}s  ({100 * t_cosmic / t_total:>5.1f}%)")
     print("-" * 40)
     print(f"  TOTAL:          {t_total:>8.3f}s")
     print()
@@ -485,7 +497,9 @@ def main() -> None:
 
     if G.number_of_edges() > 0:
         weights = np.array([d["weight"] for _, _, d in G.edges(data=True)])
-        print(f"  Edge weights:   min={weights.min():.4f}, max={weights.max():.4f}, mean={weights.mean():.4f}")
+        print(
+            f"  Edge weights:   min={weights.min():.4f}, max={weights.max():.4f}, mean={weights.mean():.4f}"
+        )
 
     # Cluster analysis by rhythm type
     print()
@@ -518,7 +532,9 @@ def main() -> None:
 
         print()
         print("  Rhythm distribution per cluster (top 5 clusters by size):")
-        cluster_sizes = cluster_df.groupby("cluster").size().sort_values(ascending=False)
+        cluster_sizes = (
+            cluster_df.groupby("cluster").size().sort_values(ascending=False)
+        )
 
         for cluster_id in cluster_sizes.head(5).index:
             cluster_rhythms = cluster_df[cluster_df["cluster"] == cluster_id]["rhythm"]
