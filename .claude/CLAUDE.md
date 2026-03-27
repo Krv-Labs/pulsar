@@ -47,12 +47,16 @@ The entry point is `ThemaRS("params.yaml").fit()` (in `pulsar/pipeline.py`). It 
 - `ballmapper.rs` — Ball Mapper: greedy center selection + point membership
 - `pseudolaplacian.rs` — accumulates Laplacian matrices across all ball maps
 - `cosmic.rs` — CosmicGraph: normalized adjacency from accumulated Laplacian
+- `ph.rs` — approximate H₀ persistent homology for automatic threshold selection; exposes `PyStabilityResult` / `PyPlateau`
+- `temporal.rs` — 3D pseudo-Laplacian accumulation across time steps; exposes `accumulate_temporal_pseudo_laplacians` and `py_normalize_temporal_laplacian`
+- `error.rs` — shared `PulsarError` type via `thiserror`
 - `lib.rs` — PyO3 module definition, all Python-exposed classes/functions
 
 **Python (`pulsar/`)** — orchestration and post-processing:
 - `pipeline.py` — `ThemaRS` class; loads data, drives the grid sweeps, calls Rust
 - `config.py` — `PulsarConfig`; YAML loader supporting `values`, `range`, and `distribution` sweep specs
 - `hooks.py` — post-processing utilities: `label_points`, `membership_matrix`, `cosmic_clusters`, `graph_to_dataframe`, `unclustered_points`
+- `temporal.py` — `TemporalCosmicGraph`; wraps the `(n, n, T)` tensor from `temporal.rs` and provides six aggregation methods: `persistence_graph`, `mean_graph`, `recency_graph`, `volatility_graph`, `trend_graph`, `change_point_graph`
 
 ### Grid Search Design
 
