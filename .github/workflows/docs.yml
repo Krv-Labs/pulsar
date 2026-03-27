@@ -21,7 +21,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install docs dependencies
-        run: uv sync --group docs
+        run: uv sync --no-install-project --group docs
       - name: Build rust extension
         run: uv run --no-sync maturin develop --release
       - name: Build docs
