@@ -23,6 +23,7 @@ from pulsar._pulsar import (
     StandardScaler,
     accumulate_pseudo_laplacians,
     ball_mapper_grid,
+    find_stable_thresholds,
     impute_column,
     pca_grid,
 )
@@ -170,14 +171,30 @@ class TimedThemaRS(ThemaRS):
         galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
         self.timings["laplacian"] = time.perf_counter() - t0
 
-        # ── 7. CosmicGraph ───────────────────────────────────────────────────
+        # ── 7. CosmicGraph (initial, threshold=0 to get weighted adj) ────────
+        t0 = time.perf_counter()
+        cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+        self._weighted_adjacency = np.array(cg_temp.weighted_adj)
+        self.timings["cosmic_graph_init"] = time.perf_counter() - t0
+
+        # ── 8. Threshold stability analysis (if auto) ────────────────────────
+        threshold = cfg.cosmic_graph.threshold
+        if threshold == "auto":
+            t0 = time.perf_counter()
+            self._stability_result = find_stable_thresholds(self._weighted_adjacency)
+            threshold = self._stability_result.optimal_threshold
+            self.timings["stability_analysis"] = time.perf_counter() - t0
+        else:
+            self._stability_result = None
+        self._resolved_threshold = float(threshold)
+
+        # ── 9. CosmicGraph (final, with resolved threshold) ───────────────────
         t0 = time.perf_counter()
         self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-            galactic_L, cfg.cosmic_graph.threshold
+            galactic_L, self._resolved_threshold
         )
-        self._weighted_adjacency = np.array(self._cosmic_rust.weighted_adj)
         self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
-        self.timings["cosmic_graph"] = time.perf_counter() - t0
+        self.timings["cosmic_graph_final"] = time.perf_counter() - t0
 
         return self
 
@@ -245,6 +262,20 @@ def main() -> None:
     t_wall_total = time.perf_counter() - t_wall_start
 
     print(f"[run]    done  (wall clock: {t_wall_total:.3f}s)")
+
+    # Print stability analysis results if auto threshold was used
+    if model._stability_result is not None:
+        sr = model._stability_result
+        best_plateau = sr.plateaus[0] if sr.plateaus else None
+        print(f"[stability] optimal threshold: {sr.optimal_threshold:.4f}")
+        if best_plateau:
+            print(
+                f"[stability] longest plateau: {best_plateau.start_threshold:.3f} → "
+                f"{best_plateau.end_threshold:.3f} ({best_plateau.component_count} components)"
+            )
+    else:
+        print(f"[threshold] using manual threshold: {model._resolved_threshold:.4f}")
+
     print(f"[run]    cosmic graph: {model.cosmic_graph.number_of_nodes()} nodes,"
           f" {model.cosmic_graph.number_of_edges()} edges")
 

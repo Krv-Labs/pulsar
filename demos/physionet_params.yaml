@@ -36,9 +36,5 @@ sweep:
     epsilon:
       range: {min: 0.4, max: 2.5, steps: 40}  # 40 cover radii → 36 × 40 = 1440 ball maps
 
-cosmic_graph:
-  threshold: 0.0
-  neighborhood: node
-
 output:
   n_reps: 5
