@@ -243,8 +243,10 @@ class TemporalCosmicGraph:
         Parameters
         ----------
         decay : float
-            Decay factor λ in (0, 1). Higher values give more weight to recent times.
-            Default 0.9 means each step back is weighted 0.9x the previous.
+            Decay factor λ in (0, 1). Values closer to 1 make the weights more uniform
+            across time (less recency emphasis), while smaller values place more weight
+            on the most recent steps. Default 0.9 means each step back is weighted
+            0.9x the previous.
 
         Returns
         -------
