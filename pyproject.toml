@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "pulsar"
+name = "thema-pulsar"
 version = "0.2.0"
 authors = [
     { name = "Krv Labs", email = "team@krv.ai" },
