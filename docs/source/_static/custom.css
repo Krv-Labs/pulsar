@@ -1,0 +1,119 @@
+/* Custom styles for Pulsar documentation */
+
+:root {
+  --pulsar-primary: #f59e0b;
+  --pulsar-primary-dark: #d97706;
+  --pulsar-accent: #f97316;
+  --pulsar-rust: #b7410e;
+  --pulsar-success: #10b981;
+}
+
+.sidebar-logo {
+  cursor: pointer;
+}
+
+/* Card styling */
+.intro-card {
+  padding: 1.25rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  transition: all 0.2s ease;
+  text-align: center;
+  border-top: 3px solid var(--pulsar-primary);
+}
+
+.intro-card:hover {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  transform: translateY(-2px);
+}
+
+.intro-card h3 {
+  margin-top: 0;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+.intro-card p {
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+
+/* Button styling */
+.sd-btn-secondary {
+  background-color: var(--pulsar-primary) !important;
+  border-color: var(--pulsar-primary) !important;
+}
+
+.sd-btn-secondary:hover {
+  background-color: var(--pulsar-primary-dark) !important;
+  border-color: var(--pulsar-primary-dark) !important;
+}
+
+/* Code block enhancements */
+.highlight pre {
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+/* Mermaid diagram styling */
+.mermaid {
+  margin: 1.5rem 0;
+}
+
+/* Table improvements */
+table.docutils {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+}
+
+table.docutils th {
+  background-color: var(--pulsar-primary);
+  color: white;
+  padding: 0.75rem;
+  text-align: left;
+}
+
+table.docutils td {
+  padding: 0.75rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+/* Admonition styling */
+.admonition.note {
+  border-left-color: var(--pulsar-primary);
+}
+
+.admonition.tip {
+  border-left-color: var(--pulsar-success);
+}
+
+/* Rust-specific callout */
+.admonition.rust-note {
+  border-left-color: var(--pulsar-rust);
+  background-color: rgba(183, 65, 14, 0.05);
+}
+
+/* References section */
+.references {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e5e7eb;
+}
+
+/* Sidebar active link */
+.sidebar-tree .current > .reference {
+  font-weight: 600;
+  color: var(--pulsar-primary);
+}
+
+/* Section headers */
+h2 {
+  border-bottom: 2px solid var(--pulsar-primary);
+  padding-bottom: 0.5rem;
+}
+
+/* YAML code blocks */
+.highlight-yaml .highlight {
+  border-left: 3px solid var(--pulsar-primary);
+}

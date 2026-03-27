@@ -89,3 +89,8 @@ uv run maturin develop        # debug build
 uv run maturin develop --release  # optimised build
 uv run pytest tests/ -v
 ```
+
+## Documentation
+
+Full package documentation and API reference live in `docs/source`.
+Start with `docs/source/index.rst` (or build HTML with `uv run sphinx-build -M html docs/source docs/build`).
