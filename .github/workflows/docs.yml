@@ -21,11 +21,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
-        run: uv pip install sphinx furo sphinx-design sphinxcontrib-mermaid IPython nbsphinx
+        run: uv pip install --system sphinx furo sphinx-design sphinxcontrib-mermaid IPython nbsphinx
+      - name: Install maturin
+        run: uv pip install --system maturin
       - name: Build rust extension
-        run: uv run --no-sync maturin develop --release
+        run: maturin develop --release
       - name: Build docs
-        run: uv run --no-sync sphinx-build -M html docs/source docs/build
+        run: sphinx-build -M html docs/source docs/build
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/build/html
