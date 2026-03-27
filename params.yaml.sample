@@ -35,9 +35,6 @@ sweep:
       # alternative — sweep a linspace:
       # range: {min: 0.1, max: 1.5, steps: 8}
 
-cosmic_graph:
-  threshold: 0.0              # minimum edge weight to include in binary adjacency
-  neighborhood: node          # node (default) | cc (connected components, future)
-
-output:
-  n_reps: 4                   # number of representative ball maps to select
+# Advanced options use sensible defaults and are usually not needed:
+# cosmic_graph:
+#   neighborhood: node

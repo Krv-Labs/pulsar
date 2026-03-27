@@ -17,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
-
 from pulsar._pulsar import (
     CosmicGraph,
     StandardScaler,
@@ -27,6 +26,7 @@ from pulsar._pulsar import (
     impute_column,
     pca_grid,
 )
+
 from pulsar.config import load_config
 from pulsar.hooks import cosmic_to_networkx
 from pulsar.pipeline import ThemaRS
@@ -36,7 +36,7 @@ from pulsar.pipeline import ThemaRS
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEMO_DIR = REPO_ROOT / "demo"
+DEMO_DIR = REPO_ROOT / "demos"
 CSV_PATH = DEMO_DIR / "us_coal_plants_dataset.csv"
 PARAMS_PATH = DEMO_DIR / "coal_params.yaml"
 DATA_URL = (

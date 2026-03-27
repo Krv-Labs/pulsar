@@ -28,13 +28,10 @@ run:
 sweep:
   pca:
     dimensions:
-      values: [2, 3, 5, 8, 10, 12]  # 6 dimensionalities
+      values: [2, 3, 5, 8, 10, 12] # 6 dimensionalities
     seed:
-      values: [42, 7, 13, 99, 123, 456]  # 6 seeds → 36 total embeddings
+      values: [42, 7, 13, 99, 123, 456] # 6 seeds → 36 total embeddings
 
   ball_mapper:
     epsilon:
-      range: {min: 0.4, max: 2.5, steps: 40}  # 40 cover radii → 36 × 40 = 1440 ball maps
-
-output:
-  n_reps: 5
+      range: { min: 0.4, max: 2.5, steps: 40 } # 40 cover radii → 36 × 40 = 1440 ball maps
