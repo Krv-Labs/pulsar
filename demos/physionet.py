@@ -51,10 +51,11 @@ PARAMS_PATH = DEMO_DIR / "physionet_params.yaml"
 # Synthetic EHR data generator (mimics eICU patient table statistics)
 # ---------------------------------------------------------------------------
 
+
 def generate_synthetic_ehr(n_patients: int = 2000, seed: int = 42) -> pd.DataFrame:
     """
     Generate synthetic EHR data mimicking eICU patient table structure.
-    
+
     Features are based on typical ICU patient characteristics:
     - Demographics: age, gender, ethnicity, BMI
     - Admission info: admission source, unit type, hospital stay length
@@ -65,24 +66,28 @@ def generate_synthetic_ehr(n_patients: int = 2000, seed: int = 42) -> pd.DataFra
     - Outcomes: ICU LOS, hospital mortality
     """
     rng = np.random.default_rng(seed)
-    
+
     # Demographics
     age = rng.normal(65, 15, n_patients).clip(18, 100)
     gender = rng.choice([0, 1], n_patients)  # 0=F, 1=M
-    ethnicity = rng.choice([0, 1, 2, 3, 4], n_patients, p=[0.65, 0.15, 0.10, 0.05, 0.05])
+    ethnicity = rng.choice(
+        [0, 1, 2, 3, 4], n_patients, p=[0.65, 0.15, 0.10, 0.05, 0.05]
+    )
     bmi = rng.normal(28, 6, n_patients).clip(15, 60)
-    
+
     # Admission info
     admission_source = rng.choice([0, 1, 2, 3], n_patients, p=[0.4, 0.3, 0.2, 0.1])
-    unit_type = rng.choice([0, 1, 2, 3, 4], n_patients, p=[0.35, 0.25, 0.20, 0.12, 0.08])
-    
+    unit_type = rng.choice(
+        [0, 1, 2, 3, 4], n_patients, p=[0.35, 0.25, 0.20, 0.12, 0.08]
+    )
+
     # Vitals at admission (with physiological correlations)
     heart_rate = rng.normal(88, 20, n_patients).clip(40, 180)
     map_bp = rng.normal(75, 15, n_patients).clip(40, 140)
     temperature = rng.normal(37.2, 0.8, n_patients).clip(34, 42)
     spo2 = rng.beta(20, 1, n_patients) * 15 + 85  # skewed toward high values
     respiratory_rate = rng.normal(20, 6, n_patients).clip(8, 45)
-    
+
     # Labs at admission
     creatinine = rng.lognormal(0.5, 0.8, n_patients).clip(0.3, 15)
     bun = rng.lognormal(2.8, 0.6, n_patients).clip(5, 150)
@@ -91,7 +96,7 @@ def generate_synthetic_ehr(n_patients: int = 2000, seed: int = 42) -> pd.DataFra
     hemoglobin = rng.normal(11, 2.5, n_patients).clip(5, 18)
     platelets = rng.lognormal(5.2, 0.5, n_patients).clip(20, 800)
     lactate = rng.lognormal(0.7, 0.7, n_patients).clip(0.5, 20)
-    
+
     # Comorbidities (binary, with realistic prevalence)
     hypertension = rng.binomial(1, 0.55, n_patients)
     diabetes = rng.binomial(1, 0.30, n_patients)
@@ -100,7 +105,7 @@ def generate_synthetic_ehr(n_patients: int = 2000, seed: int = 42) -> pd.DataFra
     ckd = rng.binomial(1, 0.18, n_patients)
     liver_disease = rng.binomial(1, 0.08, n_patients)
     cancer = rng.binomial(1, 0.12, n_patients)
-    
+
     # Severity scores (correlated with vitals/labs)
     apache_base = (
         0.02 * age
@@ -112,59 +117,63 @@ def generate_synthetic_ehr(n_patients: int = 2000, seed: int = 42) -> pd.DataFra
         + 2 * chf
         + 1.5 * ckd
     )
-    apache_score = (apache_base * 3 + rng.normal(0, 5, n_patients)).clip(0, 150).astype(int)
-    
+    apache_score = (
+        (apache_base * 3 + rng.normal(0, 5, n_patients)).clip(0, 150).astype(int)
+    )
+
     # Predicted mortality (logistic based on severity)
     logit = -4 + 0.05 * apache_score + 0.02 * age - 0.01 * map_bp
     predicted_mortality = 1 / (1 + np.exp(-logit))
-    
+
     # Outcomes
     icu_los_days = rng.lognormal(1.0, 0.8, n_patients).clip(0.5, 60)
     hospital_mortality = (rng.random(n_patients) < predicted_mortality).astype(int)
-    
+
     # Introduce missing values (realistic patterns)
     missing_mask = rng.random(n_patients) < 0.05
     bmi_with_nan = np.where(missing_mask, np.nan, bmi)
-    
+
     missing_mask = rng.random(n_patients) < 0.08
     lactate_with_nan = np.where(missing_mask, np.nan, lactate)
-    
+
     missing_mask = rng.random(n_patients) < 0.03
     ethnicity_with_nan = np.where(missing_mask, np.nan, ethnicity)
-    
-    df = pd.DataFrame({
-        "patient_id": np.arange(n_patients),
-        "age": age,
-        "gender": gender,
-        "ethnicity": ethnicity_with_nan,
-        "bmi": bmi_with_nan,
-        "admission_source": admission_source,
-        "unit_type": unit_type,
-        "heart_rate": heart_rate,
-        "mean_arterial_pressure": map_bp,
-        "temperature": temperature,
-        "spo2": spo2,
-        "respiratory_rate": respiratory_rate,
-        "creatinine": creatinine,
-        "bun": bun,
-        "glucose": glucose,
-        "wbc": wbc,
-        "hemoglobin": hemoglobin,
-        "platelets": platelets,
-        "lactate": lactate_with_nan,
-        "hypertension": hypertension,
-        "diabetes": diabetes,
-        "copd": copd,
-        "chf": chf,
-        "ckd": ckd,
-        "liver_disease": liver_disease,
-        "cancer": cancer,
-        "apache_score": apache_score,
-        "predicted_mortality": predicted_mortality,
-        "icu_los_days": icu_los_days,
-        "hospital_mortality": hospital_mortality,
-    })
-    
+
+    df = pd.DataFrame(
+        {
+            "patient_id": np.arange(n_patients),
+            "age": age,
+            "gender": gender,
+            "ethnicity": ethnicity_with_nan,
+            "bmi": bmi_with_nan,
+            "admission_source": admission_source,
+            "unit_type": unit_type,
+            "heart_rate": heart_rate,
+            "mean_arterial_pressure": map_bp,
+            "temperature": temperature,
+            "spo2": spo2,
+            "respiratory_rate": respiratory_rate,
+            "creatinine": creatinine,
+            "bun": bun,
+            "glucose": glucose,
+            "wbc": wbc,
+            "hemoglobin": hemoglobin,
+            "platelets": platelets,
+            "lactate": lactate_with_nan,
+            "hypertension": hypertension,
+            "diabetes": diabetes,
+            "copd": copd,
+            "chf": chf,
+            "ckd": ckd,
+            "liver_disease": liver_disease,
+            "cancer": cancer,
+            "apache_score": apache_score,
+            "predicted_mortality": predicted_mortality,
+            "icu_los_days": icu_los_days,
+            "hospital_mortality": hospital_mortality,
+        }
+    )
+
     return df
 
 
@@ -172,39 +181,43 @@ def generate_synthetic_ehr(n_patients: int = 2000, seed: int = 42) -> pd.DataFra
 # Auto-detect preprocessing from the raw data
 # ---------------------------------------------------------------------------
 
-def build_preprocessing(df: pd.DataFrame, id_col: str = "patient_id") -> tuple[list[str], dict]:
+
+def build_preprocessing(
+    df: pd.DataFrame, id_col: str = "patient_id"
+) -> tuple[list[str], dict]:
     """
     Return (drop_columns, impute_dict).
-    
+
     Strategy:
     - Drop ID columns (not useful for clustering)
     - Categorical (non-numeric) columns: keep, impute with sample_categorical
     - Numeric columns with NaN: impute with sample_normal
     """
     drop_cols = [id_col] if id_col in df.columns else []
-    
+
     df_work = df.drop(columns=drop_cols, errors="ignore")
     cat_cols = df_work.select_dtypes(exclude="number").columns.tolist()
     numeric_df = df_work.drop(columns=cat_cols, errors="ignore")
-    
+
     impute: dict = {}
-    
+
     # Categorical NaN columns
     for col in cat_cols:
         if df_work[col].isna().any():
             impute[col] = {"method": "sample_categorical", "seed": 42}
-    
+
     # Numeric NaN columns
     for col in numeric_df.columns:
         if numeric_df[col].isna().any():
             impute[col] = {"method": "sample_normal", "seed": 42}
-    
+
     return drop_cols, impute
 
 
 # ---------------------------------------------------------------------------
 # Timed pipeline (reused from coal.py)
 # ---------------------------------------------------------------------------
+
 
 class TimedThemaRS(ThemaRS):
     """ThemaRS with per-stage wall-clock timing."""
@@ -330,6 +343,7 @@ class TimedThemaRS(ThemaRS):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="PhysioNet EHR demo for Pulsar")
     parser.add_argument(
@@ -355,7 +369,9 @@ def main() -> None:
     if args.synthetic or not (args.data or CSV_PATH.exists()):
         print(f"[data] generating synthetic EHR data ({args.n_patients} patients) ...")
         df_raw = generate_synthetic_ehr(n_patients=args.n_patients)
-        print(f"[data] synthetic dataset shape: {df_raw.shape[0]} rows × {df_raw.shape[1]} cols")
+        print(
+            f"[data] synthetic dataset shape: {df_raw.shape[0]} rows × {df_raw.shape[1]} cols"
+        )
         data_source = "synthetic"
     else:
         data_path = Path(args.data) if args.data else CSV_PATH
@@ -372,11 +388,11 @@ def main() -> None:
     # Detect preprocessing requirements
     print("[config] detecting column types and NaN patterns ...")
     drop_columns, impute_specs = build_preprocessing(df_raw)
-    
+
     cat_cols = df_raw.select_dtypes(exclude="number").columns.tolist()
     cat_nan = sum(1 for c in cat_cols if df_raw[c].isna().any())
     num_nan = sum(1 for c, s in impute_specs.items() if s["method"] == "sample_normal")
-    
+
     print(f"[config] dropping {len(drop_columns)} ID columns: {drop_columns}")
     print(f"[config] imputing {cat_nan} categorical NaN cols (sample_categorical)")
     print(f"[config] imputing {num_nan} numeric NaN cols (sample_normal/Gaussian)")
@@ -412,7 +428,7 @@ def main() -> None:
     cfg = load_config(raw_cfg)
     n_pca = len(cfg.pca.dimensions) * len(cfg.pca.seeds)
     n_maps = n_pca * len(cfg.ball_mapper.epsilons)
-    
+
     print(
         f"[grid]   {len(cfg.pca.dimensions)} dims × {len(cfg.pca.seeds)} seeds"
         f" × {len(cfg.ball_mapper.epsilons)} epsilons"
@@ -453,15 +469,15 @@ def main() -> None:
     print("=" * 60)
     print("EHR Analysis Summary")
     print("=" * 60)
-    
+
     n_nodes = model.cosmic_graph.number_of_nodes()
     n_edges = model.cosmic_graph.number_of_edges()
-    
+
     print(f"Patients analyzed:        {df_raw.shape[0]}")
     print(f"Features used:            {df_raw.shape[1] - len(drop_columns)}")
     print(f"Cosmic graph nodes:       {n_nodes}")
     print(f"Cosmic graph edges:       {n_edges}")
-    
+
     # Edge weight distribution
     weights = np.array([d["weight"] for _, _, d in model.cosmic_graph.edges(data=True)])
     if len(weights) > 0:

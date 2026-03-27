@@ -49,6 +49,7 @@ DATA_URL = (
 # Data download
 # ---------------------------------------------------------------------------
 
+
 def ensure_data() -> None:
     if CSV_PATH.exists():
         print(f"[data] found {CSV_PATH.name}")
@@ -61,6 +62,7 @@ def ensure_data() -> None:
 # ---------------------------------------------------------------------------
 # Auto-detect preprocessing from the raw CSV
 # ---------------------------------------------------------------------------
+
 
 def build_preprocessing(df: pd.DataFrame) -> tuple[list[str], dict]:
     """
@@ -91,6 +93,7 @@ def build_preprocessing(df: pd.DataFrame) -> tuple[list[str], dict]:
 # ---------------------------------------------------------------------------
 # Timed pipeline
 # ---------------------------------------------------------------------------
+
 
 class TimedThemaRS(ThemaRS):
     """ThemaRS with per-stage wall-clock timing."""
@@ -219,6 +222,7 @@ class TimedThemaRS(ThemaRS):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     ensure_data()
 
@@ -276,8 +280,10 @@ def main() -> None:
     else:
         print(f"[threshold] using manual threshold: {model._resolved_threshold:.4f}")
 
-    print(f"[run]    cosmic graph: {model.cosmic_graph.number_of_nodes()} nodes,"
-          f" {model.cosmic_graph.number_of_edges()} edges")
+    print(
+        f"[run]    cosmic graph: {model.cosmic_graph.number_of_nodes()} nodes,"
+        f" {model.cosmic_graph.number_of_edges()} edges"
+    )
 
     model.print_report()
 
