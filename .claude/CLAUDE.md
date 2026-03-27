@@ -66,6 +66,12 @@ The pipeline runs **parallel grid searches** over PCA (dimensions × seeds) and 
 
 All Rust structs/functions exposed to Python are defined at the bottom of `src/lib.rs` via `#[pyclass]` / `#[pyfunction]`. When adding new Rust functionality that Python needs, register it there.
 
+### Tests
+
+Two-tier structure:
+- `tests/test_*.py` — integration-level, fast feedback
+- `tests/correctness/test_*.py` — numerical validation against reference implementations and edge cases
+
 ## Configuration (params.yaml)
 
 ```yaml
@@ -83,7 +89,7 @@ sweep:
   ball_mapper:
     epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 cosmic_graph:
-  threshold: 0.0
+  threshold: 0.0   # or "auto" to use persistent homology for threshold selection
 output:
   n_reps: 4
 ```
