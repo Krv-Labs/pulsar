@@ -154,7 +154,9 @@ class TemporalCosmicGraph:
             ball_maps_per_time.append(ball_maps)
 
         # Accumulate into 3D pseudo-Laplacian tensor
-        L_tensor = np.array(accumulate_temporal_pseudo_laplacians(ball_maps_per_time, n))
+        L_tensor = np.array(
+            accumulate_temporal_pseudo_laplacians(ball_maps_per_time, n)
+        )
 
         # Normalize to weighted adjacency
         W_tensor = np.array(py_normalize_temporal_laplacian(L_tensor))
