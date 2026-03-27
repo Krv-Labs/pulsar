@@ -6,7 +6,7 @@ Performance-critical algorithms are written in Rust (PyO3/maturin) and exposed a
 
 ## Installation
 
-Requires Rust and Python 3.13+.
+Requires Rust and Python 3.10+.
 
 ```bash
 uv sync

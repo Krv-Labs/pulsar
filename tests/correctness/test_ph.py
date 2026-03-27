@@ -3,7 +3,7 @@ Correctness tests for ph.rs — threshold stability analysis.
 
 These tests compare the Rust implementation against a Python reference
 implementation of the connected component analysis algorithm. The Python
-version uses NetworkX for correctness verification.
+version uses a pure BFS connected-component counter for correctness verification.
 
 The algorithm:
 1. Sweep threshold τ from 1.0 → 0.0
@@ -14,7 +14,6 @@ The algorithm:
 """
 
 import numpy as np
-
 from pulsar._pulsar import find_stable_thresholds
 
 
