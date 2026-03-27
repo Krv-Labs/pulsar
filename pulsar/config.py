@@ -10,7 +10,7 @@ Sweep parameters support three specification styles:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 import numpy as np
 import yaml
 
@@ -67,7 +67,7 @@ class BallMapperSpec:
 
 @dataclass
 class CosmicGraphSpec:
-    threshold: float = 0.0
+    threshold: float | Literal["auto"] = "auto"
     neighborhood: str = "node"
 
 
@@ -128,8 +128,10 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
 
     # cosmic_graph section
     cg_raw = raw.get("cosmic_graph", {})
+    threshold_raw = cg_raw.get("threshold", "auto")
+    threshold: float | Literal["auto"] = "auto" if threshold_raw == "auto" else float(threshold_raw)
     cosmic_graph = CosmicGraphSpec(
-        threshold=float(cg_raw.get("threshold", 0.0)),
+        threshold=threshold,
         neighborhood=str(cg_raw.get("neighborhood", "node")),
     )
 
