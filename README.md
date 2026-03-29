@@ -4,6 +4,27 @@ Rust-backed Python library for topological data analysis. Implements the Thema p
 
 Performance-critical algorithms are written in Rust (PyO3/maturin) and exposed as `pulsar._pulsar`. Python orchestrates the pipeline.
 
+## Citation
+
+If you use this package in your research, please cite:
+
+```bibtex
+@article{Gathrid2025,
+  author  = {Gathrid, Sidney and Wayland, Jeremy and Wayland, Stuart and Deshmukh, Ranjit and Wu, Grace C.},
+  title   = {Strategies to accelerate US coal power phase-out using contextual retirement vulnerabilities},
+  journal = {Nature Energy},
+  year    = {2025},
+  volume  = {10},
+  number  = {10},
+  pages   = {1274--1288},
+  month   = {October},
+  doi     = {10.1038/s41560-025-01871-0},
+  url     = {https://doi.org/10.1038/s41560-025-01871-0},
+  issn    = {2058-7546}
+}
+```
+Which introduced the original [`Thema`](https://github.com/Krv-Labs/Thema) algorithm.
+
 ## Installation
 
 Requires Rust and Python 3.10+.
@@ -90,7 +111,3 @@ uv run maturin develop --release  # optimised build
 uv run pytest tests/ -v
 ```
 
-## Documentation
-
-Full package documentation and API reference live in `docs/source`.
-Start with `docs/source/index.rst` (or build HTML with `uv run sphinx-build -M html docs/source docs/build`).
