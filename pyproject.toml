@@ -37,6 +37,14 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.7",
 ]
+demos = [
+    "sentence-transformers>=3.0",
+    "datasets>=3.0",
+    "umap-learn>=0.5",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "jupyter>=1.0",
+]
 docs = [
     "sphinx>=7.4,<9",
     "furo>=2024.8.6",
