@@ -13,6 +13,7 @@ Cargo.lock
 
 # Data
 *.csv
+demos/mmlu/data/
 
 
 # Byte-compiled / optimized / DLL files
