@@ -157,7 +157,7 @@ For development (requires Rust toolchain):
 
    git clone https://github.com/Krv-Analytics/pulsar.git
    cd pulsar
-   uv sync --extra dev --extra docs
+   uv sync --group docs
    uv run maturin develop --release
 
 Supports Python 3.10, 3.11, 3.12.
