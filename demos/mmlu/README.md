@@ -20,7 +20,7 @@ MMLU is the standard LLM benchmark: 57 subjects, ~14,000 test questions, one lea
 
 1. Silhouette analysis on the cosmic graph identifies **12 distinct geometric regions** that cut across subject boundaries
 2. Two subjects form tight geometric islands: `moral_scenarios` (100% isolation) and `professional_law` (87% of its region)
-3. Models show a **~9% accuracy gap** between their best and worst regions — the leaderboard hides this
+3. Per-question evaluation of GPT-4o-mini, Claude 3 Haiku, Gemini 2.5 Flash, and Grok 4 shows **significant accuracy gaps** between best and worst regions — the leaderboard hides this
 4. Random sampling needs **3x more questions** than topology-aware sampling to cover all regions
 
 ## How the Parameters Were Calibrated
@@ -98,6 +98,10 @@ cosmic_graph:
 
 264 ball maps. Runs in ~50 seconds on a 5,000-point subsample.
 
+## Embedding Model Dependency
+
+The geometric structure in this demo is discovered in bge-small-en-v1.5's embedding space. Different embedding models may reveal different cluster boundaries. This is a feature, not a bug — Pulsar can characterize how *any* representation organizes a dataset, which is useful for comparing embedding models or understanding what structure a particular model "sees."
+
 ## Results
 
 12 regions, sizes 318–478. NMI = 0.335 (subjects partially but incompletely align with topology). Silhouette peak at k=12.
@@ -122,7 +126,7 @@ Key findings:
 - `professional_law` dominates Region 5 at 87% — the tightest geometric cluster in the benchmark.
 - Most regions span 30–50+ subjects. The real structure is thematic, not administrative.
 - Psychology splits: behavioral psych → Region 0, philosophical psych → Region 7. One subject label, two distinct question types.
-- Models show ~9% accuracy gaps between best and worst regions. The leaderboard never shows this.
+- Per-question model evaluation (GPT-4o-mini, Claude 3 Haiku, Gemini 2.5 Flash, Grok 4) shows significant accuracy gaps between best and worst regions. The leaderboard never shows this.
 - Random sampling needs 3x more questions than topology-aware sampling to cover all 12 regions.
 
 ## Helper Scripts
@@ -131,6 +135,7 @@ The `helpers/` directory contains the calibration scripts used to find these par
 
 | Script | Purpose |
 |--------|---------|
+| `run_model_evals.py` | Offline script to evaluate 4 models (GPT-4o-mini, Claude 3 Haiku, Gemini 2.5 Flash, Grok Fast via xAI) on the 5k subsample via API. Produces `data/model_eval_results.csv`. Requires `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`. |
 | `diagnose.py` | Full diagnostic suite: weight distributions, stability curves, ball map diversity, pairwise distances. Run with `--config` to test any YAML. |
 | `quick_experiment.py` | First-pass experiments at 1,500 points. Showed epsilon range was too small. |
 | `quick_experiment_v2.py` | Discovered the StandardScaler distance inflation. Tested BallMapper directly per PCA dim. |
@@ -158,7 +163,7 @@ demos/mmlu/
     mmlu_questions.csv         # Cached MMLU dataset
     mmlu_embeddings_all.npy   # Cached embeddings (384d)
     mmlu_umap_sub.npy         # Cached UMAP (subsample)
-    mmlu_umap_all.npy         # Cached UMAP (full 14k)
+    model_eval_results.csv    # Pre-computed per-question model accuracy
     eigengap.png              # Eigenvalue scree plot
     *.png                     # Generated figures
 ```
