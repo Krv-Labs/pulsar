@@ -19,12 +19,19 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.scripts]
+pulsar-mcp = "pulsar.mcp.server:main"
+
 [tool.maturin]
 features        = ["pyo3/extension-module"]
 module-name     = "pulsar._pulsar"
 python-packages = ["pulsar"]
 
 [dependency-groups]
+mcp = [
+    "mcp>=0.1",
+    "fastmcp>=0.1",
+]
 dev = [
     "maturin>=1.12.6",
     "pytest>=9.0.2",
