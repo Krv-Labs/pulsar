@@ -29,8 +29,7 @@ python-packages = ["pulsar"]
 
 [dependency-groups]
 mcp = [
-    "mcp>=0.1",
-    "fastmcp>=0.1",
+    "fastmcp>=2.0",
 ]
 dev = [
     "maturin>=1.12.6",
