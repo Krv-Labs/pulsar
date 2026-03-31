@@ -15,7 +15,7 @@ sweep:
     dimensions:
       values: [5, 10, 20]
     seed:
-      values: [42, 7, 13, 99, 123, 456, 789, 1000]
+      values: [7, 13, 42, 99, 123, 456, 789, 1000]
 
   ball_mapper:
     epsilon:
