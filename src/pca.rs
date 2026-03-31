@@ -25,7 +25,8 @@ fn qr_q(a: &Array2<f64>) -> Array2<f64> {
     let a_na = ndarray_to_nalgebra(a);
     let qr = a_na.qr();
     let q = qr.q();
-    let thin_q = q.columns(0, a.ncols());
+    let k = a.nrows().min(a.ncols());
+    let thin_q = q.columns(0, k);
     let (nrows, ncols) = (thin_q.nrows(), thin_q.ncols());
     Array2::from_shape_fn((nrows, ncols), |(i, j)| thin_q[(i, j)])
 }
@@ -114,10 +115,12 @@ impl PCAInner {
         let singular_values = svd.singular_values;
 
         let v_t_nd = nalgebra_to_ndarray(&v_t);
-        let mut components = v_t_nd.slice(s![..n_components, ..]).to_owned();
+        let n_sv = singular_values.len();
+        let k = n_components.min(n_sv);
+        let mut components = v_t_nd.slice(s![..k, ..]).to_owned();
 
         // Sign convention: largest-abs-value element must be positive
-        for i in 0..n_components {
+        for i in 0..k {
             let row = components.row(i);
             let max_abs_idx = row
                 .iter()
@@ -130,7 +133,7 @@ impl PCAInner {
             }
         }
 
-        let explained_variance: Vec<f64> = (0..n_components)
+        let explained_variance: Vec<f64> = (0..k)
             .map(|i| {
                 let sv = singular_values[i];
                 (sv * sv) / ((n_samples as f64) - 1.0)
