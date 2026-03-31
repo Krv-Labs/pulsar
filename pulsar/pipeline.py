@@ -143,6 +143,91 @@ class ThemaRS:
 
         return self
 
+    def fit_multi(self, datasets: list[pd.DataFrame]) -> "ThemaRS":
+        """
+        Run the pipeline over multiple data versions (e.g. different embedding
+        models) and fuse them via pseudo-Laplacian accumulation.
+
+        Each DataFrame must have the same number of rows (same points, different
+        representations). The sweep is run independently on each version and all
+        resulting ball maps are accumulated into a single CosmicGraph — so a high
+        edge weight means two points are topological neighbours across *all*
+        representations, not just one.
+
+        Imputation and column-dropping are applied per-dataset if configured.
+        All datasets must yield the same n after preprocessing.
+
+        Returns self for method chaining.
+        """
+        if not datasets:
+            raise ValueError("datasets must be non-empty")
+
+        cfg = self.config
+        all_ball_maps: list[BallMapper] = []
+        n: int | None = None
+
+        for i, data in enumerate(datasets):
+            df = data.copy()
+
+            drop = [c for c in cfg.drop_columns if c in df.columns]
+            df = df.drop(columns=drop)
+
+            for col in cfg.impute:
+                if col in df.columns:
+                    df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
+
+            for col, spec in cfg.impute.items():
+                if col not in df.columns:
+                    continue
+                arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
+                df[col] = impute_column(arr, spec.method, spec.seed)
+
+            df = df.dropna(axis=0)
+
+            X = df.to_numpy(dtype=np.float64)
+            if n is None:
+                n = X.shape[0]
+            elif X.shape[0] != n:
+                raise ValueError(
+                    f"Dataset {i} has {X.shape[0]} rows after preprocessing; "
+                    f"expected {n} (same as dataset 0)"
+                )
+
+            scaler = StandardScaler()
+            X_scaled = np.array(scaler.fit_transform(X))
+
+            embeddings = [
+                np.ascontiguousarray(emb)
+                for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
+            ]
+
+            all_ball_maps.extend(ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons))
+
+        self._ball_maps = all_ball_maps
+
+        galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
+
+        threshold = cfg.cosmic_graph.threshold
+        if threshold == "auto":
+            cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+            weighted_adj = np.array(cg_temp.weighted_adj)
+            self._stability_result = find_stable_thresholds(weighted_adj)
+            self._resolved_threshold = float(self._stability_result.optimal_threshold)
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_threshold
+            )
+        else:
+            self._resolved_threshold = float(threshold)
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_threshold
+            )
+            weighted_adj = np.array(self._cosmic_rust.weighted_adj)
+
+        self._weighted_adjacency = weighted_adj
+        self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
+
+        return self
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
