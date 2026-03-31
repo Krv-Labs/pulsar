@@ -55,6 +55,12 @@ MODEL_REGISTRY = {
         "env_var": "OPENAI_API_KEY",
         "rate_limit": 20,
     },
+    "gpt-4.1-mini": {
+        "provider": "openai",
+        "api_model": "gpt-4.1-mini",
+        "env_var": "OPENAI_API_KEY",
+        "rate_limit": 20,
+    },
     "claude-3-haiku": {
         "provider": "anthropic",
         "api_model": "claude-3-haiku-20240307",
@@ -72,6 +78,12 @@ MODEL_REGISTRY = {
         "api_model": "gemini-2.5-flash",
         "env_var": "GEMINI_API_KEY",
         "rate_limit": 15,
+    },
+    "gemini-3.1-flash-lite": {
+        "provider": "gemini",
+        "api_model": "gemini-3.1-flash-lite-preview",
+        "env_var": "GEMINI_API_KEY",
+        "rate_limit": 30,
     },
     "grok-fast": {
         "provider": "xai",
