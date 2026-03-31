@@ -1,14 +1,15 @@
 """
 Topological Interpreter Engine.
 
-Translates the raw topological graph and clustered data into a high-signal 
+Translates the raw topological graph and clustered data into a high-signal
 statistical dossier for LLM synthesis.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,14 @@ from sklearn.cluster import SpectralClustering
 from sklearn.metrics import silhouette_score
 
 from pulsar.pipeline import ThemaRS
+
+logger = logging.getLogger(__name__)
+
+# Clustering strategy constants
+_MAX_COMPONENTS = 50            # Use component strategy if fewer than this
+_MAX_SINGLETON_RATIO = 0.5      # Reject if >50% of nodes are singletons
+_SPECTRAL_K_MIN = 2
+_SPECTRAL_K_MAX = 15
 
 
 @dataclass
@@ -39,12 +48,17 @@ class TopologicalDossier:
     global_stats: Dict[str, Any]
 
 
-def resolve_clusters(model: ThemaRS, k: Optional[int] = None) -> pd.Series:
+def resolve_clusters(model: ThemaRS) -> pd.Series:
     """
     Finds the most informative clusters in the cosmic graph.
-    
-    1. If threshold was 'auto' and graph has components, use components.
-    2. Otherwise, fall back to Spectral Clustering with Silhouette analysis.
+
+    Strategy 1: Connected Components — if we have a reasonable number (1 < n < 50)
+    and less than 50% singletons, use them.
+
+    Strategy 2: Spectral Clustering with Silhouette search — sweeps k from 2 to 15
+    and selects the k with highest silhouette score.
+
+    Falls back to all-in-one cluster if neither strategy succeeds.
     """
     graph = model.cosmic_graph
     adj = model.weighted_adjacency
@@ -53,35 +67,38 @@ def resolve_clusters(model: ThemaRS, k: Optional[int] = None) -> pd.Series:
     # Strategy 1: Connected Components (if graph is not too sparse)
     components = list(nx.connected_components(graph))
     n_comp = len(components)
-    
+
     # If we have a reasonable number of components that aren't all singletons
-    if 1 < n_comp < 50:
+    if 1 < n_comp < _MAX_COMPONENTS:
         # Check density or singleton ratio
         singleton_count = sum(1 for c in components if len(c) == 1)
-        if (singleton_count / n) < 0.5:
+        if (singleton_count / n) < _MAX_SINGLETON_RATIO:
             # Map nodes to component IDs
             labels = np.zeros(n, dtype=int)
             for i, comp in enumerate(components):
                 for node in comp:
                     labels[node] = i
+            logger.debug(
+                "resolve_clusters: using connected components (n_comp=%d)", n_comp
+            )
             return pd.Series(labels, name="cluster")
 
-    # Strategy 2: Spectral Clustering Fallback (The MMLU Route)
-    # We sweep k from 2 to 15 and pick the best silhouette score
-    best_k = 2
+    # Strategy 2: Spectral Clustering Fallback
+    # Sweep k from min to max and pick the best silhouette score
+    best_k = _SPECTRAL_K_MIN
     best_score = -1.0
     best_labels = None
 
-    k_range = range(2, min(16, n))
+    k_range = range(_SPECTRAL_K_MIN, min(_SPECTRAL_K_MAX + 1, n))
     for k_test in k_range:
         sc = SpectralClustering(
-            n_clusters=k_test, 
-            affinity='precomputed', 
-            assign_labels='discretize', 
+            n_clusters=k_test,
+            affinity='precomputed',
+            assign_labels='discretize',
             random_state=42
         )
         labels = sc.fit_predict(adj)
-        
+
         # Silhouette requires at least 2 clusters and < n points
         if len(np.unique(labels)) > 1:
             score = silhouette_score(adj, labels, metric='precomputed')
@@ -91,20 +108,42 @@ def resolve_clusters(model: ThemaRS, k: Optional[int] = None) -> pd.Series:
                 best_labels = labels
 
     if best_labels is not None:
+        logger.debug(
+            "resolve_clusters: spectral fallback, best_k=%d score=%.3f",
+            best_k,
+            best_score,
+        )
         return pd.Series(best_labels, name="cluster")
-    
+
     # Ultimate fallback: Everyone is cluster 0
+    logger.warning("resolve_clusters: falling back to single cluster")
     return pd.Series(np.zeros(n, dtype=int), name="cluster")
 
 
-def build_dossier(model: ThemaRS, data: pd.DataFrame, clusters: pd.Series) -> TopologicalDossier:
+def build_dossier(
+    model: ThemaRS, data: pd.DataFrame, clusters: pd.Series
+) -> TopologicalDossier:
     """
-    Computes the Enhanced Contextual Distillation (Ranked shifts, Homogeneity, etc.).
+    Computes per-cluster statistical profiles.
+
+    Calculates shifts, homogeneity, and categorical concentration for each cluster.
+
+    Args:
+        model: Fitted ThemaRS instance
+        data: DataFrame with original data (must match clusters length)
+        clusters: pd.Series with cluster assignments for each row
+
+    Returns:
+        TopologicalDossier with cluster profiles and global statistics
     """
-    # Align data with clusters (ThemaRS may have dropped rows during preprocessing)
-    # For now, we assume the user passed the same DataFrame that ThemaRS.fit() used.
-    # We can refine this by checking row counts.
-    
+    # Validate alignment
+    if len(clusters) != len(data):
+        msg = (
+            f"clusters length ({len(clusters)}) "
+            f"does not match data length ({len(data)})"
+        )
+        raise ValueError(msg)
+
     n_total = len(data)
     n_clusters = len(clusters.unique())
     
@@ -197,8 +236,9 @@ def build_dossier(model: ThemaRS, data: pd.DataFrame, clusters: pd.Series) -> To
                 pagerank = nx.pagerank(sub_graph, weight='weight')
                 central_ids = sorted(pagerank, key=pagerank.get, reverse=True)[:3]
                 profile.central_rows = data.iloc[central_ids].to_dict('records')
-        except:
-            # Fallback to simple head
+        except (nx.NetworkXError, nx.NetworkXUnfeasible, ValueError, KeyError) as e:
+            # Fallback to simple head if PageRank fails
+            logger.debug("PageRank failed for cluster %d: %s, using head", cid, e)
             profile.central_rows = c_data.head(3).to_dict('records')
             
         cluster_profiles.append(profile)
@@ -217,7 +257,7 @@ def build_dossier(model: ThemaRS, data: pd.DataFrame, clusters: pd.Series) -> To
 def dossier_to_markdown(dossier: TopologicalDossier) -> str:
     """Renders the dossier as a high-signal Markdown report for LLM consumption."""
     md = [
-        f"# Topological Analysis Dossier",
+        "# Topological Analysis Dossier",
         f"**Dataset Size**: {dossier.n_total} points",
         f"**Clusters Found**: {dossier.n_clusters}",
         "",

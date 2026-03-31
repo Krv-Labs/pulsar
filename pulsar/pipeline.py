@@ -263,6 +263,13 @@ class ThemaRS:
             raise RuntimeError("Call fit() first")
         return self._resolved_threshold
 
+    @property
+    def data(self) -> pd.DataFrame:
+        """The original DataFrame passed to fit() (before preprocessing)."""
+        if self._data is None:
+            raise RuntimeError("Call fit() first")
+        return self._data
+
     # ------------------------------------------------------------------
     # Analysis
     # ------------------------------------------------------------------
