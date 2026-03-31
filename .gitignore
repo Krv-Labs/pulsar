@@ -13,7 +13,9 @@ Cargo.lock
 
 # Data
 *.csv
-demos/mmlu/data/
+!demos/mmlu/data/
+demos/mmlu/data/*
+!demos/mmlu/data/model_eval_results.csv
 
 
 # Byte-compiled / optimized / DLL files
