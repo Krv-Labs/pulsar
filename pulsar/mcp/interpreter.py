@@ -78,13 +78,7 @@ def resolve_clusters(
         return _cluster_by_components(graph, n)
 
     if method == "spectral":
-        result = _cluster_by_spectral(adj, n, max_k)
-        if result is not None:
-            return result
-        logger.warning(
-            "resolve_clusters: spectral failed, falling back to single cluster"
-        )
-        return pd.Series(np.zeros(n, dtype=int), name="cluster")
+        return _cluster_by_spectral(adj, n, max_k)
 
     # method == "auto": try components first, then spectral
     components = list(nx.connected_components(graph))
@@ -93,22 +87,10 @@ def resolve_clusters(
     if 1 < n_comp < _MAX_COMPONENTS:
         singleton_count = sum(1 for c in components if len(c) == 1)
         if (singleton_count / n) < _MAX_SINGLETON_RATIO:
-            labels = np.zeros(n, dtype=int)
-            for i, comp in enumerate(components):
-                for node in comp:
-                    labels[node] = i
-            logger.debug(
-                "resolve_clusters: using connected components (n_comp=%d)", n_comp
-            )
-            return pd.Series(labels, name="cluster")
+            return _cluster_by_components(graph, n)
 
     # Spectral fallback
-    result = _cluster_by_spectral(adj, n, max_k)
-    if result is not None:
-        return result
-
-    logger.warning("resolve_clusters: falling back to single cluster")
-    return pd.Series(np.zeros(n, dtype=int), name="cluster")
+    return _cluster_by_spectral(adj, n, max_k)
 
 
 def _cluster_by_components(graph, n: int) -> pd.Series:
@@ -122,23 +104,32 @@ def _cluster_by_components(graph, n: int) -> pd.Series:
     return pd.Series(labels, name="cluster")
 
 
-def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series | None:
-    """Spectral clustering with silhouette-optimized k. Returns None if it fails."""
+def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
+    """Spectral clustering with silhouette-optimized k. Raises ValueError on failure."""
     affinity = np.asarray(adj)
+    
+    # Silhouette requires a distance matrix if metric="precomputed".
+    # Convert affinity (similarity) to distance: dist = max(aff) - aff.
+    aff_max = affinity.max()
+    distance = aff_max - affinity
+    np.fill_diagonal(distance, 0.0)
+
     connectivity = nx.from_numpy_array((affinity > 0).astype(np.int8))
+    
     if n > 1 and not nx.is_connected(connectivity):
-        logger.info(
-            "resolve_clusters: spectral skipped, affinity graph disconnected "
-            "(components=%d)",
-            nx.number_connected_components(connectivity),
+        n_comp = nx.number_connected_components(connectivity)
+        raise ValueError(
+            f"Spectral clustering failed: Affinity graph is disconnected into {n_comp} components. "
+            "Increase epsilon to connect the graph globally, or use method='components'."
         )
-        return None
 
     best_score = -1.0
     best_labels = None
     best_k = _SPECTRAL_K_MIN
 
     k_range = range(_SPECTRAL_K_MIN, min(max_k + 1, n))
+    scores_by_k = {}
+    
     for k_test in k_range:
         sc = SpectralClustering(
             n_clusters=k_test,
@@ -146,23 +137,34 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series | None:
             assign_labels="discretize",
             random_state=42,
         )
-        labels = sc.fit_predict(affinity)
+        try:
+            labels = sc.fit_predict(affinity)
+        except Exception as e:
+            continue
 
         if len(np.unique(labels)) > 1:
-            score = silhouette_score(affinity, labels, metric="precomputed")
+            score = float(silhouette_score(distance, labels, metric="precomputed"))
+            scores_by_k[k_test] = score
             if score > best_score:
                 best_score = score
                 best_k = k_test
                 best_labels = labels
 
-    if best_labels is not None:
+    if best_labels is not None and best_score > 0.05:  # threshold for stability
         logger.debug(
             "resolve_clusters: spectral, best_k=%d score=%.3f",
             best_k,
             best_score,
         )
         return pd.Series(best_labels, name="cluster")
-    return None
+    
+    # If we get here, no stable cut was found
+    max_score = max(scores_by_k.values()) if scores_by_k else 0.0
+    raise ValueError(
+        f"Spectral clustering failed: No stable silhouette score found for k={_SPECTRAL_K_MIN}..{max_k}. "
+        f"Max score was {max_score:.3f}. The graph is likely too uniformly dense ('hairball'). "
+        "Try restricting PCA dimensions or decreasing epsilon to create a topological bottleneck."
+    )
 
 
 def build_dossier(
@@ -210,10 +212,15 @@ def build_dossier(
             col
         ].mean()
 
+    # Pre-compute cluster ranks once per column
+    all_cluster_ranks = {}
+    for col in numeric_cols:
+        all_cluster_ranks[col] = all_cluster_means[col].rank(ascending=False)
+
     for cid in sorted(clusters.unique()):
         # Use boolean array directly to avoid index label mismatch
         c_mask = clusters.values == cid
-        c_data = data.iloc[c_mask]
+        c_data = data[c_mask]
         c_size = len(c_data)
 
         profile = ClusterProfile(
@@ -235,7 +242,7 @@ def build_dossier(
             z_score = (c_mean - global_mean_val) / np.sqrt(global_vars[col])
 
             # Relative Rank among clusters
-            rank = all_cluster_means[col].rank(ascending=False).get(cid, np.nan)
+            rank = all_cluster_ranks[col].get(cid, np.nan)
             if pd.isna(rank):
                 continue
 
@@ -353,8 +360,8 @@ def compare_clusters(
     mask_a = clusters.values == id_a
     mask_b = clusters.values == id_b
 
-    data_a = data.iloc[mask_a]
-    data_b = data.iloc[mask_b]
+    data_a = data[mask_a]
+    data_b = data[mask_b]
 
     if len(data_a) < 2 or len(data_b) < 2:
         logger.warning(
