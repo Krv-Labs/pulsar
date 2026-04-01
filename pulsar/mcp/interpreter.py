@@ -266,7 +266,7 @@ def build_dossier(
         # Central Nodes (Sampling)
         # We use PageRank on the cluster's sub-graph if possible
         try:
-            sub_nodes = [i for i, val in enumerate(clusters) if val == cid]
+            sub_nodes = list(np.where(clusters.values == cid)[0])
             sub_graph = model.cosmic_graph.subgraph(sub_nodes)
             if len(sub_graph) > 0:
                 pagerank = nx.pagerank(sub_graph, weight='weight')

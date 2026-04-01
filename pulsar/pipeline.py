@@ -77,6 +77,7 @@ class ThemaRS:
         self._weighted_adjacency: np.ndarray | None = None
         self._cosmic_rust: CosmicGraph | None = None
         self._data: pd.DataFrame | None = None
+        self._preprocessed_data: pd.DataFrame | None = None
         self._stability_result: StabilityResult | None = None
         self._resolved_threshold: float | None = None
 
@@ -165,17 +166,14 @@ class ThemaRS:
 
         # 3c. Encode categorical columns (pure Python)
         for col, spec in cfg.encode.items():
-            print(f"DEBUG: Encoding column: {col} with method: {spec.method}")
-            print(f"DEBUG: df.columns: {df.columns.tolist()}")
-            if col in df.columns:
-                if spec.method == "one_hot":
-                    df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
-                    print(f"DEBUG: Encoded {col}. New columns: {df.columns.tolist()}")
-            else:
-                print(f"DEBUG: Column {col} NOT found in df.columns")
+            if col not in df.columns:
+                continue
+            if spec.method == "one_hot":
+                df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
 
         # Drop any remaining NaN rows
         df = df.dropna(axis=0)
+        self._preprocessed_data = df.reset_index(drop=True)
         _notify()  # impute
 
         # 4. Convert to float64 matrix and scale
@@ -418,6 +416,13 @@ class ThemaRS:
         if self._data is None:
             raise RuntimeError("Call fit() first")
         return self._data
+
+    @property
+    def preprocessed_data(self) -> pd.DataFrame:
+        """DataFrame after drop/impute/encode/dropna — row-aligned with graph nodes."""
+        if self._preprocessed_data is None:
+            raise RuntimeError("Call fit() first")
+        return self._preprocessed_data
 
     # ------------------------------------------------------------------
     # Analysis

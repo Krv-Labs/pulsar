@@ -200,7 +200,7 @@ async def run_topological_sweep(
         )
 
         session.model = model
-        session.data = model.data
+        session.data = model.preprocessed_data  # row-aligned with graph nodes
 
         # Update session cache with fresh embeddings if not reused
         if precomputed is None:
@@ -339,7 +339,7 @@ async def compare_clusters_tool(
         markdown = comparison_to_markdown(cluster_a, cluster_b, results)
         return markdown
 
-    except Exception as e:
+    except (ValueError, KeyError, IndexError) as e:
         error_msg = f"Error comparing clusters: {e}"
         logger.error(error_msg)
         return error_msg
@@ -476,10 +476,6 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
         ))
 
         return json.dumps(dataclasses.asdict(result), indent=2)
-    except RuntimeError as e:
-        error_msg = f"Error: {e}"
-        logger.error(error_msg)
-        return error_msg
     except (ValueError, RuntimeError) as e:
         error_msg = f"Error diagnosing graph: {e}"
         logger.error(error_msg)

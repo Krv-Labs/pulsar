@@ -26,6 +26,11 @@ from pulsar._pulsar import pca_grid
 
 logger = logging.getLogger(__name__)
 
+# Cardinality threshold for auto-encoding vs dropping non-numeric columns.
+# Columns with <= this many unique values are suggested for one-hot encoding;
+# columns above are suggested for dropping. Agent can override either way.
+LOW_CARDINALITY_THRESHOLD = 10
+
 
 @dataclass
 class ColumnProfile:
@@ -201,9 +206,9 @@ def characterize_dataset(
     if non_numeric_summaries:
         warnings.append(
             f"Non-numeric columns found: {', '.join(non_numeric_summaries)}. "
-            f"The pipeline requires float64 input. Low-cardinality columns (<=10 unique) "
-            f"have been added to the suggested encode block; others are in drop_columns. "
-            f"Review and adjust as needed."
+            f"The pipeline requires float64 input. Low-cardinality columns "
+            f"(<={LOW_CARDINALITY_THRESHOLD} unique) have been added to the suggested "
+            f"encode block; others are in drop_columns. Review and adjust as needed."
         )
     numeric_with_nan = [
         f"{cp.name} ({cp.missing_pct:.1f}%)"
@@ -349,18 +354,13 @@ def _build_yaml_template(
     column_profiles: list[ColumnProfile],
 ) -> str:
     """Generate YAML config template with drop_columns, encode, and impute blocks."""
-    # Columns to encode: non-numeric with low cardinality (<= 10 unique values)
-    # This preserves valuable categorical context for the topological analysis.
     to_encode = [
-        cp.name for cp in column_profiles if not cp.is_numeric and cp.n_unique <= 10
+        cp.name for cp in column_profiles
+        if not cp.is_numeric and cp.n_unique <= LOW_CARDINALITY_THRESHOLD
     ]
-
-    # Columns to drop: everything else non-numeric
-    # (except ID-like columns which characterization doesn't know yet)
     to_drop = [
-        cp.name
-        for cp in column_profiles
-        if not cp.is_numeric and cp.n_unique > 10
+        cp.name for cp in column_profiles
+        if not cp.is_numeric and cp.n_unique > LOW_CARDINALITY_THRESHOLD
     ]
 
     drop_line = str(to_drop) if to_drop else "[]"
