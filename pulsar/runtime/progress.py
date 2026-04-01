@@ -39,7 +39,7 @@ def fit_with_progress(
     Example::
 
         from pulsar.pipeline import ThemaRS
-        from pulsar.progress import fit_with_progress
+        from pulsar.runtime.progress import fit_with_progress
 
         model = fit_with_progress(ThemaRS("params.yaml"))
         graph = model.cosmic_graph

@@ -11,13 +11,20 @@ from pulsar._pulsar import (
     CosmicGraph,
 )
 from pulsar.pipeline import ThemaRS
-from pulsar.temporal import TemporalCosmicGraph
-from pulsar.hooks import (
+from pulsar.config import PulsarConfig, load_config, config_to_yaml
+from pulsar.representations import TemporalCosmicGraph
+from pulsar.analysis import (
     label_points,
     membership_matrix,
     cosmic_clusters,
     graph_to_dataframe,
     unclustered_points,
+    cosmic_to_networkx,
+    characterize_dataset,
+    CharacterizationResult,
+    ColumnProfile,
+    DatasetProfile,
+    GeometryRecommendations,
 )
 
 __all__ = [
@@ -37,6 +44,10 @@ __all__ = [
     # Cosmic Graph
     "CosmicGraph",
     "TemporalCosmicGraph",
+    # Config
+    "PulsarConfig",
+    "load_config",
+    "config_to_yaml",
     # Pipeline
     "ThemaRS",
     # Hooks / utilities
@@ -45,4 +56,11 @@ __all__ = [
     "cosmic_clusters",
     "graph_to_dataframe",
     "unclustered_points",
+    "cosmic_to_networkx",
+    # Analysis
+    "characterize_dataset",
+    "CharacterizationResult",
+    "ColumnProfile",
+    "DatasetProfile",
+    "GeometryRecommendations",
 ]

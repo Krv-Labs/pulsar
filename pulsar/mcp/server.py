@@ -16,7 +16,7 @@ import yaml
 from fastmcp import FastMCP, Context
 
 from pulsar.config import config_to_yaml
-from pulsar.fingerprint import pca_fingerprint
+from pulsar.runtime.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
 from pulsar.mcp.interpreter import (
     resolve_clusters,
@@ -408,7 +408,7 @@ async def characterize_dataset(csv_path: str, ctx: Context) -> str:
         JSON with profile, recommendations, and suggested_params_yaml.
     """
     try:
-        from pulsar.characterization import characterize_dataset as _char
+        from pulsar.analysis.characterization import characterize_dataset as _char
 
         result = await asyncio.to_thread(_char, csv_path)
         return json.dumps(dataclasses.asdict(result), indent=2)
