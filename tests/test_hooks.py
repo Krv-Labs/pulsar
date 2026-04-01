@@ -6,7 +6,6 @@ vectorized weight assignment (np.where) vs the old loop approach.
 """
 
 import numpy as np
-import pytest
 
 from pulsar.hooks import cosmic_to_networkx
 from pulsar._pulsar import CosmicGraph

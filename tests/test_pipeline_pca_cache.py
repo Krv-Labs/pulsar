@@ -5,8 +5,6 @@ Tests that _precomputed_embeddings parameter works correctly,
 and that the MCP session properly invalidates/reuses cache.
 """
 
-import hashlib
-import json
 from unittest import mock
 
 import numpy as np
@@ -14,8 +12,8 @@ import pandas as pd
 import pytest
 
 from pulsar.config import load_config
+from pulsar.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
-from pulsar.mcp.server import _pca_fingerprint
 
 
 @pytest.fixture
@@ -139,8 +137,8 @@ def test_pca_fingerprint_changes_on_dimension_change():
         })()
     })()
 
-    fp1 = _pca_fingerprint(cfg1, 100)
-    fp2 = _pca_fingerprint(cfg2, 100)
+    fp1 = pca_fingerprint(cfg1, 100)
+    fp2 = pca_fingerprint(cfg2, 100)
 
     assert fp1 != fp2, "Fingerprint should change when dimensions change"
 
@@ -163,8 +161,8 @@ def test_pca_fingerprint_changes_on_seed_change():
         })()
     })()
 
-    fp1 = _pca_fingerprint(cfg1, 100)
-    fp2 = _pca_fingerprint(cfg2, 100)
+    fp1 = pca_fingerprint(cfg1, 100)
+    fp2 = pca_fingerprint(cfg2, 100)
 
     assert fp1 != fp2, "Fingerprint should change when seeds change"
 
@@ -179,8 +177,8 @@ def test_pca_fingerprint_changes_on_shape_change():
         })()
     })()
 
-    fp1 = _pca_fingerprint(cfg, 100)
-    fp2 = _pca_fingerprint(cfg, 150)  # Different row count
+    fp1 = pca_fingerprint(cfg, 100)
+    fp2 = pca_fingerprint(cfg, 150)  # Different row count
 
     assert fp1 != fp2, "Fingerprint should change when row count changes"
 
@@ -203,8 +201,8 @@ def test_pca_fingerprint_changes_on_path_change():
         })()
     })()
 
-    fp1 = _pca_fingerprint(cfg1, 100)
-    fp2 = _pca_fingerprint(cfg2, 100)
+    fp1 = pca_fingerprint(cfg1, 100)
+    fp2 = pca_fingerprint(cfg2, 100)
 
     assert fp1 != fp2, "Fingerprint should change when data path changes"
 
@@ -226,8 +224,8 @@ def test_pca_fingerprint_stable_on_epsilon_change():
     cfg2 = type("MockConfig2", (), cfg_base)()
     cfg2.epsilon = 1.5
 
-    fp1 = _pca_fingerprint(cfg1, 100)
-    fp2 = _pca_fingerprint(cfg2, 100)
+    fp1 = pca_fingerprint(cfg1, 100)
+    fp2 = pca_fingerprint(cfg2, 100)
 
     assert fp1 == fp2, (
         "Fingerprint should be STABLE when only epsilon changes. "
@@ -245,7 +243,7 @@ def test_pca_fingerprint_format_is_hash():
         })()
     })()
 
-    fp = _pca_fingerprint(cfg, 100)
+    fp = pca_fingerprint(cfg, 100)
 
     # Check it's a hex string of length 64 (SHA256)
     assert isinstance(fp, str), "Fingerprint should be a string"

@@ -6,7 +6,6 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 
 import asyncio
 import dataclasses
-import hashlib
 import json
 import logging
 import os
@@ -17,6 +16,7 @@ import yaml
 from fastmcp import FastMCP, Context
 
 from pulsar.config import config_to_yaml
+from pulsar.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
 from pulsar.mcp.interpreter import (
     resolve_clusters,
@@ -93,25 +93,6 @@ def _validate_config_path(path: str) -> None:
         raise ValueError(f"Config must be a YAML file (*.yaml or *.yml), got: {path}")
 
 
-def _pca_fingerprint(cfg, n_rows: int) -> str:
-    """
-    Compute a fingerprint for PCA configuration and data shape.
-
-    Used to detect when cached PCA embeddings can be reused (same data + PCA params).
-    Includes data_path, n_rows, and mtime to invalidate cache on data changes.
-    """
-    # Use 0 if data path doesn't exist (unlikely at this stage)
-    mtime = os.path.getmtime(cfg.data) if os.path.exists(cfg.data) else 0
-    payload = json.dumps({
-        "data_path": cfg.data,
-        "mtime": mtime,
-        "dimensions": list(cfg.pca.dimensions),
-        "seeds": list(cfg.pca.seeds),
-        "n_rows": n_rows,
-    })
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
 def _auto_save_config(cfg) -> str:
     """Save resolved config to disk for reproducibility. Returns saved path."""
     name = cfg.run_name or "pulsar"
@@ -175,7 +156,7 @@ async def run_topological_sweep(
         # Check if cached PCA embeddings can be reused (same data + PCA params)
         precomputed = None
         if session.embeddings is not None and session.data is not None:
-            fingerprint = _pca_fingerprint(cfg, len(session.data))
+            fingerprint = pca_fingerprint(cfg, len(session.data))
             if fingerprint == session.pca_fingerprint:
                 precomputed = session.embeddings
                 logger.info("Reusing cached PCA embeddings (fingerprint match)")
@@ -205,7 +186,7 @@ async def run_topological_sweep(
         # Update session cache with fresh embeddings if not reused
         if precomputed is None:
             session.embeddings = model._embeddings
-            session.pca_fingerprint = _pca_fingerprint(cfg, len(model.data))
+            session.pca_fingerprint = pca_fingerprint(cfg, len(model.data))
 
         # Auto-save resolved config for reproducibility
         saved_path = _auto_save_config(cfg)

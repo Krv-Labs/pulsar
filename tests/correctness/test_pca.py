@@ -188,8 +188,6 @@ def test_reconstruction_error_bounded_by_discarded_variance():
     sklearn_ref = SklearnPCA(n_components=n_components)
     sklearn_ref.fit(X)
     X_proj_sk = sklearn_ref.transform(X)
-    X_reconstructed = sklearn_ref.inverse_transform(X_proj_sk)
-    exact_mse = np.mean((X - X_reconstructed) ** 2)
 
     # Pulsar's projection should achieve similar reconstruction quality.
     # We can't call inverse_transform on Pulsar, but the projected variance
@@ -208,6 +206,10 @@ def test_reconstruction_error_bounded_by_discarded_variance():
     assert captured_variance < total_variance * 1.05, (
         f"Captured variance {captured_variance:.4f} implausibly exceeds "
         f"total {total_variance:.4f}"
+    )
+    assert discarded_variance > -0.05 * total_variance, (
+        f"Discarded variance {discarded_variance:.4f} is implausibly negative "
+        f"for total variance {total_variance:.4f}"
     )
 
 
