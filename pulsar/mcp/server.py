@@ -114,10 +114,13 @@ async def run_topological_sweep(config_path: str, ctx: Context) -> str:
         loop = asyncio.get_running_loop()
 
         def progress_callback(stage: str, fraction: float) -> None:
-            asyncio.run_coroutine_threadsafe(
-                ctx.report_progress(progress=fraction, total=1.0, message=stage),
-                loop,
-            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    ctx.report_progress(progress=fraction, total=1.0, message=stage),
+                    loop,
+                )
+            except RuntimeError:
+                pass  # Event loop closed; progress reporting is best-effort
 
         # Run blocking fit() in a threadpool — avoids starving the event loop.
         await asyncio.to_thread(

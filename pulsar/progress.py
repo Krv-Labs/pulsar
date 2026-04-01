@@ -1,5 +1,5 @@
 """
-Rich progress bar helper for ThemaRS.fit().
+Rich progress bar helpers for ThemaRS.fit() and fit_multi().
 
 Requires the 'rich' package (already included in the 'demos' dependency group).
 Install with: pip install rich
@@ -71,3 +71,48 @@ def fit_with_progress(
             progress.update(task, completed=fraction, description=f"[bold cyan]{stage}")
 
         return model.fit(data=data, progress_callback=callback, **fit_kwargs)
+
+
+def fit_multi_with_progress(
+    model: "ThemaRS",
+    datasets: list[pd.DataFrame],
+) -> "ThemaRS":
+    """Run model.fit_multi() with a transient rich progress bar.
+
+    Args:
+        model: Unfitted ThemaRS instance.
+        datasets: List of DataFrames (same points, different representations).
+
+    Returns:
+        The fitted model (for method chaining).
+
+    Raises:
+        ImportError: If 'rich' is not installed.
+    """
+    try:
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+    except ImportError:
+        raise ImportError(
+            "fit_multi_with_progress() requires the 'rich' package. "
+            "Install with: pip install rich"
+        ) from None
+
+    with Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Starting...", total=1.0)
+
+        def callback(stage: str, fraction: float) -> None:
+            progress.update(task, completed=fraction, description=f"[bold cyan]{stage}")
+
+        return model.fit_multi(datasets, progress_callback=callback)

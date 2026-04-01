@@ -27,17 +27,32 @@ from pulsar.hooks import cosmic_to_networkx
 
 
 # Approximate wall-clock fraction per pipeline stage (estimates, not guarantees).
+# Order matters — stages are consumed sequentially by a cursor.
 # PCA weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
-_STAGE_WEIGHTS: dict[str, float] = {
-    "load":        0.03,
-    "impute":      0.08,
-    "scale":       0.01,
-    "pca":         0.25,
-    "ball_mapper": 0.42,
-    "laplacian":   0.15,
-    "cosmic":      0.04,
-    "stability":   0.02,
-}
+_STAGE_WEIGHTS: list[tuple[str, float]] = [
+    ("load",        0.03),
+    ("impute",      0.08),
+    ("scale",       0.01),
+    ("pca",         0.25),
+    ("ball_mapper", 0.42),
+    ("laplacian",   0.15),
+    ("cosmic",      0.06),  # includes stability analysis when threshold="auto"
+]
+
+
+def _build_cumulative_fractions(
+    stages: list[tuple[str, float]],
+) -> list[tuple[str, float]]:
+    """Return [(label, cumulative_fraction), ...] with final entry pinned to 1.0."""
+    total = sum(w for _, w in stages)
+    result: list[tuple[str, float]] = []
+    cumulative = 0.0
+    for label, weight in stages:
+        cumulative += weight / total
+        result.append((label, round(cumulative, 6)))
+    if result:
+        result[-1] = (result[-1][0], 1.0)
+    return result
 
 
 class ThemaRS:
@@ -100,35 +115,23 @@ class ThemaRS:
         """
         cfg = self.config
 
-        # Build cumulative progress fractions from stage weights.
+        # Build cumulative progress schedule from stage weights.
         # PCA weight is zeroed when embeddings are pre-computed; fractions renormalize.
         use_cached_pca = _precomputed_embeddings is not None
-        _weights = {
-            k: (0.0 if k == "pca" and use_cached_pca else v)
-            for k, v in _STAGE_WEIGHTS.items()
-        }
-        _total_w = sum(_weights.values())
-        _cum: dict[str, float] = {}
-        _c = 0.0
-        for _s, _w in _weights.items():
-            _c += _w / _total_w
-            _cum[_s] = round(_c, 4)
+        stages = [
+            (name, 0.0 if name == "pca" and use_cached_pca else weight)
+            for name, weight in _STAGE_WEIGHTS
+        ]
+        schedule = _build_cumulative_fractions(stages)
+        _cursor = 0
 
-        def _notify(stage: str, key: str | None = None) -> None:
-            """Fire progress_callback for a stage.
-
-            Args:
-                stage: Human-readable stage name passed to the callback.
-                key: Key into _cum for fraction lookup. Defaults to stage.
-            """
-            if progress_callback is None:
+        def _notify(label_override: str | None = None) -> None:
+            nonlocal _cursor
+            if progress_callback is None or _cursor >= len(schedule):
                 return
-            try:
-                progress_callback(stage, _cum[key if key is not None else stage])
-            except Exception as exc:
-                raise RuntimeError(
-                    f"progress_callback raised during '{stage}'"
-                ) from exc
+            label, frac = schedule[_cursor]
+            _cursor += 1
+            progress_callback(label_override or label, frac)
 
         # 1. Load data
         if data is None:
@@ -144,6 +147,7 @@ class ThemaRS:
         # 2. Drop unwanted columns
         drop = [c for c in cfg.drop_columns if c in data.columns]
         df = data.drop(columns=drop)
+        _notify()  # load
 
         # 3a. Add imputation indicator flags (pure Python, before imputing)
         for col in cfg.impute:
@@ -161,7 +165,7 @@ class ThemaRS:
 
         # Drop any remaining NaN rows
         df = df.dropna(axis=0)
-        _notify("load")
+        _notify()  # impute
 
         # 4. Convert to float64 matrix and scale
         X = df.to_numpy(dtype=np.float64)
@@ -169,8 +173,7 @@ class ThemaRS:
 
         scaler = StandardScaler()
         X_scaled = np.array(scaler.fit_transform(X))
-        _notify("impute")
-        _notify("scale")
+        _notify()  # scale
 
         # 5. PCA grid (randomized SVD, parallelised across seeds)
         if _precomputed_embeddings is not None:
@@ -185,20 +188,19 @@ class ThemaRS:
             ]
         # Cache embeddings for MCP session reuse
         self._embeddings = embeddings
-        _notify("pca (cached)" if use_cached_pca else "pca", key="pca")
+        _notify("pca (cached)" if use_cached_pca else None)  # pca
 
         # 6. BallMapper grid (Rust parallel)
         self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)
-        _notify("ball_mapper")
+        _notify()  # ball_mapper
 
         # 7. Accumulate pseudo-Laplacians (Rust parallel)
         galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
-        _notify("laplacian")
+        _notify()  # laplacian
 
-        # 8. CosmicGraph
+        # 8. CosmicGraph (+ optional stability analysis)
         threshold = cfg.cosmic_graph.threshold
         if threshold == "auto":
-            # Weighted adjacency is independent of threshold; compute once at 0.0
             cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
             weighted_adj = np.array(cg_temp.weighted_adj)
             self._stability_result = find_stable_thresholds(weighted_adj)
@@ -206,7 +208,6 @@ class ThemaRS:
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
                 galactic_L, self._resolved_threshold
             )
-            _notify("stability")
         else:
             self._resolved_threshold = float(threshold)
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
@@ -215,8 +216,7 @@ class ThemaRS:
             weighted_adj = np.array(self._cosmic_rust.weighted_adj)
         self._weighted_adjacency = weighted_adj
         self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
-        # Always end at 1.0 — use stability key regardless of whether auto-threshold ran
-        _notify("cosmic", key="stability")
+        _notify()  # cosmic (always last, always 1.0)
 
         return self
 
@@ -253,21 +253,29 @@ class ThemaRS:
         N = len(datasets)
         cfg = self.config
 
-        # Compute cumulative fractions for fit_multi.
-        # Per-dataset stages are spread across N iterations; final stages are shared.
-        _per_ds_w = sum(_STAGE_WEIGHTS[s] for s in ("impute", "scale", "pca", "ball_mapper"))
-        _final_w = sum(_STAGE_WEIGHTS[s] for s in ("laplacian", "cosmic", "stability"))
-        _total_w = _per_ds_w * N + _final_w
+        # Build stage schedule: per-dataset stages repeated N times, then shared stages.
+        _per_ds_weights = [
+            ("load", 0.03), ("impute", 0.08), ("scale", 0.01),
+            ("pca", 0.25), ("ball_mapper", 0.42),
+        ]
+        stages: list[tuple[str, float]] = []
+        for i in range(N):
+            prefix = f"Dataset {i + 1}/{N}: "
+            for name, weight in _per_ds_weights:
+                stages.append((f"{prefix}{name}", weight))
+        stages.append(("laplacian", 0.15))
+        stages.append(("cosmic", 0.06))
 
-        def _notify_multi(stage: str, frac: float) -> None:
-            if progress_callback is None:
+        schedule = _build_cumulative_fractions(stages)
+        _cursor = 0
+
+        def _notify(label_override: str | None = None) -> None:
+            nonlocal _cursor
+            if progress_callback is None or _cursor >= len(schedule):
                 return
-            try:
-                progress_callback(stage, round(frac, 4))
-            except Exception as exc:
-                raise RuntimeError(
-                    f"progress_callback raised during '{stage}'"
-                ) from exc
+            label, frac = schedule[_cursor]
+            _cursor += 1
+            progress_callback(label_override or label, frac)
 
         all_ball_maps: list[BallMapper] = []
         n: int | None = None
@@ -277,6 +285,7 @@ class ThemaRS:
 
             drop = [c for c in cfg.drop_columns if c in df.columns]
             df = df.drop(columns=drop)
+            _notify()  # Dataset i: load
 
             for col in cfg.impute:
                 if col in df.columns:
@@ -289,6 +298,7 @@ class ThemaRS:
                 df[col] = impute_column(arr, spec.method, spec.seed)
 
             df = df.dropna(axis=0)
+            _notify()  # Dataset i: impute
 
             X = df.to_numpy(dtype=np.float64)
             if n is None:
@@ -301,37 +311,21 @@ class ThemaRS:
 
             scaler = StandardScaler()
             X_scaled = np.array(scaler.fit_transform(X))
-
-            # Cumulative fraction at each sub-stage for dataset i
-            _ds_base = i * _per_ds_w / _total_w
-            _notify_multi(
-                f"Dataset {i + 1}/{N}: imputing",
-                _ds_base + _STAGE_WEIGHTS["impute"] / _total_w,
-            )
-            _notify_multi(
-                f"Dataset {i + 1}/{N}: scaling",
-                _ds_base + (_STAGE_WEIGHTS["impute"] + _STAGE_WEIGHTS["scale"]) / _total_w,
-            )
+            _notify()  # Dataset i: scale
 
             embeddings = [
                 np.ascontiguousarray(emb)
                 for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
             ]
-            _notify_multi(
-                f"Dataset {i + 1}/{N}: pca",
-                _ds_base + (_STAGE_WEIGHTS["impute"] + _STAGE_WEIGHTS["scale"] + _STAGE_WEIGHTS["pca"]) / _total_w,
-            )
+            _notify()  # Dataset i: pca
 
             all_ball_maps.extend(ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons))
-            _notify_multi(
-                f"Dataset {i + 1}/{N}: ball mapper",
-                (i + 1) * _per_ds_w / _total_w,
-            )
+            _notify()  # Dataset i: ball_mapper
 
         self._ball_maps = all_ball_maps
 
         galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
-        _notify_multi("laplacian", (N * _per_ds_w + _STAGE_WEIGHTS["laplacian"]) / _total_w)
+        _notify()  # laplacian
 
         threshold = cfg.cosmic_graph.threshold
         if threshold == "auto":
@@ -342,7 +336,6 @@ class ThemaRS:
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
                 galactic_L, self._resolved_threshold
             )
-            _notify_multi("stability", 1.0)
         else:
             self._resolved_threshold = float(threshold)
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
@@ -352,7 +345,7 @@ class ThemaRS:
 
         self._weighted_adjacency = weighted_adj
         self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
-        _notify_multi("cosmic", 1.0)
+        _notify()  # cosmic (always last, always 1.0)
 
         return self
 
