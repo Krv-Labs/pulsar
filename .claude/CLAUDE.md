@@ -23,9 +23,10 @@ uv run ruff check .
 uv run ruff format .
 
 # Demos
-uv run python demo/coal.py                        # US Coal Plants (downloads dataset automatically)
-uv run python demo/physionet.py --synthetic        # EHR demo with synthetic data
-uv run python demo/physionet.py --data path/to.csv # EHR demo with real eICU data
+uv run python demos/energy/coal.py                           # US Coal Plants (downloads dataset automatically)
+uv run python demos/ehr/physionet.py --synthetic             # EHR demo with synthetic data
+uv run python demos/ehr/physionet.py --data path/to/eicu.csv # EHR demo with real eICU data
+uv run python demos/ehr/ecg_arrhythmia.py                    # ECG arrhythmia classification demo
 ```
 
 ## Architecture
