@@ -1,3 +1,7 @@
+// PyO3 proc macros generate .into() calls on error types that clippy flags as useless.
+// PCA is an intentional acronym matching the Python API name.
+#![allow(clippy::useless_conversion, clippy::upper_case_acronyms)]
+
 //! # `pulsar._pulsar` — Rust extension module for large-scale topological data analysis
 //!
 //! Optimized for large EHR datasets. All algorithms avoid O(n²) memory where possible

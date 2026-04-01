@@ -12,10 +12,8 @@ from pulsar.analysis.hooks import (
 )
 from pulsar.analysis.characterization import (
     characterize_dataset,
-    CharacterizationResult,
     ColumnProfile,
     DatasetProfile,
-    GeometryRecommendations,
 )
 
 __all__ = [
@@ -26,8 +24,6 @@ __all__ = [
     "unclustered_points",
     "cosmic_to_networkx",
     "characterize_dataset",
-    "CharacterizationResult",
     "ColumnProfile",
     "DatasetProfile",
-    "GeometryRecommendations",
 ]

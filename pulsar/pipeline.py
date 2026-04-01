@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import gc
 from collections.abc import Callable
+from contextlib import contextmanager
+import os
 from typing import Any, Union
 
 import networkx as nx

@@ -21,10 +21,8 @@ from pulsar.analysis import (
     unclustered_points,
     cosmic_to_networkx,
     characterize_dataset,
-    CharacterizationResult,
     ColumnProfile,
     DatasetProfile,
-    GeometryRecommendations,
 )
 
 __all__ = [
@@ -59,8 +57,6 @@ __all__ = [
     "cosmic_to_networkx",
     # Analysis
     "characterize_dataset",
-    "CharacterizationResult",
     "ColumnProfile",
     "DatasetProfile",
-    "GeometryRecommendations",
 ]

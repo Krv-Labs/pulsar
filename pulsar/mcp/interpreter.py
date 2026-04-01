@@ -139,7 +139,7 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
         )
         try:
             labels = sc.fit_predict(affinity)
-        except Exception as e:
+        except Exception:
             continue
 
         if len(np.unique(labels)) > 1:
