@@ -120,6 +120,16 @@ def _cluster_by_components(graph, n: int) -> pd.Series:
 
 def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series | None:
     """Spectral clustering with silhouette-optimized k. Returns None if it fails."""
+    affinity = np.asarray(adj)
+    connectivity = nx.from_numpy_array((affinity > 0).astype(np.int8))
+    if n > 1 and not nx.is_connected(connectivity):
+        logger.info(
+            "resolve_clusters: spectral skipped, affinity graph disconnected "
+            "(components=%d)",
+            nx.number_connected_components(connectivity),
+        )
+        return None
+
     best_score = -1.0
     best_labels = None
     best_k = _SPECTRAL_K_MIN
@@ -132,10 +142,10 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series | None:
             assign_labels='discretize',
             random_state=42,
         )
-        labels = sc.fit_predict(adj)
+        labels = sc.fit_predict(affinity)
 
         if len(np.unique(labels)) > 1:
-            score = silhouette_score(adj, labels, metric='precomputed')
+            score = silhouette_score(affinity, labels, metric='precomputed')
             if score > best_score:
                 best_score = score
                 best_k = k_test

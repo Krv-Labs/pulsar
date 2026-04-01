@@ -4,8 +4,11 @@ Tests for pulsar.mcp.diagnostics module.
 Tests graph quality classification, metrics computation, and diagnosis generation.
 """
 
-import tempfile
+import logging
+import warnings
+from types import SimpleNamespace
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 import pytest
@@ -69,6 +72,42 @@ def unfitted_model(basic_config):
     """Unfitted ThemaRS instance."""
     cfg = load_config(basic_config)
     return ThemaRS(cfg)
+
+
+@pytest.fixture
+def connected_spectral_model():
+    """Model-like object with deterministic connected affinity."""
+    adj = np.array(
+        [
+            [0.0, 1.0, 0.7, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.7, 0.0, 0.0, 0.0],
+            [0.7, 0.7, 0.0, 0.08, 0.0, 0.0],
+            [0.0, 0.0, 0.08, 0.0, 0.8, 0.8],
+            [0.0, 0.0, 0.0, 0.8, 0.0, 0.8],
+            [0.0, 0.0, 0.0, 0.8, 0.8, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    graph = nx.from_numpy_array((adj > 0).astype(np.int8))
+    return SimpleNamespace(cosmic_graph=graph, weighted_adjacency=adj)
+
+
+@pytest.fixture
+def disconnected_spectral_model():
+    """Model-like object with deterministic disconnected affinity."""
+    adj = np.array(
+        [
+            [0.0, 0.9, 0.9, 0.0, 0.0, 0.0],
+            [0.9, 0.0, 0.9, 0.0, 0.0, 0.0],
+            [0.9, 0.9, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.9, 0.9],
+            [0.0, 0.0, 0.0, 0.9, 0.0, 0.9],
+            [0.0, 0.0, 0.0, 0.9, 0.9, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    graph = nx.from_numpy_array((adj > 0).astype(np.int8))
+    return SimpleNamespace(cosmic_graph=graph, weighted_adjacency=adj)
 
 
 def test_returns_diagnosis_result(fitted_model):
@@ -485,10 +524,11 @@ def test_clustering_notes_present(fitted_model):
     assert any("largest component" in n.lower() or "%" in n for n in result.clustering_notes)
 
 
-def test_resolve_clusters_spectral_method(fitted_model):
-    """Assert spectral method produces multiple clusters."""
+def test_resolve_clusters_spectral_method(connected_spectral_model):
+    """Assert spectral method clusters deterministic connected affinity."""
     from pulsar.mcp.interpreter import resolve_clusters
-    clusters = resolve_clusters(fitted_model, method="spectral")
+    clusters = resolve_clusters(connected_spectral_model, method="spectral")
+    assert len(clusters) == connected_spectral_model.weighted_adjacency.shape[0]
     assert len(clusters.unique()) >= 2
 
 
@@ -500,13 +540,35 @@ def test_resolve_clusters_components_method(fitted_model):
     assert len(clusters.unique()) >= 1
 
 
-def test_resolve_clusters_max_k(fitted_model):
+def test_resolve_clusters_max_k(connected_spectral_model):
     """Assert max_k parameter is respected — higher max_k can find more clusters."""
     from pulsar.mcp.interpreter import resolve_clusters
-    clusters_low = resolve_clusters(fitted_model, method="spectral", max_k=3)
-    clusters_high = resolve_clusters(fitted_model, method="spectral", max_k=15)
+    clusters_low = resolve_clusters(connected_spectral_model, method="spectral", max_k=3)
+    clusters_high = resolve_clusters(connected_spectral_model, method="spectral", max_k=15)
     # Both should produce valid clusters
     assert len(clusters_low.unique()) >= 2
     assert len(clusters_high.unique()) >= 2
     # Higher max_k may find a better k (not guaranteed, but should not error)
     assert len(clusters_high.unique()) >= len(clusters_low.unique()) or True
+
+
+def test_resolve_clusters_spectral_disconnected_falls_back_without_warning(
+    disconnected_spectral_model, caplog,
+):
+    """Assert disconnected affinity skips spectral and falls back without sklearn warning."""
+    from pulsar.mcp.interpreter import resolve_clusters
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with caplog.at_level(logging.INFO, logger="pulsar.mcp.interpreter"):
+            clusters = resolve_clusters(disconnected_spectral_model, method="spectral")
+
+    assert (clusters.to_numpy() == 0).all()
+    assert not any(
+        "Graph is not fully connected" in str(w.message)
+        for w in caught
+    )
+    assert any(
+        "spectral skipped, affinity graph disconnected" in rec.message
+        for rec in caplog.records
+    )
