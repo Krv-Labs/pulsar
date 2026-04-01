@@ -33,13 +33,13 @@ from pulsar.hooks import cosmic_to_networkx
 # Order matters — stages are consumed sequentially by a cursor.
 # PCA weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
 _STAGE_WEIGHTS: list[tuple[str, float]] = [
-    ("load",        0.03),
-    ("impute",      0.08),
-    ("scale",       0.01),
-    ("pca",         0.25),
+    ("load", 0.03),
+    ("impute", 0.08),
+    ("scale", 0.01),
+    ("pca", 0.25),
     ("ball_mapper", 0.42),
-    ("laplacian",   0.15),
-    ("cosmic",      0.06),  # includes stability analysis when threshold="auto"
+    ("laplacian", 0.15),
+    ("cosmic", 0.06),  # includes stability analysis when threshold="auto"
 ]
 
 
@@ -209,9 +209,9 @@ class ThemaRS:
 
         # 5. PCA grid (randomized SVD, parallelised across seeds)
         if _precomputed_embeddings is not None:
-            assert all(e.shape[0] == X_scaled.shape[0] for e in _precomputed_embeddings), (
-                "Precomputed embedding row count does not match current data"
-            )
+            assert all(
+                e.shape[0] == X_scaled.shape[0] for e in _precomputed_embeddings
+            ), "Precomputed embedding row count does not match current data"
             embeddings = _precomputed_embeddings
         else:
             embeddings = [
@@ -303,8 +303,11 @@ class ThemaRS:
 
         # Build stage schedule: per-dataset stages repeated N times, then shared stages.
         _per_ds_weights = [
-            ("load", 0.03), ("impute", 0.08), ("scale", 0.01),
-            ("pca", 0.25), ("ball_mapper", 0.42),
+            ("load", 0.03),
+            ("impute", 0.08),
+            ("scale", 0.01),
+            ("pca", 0.25),
+            ("ball_mapper", 0.42),
         ]
         stages: list[tuple[str, float]] = []
         for i in range(N):
@@ -362,7 +365,9 @@ class ThemaRS:
                     if col in df.columns:
                         if spec.method == "one_hot":
                             df[col] = pd.Categorical(df[col], categories=vocab[col])
-                            df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
+                            df = pd.get_dummies(
+                                df, columns=[col], prefix=col, dtype=np.float64
+                            )
 
                 df = df.dropna(axis=0)
                 _notify()  # Dataset i: impute

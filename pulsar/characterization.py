@@ -37,17 +37,17 @@ class ColumnProfile:
     """Per-column metadata for LLM preprocessing decisions."""
 
     name: str
-    dtype: str                                          # pandas dtype as string
+    dtype: str  # pandas dtype as string
     is_numeric: bool
-    n_unique: int                                       # unique non-null values
+    n_unique: int  # unique non-null values
     n_missing: int
-    missing_pct: float                                  # [0, 100]
-    sample_values: list[str]                            # up to 5, cast to str for JSON safety
-    mean: float | None                                  # numeric only
-    std: float | None                                   # numeric only
-    min_val: float | None                               # numeric only
-    max_val: float | None                               # numeric only
-    top_values: list[tuple[str, int]] | None            # non-numeric only: [(value, count)] top 5
+    missing_pct: float  # [0, 100]
+    sample_values: list[str]  # up to 5, cast to str for JSON safety
+    mean: float | None  # numeric only
+    std: float | None  # numeric only
+    min_val: float | None  # numeric only
+    max_val: float | None  # numeric only
+    top_values: list[tuple[str, int]] | None  # non-numeric only: [(value, count)] top 5
 
 
 @dataclass
@@ -55,14 +55,14 @@ class DatasetProfile:
     """Raw measurements only — no derived decisions."""
 
     n_samples: int
-    n_features: int                                     # numeric feature count
-    n_columns_total: int                                # all columns including non-numeric
+    n_features: int  # numeric feature count
+    n_columns_total: int  # all columns including non-numeric
     missingness_pct: float
     knn_k5_mean: float
     knn_k10_mean: float
     knn_k20_mean: float
-    pca_cumulative_variance: list[tuple[int, float]]    # [(dims, cumulative_ratio), ...]
-    column_profiles: list[ColumnProfile]                # one per original column
+    pca_cumulative_variance: list[tuple[int, float]]  # [(dims, cumulative_ratio), ...]
+    column_profiles: list[ColumnProfile]  # one per original column
 
 
 @dataclass
@@ -142,11 +142,13 @@ def characterize_dataset(
     # Step 3: k-NN distances (one fit at k=20, slice for k=5 and k=10)
     k_max = min(21, n_sub - 1)
     nn = NearestNeighbors(n_neighbors=k_max, algorithm="auto", metric="euclidean")
-    distances, _ = nn.fit(X_sub).kneighbors(X_sub)  # shape (n, k_max), col 0 is self (0.0)
+    distances, _ = nn.fit(X_sub).kneighbors(
+        X_sub
+    )  # shape (n, k_max), col 0 is self (0.0)
 
     knn_k5_mean = float(distances[:, 1:6].mean())
     knn_k10_mean = float(distances[:, 1:11].mean())
-    knn_k20_mean = float(distances[:, 1:min(21, distances.shape[1])].mean())
+    knn_k20_mean = float(distances[:, 1 : min(21, distances.shape[1])].mean())
 
     # Step 4: PCA variance using pca_grid (parallel, consistent with pipeline)
     # Probe up to 20 dims or the number of features, whichever is smaller
@@ -154,9 +156,7 @@ def characterize_dataset(
     # Fallback: if data has fewer than 2 features, we can't do PCA, but we validated >= 2 numeric cols
     if not dims_to_probe:
         dims_to_probe = [min(2, X_sub.shape[1])]
-    embeddings = pca_grid(
-        np.ascontiguousarray(X_sub), dims_to_probe, [seed]
-    )
+    embeddings = pca_grid(np.ascontiguousarray(X_sub), dims_to_probe, [seed])
 
     # Explained variance: divide by total variance of scaled input
     # Note: np.var on randomized PCA output is an approximation of explained variance,
@@ -177,7 +177,10 @@ def characterize_dataset(
             break
 
     pca_dims = _build_pca_dims_recommendation(
-        suggested_dims_at_80pct, dims_to_probe, n_features, n_samples,
+        suggested_dims_at_80pct,
+        dims_to_probe,
+        n_features,
+        n_samples,
     )
 
     # Step 6: Epsilon suggestion anchored to k-NN distances
@@ -188,9 +191,7 @@ def characterize_dataset(
     # Step 7: Threshold recommendation
     # Default to "auto" (persistent homology) for threshold selection.
     # PH is designed to find stable plateaus in connected components across weights.
-    top2_var = next(
-        (v for d, v in pca_cumulative_variance if d == 2), 0.0
-    )
+    top2_var = next((v for d, v in pca_cumulative_variance if d == 2), 0.0)
     threshold_strategy: Literal["auto", "0.0"] = "auto"
 
     # Step 8: Build warnings list
@@ -198,7 +199,11 @@ def characterize_dataset(
     # Report non-numeric columns as facts — the agent decides what to do.
     non_numeric_summaries = [
         f"{cp.name} ({cp.n_unique} unique"
-        + (f": {', '.join(str(v) for v, _ in (cp.top_values or [])[:3])}" if cp.top_values else "")
+        + (
+            f": {', '.join(str(v) for v, _ in (cp.top_values or [])[:3])}"
+            if cp.top_values
+            else ""
+        )
         + ")"
         for cp in column_profiles
         if not cp.is_numeric
@@ -240,7 +245,12 @@ def characterize_dataset(
 
     # Step 9: Build YAML template
     suggested_params_yaml = _build_yaml_template(
-        csv_path, pca_dims, eps_min, eps_max, eps_steps, threshold_strategy,
+        csv_path,
+        pca_dims,
+        eps_min,
+        eps_max,
+        eps_steps,
+        threshold_strategy,
         column_profiles,
     )
 
@@ -283,7 +293,10 @@ def characterize_dataset(
 
 
 def _build_pca_dims_recommendation(
-    knee: int, probed: list[int], n_features: int, n_samples: int,
+    knee: int,
+    probed: list[int],
+    n_features: int,
+    n_samples: int,
 ) -> list[int]:
     """Return [knee-1, knee, knee+2] capped to valid range and sample-size limit.
 
@@ -291,7 +304,7 @@ def _build_pca_dims_recommendation(
     pairwise distances converge (curse of dimensionality), producing a razor-thin
     epsilon window. sqrt(n_samples) is a practical ceiling.
     """
-    sample_cap = max(2, int(n_samples ** 0.5))
+    sample_cap = max(2, int(n_samples**0.5))
     dim_cap = min(n_features - 1, sample_cap)
 
     candidates = [
@@ -327,20 +340,24 @@ def _profile_columns(df: pd.DataFrame, max_sample: int = 5) -> list[ColumnProfil
             vc = series.value_counts().head(5)
             top_values = [(str(k), int(v)) for k, v in vc.items()]
 
-        profiles.append(ColumnProfile(
-            name=col,
-            dtype=str(series.dtype),
-            is_numeric=is_numeric,
-            n_unique=n_unique,
-            n_missing=n_missing,
-            missing_pct=round(float(n_missing / n_rows * 100), 2) if n_rows > 0 else 0.0,
-            sample_values=sample_vals,
-            mean=mean,
-            std=std,
-            min_val=min_val,
-            max_val=max_val,
-            top_values=top_values,
-        ))
+        profiles.append(
+            ColumnProfile(
+                name=col,
+                dtype=str(series.dtype),
+                is_numeric=is_numeric,
+                n_unique=n_unique,
+                n_missing=n_missing,
+                missing_pct=round(float(n_missing / n_rows * 100), 2)
+                if n_rows > 0
+                else 0.0,
+                sample_values=sample_vals,
+                mean=mean,
+                std=std,
+                min_val=min_val,
+                max_val=max_val,
+                top_values=top_values,
+            )
+        )
     return profiles
 
 
@@ -355,11 +372,13 @@ def _build_yaml_template(
 ) -> str:
     """Generate YAML config template with drop_columns, encode, and impute blocks."""
     to_encode = [
-        cp.name for cp in column_profiles
+        cp.name
+        for cp in column_profiles
         if not cp.is_numeric and cp.n_unique <= LOW_CARDINALITY_THRESHOLD
     ]
     to_drop = [
-        cp.name for cp in column_profiles
+        cp.name
+        for cp in column_profiles
         if not cp.is_numeric and cp.n_unique > LOW_CARDINALITY_THRESHOLD
     ]
 
@@ -371,7 +390,9 @@ def _build_yaml_template(
         for col_name in to_encode:
             encode_block += f"\n    {col_name}: {{method: one_hot}}"
 
-    numeric_missing = [cp.name for cp in column_profiles if cp.is_numeric and cp.missing_pct > 0]
+    numeric_missing = [
+        cp.name for cp in column_profiles if cp.is_numeric and cp.missing_pct > 0
+    ]
 
     impute_block = ""
     if numeric_missing:

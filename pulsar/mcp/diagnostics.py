@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class SweepHistoryEntry:
     """Record of one sweep attempt's outcome for history-aware retry."""
 
-    quality: str         # "hairball", "singletons", "fragmented", etc.
+    quality: str  # "hairball", "singletons", "fragmented", etc.
     epsilon_min: float
     epsilon_max: float
     pca_dims: list[int]
@@ -55,7 +55,9 @@ class GraphMetrics:
 class DiagnosisResult:
     """Diagnosis outcome with concrete corrective suggestions."""
 
-    quality: str  # "good" | "hairball" | "singletons" | "fragmented" | "sparse_connected"
+    quality: (
+        str  # "good" | "hairball" | "singletons" | "fragmented" | "sparse_connected"
+    )
     metrics: GraphMetrics
     diagnosis: str
     epsilon_factor: float  # informational: multiplier applied
@@ -94,7 +96,9 @@ def diagnose_model(
     n = G.number_of_nodes()
 
     if n == 0:
-        raise RuntimeError("Empty graph: model may not have been fitted or data is empty")
+        raise RuntimeError(
+            "Empty graph: model may not have been fitted or data is empty"
+        )
 
     # Compute metrics
     n_edges = G.number_of_edges()
@@ -176,7 +180,9 @@ def diagnose_model(
     from pulsar.config import BallMapperSpec, PCASpec
 
     corrected_epsilons = np.linspace(
-        suggested_epsilon_min, suggested_epsilon_max, suggested_epsilon_steps,
+        suggested_epsilon_min,
+        suggested_epsilon_max,
+        suggested_epsilon_steps,
     ).tolist()
     corrected_cfg = dc_replace(
         model.config,
@@ -219,7 +225,9 @@ def diagnose_model(
 
 
 def _build_clustering_notes(
-    n: int, component_sizes: list[int], singleton_count: int,
+    n: int,
+    component_sizes: list[int],
+    singleton_count: int,
 ) -> list[str]:
     """Build factual observations about component balance for the agent."""
     notes: list[str] = []
@@ -227,15 +235,12 @@ def _build_clustering_notes(
         largest = component_sizes[0]
         largest_pct = largest / n * 100 if n > 0 else 0
         notes.append(
-            f"Largest component contains {largest_pct:.0f}% of points "
-            f"({largest}/{n})."
+            f"Largest component contains {largest_pct:.0f}% of points ({largest}/{n})."
         )
     multi_node = sum(1 for s in component_sizes if s >= 2)
     notes.append(f"{multi_node} components have 2+ nodes.")
     if singleton_count > 0:
-        notes.append(
-            f"{singleton_count} singleton components detected."
-        )
+        notes.append(f"{singleton_count} singleton components detected.")
     return notes
 
 

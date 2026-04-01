@@ -195,7 +195,7 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
     threshold_str = f'"{threshold}"' if threshold == "auto" else str(threshold)
 
     return f"""run:
-  name: {cfg.run_name or 'experiment'}
+  name: {cfg.run_name or "experiment"}
   data: {cfg.data}
 preprocessing:
   drop_columns: {drop_line}{impute_block}{encode_block}

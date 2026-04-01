@@ -60,12 +60,15 @@ mcp = FastMCP(
 @dataclasses.dataclass
 class _PulsarSession:
     """Session state for a single MCP client."""
+
     model: Optional[ThemaRS] = None
     data: Optional[pd.DataFrame] = None
     clusters: Optional[pd.Series] = None
-    embeddings: Optional[list] = None                # cached PCA output from last fit
-    pca_fingerprint: Optional[str] = None            # SHA256 of (data_path, dims, seeds, n_rows)
-    sweep_history: list = dataclasses.field(default_factory=list)  # list[SweepHistoryEntry]
+    embeddings: Optional[list] = None  # cached PCA output from last fit
+    pca_fingerprint: Optional[str] = None  # SHA256 of (data_path, dims, seeds, n_rows)
+    sweep_history: list = dataclasses.field(
+        default_factory=list
+    )  # list[SweepHistoryEntry]
 
 
 # Global session storage, keyed by session_id (or "default" for STDIO)
@@ -255,7 +258,9 @@ async def generate_cluster_dossier(
         return "Error: No model found. Run run_topological_sweep() first."
 
     if method not in ("auto", "spectral", "components"):
-        return f"Error: method must be 'auto', 'spectral', or 'components', got '{method}'"
+        return (
+            f"Error: method must be 'auto', 'spectral', or 'components', got '{method}'"
+        )
 
     try:
         logger.info("Generating cluster dossier (method=%s, max_k=%d)", method, max_k)
@@ -309,9 +314,7 @@ async def compare_clusters_tool(
         logger.info("Comparing clusters %d and %d", cluster_a, cluster_b)
 
         # 1. Perform Comparison
-        results = compare_clusters(
-            session.data, session.clusters, cluster_a, cluster_b
-        )
+        results = compare_clusters(session.data, session.clusters, cluster_a, cluster_b)
 
         if not results:
             return f"Error: No results for comparison between clusters {cluster_a} and {cluster_b}. Ensure clusters have at least 2 points."
@@ -364,11 +367,11 @@ async def export_labeled_data(
         logger.info("Exporting labeled data to: %s", output_path)
 
         df = session.data.copy()
-        df['topological_cluster_id'] = session.clusters
+        df["topological_cluster_id"] = session.clusters
 
         # Map IDs to names (ensure keys are ints, as LLMs sometimes send strings)
         names_map = {int(k): v for k, v in cluster_names.items()}
-        df['topological_cluster_name'] = df['topological_cluster_id'].map(names_map)
+        df["topological_cluster_name"] = df["topological_cluster_id"].map(names_map)
 
         df.to_csv(output_path, index=False)
         logger.info("Successfully exported %d rows to %s", len(df), output_path)
@@ -449,12 +452,14 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
 
         # Record this attempt for future binary search
         current_epsilons = [bm.eps for bm in session.model.ball_maps]
-        session.sweep_history.append(SweepHistoryEntry(
-            quality=result.quality,
-            epsilon_min=min(current_epsilons) if current_epsilons else 0.5,
-            epsilon_max=max(current_epsilons) if current_epsilons else 1.5,
-            pca_dims=list(session.model.config.pca.dimensions),
-        ))
+        session.sweep_history.append(
+            SweepHistoryEntry(
+                quality=result.quality,
+                epsilon_min=min(current_epsilons) if current_epsilons else 0.5,
+                epsilon_max=max(current_epsilons) if current_epsilons else 1.5,
+                pca_dims=list(session.model.config.pca.dimensions),
+            )
+        )
 
         return json.dumps(dataclasses.asdict(result), indent=2)
     except (ValueError, RuntimeError) as e:
