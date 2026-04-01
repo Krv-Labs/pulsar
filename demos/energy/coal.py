@@ -5,7 +5,7 @@ Downloads the dataset (once), runs a large grid search through the full
 ThemaRS pipeline, and prints per-stage wall-clock timings.
 
 Usage (from repo root):
-    uv run python demo/coal.py
+    uv run python demos/energy/coal.py
 """
 
 from __future__ import annotations

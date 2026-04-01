@@ -50,27 +50,23 @@ Copy `params.yaml.sample` to `params.yaml` and edit it for your dataset.
 
 ## Demos
 
-Demo scripts and their parameter files live under `demos/`:
+Demo scripts organized by domain under `demos/`:
 
-- `demos/coal.py` with `demos/coal_params.yaml`
-- `demos/physionet.py` with `demos/physionet_params.yaml`
-
-Run the coal demo (US Coal Plants):
-
+**Energy domain:**
 ```bash
-uv run python demos/coal.py
+uv run python demos/energy/coal.py  # US Coal Plants (downloads dataset automatically)
 ```
 
-Run the PhysioNet demo (synthetic mode):
-
+**EHR domain:**
 ```bash
-uv run python demos/physionet.py --synthetic
+uv run python demos/ehr/physionet.py --synthetic             # Synthetic data mode
+uv run python demos/ehr/physionet.py --data path/to/eicu.csv # Real eICU CSV data
+uv run python demos/ehr/ecg_arrhythmia.py                    # ECG arrhythmia classification
 ```
 
-Run the PhysioNet demo with a real eICU CSV export:
-
+**LLM/MMLU domain:**
 ```bash
-uv run python demos/physionet.py --data path/to/eicu_patient_static.csv
+jupyter notebook demos/mmlu/mmlu_topology_demo.ipynb
 ```
 
 ## Configuration
