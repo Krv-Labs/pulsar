@@ -2,7 +2,7 @@
 Tests for pulsar.characterization module.
 
 Tests dataset geometry probing, k-NN analysis, PCA variance estimation,
-and hyperparameter recommendation generation.
+and missingness characterization.
 """
 
 import tempfile
@@ -10,13 +10,10 @@ import tempfile
 import numpy as np
 import pandas as pd
 import pytest
-import yaml
 
 from pulsar.characterization import (
-    CharacterizationResult,
     ColumnProfile,
     DatasetProfile,
-    GeometryRecommendations,
     characterize_dataset,
 )
 
@@ -73,19 +70,6 @@ def categorical_csv(tmp_path):
 
 
 @pytest.fixture
-def large_numeric_csv(tmp_path):
-    """Large CSV: 2000 samples, 5 features."""
-    rng = np.random.default_rng(123)
-    df = pd.DataFrame(
-        rng.standard_normal((2000, 5)),
-        columns=[f"f{i}" for i in range(5)],
-    )
-    path = tmp_path / "large.csv"
-    df.to_csv(path, index=False)
-    return str(path)
-
-
-@pytest.fixture
 def mixed_csv(tmp_path):
     """CSV with numeric, string, and missing columns."""
     rng = np.random.default_rng(0)
@@ -107,18 +91,15 @@ def mixed_csv(tmp_path):
     return str(path)
 
 
-def test_returns_characterization_result(numeric_csv):
-    """Assert function returns CharacterizationResult."""
-    result = characterize_dataset(numeric_csv)
-    assert isinstance(result, CharacterizationResult)
-    assert isinstance(result.profile, DatasetProfile)
-    assert isinstance(result.recommendations, GeometryRecommendations)
+def test_returns_dataset_profile(numeric_csv):
+    """Assert function returns DatasetProfile."""
+    profile = characterize_dataset(numeric_csv)
+    assert isinstance(profile, DatasetProfile)
 
 
 def test_profile_fields(numeric_csv):
     """Check profile basic fields."""
-    result = characterize_dataset(numeric_csv)
-    profile = result.profile
+    profile = characterize_dataset(numeric_csv)
 
     assert profile.n_samples == 200
     assert profile.n_features == 5
@@ -126,69 +107,37 @@ def test_profile_fields(numeric_csv):
 
 
 def test_knn_distances_monotone(numeric_csv):
-    """Assert k-NN distances are monotone: k5 ≤ k10 ≤ k20."""
-    result = characterize_dataset(numeric_csv)
-    profile = result.profile
+    """Assert k-NN distances are monotone: k5 <= k10 <= k20."""
+    profile = characterize_dataset(numeric_csv)
 
     assert profile.knn_k5_mean <= profile.knn_k10_mean
     assert profile.knn_k10_mean <= profile.knn_k20_mean
 
 
-def test_epsilon_range_valid(numeric_csv):
-    """Assert epsilon_min > 0 and epsilon_min ≤ epsilon_max."""
-    result = characterize_dataset(numeric_csv)
-    recs = result.recommendations
+def test_missing_values_handled(csv_with_missing):
+    """Assert mean imputation works and missingness is tracked."""
+    profile = characterize_dataset(csv_with_missing)
 
-    assert recs.epsilon_min > 0.0
-    assert recs.epsilon_max > 0.0
-    assert recs.epsilon_min <= recs.epsilon_max
-
-
-def test_pca_dims_in_valid_range(numeric_csv):
-    """Assert all recommended PCA dims are in valid range [2, n_features]."""
-    result = characterize_dataset(numeric_csv)
-    recs = result.recommendations
-
-    assert len(recs.pca_dims) > 0
-    for d in recs.pca_dims:
-        assert 2 <= d <= result.profile.n_features
+    assert profile.missingness_pct == pytest.approx(4.0, abs=0.1)  # 40/1000 total cells
+    f0_prof = next(p for p in profile.column_profiles if p.name == "f0")
+    assert f0_prof.missing_pct == pytest.approx(20.0, abs=0.1)
 
 
-def test_pca_cumulative_variance_monotone(numeric_csv):
-    """Assert cumulative PCA variance is non-decreasing."""
-    result = characterize_dataset(numeric_csv)
-    profile = result.profile
+def test_non_numeric_handled(mixed_csv):
+    """Assert non-numeric columns are excluded from geometry but profiled."""
+    profile = characterize_dataset(mixed_csv)
 
-    prev_var = 0.0
-    for dim, cumvar in profile.pca_cumulative_variance:
-        assert cumvar >= prev_var, f"Non-monotone at dim={dim}: {cumvar} < {prev_var}"
-        prev_var = cumvar
+    assert profile.n_features == 4
+    assert profile.n_columns_total == 6
 
-
-def test_yaml_template_parseable(numeric_csv):
-    """Assert suggested_params_yaml is valid YAML."""
-    result = characterize_dataset(numeric_csv)
-    recs = result.recommendations
-
-    parsed = yaml.safe_load(recs.suggested_params_yaml)
-    assert isinstance(parsed, dict)
-    assert "run" in parsed
-    assert "sweep" in parsed
-    assert "cosmic_graph" in parsed
-    assert "preprocessing" in parsed
+    gender_prof = next(p for p in profile.column_profiles if p.name == "gender")
+    assert gender_prof.is_numeric is False
+    assert gender_prof.n_unique == 3
 
 
-def test_no_warning_without_issues(numeric_csv):
-    """Assert no warnings generated on clean data."""
-    result = characterize_dataset(numeric_csv)
-    recs = result.recommendations
-    # Clean data with good properties should have no warnings
-    assert len(recs.warnings) == 0
-
-
-def test_no_numeric_raises(categorical_csv):
-    """Assert ValueError when CSV has no numeric columns."""
-    with pytest.raises(ValueError, match="numeric"):
+def test_error_fewer_than_two_numeric_cols(categorical_csv):
+    """ValueError if CSV lacks numeric columns."""
+    with pytest.raises(ValueError, match="Need at least 2 numeric columns"):
         characterize_dataset(categorical_csv)
 
 
