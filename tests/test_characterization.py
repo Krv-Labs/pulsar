@@ -342,11 +342,18 @@ def test_sample_values_are_strings(mixed_csv):
             assert isinstance(sv, str)
 
 
-def test_yaml_template_drop_columns_empty(mixed_csv):
-    """Assert YAML template starts with empty drop_columns — agent decides."""
+def test_yaml_template_drop_and_encode(mixed_csv):
+    """Assert high-cardinality strings are dropped, low-cardinality are encoded."""
     result = characterize_dataset(mixed_csv)
     parsed = yaml.safe_load(result.recommendations.suggested_params_yaml)
-    assert parsed["preprocessing"]["drop_columns"] == []
+    drop = parsed["preprocessing"]["drop_columns"]
+    # patient_id has 200 unique → dropped
+    assert "patient_id" in drop
+    # gender has 3 unique → encoded, not dropped
+    assert "gender" not in drop
+    encode = parsed["preprocessing"]["encode"]
+    assert "gender" in encode
+    assert encode["gender"]["method"] == "one_hot"
 
 
 def test_yaml_template_has_impute_block(mixed_csv):
@@ -360,23 +367,16 @@ def test_yaml_template_has_impute_block(mixed_csv):
     assert "weight" not in impute
 
 
-def test_non_numeric_warning_neutral(mixed_csv):
-    """Assert warning reports non-numeric columns factually without judgments."""
+def test_non_numeric_warning(mixed_csv):
+    """Assert warning reports non-numeric columns with cardinality info."""
     result = characterize_dataset(mixed_csv)
     warnings = result.recommendations.warnings
-    # Should mention non-numeric columns exist
     non_num_warnings = [w for w in warnings if "non-numeric" in w.lower()]
     assert len(non_num_warnings) == 1
     w = non_num_warnings[0]
     # Should list column names with cardinality
     assert "patient_id" in w
     assert "gender" in w
-    # Should NOT contain judgment language
-    assert "likely IDs" not in w
-    assert "high-cardinality" not in w.lower()
-    assert "low-cardinality" not in w.lower()
-    # Should direct agent to column_profiles
-    assert "column_profiles" in w
 
 
 def test_missing_impute_warning(mixed_csv):
