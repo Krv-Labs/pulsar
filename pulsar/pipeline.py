@@ -5,6 +5,9 @@ ThemaRS — orchestrates the full Pulsar pipeline.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
+import gc
+import os
 from typing import Any, Union
 
 import networkx as nx
@@ -53,6 +56,26 @@ def _build_cumulative_fractions(
     if result:
         result[-1] = (result[-1][0], 1.0)
     return result
+
+
+@contextmanager
+def _rayon_thread_override(workers: int | None):
+    """
+    Temporarily override Rayon worker count for Rust ops that respect
+    RAYON_NUM_THREADS. Restores the previous value on exit.
+    """
+    if workers is None:
+        yield
+        return
+    prev = os.environ.get("RAYON_NUM_THREADS")
+    os.environ["RAYON_NUM_THREADS"] = str(workers)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("RAYON_NUM_THREADS", None)
+        else:
+            os.environ["RAYON_NUM_THREADS"] = prev
 
 
 class ThemaRS:
@@ -234,6 +257,9 @@ class ThemaRS:
         datasets: list[pd.DataFrame],
         *,
         progress_callback: Callable[[str, float], None] | None = None,
+        store_ball_maps: bool = False,
+        ballmap_batch_size: int | None = None,
+        rayon_workers: int | None = None,
     ) -> "ThemaRS":
         """
         Run the pipeline over multiple data versions (e.g. different embedding
@@ -253,11 +279,24 @@ class ThemaRS:
             progress_callback: Optional ``(stage: str, fraction: float) -> None``.
                 Same semantics as in fit(). Stages are prefixed with dataset index
                 (e.g. "Dataset 1/3: pca").
+            store_ball_maps: If True, retain fitted BallMapper objects on self.
+                Defaults to False to lower memory; when False, BallMappers are
+                freed after their Laplacian contributions are accumulated.
+            ballmap_batch_size: Optional cap on how many PCA embeddings to process
+                per BallMapper batch. Smaller batches reduce peak RAM at the cost
+                of more Rust crossings. None processes all embeddings together.
+            rayon_workers: Optional cap for Rayon worker threads used inside Rust
+                ops (PCA grid, BallMapper grid, Laplacian accumulation). Defaults
+                to the library setting when None.
 
         Returns self for method chaining.
         """
         if not datasets:
             raise ValueError("datasets must be non-empty")
+        if ballmap_batch_size is not None and ballmap_batch_size <= 0:
+            raise ValueError("ballmap_batch_size must be positive when provided")
+        if rayon_workers is not None and rayon_workers <= 0:
+            raise ValueError("rayon_workers must be positive when provided")
 
         N = len(datasets)
         cfg = self.config
@@ -287,6 +326,7 @@ class ThemaRS:
             progress_callback(label_override or label, frac)
 
         all_ball_maps: list[BallMapper] = []
+        galactic_L_accum: np.ndarray | None = None
         n: int | None = None
 
         # Collect global vocabulary for categorical encoding (if any)
@@ -299,58 +339,87 @@ class ThemaRS:
                     categories.update(ds[col].dropna().unique())
             vocab[col] = sorted(list(categories))
 
-        for i, data in enumerate(datasets):
-            df = data.copy()
+        with _rayon_thread_override(rayon_workers):
+            for i, data in enumerate(datasets):
+                df = data.copy()
 
-            drop = [c for c in cfg.drop_columns if c in df.columns]
-            df = df.drop(columns=drop)
-            _notify()  # Dataset i: load
+                drop = [c for c in cfg.drop_columns if c in df.columns]
+                df = df.drop(columns=drop)
+                _notify()  # Dataset i: load
 
-            for col in cfg.impute:
-                if col in df.columns:
-                    df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
+                for col in cfg.impute:
+                    if col in df.columns:
+                        df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
 
-            for col, spec in cfg.impute.items():
-                if col not in df.columns:
-                    continue
-                arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-                df[col] = impute_column(arr, spec.method, spec.seed)
+                for col, spec in cfg.impute.items():
+                    if col not in df.columns:
+                        continue
+                    arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
+                    df[col] = impute_column(arr, spec.method, spec.seed)
 
-            # Encode categorical columns with shared vocabulary
-            for col, spec in cfg.encode.items():
-                if col in df.columns:
-                    if spec.method == "one_hot":
-                        df[col] = pd.Categorical(df[col], categories=vocab[col])
-                        df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
+                # Encode categorical columns with shared vocabulary
+                for col, spec in cfg.encode.items():
+                    if col in df.columns:
+                        if spec.method == "one_hot":
+                            df[col] = pd.Categorical(df[col], categories=vocab[col])
+                            df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
 
-            df = df.dropna(axis=0)
-            _notify()  # Dataset i: impute
+                df = df.dropna(axis=0)
+                _notify()  # Dataset i: impute
 
-            X = df.to_numpy(dtype=np.float64)
-            if n is None:
-                n = X.shape[0]
-            elif X.shape[0] != n:
-                raise ValueError(
-                    f"Dataset {i} has {X.shape[0]} rows after preprocessing; "
-                    f"expected {n} (same as dataset 0)"
+                X = df.to_numpy(dtype=np.float64)
+                if n is None:
+                    n = X.shape[0]
+                    galactic_L_accum = np.zeros((n, n), dtype=np.int64)
+                elif X.shape[0] != n:
+                    raise ValueError(
+                        f"Dataset {i} has {X.shape[0]} rows after preprocessing; "
+                        f"expected {n} (same as dataset 0)"
+                    )
+
+                scaler = StandardScaler()
+                X_scaled = np.array(scaler.fit_transform(X))
+                _notify()  # Dataset i: scale
+
+                embeddings = [
+                    np.ascontiguousarray(emb)
+                    for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
+                ]
+                _notify()  # Dataset i: pca
+
+                batches = (
+                    [embeddings]
+                    if ballmap_batch_size is None
+                    else [
+                        embeddings[j : j + ballmap_batch_size]
+                        for j in range(0, len(embeddings), ballmap_batch_size)
+                    ]
                 )
 
-            scaler = StandardScaler()
-            X_scaled = np.array(scaler.fit_transform(X))
-            _notify()  # Dataset i: scale
+                for batch in batches:
+                    batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
+                    if store_ball_maps:
+                        all_ball_maps.extend(batch_ball_maps)
+                    if galactic_L_accum is None:
+                        raise RuntimeError("galactic_L_accum not initialized")
+                    galactic_L_accum += np.array(
+                        accumulate_pseudo_laplacians(batch_ball_maps, n)
+                    )
+                    # Release batch memory aggressively in notebook contexts
+                    del batch_ball_maps
+                    gc.collect()
 
-            embeddings = [
-                np.ascontiguousarray(emb)
-                for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
-            ]
-            _notify()  # Dataset i: pca
+                # Drop per-dataset intermediates promptly
+                del embeddings, X_scaled, X, df
+                gc.collect()
+                _notify()  # Dataset i: ball_mapper
 
-            all_ball_maps.extend(ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons))
-            _notify()  # Dataset i: ball_mapper
+        self._ball_maps = all_ball_maps if store_ball_maps else []
 
-        self._ball_maps = all_ball_maps
+        if galactic_L_accum is None or n is None:
+            raise RuntimeError("No datasets were processed")
 
-        galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
+        galactic_L = galactic_L_accum
         _notify()  # laplacian
 
         threshold = cfg.cosmic_graph.threshold
