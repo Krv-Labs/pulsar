@@ -4,23 +4,13 @@ Tests for pulsar.mcp.diagnostics module.
 Tests graph quality classification, metrics computation, and diagnosis generation.
 """
 
-import logging
-import warnings
-from types import SimpleNamespace
-
-import networkx as nx
 import numpy as np
 import pandas as pd
 import pytest
-import yaml
 
-from pulsar.config import config_to_yaml, load_config
+from pulsar.config import load_config
 from pulsar.mcp.diagnostics import (
-    DiagnosisResult,
     GraphMetrics,
-    SweepHistoryEntry,
-    _build_diagnosis,
-    _classify,
     diagnose_model,
 )
 from pulsar.pipeline import ThemaRS
@@ -74,44 +64,8 @@ def unfitted_model(basic_config):
     return ThemaRS(cfg)
 
 
-@pytest.fixture
-def connected_spectral_model():
-    """Model-like object with deterministic connected affinity."""
-    adj = np.array(
-        [
-            [0.0, 1.0, 0.7, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.7, 0.0, 0.0, 0.0],
-            [0.7, 0.7, 0.0, 0.08, 0.0, 0.0],
-            [0.0, 0.0, 0.08, 0.0, 0.8, 0.8],
-            [0.0, 0.0, 0.0, 0.8, 0.0, 0.8],
-            [0.0, 0.0, 0.0, 0.8, 0.8, 0.0],
-        ],
-        dtype=np.float64,
-    )
-    graph = nx.from_numpy_array((adj > 0).astype(np.int8))
-    return SimpleNamespace(cosmic_graph=graph, weighted_adjacency=adj)
-
-
-@pytest.fixture
-def disconnected_spectral_model():
-    """Model-like object with deterministic disconnected affinity."""
-    adj = np.array(
-        [
-            [0.0, 0.9, 0.9, 0.0, 0.0, 0.0],
-            [0.9, 0.0, 0.9, 0.0, 0.0, 0.0],
-            [0.9, 0.9, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.9, 0.9],
-            [0.0, 0.0, 0.0, 0.9, 0.0, 0.9],
-            [0.0, 0.0, 0.0, 0.9, 0.9, 0.0],
-        ],
-        dtype=np.float64,
-    )
-    graph = nx.from_numpy_array((adj > 0).astype(np.int8))
-    return SimpleNamespace(cosmic_graph=graph, weighted_adjacency=adj)
-
-
-def test_returns_diagnosis_result(fitted_model):
-    """Assert diagnose_model returns DiagnosisResult."""
+def test_returns_graph_metrics(fitted_model):
+    """Assert diagnose_model returns GraphMetrics."""
     result = diagnose_model(fitted_model)
     assert isinstance(result, DiagnosisResult)
     assert isinstance(result.metrics, GraphMetrics)
@@ -147,24 +101,24 @@ def test_suggested_steps(fitted_model):
 def test_density_in_range(fitted_model):
     """Assert density is in [0, 1]."""
     result = diagnose_model(fitted_model)
-    assert 0.0 <= result.metrics.density <= 1.0
+    assert 0.0 <= result.density <= 1.0
 
 
 def test_giant_fraction_in_range(fitted_model):
     """Assert giant_fraction is in [0, 1]."""
     result = diagnose_model(fitted_model)
-    assert 0.0 <= result.metrics.giant_fraction <= 1.0
+    assert 0.0 <= result.giant_fraction <= 1.0
 
 
-def test_singleton_fraction_in_range(fitted_model):
-    """Assert singleton_fraction is in [0, 1]."""
+def test_n_nodes(fitted_model):
+    """Assert n_nodes equals data size."""
     result = diagnose_model(fitted_model)
-    assert 0.0 <= result.metrics.singleton_fraction <= 1.0
+    assert result.n_nodes == 100
 
 
 def test_unfitted_raises(unfitted_model):
-    """Assert RuntimeError on unfitted model."""
-    with pytest.raises(RuntimeError):
+    """Assert diagnosing unfitted model raises RuntimeError."""
+    with pytest.raises(RuntimeError, match=r"Call fit\(\) first"):
         diagnose_model(unfitted_model)
 
 
@@ -508,9 +462,9 @@ def test_hairball_no_contradictory_suggestions():
     )
     _, suggestions = _build_diagnosis("hairball", m, 0.5)
     for s in suggestions:
-        assert not ("increasing" in s.lower() and "epsilon" in s.lower()), (
-            f"Contradictory suggestion: {s}"
-        )
+        assert not (
+            "increasing" in s.lower() and "epsilon" in s.lower()
+        ), f"Contradictory suggestion: {s}"
 
 
 def test_singletons_suggest_lower_pca():
