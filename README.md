@@ -123,6 +123,12 @@ reps  = model.select_representatives()  # uses the configured default
 
 Copy `params.yaml.sample` to `params.yaml` and edit it for your dataset.
 
+## Progress reporting
+
+- Stage weight constants for `progress_callback` live in `pulsar.runtime.utils._STAGE_WEIGHTS`; `pulsar.runtime.utils._build_cumulative_fractions` turns them into cumulative fractions (used by `ThemaRS.fit`).
+- `_rayon_thread_override` in `pulsar.runtime.utils` caps `RAYON_NUM_THREADS` for Rust-heavy stages when notebooks need stricter thread control.
+- For notebooks: use `pulsar.runtime.progress.fit_with_progress(model, data)` or `fit_multi_with_progress(model, datasets)` — renders a transient rich progress bar.
+
 ## Demos
 
 Demo scripts organized by domain under `demos/`:
