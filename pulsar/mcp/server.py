@@ -4,6 +4,7 @@ FastMCP Server for Pulsar.
 Exposes "Thick Tools" for topological data analysis and interpretation.
 """
 
+import asyncio
 import dataclasses
 import hashlib
 import json
@@ -64,10 +65,13 @@ def _pca_fingerprint(cfg, n_rows: int) -> str:
     Compute a fingerprint for PCA configuration and data shape.
 
     Used to detect when cached PCA embeddings can be reused (same data + PCA params).
-    Includes data_path and n_rows to invalidate cache on data changes.
+    Includes data_path, n_rows, and mtime to invalidate cache on data changes.
     """
+    # Use 0 if data path doesn't exist (unlikely at this stage)
+    mtime = os.path.getmtime(cfg.data) if os.path.exists(cfg.data) else 0
     payload = json.dumps({
         "data_path": cfg.data,
+        "mtime": mtime,
         "dimensions": list(cfg.pca.dimensions),
         "seeds": list(cfg.pca.seeds),
         "n_rows": n_rows,
@@ -104,7 +108,23 @@ async def run_topological_sweep(config_path: str, ctx: Context) -> str:
                 precomputed = session.embeddings
                 logger.info("Reusing cached PCA embeddings (fingerprint match)")
 
-        model.fit(_precomputed_embeddings=precomputed)
+        # Build progress callback that fires ctx.report_progress() from the fit thread.
+        # ctx.report_progress() is async; use run_coroutine_threadsafe() to schedule it
+        # from the threadpool without blocking the fit() call.
+        loop = asyncio.get_running_loop()
+
+        def progress_callback(stage: str, fraction: float) -> None:
+            asyncio.run_coroutine_threadsafe(
+                ctx.report_progress(progress=fraction, total=1.0, message=stage),
+                loop,
+            )
+
+        # Run blocking fit() in a threadpool — avoids starving the event loop.
+        await asyncio.to_thread(
+            model.fit,
+            _precomputed_embeddings=precomputed,
+            progress_callback=progress_callback,
+        )
 
         session.model = model
         session.data = model.data  # Use public property
