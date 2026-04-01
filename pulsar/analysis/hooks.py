@@ -4,6 +4,8 @@ Analysis hooks — pure Python utilities that work on the outputs of the Rust la
 
 from __future__ import annotations
 
+import warnings
+
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -60,10 +62,16 @@ def cosmic_clusters(
     if method == "spectral":
         from sklearn.cluster import SpectralClustering
 
-        return SpectralClustering(
-            n_clusters=n_clusters,
-            affinity="precomputed",
-        ).fit_predict(adj)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Graph is not fully connected.*",
+                category=UserWarning,
+            )
+            return SpectralClustering(
+                n_clusters=n_clusters,
+                affinity="precomputed",
+            ).fit_predict(adj)
 
     raise ValueError(f"Unknown clustering method: {method!r}")
 

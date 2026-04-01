@@ -8,6 +8,7 @@ statistical dossier for LLM synthesis.
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
@@ -138,7 +139,13 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
             random_state=42,
         )
         try:
-            labels = sc.fit_predict(affinity)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Graph is not fully connected",
+                    category=UserWarning,
+                )
+                labels = sc.fit_predict(affinity)
         except Exception:
             continue
 
