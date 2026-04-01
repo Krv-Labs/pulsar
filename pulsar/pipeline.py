@@ -54,7 +54,12 @@ class ThemaRS:
     # Main pipeline
     # ------------------------------------------------------------------
 
-    def fit(self, data: pd.DataFrame | None = None) -> "ThemaRS":
+    def fit(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        _precomputed_embeddings: list | None = None,
+    ) -> "ThemaRS":
         """
         Run the full pipeline:
         1. Load data (if not provided)
@@ -110,10 +115,18 @@ class ThemaRS:
         X_scaled = np.array(scaler.fit_transform(X))
 
         # 5. PCA grid (randomized SVD, parallelised across seeds)
-        embeddings = [
-            np.ascontiguousarray(emb)
-            for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
-        ]
+        if _precomputed_embeddings is not None:
+            assert all(e.shape[0] == X_scaled.shape[0] for e in _precomputed_embeddings), (
+                "Precomputed embedding row count does not match current data"
+            )
+            embeddings = _precomputed_embeddings
+        else:
+            embeddings = [
+                np.ascontiguousarray(emb)
+                for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
+            ]
+        # Cache embeddings for MCP session reuse
+        self._embeddings = embeddings
 
         # 6. BallMapper grid (Rust parallel)
         self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)

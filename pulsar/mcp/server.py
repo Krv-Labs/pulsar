@@ -5,6 +5,8 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 """
 
 import dataclasses
+import hashlib
+import json
 import logging
 import os
 from typing import Dict, Optional
@@ -28,6 +30,8 @@ class _PulsarSession:
     model: Optional[ThemaRS] = None
     data: Optional[pd.DataFrame] = None
     clusters: Optional[pd.Series] = None
+    embeddings: Optional[list] = None                # cached PCA output from last fit
+    pca_fingerprint: Optional[str] = None            # SHA256 of (data_path, dims, seeds, n_rows)
 
 
 # Global session storage, keyed by session_id (or "default" for STDIO)
@@ -55,6 +59,22 @@ def _validate_config_path(path: str) -> None:
         raise ValueError(f"Config must be a YAML file (*.yaml or *.yml), got: {path}")
 
 
+def _pca_fingerprint(cfg, n_rows: int) -> str:
+    """
+    Compute a fingerprint for PCA configuration and data shape.
+
+    Used to detect when cached PCA embeddings can be reused (same data + PCA params).
+    Includes data_path and n_rows to invalidate cache on data changes.
+    """
+    payload = json.dumps({
+        "data_path": cfg.data,
+        "dimensions": list(cfg.pca.dimensions),
+        "seeds": list(cfg.pca.seeds),
+        "n_rows": n_rows,
+    })
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 @mcp.tool()
 async def run_topological_sweep(config_path: str, ctx: Context) -> str:
     """
@@ -74,10 +94,25 @@ async def run_topological_sweep(config_path: str, ctx: Context) -> str:
         logger.info("Starting topological sweep for: %s", config_path)
 
         model = ThemaRS(config_path)
-        model.fit()
+        cfg = model.config
+
+        # Check if cached PCA embeddings can be reused (same data + PCA params)
+        precomputed = None
+        if session.embeddings is not None and session.data is not None:
+            fingerprint = _pca_fingerprint(cfg, len(session.data))
+            if fingerprint == session.pca_fingerprint:
+                precomputed = session.embeddings
+                logger.info("Reusing cached PCA embeddings (fingerprint match)")
+
+        model.fit(_precomputed_embeddings=precomputed)
 
         session.model = model
         session.data = model.data  # Use public property
+
+        # Update session cache with fresh embeddings if not reused
+        if precomputed is None:
+            session.embeddings = model._embeddings
+            session.pca_fingerprint = _pca_fingerprint(cfg, len(model.data))
 
         graph = model.cosmic_graph
         result = (
@@ -202,6 +237,71 @@ async def export_labeled_data(
         return error_msg
     except OSError as e:
         error_msg = f"Error writing to {output_path}: {e}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def characterize_dataset(csv_path: str, ctx: Context) -> str:
+    """
+    Probes dataset geometry before fitting to suggest PCA dims and epsilon range.
+
+    Returns JSON with profile (measurements), recommendations (derived outputs),
+    and a suggested params.yaml template for use with run_topological_sweep().
+
+    Args:
+        csv_path: Path to CSV file (must have >=2 numeric columns).
+        ctx: FastMCP context (auto-injected).
+
+    Returns:
+        JSON string with CharacterizationResult or error message.
+    """
+    try:
+        from pulsar.characterization import characterize_dataset as _char
+
+        result = _char(csv_path)
+        return json.dumps(dataclasses.asdict(result), indent=2)
+    except (ValueError, FileNotFoundError) as e:
+        error_msg = f"Error: {e}"
+        logger.error(error_msg)
+        return error_msg
+    except (RuntimeError, OSError) as e:
+        error_msg = f"Error analyzing dataset: {e}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def diagnose_cosmic_graph(ctx: Context) -> str:
+    """
+    Classifies the fitted cosmic graph and suggests epsilon corrections.
+
+    Analyzes graph structure (density, connectivity, components) to classify
+    quality as good/hairball/singletons/fragmented/sparse_connected and returns
+    concrete suggested epsilon range for parameter retry loops.
+
+    Args:
+        ctx: FastMCP context (auto-injected).
+
+    Returns:
+        JSON string with DiagnosisResult or error message.
+    """
+    session = _get_session(ctx)
+
+    if session.model is None:
+        return "Error: No model found. Run run_topological_sweep() first."
+
+    try:
+        from pulsar.mcp.diagnostics import diagnose_model
+
+        result = diagnose_model(session.model)
+        return json.dumps(dataclasses.asdict(result), indent=2)
+    except RuntimeError as e:
+        error_msg = f"Error: {e}"
+        logger.error(error_msg)
+        return error_msg
+    except (ValueError, Exception) as e:
+        error_msg = f"Error diagnosing graph: {e}"
         logger.error(error_msg)
         return error_msg
 
