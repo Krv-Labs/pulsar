@@ -107,7 +107,7 @@ def _cluster_by_components(graph, n: int) -> pd.Series:
 def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
     """Spectral clustering with silhouette-optimized k. Raises ValueError on failure."""
     affinity = np.asarray(adj)
-    
+
     # Silhouette requires a distance matrix if metric="precomputed".
     # Convert affinity (similarity) to distance: dist = max(aff) - aff.
     aff_max = affinity.max()
@@ -115,7 +115,7 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
     np.fill_diagonal(distance, 0.0)
 
     connectivity = nx.from_numpy_array((affinity > 0).astype(np.int8))
-    
+
     if n > 1 and not nx.is_connected(connectivity):
         n_comp = nx.number_connected_components(connectivity)
         raise ValueError(
@@ -129,7 +129,7 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
 
     k_range = range(_SPECTRAL_K_MIN, min(max_k + 1, n))
     scores_by_k = {}
-    
+
     for k_test in k_range:
         sc = SpectralClustering(
             n_clusters=k_test,
@@ -157,7 +157,7 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
             best_score,
         )
         return pd.Series(best_labels, name="cluster")
-    
+
     # If we get here, no stable cut was found
     max_score = max(scores_by_k.values()) if scores_by_k else 0.0
     raise ValueError(

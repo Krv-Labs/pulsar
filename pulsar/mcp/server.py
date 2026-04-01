@@ -264,7 +264,7 @@ async def explain_suggestion(
             if "range" in eps_node:
                 r = eps_node["range"]
                 e_min, e_max = r.get("min", 0), r.get("max", 0)
-                explanation += f"- **Epsilon Range {eps_str}**: Anchored at knn_k5_mean={knn_mean:.4f}. The range spans {e_min/knn_mean:.2f}x to {e_max/knn_mean:.2f}x the mean distance, transitioning from local neighborhoods to global structure.\n"
+                explanation += f"- **Epsilon Range {eps_str}**: Anchored at knn_k5_mean={knn_mean:.4f}. The range spans {e_min / knn_mean:.2f}x to {e_max / knn_mean:.2f}x the mean distance, transitioning from local neighborhoods to global structure.\n"
             else:
                 explanation += f"- **Epsilon {eps_str}**: Evaluated relative to knn_k5_mean={knn_mean:.4f}.\n"
         else:
@@ -302,7 +302,7 @@ async def get_experiment_history(ctx: Context) -> str:
 
         m = record.metrics
         lines.append(
-            f"| {i+1} | {pca} | {eps} | {m.get('n_nodes')} | {m.get('n_edges')} | {m.get('component_count')} | {m.get('giant_fraction', 0):.2%} |"
+            f"| {i + 1} | {pca} | {eps} | {m.get('n_nodes')} | {m.get('n_edges')} | {m.get('component_count')} | {m.get('giant_fraction', 0):.2%} |"
         )
 
     return "\n".join(lines)

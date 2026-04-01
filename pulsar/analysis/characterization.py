@@ -20,6 +20,7 @@ from pulsar._pulsar import pca_grid
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class ColumnProfile:
     """Per-column metadata for LLM preprocessing decisions."""
