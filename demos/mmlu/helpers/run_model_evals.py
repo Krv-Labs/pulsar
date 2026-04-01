@@ -808,7 +808,7 @@ async def run_one_model(
         progress.update(
             task_id,
             description=(
-                f"[red]{model_name}[/] " f"(failed: {compact_error_message(message)})"
+                f"[red]{model_name}[/] (failed: {compact_error_message(message)})"
             ),
         )
         log_full_error("failed", message)
@@ -989,8 +989,7 @@ async def main(args: argparse.Namespace):
     console.print(f"\nCompleted in [green]{elapsed:.0f}s[/]")
     console.print(f"Saved: [blue]{OUTPUT_CSV}[/]")
     console.print(
-        f"  {len(out_df)} rows "
-        f"({models_with_results} models with finalized results)\n"
+        f"  {len(out_df)} rows ({models_with_results} models with finalized results)\n"
     )
 
     table = Table(title="Overall Accuracy")

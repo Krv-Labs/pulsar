@@ -64,7 +64,9 @@ def test_precomputed_embeddings_bypasses_pca_grid(basic_config, test_data):
         model2.fit(data=test_data, _precomputed_embeddings=embeddings1)
 
         # Verify pca_grid was NOT called
-        assert not mock_pca_grid.called, "pca_grid was called but should have been skipped"
+        assert not mock_pca_grid.called, (
+            "pca_grid was called but should have been skipped"
+        )
 
 
 def test_output_equivalence_with_cache(basic_config, test_data):
@@ -84,8 +86,11 @@ def test_output_equivalence_with_cache(basic_config, test_data):
 
     # Weighted adjacency should be numerically identical
     # (ball mapper is deterministic given same embeddings and epsilons)
-    np.testing.assert_array_almost_equal(wadj1, wadj2, decimal=10,
-        err_msg="Weighted adjacency differs with cached embeddings"
+    np.testing.assert_array_almost_equal(
+        wadj1,
+        wadj2,
+        decimal=10,
+        err_msg="Weighted adjacency differs with cached embeddings",
     )
 
 
@@ -115,27 +120,44 @@ def test_embeddings_stored_after_fit(basic_config, test_data):
     assert model._embeddings is not None, "model._embeddings is None after fit"
     assert isinstance(model._embeddings, list), "model._embeddings is not a list"
     assert len(model._embeddings) > 0, "model._embeddings is empty"
-    assert all(isinstance(e, np.ndarray) for e in model._embeddings), \
+    assert all(isinstance(e, np.ndarray) for e in model._embeddings), (
         "Not all embeddings are numpy arrays"
+    )
 
 
 def test_pca_fingerprint_changes_on_dimension_change():
     """Assert fingerprint changes when PCA dimensions change."""
-    cfg1 = type("MockConfig", (), {
-        "data": "/path/to/data.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [42],
-        })()
-    })()
+    cfg1 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
 
-    cfg2 = type("MockConfig", (), {
-        "data": "/path/to/data.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 4],  # Different
-            "seeds": [42],
-        })()
-    })()
+    cfg2 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 4],  # Different
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
 
     fp1 = pca_fingerprint(cfg1, 100)
     fp2 = pca_fingerprint(cfg2, 100)
@@ -145,21 +167,37 @@ def test_pca_fingerprint_changes_on_dimension_change():
 
 def test_pca_fingerprint_changes_on_seed_change():
     """Assert fingerprint changes when PCA seeds change."""
-    cfg1 = type("MockConfig", (), {
-        "data": "/path/to/data.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [42],
-        })()
-    })()
+    cfg1 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
 
-    cfg2 = type("MockConfig", (), {
-        "data": "/path/to/data.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [99],  # Different
-        })()
-    })()
+    cfg2 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [99],  # Different
+                },
+            )(),
+        },
+    )()
 
     fp1 = pca_fingerprint(cfg1, 100)
     fp2 = pca_fingerprint(cfg2, 100)
@@ -169,13 +207,21 @@ def test_pca_fingerprint_changes_on_seed_change():
 
 def test_pca_fingerprint_changes_on_shape_change():
     """Assert fingerprint changes when data row count changes."""
-    cfg = type("MockConfig", (), {
-        "data": "/path/to/data.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [42],
-        })()
-    })()
+    cfg = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
 
     fp1 = pca_fingerprint(cfg, 100)
     fp2 = pca_fingerprint(cfg, 150)  # Different row count
@@ -185,21 +231,37 @@ def test_pca_fingerprint_changes_on_shape_change():
 
 def test_pca_fingerprint_changes_on_path_change():
     """Assert fingerprint changes when data path changes."""
-    cfg1 = type("MockConfig", (), {
-        "data": "/path/to/data1.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [42],
-        })()
-    })()
+    cfg1 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data1.csv",
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
 
-    cfg2 = type("MockConfig", (), {
-        "data": "/path/to/data2.csv",  # Different
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [42],
-        })()
-    })()
+    cfg2 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data2.csv",  # Different
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
 
     fp1 = pca_fingerprint(cfg1, 100)
     fp2 = pca_fingerprint(cfg2, 100)
@@ -211,10 +273,14 @@ def test_pca_fingerprint_stable_on_epsilon_change():
     """Assert fingerprint is STABLE when only epsilon changes (key correctness test)."""
     cfg_base = {
         "data": "/path/to/data.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [42],
-        })()
+        "pca": type(
+            "MockPCA",
+            (),
+            {
+                "dimensions": [2, 3],
+                "seeds": [42],
+            },
+        )(),
     }
 
     # Create two configs that differ only in epsilon
@@ -235,13 +301,21 @@ def test_pca_fingerprint_stable_on_epsilon_change():
 
 def test_pca_fingerprint_format_is_hash():
     """Assert fingerprint is a valid SHA256 hex string."""
-    cfg = type("MockConfig", (), {
-        "data": "/path/to/data.csv",
-        "pca": type("MockPCA", (), {
-            "dimensions": [2, 3],
-            "seeds": [42],
-        })()
-    })()
+    cfg = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
 
     fp = pca_fingerprint(cfg, 100)
 

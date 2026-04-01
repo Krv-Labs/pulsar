@@ -280,8 +280,7 @@ def test_sklearn_subspace_agreement():
     for i in range(n_components):
         corr = np.abs(np.corrcoef(pulsar_proj[:, i], sklearn_proj[:, i])[0, 1])
         assert corr > 0.95, (
-            f"Component {i}: Pulsar-sklearn correlation = {corr:.4f}, "
-            f"expected > 0.95"
+            f"Component {i}: Pulsar-sklearn correlation = {corr:.4f}, expected > 0.95"
         )
 
 

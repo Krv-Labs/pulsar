@@ -22,7 +22,13 @@ import numpy as np
 import pandas as pd
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 from scipy.spatial.distance import pdist
 
@@ -99,7 +105,9 @@ def summarise(values: np.ndarray) -> dict[str, float]:
         return {label: 0.0 for label in SUMMARY_LABELS.values()}
 
     percentiles = np.percentile(values, DISTANCE_PERCENTILES)
-    summary = {SUMMARY_LABELS[p]: float(v) for p, v in zip(DISTANCE_PERCENTILES, percentiles)}
+    summary = {
+        SUMMARY_LABELS[p]: float(v) for p, v in zip(DISTANCE_PERCENTILES, percentiles)
+    }
     summary["mean"] = float(np.mean(values))
     summary["std"] = float(np.std(values))
     return summary
@@ -107,7 +115,9 @@ def summarise(values: np.ndarray) -> dict[str, float]:
 
 def format_summary(summary: dict[str, float], precision: int = 4) -> str:
     keys = ["min", "p05", "p25", "p50", "p75", "p95", "max"]
-    return " | ".join(f"{key}={summary[key]:.{precision}f}" for key in keys if key in summary)
+    return " | ".join(
+        f"{key}={summary[key]:.{precision}f}" for key in keys if key in summary
+    )
 
 
 def load_cfg(config_path: str) -> tuple[ConfigSummary, object]:
@@ -123,7 +133,9 @@ def load_cfg(config_path: str) -> tuple[ConfigSummary, object]:
         seeds=list(cfg.pca.seeds),
         epsilons=list(cfg.ball_mapper.epsilons),
         threshold=cfg.cosmic_graph.threshold,
-        n_maps=len(cfg.pca.dimensions) * len(cfg.pca.seeds) * len(cfg.ball_mapper.epsilons),
+        n_maps=len(cfg.pca.dimensions)
+        * len(cfg.pca.seeds)
+        * len(cfg.ball_mapper.epsilons),
     )
     return summary, cfg
 
@@ -145,7 +157,9 @@ def load_data(n_subsample: int = 5000, seed: int = 42):
         indices.extend(chosen.tolist())
 
     if len(indices) > n_subsample:
-        indices = rng.choice(np.asarray(indices, dtype=np.int64), size=n_subsample, replace=False).tolist()
+        indices = rng.choice(
+            np.asarray(indices, dtype=np.int64), size=n_subsample, replace=False
+        ).tolist()
 
     indices_arr = np.sort(np.asarray(indices, dtype=np.int64))
     embeddings_sub = np.asarray(embeddings_all[indices_arr], dtype=np.float64)
@@ -161,7 +175,9 @@ def diagnose_distances(
 ) -> DistanceSummary:
     """Estimate the distance scale that Ball Mapper actually sees."""
     sample_size = min(n_sample, len(embeddings_sub))
-    idx = np.random.default_rng(42).choice(len(embeddings_sub), size=sample_size, replace=False)
+    idx = np.random.default_rng(42).choice(
+        len(embeddings_sub), size=sample_size, replace=False
+    )
     sample = np.ascontiguousarray(embeddings_sub[idx], dtype=np.float64)
 
     raw_dists = pdist(sample, metric="euclidean")
@@ -181,7 +197,9 @@ def diagnose_distances(
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task("Computing post-scale PCA distance ranges", total=max(len(unique_dims), 1))
+        task = progress.add_task(
+            "Computing post-scale PCA distance ranges", total=max(len(unique_dims), 1)
+        )
         if not unique_dims:
             progress.advance(task)
         for dim, embedding in zip(unique_dims, pca_embeddings):
@@ -205,7 +223,9 @@ def diagnose_distances(
 def run_sweep(embeddings_sub: np.ndarray, cfg) -> tuple[ThemaRS, float]:
     df_emb = pd.DataFrame(embeddings_sub)
     t0 = time.perf_counter()
-    with console.status("[bold cyan]Running Pulsar sweep...[/bold cyan]", spinner="dots"):
+    with console.status(
+        "[bold cyan]Running Pulsar sweep...[/bold cyan]", spinner="dots"
+    ):
         model = ThemaRS(cfg).fit(data=df_emb)
     elapsed = time.perf_counter() - t0
     return model, elapsed
@@ -273,7 +293,10 @@ def render_header(cfg_summary: ConfigSummary, n_rows: int, n_subjects: int) -> N
 
 
 def render_distance_summary(summary: DistanceSummary) -> None:
-    table = Table(title=f"Distance Scale ({summary.sample_size}-point sample)", header_style="bold cyan")
+    table = Table(
+        title=f"Distance Scale ({summary.sample_size}-point sample)",
+        header_style="bold cyan",
+    )
     table.add_column("Space", style="bold")
     table.add_column("Summary")
     table.add_row("Raw embeddings", format_summary(summary.raw))
@@ -300,18 +323,33 @@ def render_graph_summary(summary: GraphSummary) -> None:
     table.add_row("Nodes", f"{summary.n_nodes:,}")
     table.add_row("Edges", f"{summary.n_edges:,} ({summary.density:.2%} density)")
     table.add_row("Resolved threshold", f"{summary.resolved_threshold:.6f}")
-    table.add_row("Non-zero pairs", f"{summary.nonzero_pairs:,} / {summary.total_pairs:,} ({summary.nonzero_fraction:.2%})")
-    table.add_row("Weight distribution", format_summary(summary.weight_stats, precision=6))
+    table.add_row(
+        "Non-zero pairs",
+        f"{summary.nonzero_pairs:,} / {summary.total_pairs:,} ({summary.nonzero_fraction:.2%})",
+    )
+    table.add_row(
+        "Weight distribution", format_summary(summary.weight_stats, precision=6)
+    )
     table.add_row("Connected components", str(summary.component_count))
-    table.add_row("Giant component", f"{summary.component_sizes[0]:,} ({summary.giant_fraction:.1%})" if summary.component_sizes else "0")
+    table.add_row(
+        "Giant component",
+        f"{summary.component_sizes[0]:,} ({summary.giant_fraction:.1%})"
+        if summary.component_sizes
+        else "0",
+    )
     table.add_row("Singletons", f"{summary.singleton_count:,}")
     if summary.component_sizes:
-        table.add_row("Top component sizes", ", ".join(f"{size:,}" for size in summary.component_sizes[:10]))
+        table.add_row(
+            "Top component sizes",
+            ", ".join(f"{size:,}" for size in summary.component_sizes[:10]),
+        )
     console.print(table)
 
 
 def render_ball_map_summary(summary: BallMapSummary, n_points: int) -> None:
-    table = Table(title=f"Ball Mapper Diversity ({summary.n_maps} maps)", header_style="bold cyan")
+    table = Table(
+        title=f"Ball Mapper Diversity ({summary.n_maps} maps)", header_style="bold cyan"
+    )
     table.add_column("Metric", style="bold")
     table.add_column("Summary")
     table.add_row("Ball counts", format_summary(summary.node_stats, precision=1))
@@ -319,7 +357,9 @@ def render_ball_map_summary(summary: BallMapSummary, n_points: int) -> None:
     table.add_row("Epsilons", format_summary(summary.epsilon_stats, precision=2))
     table.add_row("Unique node counts", str(summary.unique_node_counts))
     table.add_row("Unique edge counts", str(summary.unique_edge_counts))
-    table.add_row("Median balls / points", f"{summary.node_stats['p50'] / max(n_points, 1):.2%}")
+    table.add_row(
+        "Median balls / points", f"{summary.node_stats['p50'] / max(n_points, 1):.2%}"
+    )
     console.print(table)
 
 
@@ -332,7 +372,11 @@ def build_suggestions(
     suggestions: list[str] = []
     median_balls = ball_map_summary.node_stats["p50"]
     p95_weight = graph_summary.weight_stats.get("p95", 0.0)
-    zero_threshold = cfg_summary.threshold == 0 or cfg_summary.threshold == 0.0 or cfg_summary.threshold == "0.0"
+    zero_threshold = (
+        cfg_summary.threshold == 0
+        or cfg_summary.threshold == 0.0
+        or cfg_summary.threshold == "0.0"
+    )
 
     if distance_summary.scale_ratio > 3:
         suggestions.append(
@@ -367,7 +411,11 @@ def build_suggestions(
                 "The cosmic graph is extremely dense. You may be washing out structure. Reduce epsilon or use a stronger threshold for visualization and diagnostics."
             )
 
-    if cfg_summary.threshold == "auto" and graph_summary.resolved_threshold > p95_weight and p95_weight > 0:
+    if (
+        cfg_summary.threshold == "auto"
+        and graph_summary.resolved_threshold > p95_weight
+        and p95_weight > 0
+    ):
         suggestions.append(
             "Auto-threshold landed above the 95th percentile of non-zero weights. For smooth text embeddings, that usually over-prunes the graph. Try `threshold: 0.0` and cluster on the weighted adjacency instead."
         )
@@ -398,7 +446,12 @@ def plot_diagnostics(model: ThemaRS, save_dir: Path, show_plot: bool) -> Path:
     ax = axes[0, 0]
     if len(nonzero) > 0:
         ax.hist(nonzero, bins=100, alpha=0.75, color="#4C72B0", edgecolor="white")
-        ax.axvline(model.resolved_threshold, color="#C44E52", linestyle="--", label=f"threshold={model.resolved_threshold:.4f}")
+        ax.axvline(
+            model.resolved_threshold,
+            color="#C44E52",
+            linestyle="--",
+            label=f"threshold={model.resolved_threshold:.4f}",
+        )
         ax.set_title("Non-zero Edge Weights")
         ax.legend()
     else:
@@ -407,7 +460,12 @@ def plot_diagnostics(model: ThemaRS, save_dir: Path, show_plot: bool) -> Path:
 
     ax = axes[0, 1]
     ax.hist(upper, bins=100, alpha=0.75, color="#55A868", edgecolor="white")
-    ax.axvline(model.resolved_threshold, color="#C44E52", linestyle="--", label=f"threshold={model.resolved_threshold:.4f}")
+    ax.axvline(
+        model.resolved_threshold,
+        color="#C44E52",
+        linestyle="--",
+        label=f"threshold={model.resolved_threshold:.4f}",
+    )
     ax.set_title("All Pair Weights")
     ax.legend()
 
@@ -425,7 +483,12 @@ def plot_diagnostics(model: ThemaRS, save_dir: Path, show_plot: bool) -> Path:
         thresholds = np.asarray(sr.thresholds)
         counts = np.asarray(sr.component_counts)
         ax.plot(thresholds, counts, color="#C44E52", linewidth=1.5)
-        ax.axvline(sr.optimal_threshold, color="#4C72B0", linestyle="--", label=f"auto={sr.optimal_threshold:.4f}")
+        ax.axvline(
+            sr.optimal_threshold,
+            color="#4C72B0",
+            linestyle="--",
+            label=f"auto={sr.optimal_threshold:.4f}",
+        )
         ax.set_xlabel("Threshold")
         ax.set_ylabel("Connected components")
         ax.set_title("Stability Curve")
@@ -450,17 +513,32 @@ def main():
     parser = argparse.ArgumentParser(
         description="Diagnose whether a Pulsar config is producing a useful MMLU cosmic graph."
     )
-    parser.add_argument("--config", default="mmlu_params.yaml", help="Path to params YAML.")
-    parser.add_argument("--n-subsample", type=int, default=5000, help="Stratified sample size to diagnose.")
+    parser.add_argument(
+        "--config", default="mmlu_params.yaml", help="Path to params YAML."
+    )
+    parser.add_argument(
+        "--n-subsample",
+        type=int,
+        default=5000,
+        help="Stratified sample size to diagnose.",
+    )
     parser.add_argument(
         "--distance-sample",
         type=int,
         default=DEFAULT_DISTANCE_SAMPLE,
         help="Sample size used for pairwise-distance diagnostics.",
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for the stratified subsample.")
-    parser.add_argument("--no-plot", action="store_true", help="Skip generating diagnostics.png.")
-    parser.add_argument("--show-plot", action="store_true", help="Display the matplotlib figure after saving it.")
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for the stratified subsample."
+    )
+    parser.add_argument(
+        "--no-plot", action="store_true", help="Skip generating diagnostics.png."
+    )
+    parser.add_argument(
+        "--show-plot",
+        action="store_true",
+        help="Display the matplotlib figure after saving it.",
+    )
     args = parser.parse_args()
 
     cfg_summary, cfg = load_cfg(args.config)
@@ -478,14 +556,18 @@ def main():
         progress.advance(task)
         _, df_mmlu, embeddings_sub, _ = load_data(args.n_subsample, seed=args.seed)
         progress.advance(task)
-        distance_summary = diagnose_distances(embeddings_sub, cfg_summary.dimensions, args.distance_sample)
+        distance_summary = diagnose_distances(
+            embeddings_sub, cfg_summary.dimensions, args.distance_sample
+        )
         progress.advance(task)
         model, sweep_elapsed = run_sweep(embeddings_sub, cfg)
         progress.advance(task)
 
     graph_summary = diagnose_graph(model)
     ball_map_summary = diagnose_ball_maps(model)
-    suggestions = build_suggestions(cfg_summary, distance_summary, graph_summary, ball_map_summary)
+    suggestions = build_suggestions(
+        cfg_summary, distance_summary, graph_summary, ball_map_summary
+    )
 
     render_header(cfg_summary, len(embeddings_sub), df_mmlu["subject"].nunique())
     console.print(f"[bold]Sweep runtime:[/bold] {sweep_elapsed:.1f}s")
@@ -495,7 +577,9 @@ def main():
     render_suggestions(suggestions)
 
     if not args.no_plot:
-        with console.status("[bold cyan]Saving diagnostic plots...[/bold cyan]", spinner="dots"):
+        with console.status(
+            "[bold cyan]Saving diagnostic plots...[/bold cyan]", spinner="dots"
+        ):
             output_path = plot_diagnostics(model, DATA_DIR, show_plot=args.show_plot)
         console.print(f"[bold]Saved:[/bold] {output_path}")
 

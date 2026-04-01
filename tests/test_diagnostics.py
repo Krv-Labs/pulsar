@@ -120,7 +120,13 @@ def test_returns_diagnosis_result(fitted_model):
 def test_quality_valid_enum(fitted_model):
     """Assert quality is one of the valid states."""
     result = diagnose_model(fitted_model)
-    valid_qualities = {"good", "hairball", "singletons", "fragmented", "sparse_connected"}
+    valid_qualities = {
+        "good",
+        "hairball",
+        "singletons",
+        "fragmented",
+        "sparse_connected",
+    }
     assert result.quality in valid_qualities
 
 
@@ -357,7 +363,9 @@ def test_suggested_config_yaml_preserves_pca(fitted_model):
     result = diagnose_model(fitted_model)
     parsed = yaml.safe_load(result.suggested_config_yaml)
     orig_cfg = fitted_model.config
-    assert parsed["sweep"]["pca"]["dimensions"]["values"] == list(orig_cfg.pca.dimensions)
+    assert parsed["sweep"]["pca"]["dimensions"]["values"] == list(
+        orig_cfg.pca.dimensions
+    )
     assert parsed["sweep"]["pca"]["seed"]["values"] == list(orig_cfg.pca.seeds)
 
 
@@ -431,8 +439,12 @@ def test_sweep_with_inline_yaml_dict(basic_config):
 def test_history_binary_search(fitted_model):
     """Assert history narrows epsilon via binary search between sparse and dense bounds."""
     history = [
-        SweepHistoryEntry(quality="singletons", epsilon_min=0.5, epsilon_max=1.0, pca_dims=[2]),
-        SweepHistoryEntry(quality="hairball", epsilon_min=2.0, epsilon_max=3.0, pca_dims=[2]),
+        SweepHistoryEntry(
+            quality="singletons", epsilon_min=0.5, epsilon_max=1.0, pca_dims=[2]
+        ),
+        SweepHistoryEntry(
+            quality="hairball", epsilon_min=2.0, epsilon_max=3.0, pca_dims=[2]
+        ),
     ]
     result = diagnose_model(fitted_model, history=history)
     # Binary search: midpoint of lower_bound=1.0 and upper_bound=2.0 = 1.5
@@ -444,9 +456,15 @@ def test_history_binary_search(fitted_model):
 def test_history_oscillation_suggests_pca_reduction(fitted_model):
     """Assert oscillation detection triggers PCA reduction suggestion."""
     history = [
-        SweepHistoryEntry(quality="singletons", epsilon_min=0.5, epsilon_max=1.0, pca_dims=[10]),
-        SweepHistoryEntry(quality="hairball", epsilon_min=2.0, epsilon_max=3.0, pca_dims=[10]),
-        SweepHistoryEntry(quality="singletons", epsilon_min=1.0, epsilon_max=1.5, pca_dims=[10]),
+        SweepHistoryEntry(
+            quality="singletons", epsilon_min=0.5, epsilon_max=1.0, pca_dims=[10]
+        ),
+        SweepHistoryEntry(
+            quality="hairball", epsilon_min=2.0, epsilon_max=3.0, pca_dims=[10]
+        ),
+        SweepHistoryEntry(
+            quality="singletons", epsilon_min=1.0, epsilon_max=1.5, pca_dims=[10]
+        ),
     ]
     result = diagnose_model(fitted_model, history=history)
     assert any("pca" in s.lower() and "reduc" in s.lower() for s in result.suggestions)
@@ -474,10 +492,18 @@ def test_no_history_uses_blind_multiplier(fitted_model):
 def test_hairball_no_contradictory_suggestions():
     """Assert hairball suggestions don't contain 'increasing' and 'epsilon' together."""
     m = GraphMetrics(
-        n_nodes=100, n_edges=4000, density=0.8, avg_degree=80,
-        giant_fraction=0.99, singleton_count=0, singleton_fraction=0.0,
-        component_count=1, resolved_threshold=0.1,
-        nonzero_fraction=0.9, weight_p50=0.5, weight_p95=0.8,
+        n_nodes=100,
+        n_edges=4000,
+        density=0.8,
+        avg_degree=80,
+        giant_fraction=0.99,
+        singleton_count=0,
+        singleton_fraction=0.0,
+        component_count=1,
+        resolved_threshold=0.1,
+        nonzero_fraction=0.9,
+        weight_p50=0.5,
+        weight_p95=0.8,
         component_sizes=[100],
     )
     _, suggestions = _build_diagnosis("hairball", m, 0.5)
@@ -490,10 +516,18 @@ def test_hairball_no_contradictory_suggestions():
 def test_singletons_suggest_lower_pca():
     """Assert singletons suggestions say 'lower PCA', not 'higher PCA'."""
     m = GraphMetrics(
-        n_nodes=100, n_edges=0, density=0.0, avg_degree=0.0,
-        giant_fraction=0.01, singleton_count=99, singleton_fraction=0.99,
-        component_count=100, resolved_threshold=0.9,
-        nonzero_fraction=0.0, weight_p50=0.0, weight_p95=0.0,
+        n_nodes=100,
+        n_edges=0,
+        density=0.0,
+        avg_degree=0.0,
+        giant_fraction=0.01,
+        singleton_count=99,
+        singleton_fraction=0.99,
+        component_count=100,
+        resolved_threshold=0.9,
+        nonzero_fraction=0.0,
+        weight_p50=0.0,
+        weight_p95=0.0,
         component_sizes=[1] * 100,
     )
     _, suggestions = _build_diagnosis("singletons", m, 2.0)
@@ -521,12 +555,15 @@ def test_clustering_notes_present(fitted_model):
     assert isinstance(result.clustering_notes, list)
     assert len(result.clustering_notes) >= 1
     # Should mention the largest component
-    assert any("largest component" in n.lower() or "%" in n for n in result.clustering_notes)
+    assert any(
+        "largest component" in n.lower() or "%" in n for n in result.clustering_notes
+    )
 
 
 def test_resolve_clusters_spectral_method(connected_spectral_model):
     """Assert spectral method clusters deterministic connected affinity."""
     from pulsar.mcp.interpreter import resolve_clusters
+
     clusters = resolve_clusters(connected_spectral_model, method="spectral")
     assert len(clusters) == connected_spectral_model.weighted_adjacency.shape[0]
     assert len(clusters.unique()) >= 2
@@ -535,6 +572,7 @@ def test_resolve_clusters_spectral_method(connected_spectral_model):
 def test_resolve_clusters_components_method(fitted_model):
     """Assert components method uses connected components."""
     from pulsar.mcp.interpreter import resolve_clusters
+
     clusters = resolve_clusters(fitted_model, method="components")
     # Should produce at least 1 cluster
     assert len(clusters.unique()) >= 1
@@ -543,8 +581,13 @@ def test_resolve_clusters_components_method(fitted_model):
 def test_resolve_clusters_max_k(connected_spectral_model):
     """Assert max_k parameter is respected — higher max_k can find more clusters."""
     from pulsar.mcp.interpreter import resolve_clusters
-    clusters_low = resolve_clusters(connected_spectral_model, method="spectral", max_k=3)
-    clusters_high = resolve_clusters(connected_spectral_model, method="spectral", max_k=15)
+
+    clusters_low = resolve_clusters(
+        connected_spectral_model, method="spectral", max_k=3
+    )
+    clusters_high = resolve_clusters(
+        connected_spectral_model, method="spectral", max_k=15
+    )
     # Both should produce valid clusters
     assert len(clusters_low.unique()) >= 2
     assert len(clusters_high.unique()) >= 2
@@ -553,7 +596,8 @@ def test_resolve_clusters_max_k(connected_spectral_model):
 
 
 def test_resolve_clusters_spectral_disconnected_falls_back_without_warning(
-    disconnected_spectral_model, caplog,
+    disconnected_spectral_model,
+    caplog,
 ):
     """Assert disconnected affinity skips spectral and falls back without sklearn warning."""
     from pulsar.mcp.interpreter import resolve_clusters
@@ -564,10 +608,7 @@ def test_resolve_clusters_spectral_disconnected_falls_back_without_warning(
             clusters = resolve_clusters(disconnected_spectral_model, method="spectral")
 
     assert (clusters.to_numpy() == 0).all()
-    assert not any(
-        "Graph is not fully connected" in str(w.message)
-        for w in caught
-    )
+    assert not any("Graph is not fully connected" in str(w.message) for w in caught)
     assert any(
         "spectral skipped, affinity graph disconnected" in rec.message
         for rec in caplog.records

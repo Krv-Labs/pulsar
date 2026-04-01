@@ -11,7 +11,9 @@ from pulsar.hooks import cosmic_to_networkx
 from pulsar._pulsar import CosmicGraph
 
 
-def make_simple_laplacian(n: int = 10, density: float = 0.3, seed: int = 42) -> np.ndarray:
+def make_simple_laplacian(
+    n: int = 10, density: float = 0.3, seed: int = 42
+) -> np.ndarray:
     """Create a simple symmetric Laplacian-like matrix for testing (int64 format)."""
     rng = np.random.default_rng(seed)
     # Build a sparse symmetric matrix
@@ -99,7 +101,9 @@ def test_symmetry_preserved():
     # For an undirected graph, if (u, v) is an edge, (v, u) is the same edge
     # Check by verifying adjacency is symmetric
     for u, v in g.edges():
-        assert g.has_edge(v, u), f"Graph not symmetric: edge ({u}, {v}) exists but ({v}, {u}) does not"
+        assert g.has_edge(v, u), (
+            f"Graph not symmetric: edge ({u}, {v}) exists but ({v}, {u}) does not"
+        )
         # Weights should also match (for symmetric matrix)
         w_uv = g[u][v].get("weight", None)
         w_vu = g[v][u].get("weight", None)

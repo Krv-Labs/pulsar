@@ -38,7 +38,9 @@ def numeric_csv(tmp_path):
 def csv_with_missing(tmp_path):
     """CSV with 20% missing values in first column."""
     rng = np.random.default_rng(42)
-    df = pd.DataFrame(rng.standard_normal((200, 5)), columns=[f"f{i}" for i in range(5)])
+    df = pd.DataFrame(
+        rng.standard_normal((200, 5)), columns=[f"f{i}" for i in range(5)]
+    )
     # Introduce 20% NaN in f0
     na_indices = rng.choice(len(df), size=40, replace=False)
     df.loc[na_indices, "f0"] = np.nan
@@ -51,7 +53,9 @@ def csv_with_missing(tmp_path):
 def csv_high_missing(tmp_path):
     """CSV with 35% missing values."""
     rng = np.random.default_rng(99)
-    df = pd.DataFrame(rng.standard_normal((200, 5)), columns=[f"f{i}" for i in range(5)])
+    df = pd.DataFrame(
+        rng.standard_normal((200, 5)), columns=[f"f{i}" for i in range(5)]
+    )
     na_indices = rng.choice(len(df), size=70, replace=False)
     df.loc[na_indices, "f0"] = np.nan
     path = tmp_path / "high_missing.csv"
@@ -62,9 +66,7 @@ def csv_high_missing(tmp_path):
 @pytest.fixture
 def categorical_csv(tmp_path):
     """CSV with only categorical columns (no numeric columns)."""
-    df = pd.DataFrame(
-        {"cat": ["a", "b", "c"] * 67, "dog": ["x", "y", "z"] * 67}
-    )
+    df = pd.DataFrame({"cat": ["a", "b", "c"] * 67, "dog": ["x", "y", "z"] * 67})
     path = tmp_path / "categorical.csv"
     df.to_csv(path, index=False)
     return str(path)
@@ -87,14 +89,16 @@ def large_numeric_csv(tmp_path):
 def mixed_csv(tmp_path):
     """CSV with numeric, string, and missing columns."""
     rng = np.random.default_rng(0)
-    df = pd.DataFrame({
-        "patient_id": [f"P{i:04d}" for i in range(200)],
-        "age": rng.integers(18, 90, size=200).astype(float),
-        "gender": rng.choice(["M", "F", "NB"], size=200),
-        "weight": rng.normal(70, 15, size=200),
-        "score1": rng.standard_normal(200),
-        "score2": rng.standard_normal(200),
-    })
+    df = pd.DataFrame(
+        {
+            "patient_id": [f"P{i:04d}" for i in range(200)],
+            "age": rng.integers(18, 90, size=200).astype(float),
+            "gender": rng.choice(["M", "F", "NB"], size=200),
+            "weight": rng.normal(70, 15, size=200),
+            "score1": rng.standard_normal(200),
+            "score2": rng.standard_normal(200),
+        }
+    )
     # Introduce 10% NaN in age
     na_idx = rng.choice(200, size=20, replace=False)
     df.loc[na_idx, "age"] = np.nan
@@ -251,7 +255,9 @@ def test_high_dimensionality_warning():
     """Verify high dimensionality case generates appropriate warning."""
     # Create high-dim data
     rng = np.random.default_rng(99)
-    df = pd.DataFrame(rng.standard_normal((100, 20)), columns=[f"f{i}" for i in range(20)])
+    df = pd.DataFrame(
+        rng.standard_normal((100, 20)), columns=[f"f{i}" for i in range(20)]
+    )
     with tempfile.TemporaryDirectory() as tmpdir:
         path = f"{tmpdir}/high_dim.csv"
         df.to_csv(path, index=False)
@@ -406,7 +412,9 @@ def test_pca_dims_capped_by_sample_size(tmp_path):
     """Assert PCA dims are capped by sqrt(n_samples) for small datasets."""
     rng = np.random.default_rng(0)
     # 100 rows, 50 features — spread variance across many dims
-    df = pd.DataFrame(rng.standard_normal((100, 50)), columns=[f"f{i}" for i in range(50)])
+    df = pd.DataFrame(
+        rng.standard_normal((100, 50)), columns=[f"f{i}" for i in range(50)]
+    )
     path = tmp_path / "small_wide.csv"
     df.to_csv(path, index=False)
     result = characterize_dataset(str(path))
@@ -419,7 +427,9 @@ def test_pca_dims_uncapped_large_sample(tmp_path):
     """Assert large sample size does not restrict dims below feature count."""
     rng = np.random.default_rng(0)
     # 10000 rows, 8 features — cap would be sqrt(10000)=100, well above 8
-    df = pd.DataFrame(rng.standard_normal((10000, 8)), columns=[f"f{i}" for i in range(8)])
+    df = pd.DataFrame(
+        rng.standard_normal((10000, 8)), columns=[f"f{i}" for i in range(8)]
+    )
     path = tmp_path / "large_narrow.csv"
     df.to_csv(path, index=False)
     result = characterize_dataset(str(path))

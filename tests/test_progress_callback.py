@@ -56,7 +56,9 @@ def test_callback_fires_in_order(basic_config, test_data):
 
     assert len(updates) > 0, "No callbacks fired"
     fractions = [f for _, f in updates]
-    assert all(0.0 < f <= 1.0 for f in fractions), f"Fractions out of range: {fractions}"
+    assert all(0.0 < f <= 1.0 for f in fractions), (
+        f"Fractions out of range: {fractions}"
+    )
     assert fractions == sorted(fractions), f"Fractions not monotonic: {fractions}"
     assert fractions[-1] == 1.0, "Final fraction must be exactly 1.0"
 
@@ -110,7 +112,9 @@ def test_cached_pca_fractions_reach_one(basic_config, test_data):
         _precomputed_embeddings=model1._embeddings,
     )
 
-    assert fractions[-1] == 1.0, f"Final fraction with cached PCA is {fractions[-1]}, not 1.0"
+    assert fractions[-1] == 1.0, (
+        f"Final fraction with cached PCA is {fractions[-1]}, not 1.0"
+    )
     assert fractions == sorted(fractions), f"Fractions not monotonic: {fractions}"
 
 
@@ -125,7 +129,9 @@ def test_no_duplicate_fractions_at_one(basic_config, test_data):
     )
 
     ones = [i for i, f in enumerate(fractions) if f == 1.0]
-    assert len(ones) == 1, f"Expected exactly one 1.0 fraction, got {len(ones)} at indices {ones}"
+    assert len(ones) == 1, (
+        f"Expected exactly one 1.0 fraction, got {len(ones)} at indices {ones}"
+    )
 
 
 def test_auto_threshold_reaches_one(auto_config, test_data):
@@ -186,6 +192,7 @@ def test_fit_with_progress_import_error(basic_config, test_data, monkeypatch):
     monkeypatch.setattr(builtins, "__import__", mock_import)
 
     from pulsar.progress import fit_with_progress
+
     cfg = load_config(basic_config)
 
     with pytest.raises(ImportError, match="rich"):
@@ -196,6 +203,7 @@ def test_fit_with_progress_import_error(basic_config, test_data, monkeypatch):
 # fit_multi tests
 # ---------------------------------------------------------------------------
 
+
 def test_fit_multi_callback_fires(basic_config):
     """fit_multi() progress_callback fires with dataset prefix in stage names."""
     cfg = load_config(basic_config)
@@ -204,14 +212,18 @@ def test_fit_multi_callback_fires(basic_config):
     ds2 = pd.DataFrame(rng.standard_normal((30, 3)), columns=["x", "y", "z"])
 
     updates: list[tuple[str, float]] = []
-    ThemaRS(cfg).fit_multi([ds1, ds2], progress_callback=lambda s, f: updates.append((s, f)))
+    ThemaRS(cfg).fit_multi(
+        [ds1, ds2], progress_callback=lambda s, f: updates.append((s, f))
+    )
 
     stages = [s for s, _ in updates]
     assert any("Dataset 1/2" in s for s in stages), f"Missing dataset 1 label: {stages}"
     assert any("Dataset 2/2" in s for s in stages), f"Missing dataset 2 label: {stages}"
 
     fractions = [f for _, f in updates]
-    assert fractions == sorted(fractions), f"fit_multi fractions not monotonic: {fractions}"
+    assert fractions == sorted(fractions), (
+        f"fit_multi fractions not monotonic: {fractions}"
+    )
     assert fractions[-1] == 1.0, f"fit_multi final fraction is {fractions[-1]}"
 
 
@@ -225,7 +237,9 @@ def test_fit_multi_stage_count(basic_config):
     stages: list[str] = []
     ThemaRS(cfg).fit_multi([ds1, ds2], progress_callback=lambda s, _: stages.append(s))
 
-    assert len(stages) == 12, f"Expected 12 callbacks for 2 datasets, got {len(stages)}: {stages}"
+    assert len(stages) == 12, (
+        f"Expected 12 callbacks for 2 datasets, got {len(stages)}: {stages}"
+    )
 
 
 def test_fit_multi_load_stage_present(basic_config):
@@ -249,7 +263,11 @@ def test_fit_multi_no_duplicate_one(basic_config):
     ds2 = pd.DataFrame(rng.standard_normal((30, 3)), columns=["x", "y", "z"])
 
     fractions: list[float] = []
-    ThemaRS(cfg).fit_multi([ds1, ds2], progress_callback=lambda _, f: fractions.append(f))
+    ThemaRS(cfg).fit_multi(
+        [ds1, ds2], progress_callback=lambda _, f: fractions.append(f)
+    )
 
     ones = [i for i, f in enumerate(fractions) if f == 1.0]
-    assert len(ones) == 1, f"Expected exactly one 1.0, got {len(ones)} at indices {ones}"
+    assert len(ones) == 1, (
+        f"Expected exactly one 1.0, got {len(ones)} at indices {ones}"
+    )

@@ -17,6 +17,7 @@ from pulsar.analysis.characterization import (
     DatasetProfile,
     GeometryRecommendations,
 )
+
 __all__ = [
     "label_points",
     "membership_matrix",
