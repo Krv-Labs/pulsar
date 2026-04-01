@@ -14,6 +14,7 @@ import yaml
 
 from pulsar.characterization import (
     CharacterizationResult,
+    ColumnProfile,
     DatasetProfile,
     GeometryRecommendations,
     characterize_dataset,
@@ -78,6 +79,26 @@ def large_numeric_csv(tmp_path):
         columns=[f"f{i}" for i in range(5)],
     )
     path = tmp_path / "large.csv"
+    df.to_csv(path, index=False)
+    return str(path)
+
+
+@pytest.fixture
+def mixed_csv(tmp_path):
+    """CSV with numeric, string, and missing columns."""
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({
+        "patient_id": [f"P{i:04d}" for i in range(200)],
+        "age": rng.integers(18, 90, size=200).astype(float),
+        "gender": rng.choice(["M", "F", "NB"], size=200),
+        "weight": rng.normal(70, 15, size=200),
+        "score1": rng.standard_normal(200),
+        "score2": rng.standard_normal(200),
+    })
+    # Introduce 10% NaN in age
+    na_idx = rng.choice(200, size=20, replace=False)
+    df.loc[na_idx, "age"] = np.nan
+    path = tmp_path / "mixed.csv"
     df.to_csv(path, index=False)
     return str(path)
 
@@ -150,6 +171,7 @@ def test_yaml_template_parseable(numeric_csv):
     assert "run" in parsed
     assert "sweep" in parsed
     assert "cosmic_graph" in parsed
+    assert "preprocessing" in parsed
 
 
 def test_no_warning_without_issues(numeric_csv):
@@ -239,3 +261,168 @@ def test_high_dimensionality_warning():
         # High-dim warning if suggested_dims >= 15
         if recs.suggested_dims_at_80pct >= 15:
             assert any("dimensionality" in w.lower() for w in recs.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Column profile tests
+# ---------------------------------------------------------------------------
+
+
+def test_column_profiles_present(mixed_csv):
+    """Assert column_profiles covers ALL original columns."""
+    result = characterize_dataset(mixed_csv)
+    profile = result.profile
+    assert profile.n_columns_total == 6
+    assert len(profile.column_profiles) == 6
+    assert all(isinstance(cp, ColumnProfile) for cp in profile.column_profiles)
+
+
+def test_column_profiles_non_numeric_detected(mixed_csv):
+    """Assert non-numeric columns are correctly flagged."""
+    result = characterize_dataset(mixed_csv)
+    by_name = {cp.name: cp for cp in result.profile.column_profiles}
+    assert not by_name["patient_id"].is_numeric
+    assert by_name["patient_id"].dtype in ("object", "str")
+    assert not by_name["gender"].is_numeric
+    assert by_name["age"].is_numeric
+    assert by_name["weight"].is_numeric
+
+
+def test_column_profiles_cardinality(mixed_csv):
+    """Assert cardinality distinguishes IDs from categoricals."""
+    result = characterize_dataset(mixed_csv)
+    by_name = {cp.name: cp for cp in result.profile.column_profiles}
+    # patient_id: 200 unique values (high cardinality = likely ID)
+    assert by_name["patient_id"].n_unique == 200
+    # gender: 3 unique values (low cardinality = categorical)
+    assert by_name["gender"].n_unique == 3
+
+
+def test_column_profiles_missing_detected(mixed_csv):
+    """Assert per-column missingness is reported."""
+    result = characterize_dataset(mixed_csv)
+    by_name = {cp.name: cp for cp in result.profile.column_profiles}
+    assert by_name["age"].n_missing == 20
+    assert by_name["age"].missing_pct == pytest.approx(10.0, abs=0.1)
+    assert by_name["weight"].n_missing == 0
+    assert by_name["weight"].missing_pct == 0.0
+
+
+def test_column_profiles_top_values_for_strings(mixed_csv):
+    """Assert top_values populated for non-numeric columns."""
+    result = characterize_dataset(mixed_csv)
+    by_name = {cp.name: cp for cp in result.profile.column_profiles}
+    assert by_name["gender"].top_values is not None
+    assert len(by_name["gender"].top_values) == 3  # M, F, NB
+    for val, count in by_name["gender"].top_values:
+        assert isinstance(val, str)
+        assert isinstance(count, int)
+    # Numeric columns should have no top_values
+    assert by_name["weight"].top_values is None
+
+
+def test_column_profiles_numeric_stats(mixed_csv):
+    """Assert numeric stats populated for numeric columns."""
+    result = characterize_dataset(mixed_csv)
+    by_name = {cp.name: cp for cp in result.profile.column_profiles}
+    assert by_name["weight"].mean is not None
+    assert by_name["weight"].std is not None
+    assert by_name["weight"].min_val is not None
+    assert by_name["weight"].max_val is not None
+    # Non-numeric should have None for these
+    assert by_name["gender"].mean is None
+    assert by_name["gender"].std is None
+
+
+def test_sample_values_are_strings(mixed_csv):
+    """Assert sample_values are always strings (JSON-safe)."""
+    result = characterize_dataset(mixed_csv)
+    for cp in result.profile.column_profiles:
+        for sv in cp.sample_values:
+            assert isinstance(sv, str)
+
+
+def test_yaml_template_drop_columns_empty(mixed_csv):
+    """Assert YAML template starts with empty drop_columns — agent decides."""
+    result = characterize_dataset(mixed_csv)
+    parsed = yaml.safe_load(result.recommendations.suggested_params_yaml)
+    assert parsed["preprocessing"]["drop_columns"] == []
+
+
+def test_yaml_template_has_impute_block(mixed_csv):
+    """Assert YAML template includes impute entries for missing numeric cols."""
+    result = characterize_dataset(mixed_csv)
+    parsed = yaml.safe_load(result.recommendations.suggested_params_yaml)
+    impute = parsed["preprocessing"]["impute"]
+    assert "age" in impute
+    assert impute["age"]["method"] == "fill_mean"
+    # weight has no missing values — should not appear
+    assert "weight" not in impute
+
+
+def test_non_numeric_warning_neutral(mixed_csv):
+    """Assert warning reports non-numeric columns factually without judgments."""
+    result = characterize_dataset(mixed_csv)
+    warnings = result.recommendations.warnings
+    # Should mention non-numeric columns exist
+    non_num_warnings = [w for w in warnings if "non-numeric" in w.lower()]
+    assert len(non_num_warnings) == 1
+    w = non_num_warnings[0]
+    # Should list column names with cardinality
+    assert "patient_id" in w
+    assert "gender" in w
+    # Should NOT contain judgment language
+    assert "likely IDs" not in w
+    assert "high-cardinality" not in w.lower()
+    assert "low-cardinality" not in w.lower()
+    # Should direct agent to column_profiles
+    assert "column_profiles" in w
+
+
+def test_missing_impute_warning(mixed_csv):
+    """Assert warning about imputed numeric columns."""
+    result = characterize_dataset(mixed_csv)
+    warnings = result.recommendations.warnings
+    assert any("fill_mean" in w for w in warnings)
+
+
+def test_backward_compat_numeric_only(numeric_csv):
+    """Assert pure-numeric CSV produces empty drop_columns and no impute."""
+    result = characterize_dataset(numeric_csv)
+    profile = result.profile
+    assert profile.n_columns_total == 5
+    assert all(cp.is_numeric for cp in profile.column_profiles)
+    parsed = yaml.safe_load(result.recommendations.suggested_params_yaml)
+    assert parsed["preprocessing"]["drop_columns"] == []
+    assert "impute" not in parsed["preprocessing"]
+
+
+# ---------------------------------------------------------------------------
+# PCA dim cap tests (Fix 2)
+# ---------------------------------------------------------------------------
+
+
+def test_pca_dims_capped_by_sample_size(tmp_path):
+    """Assert PCA dims are capped by sqrt(n_samples) for small datasets."""
+    rng = np.random.default_rng(0)
+    # 100 rows, 50 features — spread variance across many dims
+    df = pd.DataFrame(rng.standard_normal((100, 50)), columns=[f"f{i}" for i in range(50)])
+    path = tmp_path / "small_wide.csv"
+    df.to_csv(path, index=False)
+    result = characterize_dataset(str(path))
+    # sqrt(100) = 10 → all dims should be ≤ 10
+    for d in result.recommendations.pca_dims:
+        assert d <= 10, f"PCA dim {d} exceeds sqrt(100)=10 cap"
+
+
+def test_pca_dims_uncapped_large_sample(tmp_path):
+    """Assert large sample size does not restrict dims below feature count."""
+    rng = np.random.default_rng(0)
+    # 10000 rows, 8 features — cap would be sqrt(10000)=100, well above 8
+    df = pd.DataFrame(rng.standard_normal((10000, 8)), columns=[f"f{i}" for i in range(8)])
+    path = tmp_path / "large_narrow.csv"
+    df.to_csv(path, index=False)
+    result = characterize_dataset(str(path))
+    # All dims should be ≤ n_features-1 = 7 (not further restricted by sample cap)
+    for d in result.recommendations.pca_dims:
+        assert d <= 7
