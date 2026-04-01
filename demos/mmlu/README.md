@@ -14,6 +14,51 @@ jupyter notebook mmlu_topology_demo.ipynb
 
 First run downloads MMLU (~14k questions) and computes embeddings (~2 min on Apple Silicon, ~10 min CPU). Subsequent runs use cached data in `data/`.
 
+## Parallel Embedding Build (Bash)
+
+You can generate the notebook's embedding artifacts outside Jupyter with a parallel bash launcher.
+
+```bash
+cd demos/mmlu
+
+# Build missing embeddings in parallel across models (2 workers)
+bash helpers/generate_embeddings_parallel.sh --jobs 2 --download-mmlu
+
+# Optional: smoke run with fewer models/variants
+bash helpers/generate_embeddings_parallel.sh \
+  --jobs 2 \
+  --max-models-run 2 \
+  --max-variants-run 3
+```
+
+What this produces:
+
+- Per-artifact caches: `data/emb_<model>_<variant>_<sample>_n<rows>_s<seed>.npy`
+- Per-artifact sidecars: `*.npy.meta.json`
+- Consolidated index: `data/mmlu_embedding_artifacts_metadata.json`
+
+The notebook can then reuse these caches directly.
+
+## Run Cosmic Fit as a Script (No Notebook)
+
+If Jupyter kernels are unstable on your machine, run the fit stage directly:
+
+```bash
+cd demos/mmlu
+
+# Full fused fit across all cached embedding artifacts
+uv run python fit_cosmic_graph.py
+
+# Lower-memory run (example): fuse first 20 artifacts and batch BallMapper work
+uv run python fit_cosmic_graph.py --max-representations 20 --ballmap-batch-size 8
+```
+
+Outputs are written to `data/`:
+
+- `mmlu_cosmic_fit_summary.json` (fit metadata and graph stats)
+- `mmlu_cosmic_weighted_adjacency.npz` (weighted adjacency matrix; optional)
+- `mmlu_cosmic_selected_artifacts.txt` (artifact keys used in the fit)
+
 ## What This Shows
 
 MMLU is the standard LLM benchmark: 57 subjects, ~14,000 test questions, one leaderboard number. We ran Pulsar's multi-configuration topological sweep on the embedded question space and found:
