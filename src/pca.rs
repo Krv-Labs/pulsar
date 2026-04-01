@@ -11,7 +11,8 @@ use crate::error::PulsarError;
 /// Convert an ndarray `Array2<f64>` to a nalgebra `DMatrix<f64>`.
 fn ndarray_to_nalgebra(a: &Array2<f64>) -> DMatrix<f64> {
     let (nrows, ncols) = (a.nrows(), a.ncols());
-    DMatrix::from_iterator(nrows, ncols, a.iter().cloned())
+    let data: Vec<f64> = a.as_standard_layout().iter().cloned().collect();
+    DMatrix::from_row_slice(nrows, ncols, &data)
 }
 
 /// Convert a nalgebra `DMatrix<f64>` back to an ndarray `Array2<f64>`.
@@ -76,8 +77,23 @@ impl PCAInner {
             });
         }
 
+        if n_samples < 2 {
+            return Err(PulsarError::InvalidParameter {
+                msg: format!(
+                    "PCA requires at least 2 samples, got {}",
+                    n_samples
+                ),
+            });
+        }
+
+        if n_features == 0 {
+            return Err(PulsarError::InvalidParameter {
+                msg: "input data has 0 features (columns)".to_string(),
+            });
+        }
+
         // Step 1: centre data
-        let means = data.mean_axis(Axis(0)).unwrap();
+        let means = data.mean_axis(Axis(0)).expect("non-empty axis guaranteed above");
         let mut centered = data.clone();
         for mut row in centered.rows_mut() {
             row -= &means;
@@ -119,13 +135,21 @@ impl PCAInner {
         let k = n_components.min(n_sv);
         let mut components = v_t_nd.slice(s![..k, ..]).to_owned();
 
+        // Detect NaN in SVD output — indicates the decomposition failed to converge
+        for i in 0..k {
+            if components.row(i).iter().any(|v| v.is_nan()) {
+                return Err(PulsarError::SvdFailed);
+            }
+        }
+
         // Sign convention: largest-abs-value element must be positive
         for i in 0..k {
             let row = components.row(i);
+            // NaN-free guaranteed by the check above, so unwrap is safe
             let max_abs_idx = row
                 .iter()
                 .enumerate()
-                .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+                .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).expect("NaN excluded above"))
                 .map(|(idx, _)| idx)
                 .unwrap();
             if row[max_abs_idx] < 0.0 {
@@ -262,9 +286,20 @@ pub fn pca_grid<'py>(
     n_power_iter: usize,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     let arr = data.as_array().to_owned();
+    let n_features = arr.ncols();
     let max_dim = *dimensions.iter().max().ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err("dimensions list cannot be empty")
     })?;
+
+    if max_dim > n_features {
+        return Err(PulsarError::InvalidParameter {
+            msg: format!(
+                "requested dimension {} exceeds number of features ({})",
+                max_dim, n_features
+            ),
+        }
+        .into());
+    }
 
     let embeddings: Result<Vec<Vec<Array2<f64>>>, PulsarError> = seeds
         .par_iter()
