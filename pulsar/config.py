@@ -151,3 +151,45 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         n_reps=n_reps,
         run_name=run_name,
     )
+
+
+def config_to_yaml(cfg: PulsarConfig) -> str:
+    """Serialize a PulsarConfig to a reproducible YAML string.
+
+    Inverse of ``load_config``; every field is written explicitly so the
+    resulting YAML can recreate the exact same pipeline run.
+    """
+    # Preprocessing: drop_columns + impute
+    drop_line = str(cfg.drop_columns) if cfg.drop_columns else "[]"
+    impute_block = ""
+    if cfg.impute:
+        impute_block = "\n  impute:"
+        for col, spec in cfg.impute.items():
+            impute_block += f"\n    {col}: {{method: {spec.method}, seed: {spec.seed}}}"
+
+    # Threshold
+    threshold = cfg.cosmic_graph.threshold
+    threshold_str = f'"{threshold}"' if threshold == "auto" else str(threshold)
+
+    return f"""run:
+  name: {cfg.run_name or 'experiment'}
+  data: {cfg.data}
+preprocessing:
+  drop_columns: {drop_line}{impute_block}
+sweep:
+  pca:
+    dimensions:
+      values: {list(cfg.pca.dimensions)}
+    seed:
+      values: {list(cfg.pca.seeds)}
+  ball_mapper:
+    epsilon:
+      range:
+        min: {min(cfg.ball_mapper.epsilons):.4f}
+        max: {max(cfg.ball_mapper.epsilons):.4f}
+        steps: {len(cfg.ball_mapper.epsilons)}
+cosmic_graph:
+  threshold: {threshold_str}
+output:
+  n_reps: {cfg.n_reps}
+"""

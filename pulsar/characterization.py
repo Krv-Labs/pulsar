@@ -28,16 +28,36 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ColumnProfile:
+    """Per-column metadata for LLM preprocessing decisions."""
+
+    name: str
+    dtype: str                                          # pandas dtype as string
+    is_numeric: bool
+    n_unique: int                                       # unique non-null values
+    n_missing: int
+    missing_pct: float                                  # [0, 100]
+    sample_values: list[str]                            # up to 5, cast to str for JSON safety
+    mean: float | None                                  # numeric only
+    std: float | None                                   # numeric only
+    min_val: float | None                               # numeric only
+    max_val: float | None                               # numeric only
+    top_values: list[tuple[str, int]] | None            # non-numeric only: [(value, count)] top 5
+
+
+@dataclass
 class DatasetProfile:
     """Raw measurements only — no derived decisions."""
 
     n_samples: int
-    n_features: int
+    n_features: int                                     # numeric feature count
+    n_columns_total: int                                # all columns including non-numeric
     missingness_pct: float
     knn_k5_mean: float
     knn_k10_mean: float
     knn_k20_mean: float
-    pca_cumulative_variance: list[tuple[int, float]]  # [(dims, cumulative_ratio), ...]
+    pca_cumulative_variance: list[tuple[int, float]]    # [(dims, cumulative_ratio), ...]
+    column_profiles: list[ColumnProfile]                # one per original column
 
 
 @dataclass
@@ -88,6 +108,11 @@ def characterize_dataset(
     """
     # Step 1: Load and validate
     df = pd.read_csv(csv_path)
+
+    # Profile ALL columns before filtering to numeric
+    column_profiles = _profile_columns(df)
+    n_columns_total = len(df.columns)
+
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
     if len(numeric_cols) < 2:
@@ -147,7 +172,7 @@ def characterize_dataset(
             break
 
     pca_dims = _build_pca_dims_recommendation(
-        suggested_dims_at_80pct, dims_to_probe, n_features
+        suggested_dims_at_80pct, dims_to_probe, n_features, n_samples,
     )
 
     # Step 6: Epsilon suggestion anchored to k-NN distances
@@ -165,6 +190,30 @@ def characterize_dataset(
 
     # Step 8: Build warnings list
     warnings = []
+    # Report non-numeric columns as facts — the agent decides what to do.
+    non_numeric_summaries = [
+        f"{cp.name} ({cp.n_unique} unique"
+        + (f": {', '.join(str(v) for v, _ in (cp.top_values or [])[:3])}" if cp.top_values else "")
+        + ")"
+        for cp in column_profiles
+        if not cp.is_numeric
+    ]
+    if non_numeric_summaries:
+        warnings.append(
+            f"Non-numeric columns found: {', '.join(non_numeric_summaries)}. "
+            f"The pipeline requires float64 input. Review column_profiles and "
+            f"decide for each: add to drop_columns or encode before the sweep."
+        )
+    numeric_with_nan = [
+        f"{cp.name} ({cp.missing_pct:.1f}%)"
+        for cp in column_profiles
+        if cp.is_numeric and cp.missing_pct > 0
+    ]
+    if numeric_with_nan:
+        warnings.append(
+            f"Numeric columns with missing values (fill_mean default added): "
+            f"{', '.join(numeric_with_nan)}. Review imputation methods."
+        )
     if n_samples > subsample:
         warnings.append(f"Subsampled to {subsample} of {n_samples} rows for speed.")
     if missingness_pct > 30:
@@ -185,7 +234,8 @@ def characterize_dataset(
 
     # Step 9: Build YAML template
     suggested_params_yaml = _build_yaml_template(
-        csv_path, pca_dims, eps_min, eps_max, eps_steps, threshold_strategy
+        csv_path, pca_dims, eps_min, eps_max, eps_steps, threshold_strategy,
+        column_profiles,
     )
 
     rationale = (
@@ -199,11 +249,13 @@ def characterize_dataset(
     profile = DatasetProfile(
         n_samples=n_samples,
         n_features=n_features,
+        n_columns_total=n_columns_total,
         missingness_pct=missingness_pct,
         knn_k5_mean=knn_k5_mean,
         knn_k10_mean=knn_k10_mean,
         knn_k20_mean=knn_k20_mean,
         pca_cumulative_variance=pca_cumulative_variance,
+        column_profiles=column_profiles,
     )
 
     recommendations = GeometryRecommendations(
@@ -225,15 +277,65 @@ def characterize_dataset(
 
 
 def _build_pca_dims_recommendation(
-    knee: int, probed: list[int], n_features: int
+    knee: int, probed: list[int], n_features: int, n_samples: int,
 ) -> list[int]:
-    """Return [knee-1, knee, knee+2] capped to valid range."""
+    """Return [knee-1, knee, knee+2] capped to valid range and sample-size limit.
+
+    Ball Mapper uses Euclidean distance; in high dimensions with few samples,
+    pairwise distances converge (curse of dimensionality), producing a razor-thin
+    epsilon window. sqrt(n_samples) is a practical ceiling.
+    """
+    sample_cap = max(2, int(n_samples ** 0.5))
+    dim_cap = min(n_features - 1, sample_cap)
+
     candidates = [
         max(2, knee - 1),
         knee,
         min(n_features - 1, knee + 2),
     ]
-    return sorted(set(candidates))
+    capped = [min(d, dim_cap) for d in candidates]
+    return sorted(set(capped))
+
+
+def _profile_columns(df: pd.DataFrame, max_sample: int = 5) -> list[ColumnProfile]:
+    """Build per-column metadata from raw DataFrame (before any filtering)."""
+    profiles: list[ColumnProfile] = []
+    n_rows = len(df)
+    for col in df.columns:
+        series = df[col]
+        is_numeric = pd.api.types.is_numeric_dtype(series)
+        non_null = series.dropna()
+        n_missing = int(series.isna().sum())
+        n_unique = int(non_null.nunique())
+        sample_vals = [str(v) for v in non_null.unique()[:max_sample]]
+
+        mean = std = min_val = max_val = None
+        top_values = None
+
+        if is_numeric and len(non_null) > 0:
+            mean = round(float(non_null.mean()), 4)
+            std = round(float(non_null.std()), 4) if len(non_null) > 1 else None
+            min_val = round(float(non_null.min()), 4)
+            max_val = round(float(non_null.max()), 4)
+        elif not is_numeric:
+            vc = series.value_counts().head(5)
+            top_values = [(str(k), int(v)) for k, v in vc.items()]
+
+        profiles.append(ColumnProfile(
+            name=col,
+            dtype=str(series.dtype),
+            is_numeric=is_numeric,
+            n_unique=n_unique,
+            n_missing=n_missing,
+            missing_pct=round(float(n_missing / n_rows * 100), 2) if n_rows > 0 else 0.0,
+            sample_values=sample_vals,
+            mean=mean,
+            std=std,
+            min_val=min_val,
+            max_val=max_val,
+            top_values=top_values,
+        ))
+    return profiles
 
 
 def _build_yaml_template(
@@ -243,13 +345,25 @@ def _build_yaml_template(
     eps_max: float,
     eps_steps: int,
     threshold: Literal["auto", "0.0"],
+    column_profiles: list[ColumnProfile],
 ) -> str:
-    """Generate YAML config template."""
+    """Generate YAML config template with drop_columns and impute block."""
+    # drop_columns starts empty — the agent decides based on column_profiles.
+    drop_line = "[]"
+
+    numeric_missing = [cp.name for cp in column_profiles if cp.is_numeric and cp.missing_pct > 0]
+
+    impute_block = ""
+    if numeric_missing:
+        impute_block = "\n  impute:"
+        for col_name in numeric_missing:
+            impute_block += f"\n    {col_name}: {{method: fill_mean, seed: 42}}"
+
     return f"""run:
   name: experiment
   data: {csv_path}
 preprocessing:
-  drop_columns: []
+  drop_columns: {drop_line}{impute_block}
 sweep:
   pca:
     dimensions:

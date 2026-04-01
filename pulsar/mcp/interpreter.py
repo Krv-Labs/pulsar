@@ -179,26 +179,33 @@ def build_dossier(
         c_numeric = []
         for col in numeric_cols:
             c_mean = c_data[col].mean()
+            if pd.isna(c_mean):
+                continue  # All NaN for this cluster in this column — no signal
+            global_mean_val = global_means[col]
+            if pd.isna(global_mean_val):
+                continue  # Column is entirely NaN globally
             c_var = c_data[col].var() if c_size > 1 else 0.0
-            
+
             # Z-score of cluster mean relative to global dist
-            z_score = (c_mean - global_means[col]) / np.sqrt(global_vars[col])
-            
+            z_score = (c_mean - global_mean_val) / np.sqrt(global_vars[col])
+
             # Relative Rank among clusters
-            rank = all_cluster_means[col].rank(ascending=False)[cid]
-            
+            rank = all_cluster_means[col].rank(ascending=False).get(cid, np.nan)
+            if pd.isna(rank):
+                continue
+
             # Homogeneity Index (Variance Ratio)
             # < 1.0 means more homogeneous than global; > 1.0 means more diverse
             homogeneity = c_var / global_vars[col] if global_vars[col] > 0 else 1.0
-            
+
             # Importance Score: Combine Shift and Tightness
             # High score means it's both far from mean and very tight
             importance = abs(z_score) / (homogeneity + 0.1)
-            
+
             c_numeric.append({
                 "column": col,
                 "mean": float(c_mean),
-                "global_mean": float(global_means[col]),
+                "global_mean": float(global_mean_val),
                 "z_score": float(z_score),
                 "rank": int(rank),
                 "homogeneity": float(homogeneity),

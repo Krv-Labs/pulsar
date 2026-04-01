@@ -14,10 +14,22 @@ from typing import TYPE_CHECKING
 import numpy as np
 import networkx as nx
 
+from pulsar.config import config_to_yaml
+
 if TYPE_CHECKING:
     from pulsar.pipeline import ThemaRS
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SweepHistoryEntry:
+    """Record of one sweep attempt's outcome for history-aware retry."""
+
+    quality: str         # "hairball", "singletons", "fragmented", etc.
+    epsilon_min: float
+    epsilon_max: float
+    pca_dims: list[int]
 
 
 @dataclass
@@ -50,14 +62,23 @@ class DiagnosisResult:
     suggested_epsilon_max: float
     suggested_epsilon_steps: int
     suggestions: list[str]
+    suggested_config_yaml: str  # complete corrected YAML, pass to run_topological_sweep
 
 
-def diagnose_model(model: ThemaRS) -> DiagnosisResult:
+def diagnose_model(
+    model: ThemaRS,
+    history: list[SweepHistoryEntry] | None = None,
+) -> DiagnosisResult:
     """
     Classify cosmic graph quality and return concrete epsilon corrections.
 
+    Uses sweep history (if provided) to narrow epsilon via binary search
+    instead of blind multiplicative correction. Detects oscillation and
+    escalates to PCA dimension reduction when needed.
+
     Args:
         model: Fitted ThemaRS instance
+        history: Prior sweep attempts from this session (optional)
 
     Returns:
         DiagnosisResult with classification, metrics, and corrective suggestions
@@ -119,19 +140,59 @@ def diagnose_model(model: ThemaRS) -> DiagnosisResult:
     else:
         cur_min, cur_max = 0.5, 1.5  # safe fallback
 
-    suggested_epsilon_min = round(cur_min * epsilon_factor, 3)
-    suggested_epsilon_max = round(cur_max * epsilon_factor, 3)
     suggested_epsilon_steps = 15
+
+    # History-aware epsilon correction (binary search between known bounds)
+    reduce_pca = False
+    if history and len(history) >= 2:
+        suggested_epsilon_min, suggested_epsilon_max, reduce_pca = (
+            _history_aware_epsilon(quality, cur_min, cur_max, epsilon_factor, history)
+        )
+    else:
+        # No history or single attempt: use blind multiplier
+        suggested_epsilon_min = round(cur_min * epsilon_factor, 3)
+        suggested_epsilon_max = round(cur_max * epsilon_factor, 3)
 
     # Build diagnostic message and suggestions
     diagnosis, suggestions = _build_diagnosis(quality, metrics, epsilon_factor)
 
+    if reduce_pca:
+        suggestions.append(
+            "Oscillating between sparse and dense: reducing PCA dimensions "
+            "in suggested config to widen the viable epsilon window."
+        )
+
+    # Build corrected config YAML with updated epsilon range
+    from dataclasses import replace as dc_replace
+    from pulsar.config import BallMapperSpec, PCASpec
+
+    corrected_epsilons = np.linspace(
+        suggested_epsilon_min, suggested_epsilon_max, suggested_epsilon_steps,
+    ).tolist()
+    corrected_cfg = dc_replace(
+        model.config,
+        ball_mapper=BallMapperSpec(epsilons=corrected_epsilons),
+    )
+
+    if reduce_pca:
+        current_dims = list(model.config.pca.dimensions)
+        reduced = sorted(set(max(2, int(d * 0.7)) for d in current_dims))
+        corrected_cfg = dc_replace(
+            corrected_cfg,
+            pca=PCASpec(dimensions=reduced, seeds=list(model.config.pca.seeds)),
+        )
+
+    suggested_config_yaml = config_to_yaml(corrected_cfg)
+
     logger.info(
-        "diagnose_model: quality=%s, epsilon_factor=%.2f, nodes=%d, edges=%d",
+        "diagnose_model: quality=%s, epsilon_factor=%.2f, nodes=%d, edges=%d, "
+        "history_len=%d, reduce_pca=%s",
         quality,
         epsilon_factor,
         n,
         n_edges,
+        len(history) if history else 0,
+        reduce_pca,
     )
 
     return DiagnosisResult(
@@ -143,7 +204,59 @@ def diagnose_model(model: ThemaRS) -> DiagnosisResult:
         suggested_epsilon_max=suggested_epsilon_max,
         suggested_epsilon_steps=suggested_epsilon_steps,
         suggestions=suggestions,
+        suggested_config_yaml=suggested_config_yaml,
     )
+
+
+def _history_aware_epsilon(
+    quality: str,
+    cur_min: float,
+    cur_max: float,
+    epsilon_factor: float,
+    history: list[SweepHistoryEntry],
+) -> tuple[float, float, bool]:
+    """Compute epsilon range using binary search on sweep history.
+
+    Returns (suggested_min, suggested_max, reduce_pca).
+    """
+    sparse_entries = [h for h in history if h.quality in ("singletons", "fragmented")]
+    dense_entries = [h for h in history if h.quality == "hairball"]
+
+    # Find tightest known bounds
+    lower_bound = max((h.epsilon_max for h in sparse_entries), default=None)
+    upper_bound = min((h.epsilon_min for h in dense_entries), default=None)
+
+    if lower_bound is not None and upper_bound is not None:
+        # Binary search: midpoint of known bounds ± 15%
+        midpoint = (lower_bound + upper_bound) / 2.0
+        eps_min = round(midpoint * 0.85, 3)
+        eps_max = round(midpoint * 1.15, 3)
+    elif lower_bound is not None and quality in ("singletons", "fragmented"):
+        # Only sparse history: step up cautiously from known upper bound
+        eps_min = round(lower_bound * 1.1, 3)
+        eps_max = round(lower_bound * 1.5, 3)
+    elif upper_bound is not None and quality == "hairball":
+        # Only dense history: step down cautiously from known lower bound
+        eps_min = round(upper_bound * 0.4, 3)
+        eps_max = round(upper_bound * 0.8, 3)
+    else:
+        # Fallback to blind multiplier
+        eps_min = round(cur_min * epsilon_factor, 3)
+        eps_max = round(cur_max * epsilon_factor, 3)
+
+    # Detect oscillation: count direction changes
+    directions = []
+    for h in history:
+        if h.quality in ("singletons", "fragmented"):
+            directions.append("sparse")
+        elif h.quality == "hairball":
+            directions.append("dense")
+    oscillation_count = sum(
+        1 for i in range(1, len(directions)) if directions[i] != directions[i - 1]
+    )
+    reduce_pca = oscillation_count >= 2
+
+    return eps_min, eps_max, reduce_pca
 
 
 def _classify(m: GraphMetrics) -> tuple[str, float]:
@@ -191,7 +304,6 @@ def _build_diagnosis(
         suggestions = [
             f"Reduce epsilon by {epsilon_factor:.1f}x "
             f"(suggested: [{m.weight_p50:.3f}, {m.weight_p95:.3f}])",
-            "Consider increasing Ball Mapper epsilon range upper bound",
             "Try lower PCA dimensions to reduce false neighbor connections",
         ]
     elif quality == "singletons":
@@ -202,7 +314,7 @@ def _build_diagnosis(
         suggestions = [
             f"Increase epsilon by {epsilon_factor:.1f}x",
             "Ensure data has intrinsic geometry (not random noise)",
-            "Try higher PCA dimensions to better capture structure",
+            "Try lower PCA dimensions to widen the viable epsilon window",
         ]
     elif quality == "fragmented":
         diagnosis = (
