@@ -201,8 +201,9 @@ def characterize_dataset(
     if non_numeric_summaries:
         warnings.append(
             f"Non-numeric columns found: {', '.join(non_numeric_summaries)}. "
-            f"The pipeline requires float64 input. Review column_profiles and "
-            f"decide for each: add to drop_columns or encode before the sweep."
+            f"The pipeline requires float64 input. Low-cardinality columns (<=10 unique) "
+            f"have been added to the suggested encode block; others are in drop_columns. "
+            f"Review and adjust as needed."
         )
     numeric_with_nan = [
         f"{cp.name} ({cp.missing_pct:.1f}%)"
@@ -347,9 +348,28 @@ def _build_yaml_template(
     threshold: Literal["auto", "0.0"],
     column_profiles: list[ColumnProfile],
 ) -> str:
-    """Generate YAML config template with drop_columns and impute block."""
-    # drop_columns starts empty — the agent decides based on column_profiles.
-    drop_line = "[]"
+    """Generate YAML config template with drop_columns, encode, and impute blocks."""
+    # Columns to encode: non-numeric with low cardinality (<= 10 unique values)
+    # This preserves valuable categorical context for the topological analysis.
+    to_encode = [
+        cp.name for cp in column_profiles if not cp.is_numeric and cp.n_unique <= 10
+    ]
+
+    # Columns to drop: everything else non-numeric
+    # (except ID-like columns which characterization doesn't know yet)
+    to_drop = [
+        cp.name
+        for cp in column_profiles
+        if not cp.is_numeric and cp.n_unique > 10
+    ]
+
+    drop_line = str(to_drop) if to_drop else "[]"
+
+    encode_block = ""
+    if to_encode:
+        encode_block = "\n  encode:"
+        for col_name in to_encode:
+            encode_block += f"\n    {col_name}: {{method: one_hot}}"
 
     numeric_missing = [cp.name for cp in column_profiles if cp.is_numeric and cp.missing_pct > 0]
 
@@ -363,7 +383,7 @@ def _build_yaml_template(
   name: experiment
   data: {csv_path}
 preprocessing:
-  drop_columns: {drop_line}{impute_block}
+  drop_columns: {drop_line}{encode_block}{impute_block}
 sweep:
   pca:
     dimensions:

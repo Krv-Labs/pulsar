@@ -18,7 +18,13 @@ from fastmcp import FastMCP, Context
 
 from pulsar.config import config_to_yaml
 from pulsar.pipeline import ThemaRS
-from pulsar.mcp.interpreter import resolve_clusters, build_dossier, dossier_to_markdown
+from pulsar.mcp.interpreter import (
+    resolve_clusters,
+    build_dossier,
+    dossier_to_markdown,
+    compare_clusters,
+    comparison_to_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +35,21 @@ mcp = FastMCP(
         "Pulsar is a geometric deep learning toolkit for discovering structure "
         "in complex datasets. Follow this workflow:\n"
         "1. characterize_dataset(csv_path) → get column_profiles and a YAML template\n"
-        "2. Review column_profiles to decide preprocessing:\n"
-        "   - Non-numeric columns: decide drop vs encode based on column name, "
-        "cardinality, and sample values in the profiles\n"
-        "   - Edit the suggested_params_yaml: add columns to drop_columns, "
-        "adjust impute methods, or tweak PCA/epsilon as needed\n"
+        "2. Review column_profiles and the suggested YAML:\n"
+        "   - Low-cardinality strings (≤10 unique) are automatically added to "
+        "the 'encode' block. This preserves their geometric context.\n"
+        "   - High-cardinality or unique strings (like Names/IDs) are added to 'drop_columns'.\n"
+        "   - Edit the YAML if you want to encode a column that was dropped, or vice-versa.\n"
         "3. run_topological_sweep(config_yaml=<your edited YAML>) → fit pipeline\n"
-        "4. diagnose_cosmic_graph() → if quality != 'good', retry with suggested_config_yaml\n"
-        "5. generate_cluster_dossier() → get cluster statistics\n"
-        "6. export_labeled_data(cluster_names, output_path) → save results\n"
+        "4. diagnose_cosmic_graph() → check quality and balance.\n"
+        "   - Review 'component_sizes'. If one component contains >80% of data, "
+        "the graph is a 'blob'.\n"
+        "5. generate_cluster_dossier(method, max_k) → get cluster statistics.\n"
+        "   - If diagnose showed a 'blob', use method='spectral' to find sub-structure.\n"
+        "   - If diagnose showed balanced components, use method='auto' or 'components'.\n"
+        "6. compare_clusters(cluster_a, cluster_b) → use this for academic rigor to "
+        "prove why two clusters are statistically distinct (p-values, Cohen's d).\n"
+        "7. export_labeled_data(cluster_names, output_path) → save results\n"
         "IMPORTANT: Pass YAML strings directly between tools. Never ask the user "
         "to write files manually — the tools handle file I/O automatically."
     ),
@@ -229,17 +241,29 @@ async def run_topological_sweep(
 
 
 @mcp.tool()
-async def generate_cluster_dossier(ctx: Context) -> str:
+async def generate_cluster_dossier(
+    method: str = "auto",
+    max_k: int = 15,
+    ctx: Context = None,
+) -> str:
     """
     Generate a statistical dossier of the topological clusters.
 
     Call this AFTER diagnose_cosmic_graph() returns quality == "good".
-    Finds stable clusters in the cosmic graph and produces a Markdown report
-    with per-cluster statistics: size, defining features, relative shifts
-    from the global mean, and homogeneity scores.
 
-    NEXT STEP: Present the dossier to the user, then call export_labeled_data()
-    with semantic cluster names to save the labeled dataset.
+    CHOOSING A METHOD: Review component_sizes and clustering_notes from the
+    diagnose results to decide:
+    - method="auto" (default): Uses connected components if balanced, falls
+      back to spectral. Works well when the graph has natural separation.
+    - method="spectral": Forces spectral clustering with silhouette-optimized k.
+      Use this when component_sizes shows one dominant component (e.g. [162, 7, 2, 1, 1]).
+    - method="components": Forces connected components. Use when components
+      are naturally balanced.
+
+    Args:
+        method: Clustering strategy — "auto", "spectral", or "components".
+        max_k: Maximum k for spectral clustering search (default 15).
+            Increase for large datasets (e.g. max_k=30 for 5000+ nodes).
 
     Returns:
         Markdown-formatted cluster dossier.
@@ -249,11 +273,14 @@ async def generate_cluster_dossier(ctx: Context) -> str:
     if session.model is None or session.data is None:
         return "Error: No model found. Run run_topological_sweep() first."
 
+    if method not in ("auto", "spectral", "components"):
+        return f"Error: method must be 'auto', 'spectral', or 'components', got '{method}'"
+
     try:
-        logger.info("Generating cluster dossier")
+        logger.info("Generating cluster dossier (method=%s, max_k=%d)", method, max_k)
 
         # 1. Resolve Clusters
-        clusters = resolve_clusters(session.model)
+        clusters = resolve_clusters(session.model, method=method, max_k=max_k)
         session.clusters = clusters
 
         # 2. Build Statistical Dossier
@@ -270,6 +297,50 @@ async def generate_cluster_dossier(ctx: Context) -> str:
         return error_msg
     except RuntimeError as e:
         error_msg = f"Error generating dossier: {e}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def compare_clusters_tool(
+    cluster_a: int, cluster_b: int, ctx: Context = None
+) -> str:
+    """
+    Perform pairwise statistical tests between two clusters.
+
+    Returns a Markdown report with Welch's T-test, KS-test, and Cohen's d
+    effect size for all numeric features. Features are sorted by the magnitude
+    of the difference (Cohen's d).
+
+    Args:
+        cluster_a: ID of the first cluster.
+        cluster_b: ID of the second cluster.
+
+    Returns:
+        Markdown-formatted statistical comparison.
+    """
+    session = _get_session(ctx)
+
+    if session.data is None or session.clusters is None:
+        return "Error: No data or clusters found. Run generate_cluster_dossier() first."
+
+    try:
+        logger.info("Comparing clusters %d and %d", cluster_a, cluster_b)
+
+        # 1. Perform Comparison
+        results = compare_clusters(
+            session.data, session.clusters, cluster_a, cluster_b
+        )
+
+        if not results:
+            return f"Error: No results for comparison between clusters {cluster_a} and {cluster_b}. Ensure clusters have at least 2 points."
+
+        # 2. Convert to Markdown
+        markdown = comparison_to_markdown(cluster_a, cluster_b, results)
+        return markdown
+
+    except Exception as e:
+        error_msg = f"Error comparing clusters: {e}"
         logger.error(error_msg)
         return error_msg
 
@@ -339,28 +410,18 @@ async def characterize_dataset(csv_path: str, ctx: Context) -> str:
 
     ALWAYS call this FIRST before run_topological_sweep(). Returns JSON with:
 
-    - profile.column_profiles: per-column metadata. For each column you get:
-      name, dtype, is_numeric, n_unique, missing_pct, sample_values, and
-      top_values (with frequency counts for non-numeric columns).
-      Use this to decide which columns to drop, encode, or impute.
-    - recommendations.suggested_params_yaml: a YAML template with geometry-based
-      PCA dims, epsilon range, seeds, and an impute block for NaN columns.
-      drop_columns starts EMPTY — you must populate it based on your analysis
-      of column_profiles. Non-numeric columns that are not encoded must be added
-      to drop_columns (the pipeline requires float64 input).
-    - recommendations.warnings: factual observations about the dataset.
-
-    NEXT STEPS:
-    1. Review column_profiles. For each non-numeric column, decide: drop or encode.
-    2. Edit the suggested_params_yaml: add columns to drop_columns as needed.
-    3. Pass the edited YAML to run_topological_sweep(config_yaml=<your YAML>).
-       Do NOT write it to a file — the sweep tool auto-saves for reproducibility.
+    - profile.column_profiles: per-column metadata (dtype, uniqueness, missingness).
+    - recommendations.suggested_params_yaml: a complete YAML template.
+      - Non-numeric columns with <=10 unique values are auto-added to the 'encode' block.
+      - High-cardinality strings are auto-added to 'drop_columns'.
+      - PCA dims, epsilon range, and imputation methods are suggested based on geometry.
+    - recommendations.warnings: factual observations about data quality and dimensionality.
 
     Args:
         csv_path: Absolute path to a CSV file (must have >=2 numeric columns).
 
     Returns:
-        JSON with profile (column_profiles), recommendations, and suggested_params_yaml.
+        JSON with profile, recommendations, and suggested_params_yaml.
     """
     try:
         from pulsar.characterization import characterize_dataset as _char
@@ -380,28 +441,17 @@ async def characterize_dataset(csv_path: str, ctx: Context) -> str:
 @mcp.tool()
 async def diagnose_cosmic_graph(ctx: Context) -> str:
     """
-    Diagnose the fitted cosmic graph and get a corrected config if needed.
+    Diagnose the fitted cosmic graph quality and topological balance.
 
     Call this AFTER run_topological_sweep(). Returns JSON with:
-    - quality: "good", "hairball", "singletons", "fragmented", or "sparse_connected"
-    - suggested_config_yaml: a complete corrected YAML config with adjusted epsilon
-      (and possibly adjusted PCA dims). If quality != "good", pass this string
-      DIRECTLY to run_topological_sweep(config_yaml=...) to retry.
-    - diagnosis: human-readable explanation of the graph's structure.
-    - suggestions: list of corrective actions.
+    - quality: "good", "hairball", "singletons", etc.
+    - metrics.component_sizes: sorted list of connected component sizes.
+      Use this to identify a 'blob' (one massive component) vs. a balanced graph.
+    - clustering_notes: advice on which clustering method to use in the dossier step.
+    - suggested_config_yaml: corrected YAML if quality != "good".
 
-    HISTORY-AWARE RETRY: This tool tracks the quality and epsilon range of every
-    prior call within this session. On repeated retries it narrows the epsilon
-    search via binary search between the last known "too sparse" and "too dense"
-    bounds. If oscillation is detected (2+ direction changes), it will also
-    reduce PCA dimensions in the suggested config to escape the curse of
-    dimensionality.
-
-    RETRY WORKFLOW: If quality != "good", take the "suggested_config_yaml" value
-    and call run_topological_sweep(config_yaml=<that string>). Repeat until
-    quality == "good" or you've tried 3 times.
-
-    When quality == "good", proceed to generate_cluster_dossier().
+    RETRY WORKFLOW: If quality != "good", pass the "suggested_config_yaml" string
+    DIRECTLY to run_topological_sweep(config_yaml=...).
 
     Returns:
         JSON with quality classification, metrics, diagnosis, and corrected YAML.

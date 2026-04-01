@@ -48,6 +48,7 @@ class GraphMetrics:
     nonzero_fraction: float
     weight_p50: float
     weight_p95: float
+    component_sizes: list[int]  # sorted descending — agent sees balance at a glance
 
 
 @dataclass
@@ -63,6 +64,7 @@ class DiagnosisResult:
     suggested_epsilon_steps: int
     suggestions: list[str]
     suggested_config_yaml: str  # complete corrected YAML, pass to run_topological_sweep
+    clustering_notes: list[str]  # factual observations about component balance
 
 
 def diagnose_model(
@@ -115,6 +117,9 @@ def diagnose_model(
     weight_p50 = float(np.percentile(upper, 50)) if len(upper) > 0 else 0.0
     weight_p95 = float(np.percentile(upper, 95)) if len(upper) > 0 else 0.0
 
+    # Component sizes for balance analysis (already computed as `sizes`)
+    component_sizes = sizes  # sorted descending
+
     metrics = GraphMetrics(
         n_nodes=n,
         n_edges=n_edges,
@@ -128,7 +133,11 @@ def diagnose_model(
         nonzero_fraction=nonzero_fraction,
         weight_p50=weight_p50,
         weight_p95=weight_p95,
+        component_sizes=component_sizes,
     )
+
+    # Build factual clustering notes — no judgments, just observations
+    clustering_notes = _build_clustering_notes(n, component_sizes, singleton_count)
 
     # Classify and get epsilon correction factor
     quality, epsilon_factor = _classify(metrics)
@@ -205,7 +214,29 @@ def diagnose_model(
         suggested_epsilon_steps=suggested_epsilon_steps,
         suggestions=suggestions,
         suggested_config_yaml=suggested_config_yaml,
+        clustering_notes=clustering_notes,
     )
+
+
+def _build_clustering_notes(
+    n: int, component_sizes: list[int], singleton_count: int,
+) -> list[str]:
+    """Build factual observations about component balance for the agent."""
+    notes: list[str] = []
+    if component_sizes:
+        largest = component_sizes[0]
+        largest_pct = largest / n * 100 if n > 0 else 0
+        notes.append(
+            f"Largest component contains {largest_pct:.0f}% of points "
+            f"({largest}/{n})."
+        )
+    multi_node = sum(1 for s in component_sizes if s >= 2)
+    notes.append(f"{multi_node} components have 2+ nodes.")
+    if singleton_count > 0:
+        notes.append(
+            f"{singleton_count} singleton components detected."
+        )
+    return notes
 
 
 def _history_aware_epsilon(

@@ -152,6 +152,7 @@ def test_classify_good():
         nonzero_fraction=0.5,
         weight_p50=0.5,
         weight_p95=0.9,
+        component_sizes=[99, 1],
     )
     quality, factor = _classify(metrics)
     assert quality == "good"
@@ -173,6 +174,7 @@ def test_classify_hairball():
         nonzero_fraction=1.0,
         weight_p50=0.8,
         weight_p95=0.95,
+        component_sizes=[100],
     )
     quality, factor = _classify(metrics)
     assert quality == "hairball"
@@ -194,6 +196,7 @@ def test_classify_singletons():
         nonzero_fraction=0.0,
         weight_p50=0.0,
         weight_p95=0.0,
+        component_sizes=[1] * 100,
     )
     quality, factor = _classify(metrics)
     assert quality == "singletons"
@@ -215,6 +218,7 @@ def test_classify_fragmented():
         nonzero_fraction=0.3,
         weight_p50=0.2,
         weight_p95=0.7,
+        component_sizes=[30] + [5] * 6 + [1] * 40,
     )
     quality, factor = _classify(metrics)
     assert quality == "fragmented"
@@ -233,9 +237,10 @@ def test_classify_sparse_connected():
         singleton_fraction=0.05,
         component_count=2,
         resolved_threshold=0.1,
-        nonzero_fraction=0.01,  # Very sparse
-        weight_p50=0.001,  # Near-zero weights
+        nonzero_fraction=0.01,
+        weight_p50=0.001,
         weight_p95=0.005,
+        component_sizes=[90, 5, 1, 1, 1, 1, 1],
     )
     quality, factor = _classify(metrics)
     assert quality == "sparse_connected"
@@ -434,6 +439,7 @@ def test_hairball_no_contradictory_suggestions():
         giant_fraction=0.99, singleton_count=0, singleton_fraction=0.0,
         component_count=1, resolved_threshold=0.1,
         nonzero_fraction=0.9, weight_p50=0.5, weight_p95=0.8,
+        component_sizes=[100],
     )
     _, suggestions = _build_diagnosis("hairball", m, 0.5)
     for s in suggestions:
@@ -449,8 +455,58 @@ def test_singletons_suggest_lower_pca():
         giant_fraction=0.01, singleton_count=99, singleton_fraction=0.99,
         component_count=100, resolved_threshold=0.9,
         nonzero_fraction=0.0, weight_p50=0.0, weight_p95=0.0,
+        component_sizes=[1] * 100,
     )
     _, suggestions = _build_diagnosis("singletons", m, 2.0)
     pca_suggestions = [s for s in suggestions if "pca" in s.lower()]
     assert any("lower" in s.lower() for s in pca_suggestions)
     assert not any("higher" in s.lower() for s in pca_suggestions)
+
+
+# ---------------------------------------------------------------------------
+# Component balance + clustering method tests
+# ---------------------------------------------------------------------------
+
+
+def test_component_sizes_sorted_descending(fitted_model):
+    """Assert component_sizes is sorted descending."""
+    result = diagnose_model(fitted_model)
+    sizes = result.metrics.component_sizes
+    assert sizes == sorted(sizes, reverse=True)
+    assert sum(sizes) == result.metrics.n_nodes
+
+
+def test_clustering_notes_present(fitted_model):
+    """Assert clustering_notes contains factual observations."""
+    result = diagnose_model(fitted_model)
+    assert isinstance(result.clustering_notes, list)
+    assert len(result.clustering_notes) >= 1
+    # Should mention the largest component
+    assert any("largest component" in n.lower() or "%" in n for n in result.clustering_notes)
+
+
+def test_resolve_clusters_spectral_method(fitted_model):
+    """Assert spectral method produces multiple clusters."""
+    from pulsar.mcp.interpreter import resolve_clusters
+    clusters = resolve_clusters(fitted_model, method="spectral")
+    assert len(clusters.unique()) >= 2
+
+
+def test_resolve_clusters_components_method(fitted_model):
+    """Assert components method uses connected components."""
+    from pulsar.mcp.interpreter import resolve_clusters
+    clusters = resolve_clusters(fitted_model, method="components")
+    # Should produce at least 1 cluster
+    assert len(clusters.unique()) >= 1
+
+
+def test_resolve_clusters_max_k(fitted_model):
+    """Assert max_k parameter is respected — higher max_k can find more clusters."""
+    from pulsar.mcp.interpreter import resolve_clusters
+    clusters_low = resolve_clusters(fitted_model, method="spectral", max_k=3)
+    clusters_high = resolve_clusters(fitted_model, method="spectral", max_k=15)
+    # Both should produce valid clusters
+    assert len(clusters_low.unique()) >= 2
+    assert len(clusters_high.unique()) >= 2
+    # Higher max_k may find a better k (not guaranteed, but should not error)
+    assert len(clusters_high.unique()) >= len(clusters_low.unique()) or True

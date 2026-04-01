@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 import networkx as nx
+from scipy import stats
 from sklearn.cluster import SpectralClustering
 from sklearn.metrics import silhouette_score
 
@@ -48,32 +49,46 @@ class TopologicalDossier:
     global_stats: Dict[str, Any]
 
 
-def resolve_clusters(model: ThemaRS) -> pd.Series:
+def resolve_clusters(
+    model: ThemaRS,
+    method: str = "auto",
+    max_k: int = _SPECTRAL_K_MAX,
+) -> pd.Series:
     """
-    Finds the most informative clusters in the cosmic graph.
+    Finds clusters in the cosmic graph using the specified method.
 
-    Strategy 1: Connected Components — if we have a reasonable number (1 < n < 50)
-    and less than 50% singletons, use them.
+    Args:
+        model: Fitted ThemaRS instance.
+        method: Clustering strategy.
+            - "auto": Connected components first (if balanced), spectral fallback.
+            - "spectral": Force spectral clustering with silhouette-optimized k.
+            - "components": Force connected components only.
+        max_k: Maximum k for spectral clustering search (default 15).
 
-    Strategy 2: Spectral Clustering with Silhouette search — sweeps k from 2 to 15
-    and selects the k with highest silhouette score.
-
-    Falls back to all-in-one cluster if neither strategy succeeds.
+    Returns:
+        pd.Series with integer cluster labels.
     """
     graph = model.cosmic_graph
     adj = model.weighted_adjacency
     n = adj.shape[0]
 
-    # Strategy 1: Connected Components (if graph is not too sparse)
+    if method == "components":
+        return _cluster_by_components(graph, n)
+
+    if method == "spectral":
+        result = _cluster_by_spectral(adj, n, max_k)
+        if result is not None:
+            return result
+        logger.warning("resolve_clusters: spectral failed, falling back to single cluster")
+        return pd.Series(np.zeros(n, dtype=int), name="cluster")
+
+    # method == "auto": try components first, then spectral
     components = list(nx.connected_components(graph))
     n_comp = len(components)
 
-    # If we have a reasonable number of components that aren't all singletons
     if 1 < n_comp < _MAX_COMPONENTS:
-        # Check density or singleton ratio
         singleton_count = sum(1 for c in components if len(c) == 1)
         if (singleton_count / n) < _MAX_SINGLETON_RATIO:
-            # Map nodes to component IDs
             labels = np.zeros(n, dtype=int)
             for i, comp in enumerate(components):
                 for node in comp:
@@ -83,23 +98,42 @@ def resolve_clusters(model: ThemaRS) -> pd.Series:
             )
             return pd.Series(labels, name="cluster")
 
-    # Strategy 2: Spectral Clustering Fallback
-    # Sweep k from min to max and pick the best silhouette score
-    best_k = _SPECTRAL_K_MIN
+    # Spectral fallback
+    result = _cluster_by_spectral(adj, n, max_k)
+    if result is not None:
+        return result
+
+    logger.warning("resolve_clusters: falling back to single cluster")
+    return pd.Series(np.zeros(n, dtype=int), name="cluster")
+
+
+def _cluster_by_components(graph, n: int) -> pd.Series:
+    """Cluster by connected components."""
+    components = list(nx.connected_components(graph))
+    labels = np.zeros(n, dtype=int)
+    for i, comp in enumerate(components):
+        for node in comp:
+            labels[node] = i
+    logger.debug("resolve_clusters: components method (n_comp=%d)", len(components))
+    return pd.Series(labels, name="cluster")
+
+
+def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series | None:
+    """Spectral clustering with silhouette-optimized k. Returns None if it fails."""
     best_score = -1.0
     best_labels = None
+    best_k = _SPECTRAL_K_MIN
 
-    k_range = range(_SPECTRAL_K_MIN, min(_SPECTRAL_K_MAX + 1, n))
+    k_range = range(_SPECTRAL_K_MIN, min(max_k + 1, n))
     for k_test in k_range:
         sc = SpectralClustering(
             n_clusters=k_test,
             affinity='precomputed',
             assign_labels='discretize',
-            random_state=42
+            random_state=42,
         )
         labels = sc.fit_predict(adj)
 
-        # Silhouette requires at least 2 clusters and < n points
         if len(np.unique(labels)) > 1:
             score = silhouette_score(adj, labels, metric='precomputed')
             if score > best_score:
@@ -109,15 +143,10 @@ def resolve_clusters(model: ThemaRS) -> pd.Series:
 
     if best_labels is not None:
         logger.debug(
-            "resolve_clusters: spectral fallback, best_k=%d score=%.3f",
-            best_k,
-            best_score,
+            "resolve_clusters: spectral, best_k=%d score=%.3f", best_k, best_score,
         )
         return pd.Series(best_labels, name="cluster")
-
-    # Ultimate fallback: Everyone is cluster 0
-    logger.warning("resolve_clusters: falling back to single cluster")
-    return pd.Series(np.zeros(n, dtype=int), name="cluster")
+    return None
 
 
 def build_dossier(
@@ -259,6 +288,96 @@ def build_dossier(
             "columns": data.columns.tolist()
         }
     )
+
+
+def comparison_to_markdown(
+    id_a: int, id_b: int, results: List[Dict[str, Any]]
+) -> str:
+    """Renders the pairwise comparison results as a Markdown table."""
+    md = [
+        f"# Cluster Comparison: {id_a} vs {id_b}",
+        "",
+        "| Feature | Mean A | Mean B | Diff | Cohen's d | T-test (p) | KS-test (p) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+
+    for r in results:
+        diff = r["mean_a"] - r["mean_b"]
+        md.append(
+            f"| {r['column']} | {r['mean_a']:.3f} | {r['mean_b']:.3f} | {diff:.3f} | "
+            f"{r['cohens_d']:.2f} | {r['p_val_t']:.4f} | {r['p_val_ks']:.4f} |"
+        )
+
+    return "\n".join(md)
+
+
+def compare_clusters(
+    data: pd.DataFrame, clusters: pd.Series, id_a: int, id_b: int
+) -> List[Dict[str, Any]]:
+    """
+    Perform pairwise statistical tests between two clusters.
+
+    Compares all numeric features using:
+    1. Welch's T-test (unequal variance) for mean differences.
+    2. Kolmogorov-Smirnov test for overall distribution shifts.
+    3. Cohen's d for effect size.
+
+    Results are sorted by the absolute magnitude of Cohen's d.
+    """
+    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+    results = []
+
+    # Use boolean arrays directly to avoid index label mismatch
+    mask_a = clusters.values == id_a
+    mask_b = clusters.values == id_b
+
+    data_a = data.iloc[mask_a]
+    data_b = data.iloc[mask_b]
+
+    if len(data_a) < 2 or len(data_b) < 2:
+        logger.warning(
+            "compare_clusters: clusters %d or %d too small for t-test", id_a, id_b
+        )
+        return []
+
+    for col in numeric_cols:
+        vals_a = data_a[col].dropna()
+        vals_b = data_b[col].dropna()
+
+        if len(vals_a) < 2 or len(vals_b) < 2:
+            continue
+
+        mean_a = vals_a.mean()
+        mean_b = vals_b.mean()
+        std_a = vals_a.std()
+        std_b = vals_b.std()
+
+        # Welch's T-test (equal_var=False)
+        t_stat, p_val_t = stats.ttest_ind(vals_a, vals_b, equal_var=False)
+
+        # KS-test
+        _, p_val_ks = stats.ks_2samp(vals_a, vals_b)
+
+        # Cohen's d
+        # Pooled standard deviation
+        n_a, n_b = len(vals_a), len(vals_b)
+        pooled_std = np.sqrt(
+            ((n_a - 1) * (std_a**2) + (n_b - 1) * (std_b**2)) / (n_a + n_b - 2)
+        )
+        cohens_d = (mean_a - mean_b) / max(pooled_std, 1e-10)
+
+        results.append({
+            "column": col,
+            "mean_a": float(mean_a),
+            "mean_b": float(mean_b),
+            "p_val_t": float(p_val_t),
+            "p_val_ks": float(p_val_ks),
+            "cohens_d": float(cohens_d),
+        })
+
+    # Sort by magnitude of Cohen's d
+    results.sort(key=lambda x: abs(x["cohens_d"]), reverse=True)
+    return results
 
 
 def dossier_to_markdown(dossier: TopologicalDossier) -> str:

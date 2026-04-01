@@ -5,7 +5,7 @@ ThemaRS — orchestrates the full Pulsar pipeline.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Union
+from typing import Any, Union
 
 import networkx as nx
 import numpy as np
@@ -163,6 +163,17 @@ class ThemaRS:
             imputed = impute_column(arr, spec.method, spec.seed)
             df[col] = imputed
 
+        # 3c. Encode categorical columns (pure Python)
+        for col, spec in cfg.encode.items():
+            print(f"DEBUG: Encoding column: {col} with method: {spec.method}")
+            print(f"DEBUG: df.columns: {df.columns.tolist()}")
+            if col in df.columns:
+                if spec.method == "one_hot":
+                    df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
+                    print(f"DEBUG: Encoded {col}. New columns: {df.columns.tolist()}")
+            else:
+                print(f"DEBUG: Column {col} NOT found in df.columns")
+
         # Drop any remaining NaN rows
         df = df.dropna(axis=0)
         _notify()  # impute
@@ -280,6 +291,16 @@ class ThemaRS:
         all_ball_maps: list[BallMapper] = []
         n: int | None = None
 
+        # Collect global vocabulary for categorical encoding (if any)
+        # Ensures that pd.get_dummies produces identical columns across datasets
+        vocab: dict[str, list[Any]] = {}
+        for col in cfg.encode:
+            categories = set()
+            for ds in datasets:
+                if col in ds.columns:
+                    categories.update(ds[col].dropna().unique())
+            vocab[col] = sorted(list(categories))
+
         for i, data in enumerate(datasets):
             df = data.copy()
 
@@ -296,6 +317,13 @@ class ThemaRS:
                     continue
                 arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
                 df[col] = impute_column(arr, spec.method, spec.seed)
+
+            # Encode categorical columns with shared vocabulary
+            for col, spec in cfg.encode.items():
+                if col in df.columns:
+                    if spec.method == "one_hot":
+                        df[col] = pd.Categorical(df[col], categories=vocab[col])
+                        df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
 
             df = df.dropna(axis=0)
             _notify()  # Dataset i: impute
