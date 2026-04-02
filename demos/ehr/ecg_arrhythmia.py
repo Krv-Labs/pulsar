@@ -21,8 +21,8 @@ This demonstrates the "summarize time-series" approach — useful when:
 - Computational efficiency is important (no 3D tensor)
 
 Usage:
-    uv run python demos/ecg_arrhythmia.py --synthetic
-    uv run python demos/ecg_arrhythmia.py --data path/to/ecg_data/
+    uv run python demos/ehr/ecg_arrhythmia.py --synthetic
+    uv run python demos/ehr/ecg_arrhythmia.py --data path/to/ecg_data/
 """
 
 from __future__ import annotations

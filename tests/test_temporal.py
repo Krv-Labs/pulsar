@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from pulsar.config import load_config
-from pulsar.temporal import TemporalCosmicGraph
+from pulsar.representations import TemporalCosmicGraph
 
 
 class TestTemporalCosmicGraphConstruction:

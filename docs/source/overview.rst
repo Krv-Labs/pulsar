@@ -26,9 +26,11 @@ Pulsar combines Python ergonomics with Rust performance:
 
    graph TB
       subgraph "Python Layer"
-         A["ThemaRS API"]
-         B["Configuration parsing"]
-         C["NetworkX integration"]
+         A["ThemaRS API (pipeline.py)"]
+         B["Config parsing (config.py)"]
+         C["NetworkX integration (analysis/hooks.py)"]
+         P["Progress reporting (runtime/progress.py)"]
+         T["Temporal graphs (representations/temporal.py)"]
       end
 
       subgraph "Rust Core (PyO3)"
@@ -93,21 +95,22 @@ Pulsar uses a hierarchical configuration:
 
 .. code-block:: yaml
 
-   data:
-     path: "dataset.csv"
-     target: "label"
+   run:
+     name: my_experiment
+     data: path/to/data.csv
 
-   impute:
-     columns: ["col1", "col2"]
-     method: "median"
-     seed: 42
+   preprocessing:
+     drop_columns: [id, timestamp]
+     impute:
+       age: {method: sample_normal, seed: 42}
+       category: {method: sample_categorical, seed: 7}
 
-   pca:
-     dimensions: [2, 5, 10, 20]
-     seeds: [0, 1, 2]
-
-   ball_mapper:
-     epsilon_range: [0.1, 0.5, 10]
+   sweep:
+     pca:
+       dimensions: {values: [2, 5, 10, 20]}
+       seed: {values: [42, 7, 13]}
+     ball_mapper:
+       epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 
    cosmic_graph:
      threshold: "auto"

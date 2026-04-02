@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from sklearn.decomposition import PCA as SklearnPCA
 
-from pulsar._pulsar import PCA
+from pulsar._pulsar import PCA, pca_grid
 
 
 def test_output_shape(small_array):
@@ -64,4 +64,74 @@ def test_n_components_too_large():
     arr = np.random.randn(10, 3).astype(np.float64)
     pca = PCA(n_components=5, seed=0)
     with pytest.raises(ValueError, match="n_components"):
+        pca.fit_transform(arr)
+
+
+# ---------------------------------------------------------------------------
+# Tests that would have caught the transposition bug
+# ---------------------------------------------------------------------------
+
+
+def test_principal_direction_aligns_with_dominant_axis():
+    """Data with variance along a single axis must produce a first component
+    aligned with that axis.
+
+    This is the canonical test the transposition bug would have failed: if
+    the matrix is silently transposed, the component vectors live in the
+    wrong space and cannot align with the known variance direction.
+    """
+    rng = np.random.default_rng(0)
+    n_samples = 200
+    # Variance overwhelmingly in column 0; columns 1-3 are near-zero noise
+    data = np.zeros((n_samples, 4), dtype=np.float64)
+    data[:, 0] = rng.standard_normal(n_samples) * 10.0
+    data[:, 1] = rng.standard_normal(n_samples) * 0.01
+    data[:, 2] = rng.standard_normal(n_samples) * 0.01
+    data[:, 3] = rng.standard_normal(n_samples) * 0.01
+
+    pca = PCA(n_components=1, seed=42)
+    result = np.array(pca.fit_transform(data))
+
+    # Output shape must be (n_samples, 1) — a transposed implementation
+    # could produce (n_features, 1) or (1, n_samples).
+    assert result.shape == (n_samples, 1)
+
+    # The projected values should correlate almost perfectly with the
+    # dominant axis (column 0). A transposition would scramble this.
+    centered_col0 = data[:, 0] - data[:, 0].mean()
+    projected = result[:, 0]
+    corr = np.abs(np.corrcoef(centered_col0, projected)[0, 1])
+    assert corr > 0.99, (
+        f"First component should align with dominant variance axis, got corr={corr:.4f}"
+    )
+
+
+def test_pca_grid_dimension_exceeds_features():
+    """pca_grid must raise when a requested dimension exceeds n_features."""
+    arr = np.random.default_rng(0).standard_normal((20, 3)).astype(np.float64)
+    with pytest.raises(ValueError, match="dimension.*exceeds"):
+        pca_grid(arr, [2, 5], [42])
+
+
+def test_pca_raises_on_empty_input():
+    """PCA must reject a matrix with 0 rows."""
+    arr = np.empty((0, 4), dtype=np.float64)
+    pca = PCA(n_components=2, seed=42)
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        pca.fit_transform(arr)
+
+
+def test_pca_raises_on_single_row():
+    """PCA requires at least 2 samples for meaningful variance estimation."""
+    arr = np.array([[1.0, 2.0, 3.0]])
+    pca = PCA(n_components=1, seed=42)
+    with pytest.raises(ValueError):
+        pca.fit_transform(arr)
+
+
+def test_pca_raises_on_zero_features():
+    """PCA must reject a matrix with 0 columns."""
+    arr = np.empty((10, 0), dtype=np.float64)
+    pca = PCA(n_components=1, seed=42)
+    with pytest.raises(ValueError):
         pca.fit_transform(arr)

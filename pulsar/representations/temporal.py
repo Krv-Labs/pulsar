@@ -28,7 +28,7 @@ Given the 3D tensor, we provide several methods to collapse into summary 2D grap
 ## Example Usage
 
 ```python
-from pulsar.temporal import TemporalCosmicGraph
+from pulsar.representations import TemporalCosmicGraph
 
 # Build from time-indexed snapshots
 tcg = TemporalCosmicGraph.from_snapshots(

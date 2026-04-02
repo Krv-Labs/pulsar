@@ -1,3 +1,6 @@
+# Claude Code agent memory (ephemeral session state, not for sharing)
+.claude/agent-memory/
+
 # Python
 python-version
 uv.lock
@@ -6,6 +9,9 @@ uv.lock
 /target/
 Cargo.lock
 
+# Misc
+.DS_Store
+
 # maturin build artifacts
 *.pyd
 *.dylib
@@ -13,6 +19,9 @@ Cargo.lock
 
 # Data
 *.csv
+!demos/mmlu/data/
+demos/mmlu/data/*
+!demos/mmlu/data/model_eval_results.csv
 
 
 # Byte-compiled / optimized / DLL files
@@ -217,6 +226,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+*/settings.json
 
 # Marimo
 marimo/_static/

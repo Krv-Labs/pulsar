@@ -4,6 +4,8 @@ Analysis hooks — pure Python utilities that work on the outputs of the Rust la
 
 from __future__ import annotations
 
+import warnings
+
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -60,10 +62,16 @@ def cosmic_clusters(
     if method == "spectral":
         from sklearn.cluster import SpectralClustering
 
-        return SpectralClustering(
-            n_clusters=n_clusters,
-            affinity="precomputed",
-        ).fit_predict(adj)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Graph is not fully connected.*",
+                category=UserWarning,
+            )
+            return SpectralClustering(
+                n_clusters=n_clusters,
+                affinity="precomputed",
+            ).fit_predict(adj)
 
     raise ValueError(f"Unknown clustering method: {method!r}")
 
@@ -92,8 +100,8 @@ def unclustered_points(ball_mapper, n: int) -> list[int]:
 
 def cosmic_to_networkx(cg) -> nx.Graph:
     """Convert a CosmicGraph Rust object to a NetworkX graph with 'weight' attributes."""
-    g = nx.from_numpy_array(np.array(cg.adj, dtype=np.float64))
-    wadj = np.array(cg.weighted_adj)
-    for u, v in g.edges():
-        g[u][v]["weight"] = float(wadj[u, v])
-    return g
+    adj = np.array(cg.adj, dtype=np.float64)
+    wadj = np.array(cg.weighted_adj, dtype=np.float64)
+    # Use np.where to vectorize weight assignment: keep wadj values where adj > 0, else 0.0
+    # This eliminates the O(E) Python loop while preserving threshold mask semantics.
+    return nx.from_numpy_array(np.where(adj > 0, wadj, 0.0))

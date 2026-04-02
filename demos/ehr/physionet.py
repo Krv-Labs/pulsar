@@ -22,8 +22,8 @@ This demonstrates the "true longitudinal" approach — essential when:
 - Early warning / trend detection is important
 
 Usage:
-    uv run python demos/physionet.py
-    uv run python demos/physionet.py --n-patients 200 --n-hours 48
+    uv run python demos/ehr/physionet.py
+    uv run python demos/ehr/physionet.py --n-patients 200 --n-hours 48
 """
 
 from __future__ import annotations

@@ -55,6 +55,12 @@ class ImputeSpec:
 
 
 @dataclass
+class EncodeSpec:
+    method: str  # one_hot
+    # Reserved for future: categories, handle_unknown, etc.
+
+
+@dataclass
 class PCASpec:
     dimensions: list[int] = field(default_factory=lambda: [2])
     seeds: list[int] = field(default_factory=lambda: [42])
@@ -75,6 +81,7 @@ class CosmicGraphSpec:
 class PulsarConfig:
     data: str
     impute: dict[str, ImputeSpec]
+    encode: dict[str, EncodeSpec]
     drop_columns: list[str]
     pca: PCASpec
     ball_mapper: BallMapperSpec
@@ -104,12 +111,20 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     # preprocessing
     pre = raw.get("preprocessing", {})
     drop_columns = pre.get("drop_columns", []) or []
+
     impute_raw = pre.get("impute", {}) or {}
     impute: dict[str, ImputeSpec] = {}
     for col, spec in impute_raw.items():
         impute[col] = ImputeSpec(
             method=spec["method"],
             seed=int(spec.get("seed", 42)),
+        )
+
+    encode_raw = pre.get("encode", {}) or {}
+    encode: dict[str, EncodeSpec] = {}
+    for col, spec in encode_raw.items():
+        encode[col] = EncodeSpec(
+            method=spec["method"],
         )
 
     # sweep section
@@ -144,6 +159,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     return PulsarConfig(
         data=data_path,
         impute=impute,
+        encode=encode,
         drop_columns=drop_columns,
         pca=pca,
         ball_mapper=ball_mapper,
@@ -151,3 +167,52 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         n_reps=n_reps,
         run_name=run_name,
     )
+
+
+def config_to_yaml(cfg: PulsarConfig) -> str:
+    """Serialize a PulsarConfig to a reproducible YAML string.
+
+    Inverse of ``load_config``; every field is written explicitly so the
+    resulting YAML can recreate the exact same pipeline run.
+    """
+    # Preprocessing: drop_columns + impute + encode
+    drop_line = str(cfg.drop_columns) if cfg.drop_columns else "[]"
+
+    impute_block = ""
+    if cfg.impute:
+        impute_block = "\n  impute:"
+        for col, spec in cfg.impute.items():
+            impute_block += f"\n    {col}: {{method: {spec.method}, seed: {spec.seed}}}"
+
+    encode_block = ""
+    if cfg.encode:
+        encode_block = "\n  encode:"
+        for col, spec in cfg.encode.items():
+            encode_block += f"\n    {col}: {{method: {spec.method}}}"
+
+    # Threshold
+    threshold = cfg.cosmic_graph.threshold
+    threshold_str = f'"{threshold}"' if threshold == "auto" else str(threshold)
+
+    return f"""run:
+  name: {cfg.run_name or "experiment"}
+  data: {cfg.data}
+preprocessing:
+  drop_columns: {drop_line}{impute_block}{encode_block}
+sweep:
+  pca:
+    dimensions:
+      values: {list(cfg.pca.dimensions)}
+    seed:
+      values: {list(cfg.pca.seeds)}
+  ball_mapper:
+    epsilon:
+      range:
+        min: {min(cfg.ball_mapper.epsilons):.4f}
+        max: {max(cfg.ball_mapper.epsilons):.4f}
+        steps: {len(cfg.ball_mapper.epsilons)}
+cosmic_graph:
+  threshold: {threshold_str}
+output:
+  n_reps: {cfg.n_reps}
+"""
