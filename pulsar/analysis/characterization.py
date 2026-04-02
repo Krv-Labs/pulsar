@@ -13,8 +13,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler as SkScaler
 from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler as SkScaler
 
 from pulsar._pulsar import pca_grid
 

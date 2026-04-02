@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import gc
 from collections.abc import Callable
-from contextlib import contextmanager
-import os
 from typing import Any, Union
 
 import networkx as nx
@@ -25,91 +23,14 @@ from pulsar._pulsar import (
     impute_column,
     pca_grid,
 )
-from pulsar.config import ImputeSpec, PulsarConfig, load_config
-from pulsar.analysis.hooks import cosmic_to_networkx
-
-
-def _impute_string_column(df: pd.DataFrame, col: str, spec: ImputeSpec) -> None:
-    """Impute a string/object column in Python (Rust impute_column only handles f64).
-
-    Only fill_mode and sample_categorical are meaningful for string data.
-    Raises ValueError for numeric-only methods (fill_mean, fill_median, sample_normal).
-    """
-    missing_mask = df[col].isna()
-    if not missing_mask.any():
-        return
-    observed = df.loc[~missing_mask, col]
-
-    if spec.method == "fill_mode":
-        mode = observed.mode()
-        if not mode.empty:
-            df.loc[missing_mask, col] = mode.iloc[0]
-
-    elif spec.method == "sample_categorical":
-        import random
-
-        counts = observed.value_counts()
-        categories = counts.index.tolist()
-        weights = counts.values.tolist()
-        rng = random.Random(spec.seed)
-        n_missing = int(missing_mask.sum())
-        fills = rng.choices(categories, weights=weights, k=n_missing)
-        df.loc[missing_mask, col] = fills
-
-    else:
-        raise ValueError(
-            f"Column '{col}' is string/object dtype; method '{spec.method}' requires "
-            f"numeric data. Use 'fill_mode' or 'sample_categorical' for string columns."
-        )
-
-
-# Approximate wall-clock fraction per pipeline stage (estimates, not guarantees).
-# Order matters — stages are consumed sequentially by a cursor.
-# PCA weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
-_STAGE_WEIGHTS: list[tuple[str, float]] = [
-    ("load", 0.03),
-    ("impute", 0.08),
-    ("scale", 0.01),
-    ("pca", 0.25),
-    ("ball_mapper", 0.42),
-    ("laplacian", 0.15),
-    ("cosmic", 0.06),  # includes stability analysis when threshold="auto"
-]
-
-
-def _build_cumulative_fractions(
-    stages: list[tuple[str, float]],
-) -> list[tuple[str, float]]:
-    """Return [(label, cumulative_fraction), ...] with final entry pinned to 1.0."""
-    total = sum(w for _, w in stages)
-    result: list[tuple[str, float]] = []
-    cumulative = 0.0
-    for label, weight in stages:
-        cumulative += weight / total
-        result.append((label, round(cumulative, 6)))
-    if result:
-        result[-1] = (result[-1][0], 1.0)
-    return result
-
-
-@contextmanager
-def _rayon_thread_override(workers: int | None):
-    """
-    Temporarily override Rayon worker count for Rust ops that respect
-    RAYON_NUM_THREADS. Restores the previous value on exit.
-    """
-    if workers is None:
-        yield
-        return
-    prev = os.environ.get("RAYON_NUM_THREADS")
-    os.environ["RAYON_NUM_THREADS"] = str(workers)
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop("RAYON_NUM_THREADS", None)
-        else:
-            os.environ["RAYON_NUM_THREADS"] = prev
+from pulsar.analysis import cosmic_to_networkx
+from pulsar.config import PulsarConfig, load_config
+from pulsar.preprocessing import impute_string_column
+from pulsar.runtime.utils import (
+    STAGE_WEIGHTS,
+    build_cumulative_fractions,
+    rayon_thread_override,
+)
 
 
 class ThemaRS:
@@ -178,9 +99,9 @@ class ThemaRS:
         use_cached_pca = _precomputed_embeddings is not None
         stages = [
             (name, 0.0 if name == "pca" and use_cached_pca else weight)
-            for name, weight in _STAGE_WEIGHTS
+            for name, weight in STAGE_WEIGHTS
         ]
-        schedule = _build_cumulative_fractions(stages)
+        schedule = build_cumulative_fractions(stages)
         _cursor = 0
 
         def _notify(label_override: str | None = None) -> None:
@@ -218,7 +139,7 @@ class ThemaRS:
             if col not in df.columns:
                 continue
             if df[col].dtype == object:
-                _impute_string_column(df, col, spec)
+                impute_string_column(df, col, spec)
             else:
                 arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
                 imputed = impute_column(arr, spec.method, spec.seed)
@@ -354,7 +275,7 @@ class ThemaRS:
         stages.append(("laplacian", 0.15))
         stages.append(("cosmic", 0.06))
 
-        schedule = _build_cumulative_fractions(stages)
+        schedule = build_cumulative_fractions(stages)
         _cursor = 0
 
         def _notify(label_override: str | None = None) -> None:
@@ -379,7 +300,7 @@ class ThemaRS:
                     categories.update(ds[col].dropna().unique())
             vocab[col] = sorted(list(categories))
 
-        with _rayon_thread_override(rayon_workers):
+        with rayon_thread_override(rayon_workers):
             for i, data in enumerate(datasets):
                 df = data.copy()
 
@@ -395,7 +316,7 @@ class ThemaRS:
                     if col not in df.columns:
                         continue
                     if df[col].dtype == object:
-                        _impute_string_column(df, col, spec)
+                        impute_string_column(df, col, spec)
                     else:
                         arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
                         df[col] = impute_column(arr, spec.method, spec.seed)

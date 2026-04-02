@@ -8,7 +8,7 @@ from contextlib import contextmanager
 # Approximate wall-clock fraction per pipeline stage (estimates, not guarantees).
 # Order matters — stages are consumed sequentially by a cursor.
 # PCA weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
-_STAGE_WEIGHTS: list[tuple[str, float]] = [
+STAGE_WEIGHTS: list[tuple[str, float]] = [
     ("load", 0.03),
     ("impute", 0.08),
     ("scale", 0.01),
@@ -19,7 +19,7 @@ _STAGE_WEIGHTS: list[tuple[str, float]] = [
 ]
 
 
-def _build_cumulative_fractions(
+def build_cumulative_fractions(
     stages: list[tuple[str, float]],
 ) -> list[tuple[str, float]]:
     """Return [(label, cumulative_fraction), ...] with final entry pinned to 1.0."""
@@ -35,7 +35,7 @@ def _build_cumulative_fractions(
 
 
 @contextmanager
-def _rayon_thread_override(workers: int | None):
+def rayon_thread_override(workers: int | None):
     """
     Temporarily override Rayon worker count for Rust ops that respect
     RAYON_NUM_THREADS. Restores the previous value on exit.
