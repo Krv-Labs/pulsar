@@ -4,7 +4,6 @@ Tests for pulsar.mcp.diagnostics module.
 Tests graph quality metrics computation and diagnosis generation.
 """
 
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -69,16 +68,18 @@ def unfitted_model(basic_config):
 @pytest.fixture
 def connected_spectral_model():
     """Fitted model guaranteed to produce a dense connected graph (low epsilon)."""
-    cfg = load_config({
-        "run": {"name": "spectral_test"},
-        "preprocessing": {"drop_columns": [], "impute": {}},
-        "sweep": {
-            "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
-            "ball_mapper": {"epsilon": {"values": [2.0, 3.0]}},
-        },
-        "cosmic_graph": {"threshold": "0.0"},
-        "output": {"n_reps": 1},
-    })
+    cfg = load_config(
+        {
+            "run": {"name": "spectral_test"},
+            "preprocessing": {"drop_columns": [], "impute": {}},
+            "sweep": {
+                "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
+                "ball_mapper": {"epsilon": {"values": [2.0, 3.0]}},
+            },
+            "cosmic_graph": {"threshold": "0.0"},
+            "output": {"n_reps": 1},
+        }
+    )
     rng = np.random.default_rng(7)
     # Tightly clustered data → dense graph
     data = pd.DataFrame(
@@ -91,16 +92,18 @@ def connected_spectral_model():
 @pytest.fixture
 def disconnected_spectral_model():
     """Fitted model that produces a disconnected graph (high threshold)."""
-    cfg = load_config({
-        "run": {"name": "disconnected_test"},
-        "preprocessing": {"drop_columns": [], "impute": {}},
-        "sweep": {
-            "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
-            "ball_mapper": {"epsilon": {"values": [0.1]}},
-        },
-        "cosmic_graph": {"threshold": "0.0"},
-        "output": {"n_reps": 1},
-    })
+    cfg = load_config(
+        {
+            "run": {"name": "disconnected_test"},
+            "preprocessing": {"drop_columns": [], "impute": {}},
+            "sweep": {
+                "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
+                "ball_mapper": {"epsilon": {"values": [0.1]}},
+            },
+            "cosmic_graph": {"threshold": "0.0"},
+            "output": {"n_reps": 1},
+        }
+    )
     rng = np.random.default_rng(99)
     # Spread data with small epsilon → sparse/disconnected graph
     data = pd.DataFrame(
