@@ -53,6 +53,7 @@ fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(usize,
     // Step 3: build edges - O(k²) but k is small
     let n_balls = nodes.len();
     let mut edges: Vec<(usize, usize)> = Vec::new();
+    #[allow(clippy::needless_range_loop)]
     for a in 0..n_balls {
         let set_a: HashSet<usize> = nodes[a].iter().copied().collect();
         for b in (a + 1)..n_balls {

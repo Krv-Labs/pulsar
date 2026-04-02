@@ -23,12 +23,13 @@ from pulsar._pulsar import (
     impute_column,
     pca_grid,
 )
-from pulsar.analysis.hooks import cosmic_to_networkx
+from pulsar.analysis import cosmic_to_networkx
 from pulsar.config import PulsarConfig, load_config
+from pulsar.preprocessing import impute_string_column
 from pulsar.runtime.utils import (
-    _STAGE_WEIGHTS,
-    _build_cumulative_fractions,
-    _rayon_thread_override,
+    STAGE_WEIGHTS,
+    build_cumulative_fractions,
+    rayon_thread_override,
 )
 
 
@@ -98,9 +99,9 @@ class ThemaRS:
         use_cached_pca = _precomputed_embeddings is not None
         stages = [
             (name, 0.0 if name == "pca" and use_cached_pca else weight)
-            for name, weight in _STAGE_WEIGHTS
+            for name, weight in STAGE_WEIGHTS
         ]
-        schedule = _build_cumulative_fractions(stages)
+        schedule = build_cumulative_fractions(stages)
         _cursor = 0
 
         def _notify(label_override: str | None = None) -> None:
@@ -133,13 +134,16 @@ class ThemaRS:
                 flag_col = f"{col}_was_missing"
                 df[flag_col] = df[col].isna().astype(np.float64)
 
-        # 3b. Impute columns (Rust)
+        # 3b. Impute columns (Rust for numeric, Python for string/object)
         for col, spec in cfg.impute.items():
             if col not in df.columns:
                 continue
-            arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-            imputed = impute_column(arr, spec.method, spec.seed)
-            df[col] = imputed
+            if df[col].dtype == object:
+                impute_string_column(df, col, spec)
+            else:
+                arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
+                imputed = impute_column(arr, spec.method, spec.seed)
+                df[col] = imputed
 
         # 3c. Encode categorical columns (pure Python)
         for col, spec in cfg.encode.items():
@@ -271,7 +275,7 @@ class ThemaRS:
         stages.append(("laplacian", 0.15))
         stages.append(("cosmic", 0.06))
 
-        schedule = _build_cumulative_fractions(stages)
+        schedule = build_cumulative_fractions(stages)
         _cursor = 0
 
         def _notify(label_override: str | None = None) -> None:
@@ -296,7 +300,7 @@ class ThemaRS:
                     categories.update(ds[col].dropna().unique())
             vocab[col] = sorted(list(categories))
 
-        with _rayon_thread_override(rayon_workers):
+        with rayon_thread_override(rayon_workers):
             for i, data in enumerate(datasets):
                 df = data.copy()
 
@@ -311,8 +315,11 @@ class ThemaRS:
                 for col, spec in cfg.impute.items():
                     if col not in df.columns:
                         continue
-                    arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-                    df[col] = impute_column(arr, spec.method, spec.seed)
+                    if df[col].dtype == object:
+                        impute_string_column(df, col, spec)
+                    else:
+                        arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
+                        df[col] = impute_column(arr, spec.method, spec.seed)
 
                 # Encode categorical columns with shared vocabulary
                 for col, spec in cfg.encode.items():

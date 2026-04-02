@@ -6,14 +6,17 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 
 import asyncio
 import dataclasses
+from dataclasses import dataclass
 import json
 import logging
 import os
+import time
 from typing import Dict, Optional
 
 import pandas as pd
 import yaml
 from fastmcp import FastMCP, Context
+from fastmcp.exceptions import ToolError
 
 from pulsar.config import config_to_yaml
 from pulsar.runtime.fingerprint import pca_fingerprint
@@ -25,6 +28,7 @@ from pulsar.mcp.interpreter import (
     compare_clusters,
     comparison_to_markdown,
 )
+from pulsar.mcp.errors import mcp_error
 
 logger = logging.getLogger(__name__)
 
@@ -32,28 +36,44 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     "Pulsar",
     instructions=(
-        "Pulsar is a geometric deep learning toolkit for discovering structure "
-        "in complex datasets. Follow this workflow:\n"
-        "1. characterize_dataset(csv_path) → get column_profiles and a YAML template\n"
-        "2. Review column_profiles and the suggested YAML:\n"
-        "   - Low-cardinality strings (≤10 unique) are automatically added to "
-        "the 'encode' block. This preserves their geometric context.\n"
-        "   - High-cardinality or unique strings (like Names/IDs) are added to 'drop_columns'.\n"
-        "   - Edit the YAML if you want to encode a column that was dropped, or vice-versa.\n"
-        "3. run_topological_sweep(config_yaml=<your edited YAML>) → fit pipeline\n"
-        "4. diagnose_cosmic_graph() → check quality and balance.\n"
-        "   - Review 'component_sizes'. If one component contains >80% of data, "
-        "the graph is a 'blob'.\n"
-        "5. generate_cluster_dossier(method, max_k) → get cluster statistics.\n"
-        "   - If diagnose showed a 'blob', use method='spectral' to find sub-structure.\n"
-        "   - If diagnose showed balanced components, use method='auto' or 'components'.\n"
-        "6. compare_clusters(cluster_a, cluster_b) → use this for academic rigor to "
-        "prove why two clusters are statistically distinct (p-values, Cohen's d).\n"
-        "7. export_labeled_data(cluster_names, output_path) → save results\n"
-        "IMPORTANT: Pass YAML strings directly between tools. Never ask the user "
-        "to write files manually — the tools handle file I/O automatically."
+        "You are a topological cartographer. Your job is to reveal the shape of the data, not impose one.\n\n"
+        "# Your Mental Model\n"
+        "- **Manifold Recovery, Not Clustering:** You are mapping the continuous geometric structure of the dataset. "
+        "Do not force data into neat, disconnected clusters if they do not organically exist.\n"
+        "- **The Cosmic Graph:** This is your primary artifact. It is the aggregated topological signal of the data across multiple spatial scales.\n\n"
+        "# Core Principles\n"
+        "1. **Dimensionality vs. Scale:** Higher dimensions compress Euclidean distance into a narrow band. This requires a larger epsilon "
+        "to capture local neighborhoods, which rapidly leads to a massive, uninformative 'blob' (a fully connected component). "
+        "Manage dimensionality (e.g., PCA dims) tightly before aggressively tuning your scale (epsilon) parameters.\n"
+        "2. **Respect Categoricals:** Categorical variables (e.g., island, group) add rigid, orthogonal structure to the manifold. "
+        "They are not noise. Never drop them simply to force spatial separation. If the reality of the data is partitioned, the topology must reflect that.\n"
+        "3. **Variance Curve:** Look at the cumulative variance curve from characterize_dataset. If Dim 3 captures 94% variance, using Dim 5 "
+        "adds almost no signal but drastically dilutes distances (curse of dimensionality).\n"
+        "4. **Good Graph vs Convenient Graph:** A 'good' graph has structural balance. Look for a `giant_fraction` (the largest component) "
+        "typically between 20% and 60%, accompanied by multiple smaller structural components. It is not necessarily the graph that perfectly fits a preconceived notion of 'K=3 clusters'.\n\n"
+        "# The Scientific Posture\n"
+        "Treat the cosmic graph as empirical evidence, not a score to maximize.\n"
+        "- **Form a hypothesis** before adjusting any configuration.\n"
+        "- **Change ONE parameter at a time** (e.g., epsilon bounds OR PCA dims OR categorical encoding).\n"
+        "- **Observe the exact structural impact** on the cosmic graph (use the diff provided by run_topological_sweep), and re-assess your hypothesis.\n\n"
+        "# Workflow\n"
+        "1. characterize_dataset -> suggest_initial_config -> explain_suggestion\n"
+        "2. run_topological_sweep -> diagnose_cosmic_graph\n"
+        "3. **Iterate:** Change ONE parameter. After each sweep, review the diff. Call `get_experiment_history` when reasoning across multiple iterations.\n"
+        "4. **Blob Recovery:** If run 1 produces a massive blob (`giant_fraction` > 80%), call `explain_suggestion` to understand the initial reasoning *before* blindly deviating. "
+        "Usually, you must decrease epsilon OR reduce PCA dims to break the blob.\n"
+        "5. **Shatter Recovery:** If the graph is fragmented (`component_count` > 20 and `giant_fraction` < 5%), your epsilon is too small or threshold too aggressive. "
+        "Increase epsilon modestly (10-20%) or reduce the threshold before any other change. After calling `explain_suggestion`, return to step 2 (`run_topological_sweep`) with ONE adjusted parameter.\n"
+        "6. generate_cluster_dossier -> compare_clusters\n"
     ),
 )
+
+
+@dataclass
+class SweepRecord:
+    timestamp: float
+    config_yaml: str
+    metrics: dict
 
 
 # Session state: stores (model, data, clusters) per session
@@ -66,17 +86,22 @@ class _PulsarSession:
     clusters: Optional[pd.Series] = None
     embeddings: Optional[list] = None  # cached PCA output from last fit
     pca_fingerprint: Optional[str] = None  # SHA256 of (data_path, dims, seeds, n_rows)
-    sweep_history: list = dataclasses.field(
-        default_factory=list
-    )  # list[SweepHistoryEntry]
+    sweep_history: list[SweepRecord] = dataclasses.field(default_factory=list)
 
 
 # Global session storage, keyed by session_id (or "default" for STDIO)
+# STDIO transport assumption: mcp.run() with no transport argument defaults to STDIO.
+# Under STDIO, each process serves exactly one client. _sessions will contain at most
+# one entry, keyed "default". If ported to SSE/WebSocket (multi-client), replace this
+# with a bounded LRU dict capped at MAX_SESSIONS.
 _sessions: Dict[str, _PulsarSession] = {}
+_MAX_SESSIONS = 1
 
 
-def _session_key(ctx: Context) -> str:
+def _session_key(ctx: Context | None) -> str:
     """Get the session key from context (session_id or 'default' for STDIO)."""
+    if ctx is None:
+        return "default"
     return ctx.session_id or "default"
 
 
@@ -84,8 +109,26 @@ def _get_session(ctx: Context) -> _PulsarSession:
     """Get or create session state for the current client."""
     key = _session_key(ctx)
     if key not in _sessions:
+        if len(_sessions) >= _MAX_SESSIONS:
+            logger.warning(
+                "_sessions has %d entries; expected %d under STDIO transport. "
+                "If using a multi-client transport, this server needs LRU eviction.",
+                len(_sessions),
+                _MAX_SESSIONS,
+            )
         _sessions[key] = _PulsarSession()
     return _sessions[key]
+
+
+def _format_epsilon(cfg: dict) -> str:
+    """Format epsilon config as a display string, handling both range and values shapes."""
+    eps_node = cfg.get("sweep", {}).get("ball_mapper", {}).get("epsilon", {})
+    if "range" in eps_node:
+        r = eps_node["range"]
+        return f"[{r.get('min', 0):.3f}, {r.get('max', 0):.3f}]"
+    elif "values" in eps_node:
+        return str(eps_node["values"])
+    return "n/a"
 
 
 def _validate_config_path(path: str) -> None:
@@ -111,6 +154,161 @@ def _auto_save_config(cfg) -> str:
 
 
 @mcp.tool()
+async def suggest_initial_config(dataset_geometry: str, ctx: Context) -> str:
+    """
+    Generate an initial configuration YAML based on your interpretation of the raw dataset geometry.
+
+    You MUST call characterize_dataset first, analyze the variance curve and column missingness/cardinality,
+    and then formulate a JSON-encoded summary of the geometry to pass into this tool.
+
+    Args:
+        dataset_geometry: A JSON string containing your summary of the geometry (e.g., {"N": 344, "pca_knee_dim": 3, "knn_mean": 0.6}).
+
+    Returns:
+        A starter config_yaml string.
+    """
+    try:
+        geo = json.loads(dataset_geometry)
+        pca_dims = geo.get("pca_knee_dim", 3)
+        if isinstance(pca_dims, int):
+            pca_dims = [pca_dims]
+
+        eps_min = geo.get("knn_mean", 0.5) * 0.8
+        eps_max = geo.get("knn_mean", 0.5) * 1.5
+
+        yaml_str = f"""run:
+  name: initial_sweep
+  data: "FILL_THIS_IN_WITH_PATH"
+preprocessing:
+  drop_columns: []
+  encode: {{}}
+  impute: {{}}
+sweep:
+  pca:
+    dimensions:
+      values: {pca_dims}
+    seed:
+      values: [42]
+  ball_mapper:
+    epsilon:
+      range:
+        min: {eps_min:.4f}
+        max: {eps_max:.4f}
+        steps: 15
+cosmic_graph:
+  threshold: auto
+output:
+  n_reps: 4
+"""
+        return yaml_str
+    except Exception as e:
+        return mcp_error("suggest_initial_config", str(e))
+
+
+@mcp.tool()
+async def explain_suggestion(
+    config_yaml: str, dataset_geometry: str, ctx: Context
+) -> str:
+    """
+    Explains the mathematical reasoning behind a specific parameter suggestion based on raw geometry.
+
+    Args:
+        config_yaml: The YAML config to explain.
+        dataset_geometry: JSON string of the dataset geometry summary.
+
+    Returns:
+        A Markdown explanation of WHY these parameters were chosen.
+    """
+    try:
+        geo = json.loads(dataset_geometry)
+        config_dict = yaml.safe_load(config_yaml)
+
+        pca_dims = (
+            config_dict.get("sweep", {})
+            .get("pca", {})
+            .get("dimensions", {})
+            .get("values", [])
+        )
+        eps_str = _format_epsilon(config_dict)
+
+        n_samples = geo.get("n_samples", "unknown")
+        cum_var_map = {int(d): v for d, v in geo.get("pca_cumulative_variance", [])}
+        knn_mean = geo.get("knn_k5_mean")
+
+        explanation = "### Parameter Reasoning\n\n"
+
+        # 1. PCA Reasoning
+        pca_reasons = []
+        for dim in pca_dims:
+            var = cum_var_map.get(int(dim))
+            if var is not None:
+                next_var = cum_var_map.get(int(dim) + 1)
+                benefit = f" (+{next_var - var:.1%})" if next_var else ""
+                pca_reasons.append(f"Dim {dim} captures {var:.1%} variance{benefit}.")
+
+        if pca_reasons:
+            explanation += f"- **PCA Dimensions {pca_dims}**: " + " ".join(pca_reasons)
+            if isinstance(n_samples, int):
+                pts_per_dim = n_samples / max(pca_dims)
+                explanation += f" With N={n_samples}, this maintains ~{pts_per_dim:.1f} points per dimension, ensuring sufficient manifold density.\n"
+            else:
+                explanation += "\n"
+        else:
+            explanation += f"- **PCA Dimensions {pca_dims}**: Chosen based on the variance curve elbow (values not provided in geo summary).\n"
+
+        # 2. Epsilon Reasoning
+        if knn_mean:
+            eps_node = (
+                config_dict.get("sweep", {}).get("ball_mapper", {}).get("epsilon", {})
+            )
+            if "range" in eps_node:
+                r = eps_node["range"]
+                e_min, e_max = r.get("min", 0), r.get("max", 0)
+                explanation += f"- **Epsilon Range {eps_str}**: Anchored at knn_k5_mean={knn_mean:.4f}. The range spans {e_min / knn_mean:.2f}x to {e_max / knn_mean:.2f}x the mean distance, transitioning from local neighborhoods to global structure.\n"
+            else:
+                explanation += f"- **Epsilon {eps_str}**: Evaluated relative to knn_k5_mean={knn_mean:.4f}.\n"
+        else:
+            explanation += f"- **Epsilon {eps_str}**: Search window centered around k-NN mean (knn_k5_mean not provided in summary).\n"
+
+        return explanation
+    except Exception as e:
+        return mcp_error("explain_suggestion", str(e))
+
+
+@mcp.tool()
+async def get_experiment_history(ctx: Context) -> str:
+    """
+    Returns a markdown table of all topological sweeps run in the current session.
+    Use this to reason about your trajectory across multiple iterations.
+
+    Returns:
+        Markdown table of history. Returns an empty table if no sweeps have been run.
+    """
+    session = _get_session(ctx)
+    if not session.sweep_history:
+        return "No experiments run yet in this session.\n\n| Run | PCA Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |\n|---|---|---|---|---|---|---|"
+
+    lines = [
+        "| Run | PCA Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |"
+    ]
+    lines.append("|---|---|---|---|---|---|---|")
+
+    for i, record in enumerate(session.sweep_history):
+        cfg = yaml.safe_load(record.config_yaml)
+        pca = str(
+            cfg.get("sweep", {}).get("pca", {}).get("dimensions", {}).get("values", [])
+        )
+        eps = _format_epsilon(cfg)
+
+        m = record.metrics
+        lines.append(
+            f"| {i + 1} | {pca} | {eps} | {m.get('n_nodes')} | {m.get('n_edges')} | {m.get('component_count')} | {m.get('giant_fraction', 0):.2%} |"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
 async def run_topological_sweep(
     config_path: str = "",
     config_yaml: str = "",
@@ -119,44 +317,37 @@ async def run_topological_sweep(
     """
     Run the Pulsar topological sweep pipeline on a dataset.
 
-    PREFERRED WORKFLOW:
-    1. Call characterize_dataset(csv_path) first to get a suggested config.
-    2. Extract the "suggested_params_yaml" string from the JSON response.
-    3. Pass it directly here as config_yaml — NO file writing needed.
-    4. If diagnose_cosmic_graph() later returns quality != "good", take its
-       "suggested_config_yaml" and pass it here as config_yaml to retry.
-
-    The resolved config is automatically saved to disk for reproducibility.
+    Returns a markdown diff of parameter and metric changes compared to your previous run,
+    followed by the full execution summary.
 
     Args:
-        config_path: Path to a params.yaml file on disk (use this OR config_yaml).
-        config_yaml: Inline YAML string — pass the suggested_params_yaml from
-            characterize_dataset() or suggested_config_yaml from
-            diagnose_cosmic_graph() directly. No file writing needed.
-
-    Returns:
-        Summary with node/edge counts, resolution, data shape, and saved config path.
+        config_path: Path to a params.yaml file on disk.
+        config_yaml: Inline YAML string (preferred).
     """
+    if config_yaml:
+        config_dict = yaml.safe_load(config_yaml)
+        if not isinstance(config_dict, dict):
+            raise ToolError("config_yaml must be a valid YAML mapping")
+        current_yaml = config_yaml
+    elif config_path:
+        _validate_config_path(config_path)
+        with open(config_path) as f:
+            current_yaml = f.read()
+    else:
+        raise ToolError("Provide either config_path or config_yaml.")
+
     session = _get_session(ctx)
 
     try:
-        # Resolve config from either source
         if config_yaml:
-            config_dict = yaml.safe_load(config_yaml)
-            if not isinstance(config_dict, dict):
-                raise ValueError("config_yaml must be a valid YAML mapping")
             logger.info("Starting topological sweep from inline YAML")
             model = ThemaRS(config_dict)
-        elif config_path:
-            _validate_config_path(config_path)
+        else:
             logger.info("Starting topological sweep for: %s", config_path)
             model = ThemaRS(config_path)
-        else:
-            return "Error: Provide either config_path or config_yaml."
 
         cfg = model.config
 
-        # Check if cached PCA embeddings can be reused (same data + PCA params)
         precomputed = None
         if session.embeddings is not None and session.data is not None:
             fingerprint = pca_fingerprint(cfg, len(session.data))
@@ -164,19 +355,19 @@ async def run_topological_sweep(
                 precomputed = session.embeddings
                 logger.info("Reusing cached PCA embeddings (fingerprint match)")
 
-        # Build progress callback that fires ctx.report_progress() from the fit thread.
         loop = asyncio.get_running_loop()
 
         def progress_callback(stage: str, fraction: float) -> None:
+            if ctx is None:
+                return
             try:
                 asyncio.run_coroutine_threadsafe(
                     ctx.report_progress(progress=fraction, total=1.0, message=stage),
                     loop,
                 )
             except RuntimeError:
-                pass  # Event loop closed; progress reporting is best-effort
+                pass
 
-        # Run blocking fit() in a threadpool — avoids starving the event loop.
         await asyncio.to_thread(
             model.fit,
             _precomputed_embeddings=precomputed,
@@ -184,18 +375,68 @@ async def run_topological_sweep(
         )
 
         session.model = model
-        session.data = model.preprocessed_data  # row-aligned with graph nodes
+        session.data = model.preprocessed_data
 
-        # Update session cache with fresh embeddings if not reused
         if precomputed is None:
             session.embeddings = model._embeddings
             session.pca_fingerprint = pca_fingerprint(cfg, len(model.data))
 
-        # Auto-save resolved config for reproducibility
         saved_path = _auto_save_config(cfg)
-
         graph = model.cosmic_graph
-        result = (
+
+        # Calculate metrics for diff
+        from pulsar.mcp.diagnostics import diagnose_model
+
+        current_metrics_obj = diagnose_model(model)
+        current_metrics = dataclasses.asdict(current_metrics_obj)
+
+        # Build Diff block
+        diff_block = (
+            "### Experiment Diff\n\n| Parameter | Previous | Current |\n|---|---|---|\n"
+        )
+        if not session.sweep_history:
+            diff_block += "| (Initial Run) | - | - |\n"
+        else:
+            prev_record = session.sweep_history[-1]
+            prev_cfg = yaml.safe_load(prev_record.config_yaml)
+            curr_cfg = yaml.safe_load(current_yaml)
+
+            p_pca = str(
+                prev_cfg.get("sweep", {})
+                .get("pca", {})
+                .get("dimensions", {})
+                .get("values", [])
+            )
+            c_pca = str(
+                curr_cfg.get("sweep", {})
+                .get("pca", {})
+                .get("dimensions", {})
+                .get("values", [])
+            )
+            if p_pca != c_pca:
+                diff_block += f"| pca_dims | {p_pca} | {c_pca} |\n"
+
+            p_eps = _format_epsilon(prev_cfg)
+            c_eps = _format_epsilon(curr_cfg)
+            if p_eps != c_eps:
+                diff_block += f"| epsilon | {p_eps} | {c_eps} |\n"
+
+            pm = prev_record.metrics
+            cm = current_metrics
+            diff_block += (
+                f"| Edges | {pm.get('n_edges', 0):,} | {cm.get('n_edges', 0):,} |\n"
+            )
+            diff_block += f"| Components | {pm.get('component_count', 0)} | {cm.get('component_count', 0)} |\n"
+            diff_block += f"| Giant Fraction | {pm.get('giant_fraction', 0):.2%} | {cm.get('giant_fraction', 0):.2%} |\n"
+
+        # Record history
+        session.sweep_history.append(
+            SweepRecord(time.time(), current_yaml, current_metrics)
+        )
+
+        result = f"{diff_block}\n\n"
+        result += (
+            "### Execution Summary\n"
             "Successfully ran topological sweep.\n"
             f"- Nodes: {graph.number_of_nodes()}\n"
             f"- Edges: {graph.number_of_edges()}\n"
@@ -203,25 +444,11 @@ async def run_topological_sweep(
             f"- Data Shape: {session.data.shape}\n"
             f"- Config saved: {saved_path}"
         )
-        logger.info(
-            "Topological sweep complete: %d nodes, %d edges",
-            graph.number_of_nodes(),
-            graph.number_of_edges(),
-        )
         return result
 
-    except FileNotFoundError as e:
-        error_msg = f"Error: {e}"
-        logger.error(error_msg)
-        return error_msg
-    except ValueError as e:
-        error_msg = f"Error: {e}"
-        logger.error(error_msg)
-        return error_msg
-    except (RuntimeError, OSError) as e:
-        error_msg = f"Error running sweep: {e}"
-        logger.error(error_msg)
-        return error_msg
+    except Exception as e:
+        logger.error(f"Error running sweep: {e}")
+        return mcp_error("run_topological_sweep", str(e))
 
 
 @mcp.tool()
@@ -232,59 +459,28 @@ async def generate_cluster_dossier(
 ) -> str:
     """
     Generate a statistical dossier of the topological clusters.
-
-    Call this AFTER diagnose_cosmic_graph() returns quality == "good".
-
-    CHOOSING A METHOD: Review component_sizes and clustering_notes from the
-    diagnose results to decide:
-    - method="auto" (default): Uses connected components if balanced, falls
-      back to spectral. Works well when the graph has natural separation.
-    - method="spectral": Forces spectral clustering with silhouette-optimized k.
-      Use this when component_sizes shows one dominant component (e.g. [162, 7, 2, 1, 1]).
-    - method="components": Forces connected components. Use when components
-      are naturally balanced.
-
-    Args:
-        method: Clustering strategy — "auto", "spectral", or "components".
-        max_k: Maximum k for spectral clustering search (default 15).
-            Increase for large datasets (e.g. max_k=30 for 5000+ nodes).
-
-    Returns:
-        Markdown-formatted cluster dossier.
     """
     session = _get_session(ctx)
 
     if session.model is None or session.data is None:
-        return "Error: No model found. Run run_topological_sweep() first."
+        raise ToolError("No model found. Run run_topological_sweep() first.")
 
     if method not in ("auto", "spectral", "components"):
-        return (
-            f"Error: method must be 'auto', 'spectral', or 'components', got '{method}'"
+        raise ToolError(
+            f"method must be 'auto', 'spectral', or 'components', got '{method}'"
         )
 
     try:
-        logger.info("Generating cluster dossier (method=%s, max_k=%d)", method, max_k)
-
-        # 1. Resolve Clusters
         clusters = resolve_clusters(session.model, method=method, max_k=max_k)
         session.clusters = clusters
 
-        # 2. Build Statistical Dossier
         dossier = build_dossier(session.model, session.data, clusters)
-
-        # 3. Convert to Markdown
         markdown = dossier_to_markdown(dossier)
-        logger.info("Cluster dossier generated: %d clusters", dossier.n_clusters)
         return markdown
 
-    except ValueError as e:
-        error_msg = f"Error generating dossier: {e}"
-        logger.error(error_msg)
-        return error_msg
-    except RuntimeError as e:
-        error_msg = f"Error generating dossier: {e}"
-        logger.error(error_msg)
-        return error_msg
+    except Exception as e:
+        logger.error(f"Error generating dossier: {e}")
+        return mcp_error("generate_cluster_dossier", str(e))
 
 
 @mcp.tool()
@@ -293,40 +489,28 @@ async def compare_clusters_tool(
 ) -> str:
     """
     Perform pairwise statistical tests between two clusters.
-
-    Returns a Markdown report with Welch's T-test, KS-test, and Cohen's d
-    effect size for all numeric features. Features are sorted by the magnitude
-    of the difference (Cohen's d).
-
-    Args:
-        cluster_a: ID of the first cluster.
-        cluster_b: ID of the second cluster.
-
-    Returns:
-        Markdown-formatted statistical comparison.
     """
     session = _get_session(ctx)
 
     if session.data is None or session.clusters is None:
-        return "Error: No data or clusters found. Run generate_cluster_dossier() first."
+        raise ToolError(
+            "No data or clusters found. Run generate_cluster_dossier() first."
+        )
 
     try:
-        logger.info("Comparing clusters %d and %d", cluster_a, cluster_b)
-
-        # 1. Perform Comparison
         results = compare_clusters(session.data, session.clusters, cluster_a, cluster_b)
-
         if not results:
-            return f"Error: No results for comparison between clusters {cluster_a} and {cluster_b}. Ensure clusters have at least 2 points."
+            return mcp_error(
+                "compare_clusters_tool",
+                f"No results for comparison between clusters {cluster_a} and {cluster_b}.",
+            )
 
-        # 2. Convert to Markdown
         markdown = comparison_to_markdown(cluster_a, cluster_b, results)
         return markdown
 
-    except (ValueError, KeyError, IndexError) as e:
-        error_msg = f"Error comparing clusters: {e}"
-        logger.error(error_msg)
-        return error_msg
+    except Exception as e:
+        logger.error(f"Error comparing clusters: {e}")
+        return mcp_error("compare_clusters_tool", str(e))
 
 
 @mcp.tool()
@@ -335,141 +519,73 @@ async def export_labeled_data(
 ) -> str:
     """
     Assign semantic names to clusters and export the labeled dataset to CSV.
-
-    Call this AFTER generate_cluster_dossier(). Maps cluster IDs to
-    human-readable names chosen by the agent based on the dossier analysis.
-
-    Args:
-        cluster_names: Dict mapping cluster IDs (from the dossier) to semantic
-            names. Example: {0: "High Emission Plants", 1: "Clean Energy"}
-        output_path: Absolute path where the labeled CSV will be saved.
-
-    Returns:
-        Confirmation message with export path.
     """
     session = _get_session(ctx)
 
     if session.data is None or session.clusters is None:
-        return "Error: No data or clusters found. Run generate_cluster_dossier() first."
+        raise ToolError(
+            "No data or clusters found. Run generate_cluster_dossier() first."
+        )
+
+    actual_ids = set(session.clusters.unique().tolist())
+    provided_ids = set(int(k) for k in cluster_names.keys())
+    missing_ids = actual_ids - provided_ids
+    if missing_ids:
+        raise ToolError(
+            f"cluster IDs {sorted(missing_ids)} have no name mapping. Provide all {len(actual_ids)} cluster IDs."
+        )
 
     try:
-        # Validate cluster_names coverage
-        actual_ids = set(session.clusters.unique().tolist())
-        provided_ids = set(int(k) for k in cluster_names.keys())
-        missing_ids = actual_ids - provided_ids
-        if missing_ids:
-            missing_str = sorted(missing_ids)
-            return (
-                f"Error: cluster IDs {missing_str} have no name mapping. "
-                f"Provide all {len(actual_ids)} cluster IDs."
-            )
-
-        logger.info("Exporting labeled data to: %s", output_path)
-
         df = session.data.copy()
         df["topological_cluster_id"] = session.clusters
-
-        # Map IDs to names (ensure keys are ints, as LLMs sometimes send strings)
         names_map = {int(k): v for k, v in cluster_names.items()}
         df["topological_cluster_name"] = df["topological_cluster_id"].map(names_map)
-
         df.to_csv(output_path, index=False)
-        logger.info("Successfully exported %d rows to %s", len(df), output_path)
         return f"Successfully exported labeled data to {output_path}"
 
-    except ValueError as e:
-        error_msg = f"Error exporting data: {e}"
-        logger.error(error_msg)
-        return error_msg
-    except OSError as e:
-        error_msg = f"Error writing to {output_path}: {e}"
-        logger.error(error_msg)
-        return error_msg
+    except Exception as e:
+        logger.error(f"Error exporting data: {e}")
+        return mcp_error("export_labeled_data", str(e))
 
 
 @mcp.tool()
 async def characterize_dataset(csv_path: str, ctx: Context) -> str:
     """
-    Probe a dataset's geometry and return column metadata + a YAML config template.
-
-    ALWAYS call this FIRST before run_topological_sweep(). Returns JSON with:
-
-    - profile.column_profiles: per-column metadata (dtype, uniqueness, missingness).
-    - recommendations.suggested_params_yaml: a complete YAML template.
-      - Non-numeric columns with <=10 unique values are auto-added to the 'encode' block.
-      - High-cardinality strings are auto-added to 'drop_columns'.
-      - PCA dims, epsilon range, and imputation methods are suggested based on geometry.
-    - recommendations.warnings: factual observations about data quality and dimensionality.
-
-    Args:
-        csv_path: Absolute path to a CSV file (must have >=2 numeric columns).
-
-    Returns:
-        JSON with profile, recommendations, and suggested_params_yaml.
+    Probes dataset geometry to return raw facts (N, features, variance curve, k-NN mean).
+    Use this signal to form a hypothesis and pass your summary into suggest_initial_config.
     """
     try:
         from pulsar.analysis.characterization import characterize_dataset as _char
 
         result = await asyncio.to_thread(_char, csv_path)
         return json.dumps(dataclasses.asdict(result), indent=2)
-    except (ValueError, FileNotFoundError) as e:
-        error_msg = f"Error: {e}"
-        logger.error(error_msg)
-        return error_msg
-    except (RuntimeError, OSError) as e:
-        error_msg = f"Error analyzing dataset: {e}"
-        logger.error(error_msg)
-        return error_msg
+    except Exception as e:
+        logger.error(f"Error analyzing dataset: {e}")
+        return mcp_error("characterize_dataset", str(e))
 
 
 @mcp.tool()
 async def diagnose_cosmic_graph(ctx: Context) -> str:
     """
-    Diagnose the fitted cosmic graph quality and topological balance.
-
-    Call this AFTER run_topological_sweep(). Returns JSON with:
-    - quality: "good", "hairball", "singletons", etc.
-    - metrics.component_sizes: sorted list of connected component sizes.
-      Use this to identify a 'blob' (one massive component) vs. a balanced graph.
-    - clustering_notes: advice on which clustering method to use in the dossier step.
-    - suggested_config_yaml: corrected YAML if quality != "good".
-
-    RETRY WORKFLOW: If quality != "good", pass the "suggested_config_yaml" string
-    DIRECTLY to run_topological_sweep(config_yaml=...).
-
-    Returns:
-        JSON with quality classification, metrics, diagnosis, and corrected YAML.
+    Diagnose the fitted cosmic graph quality by returning pure GraphMetrics.
+    Interpret these metrics (e.g. density, component distribution) given N.
     """
     session = _get_session(ctx)
 
     if session.model is None:
-        return "Error: No model found. Run run_topological_sweep() first."
+        raise ToolError("No model found. Run run_topological_sweep() first.")
 
     try:
-        from pulsar.mcp.diagnostics import diagnose_model, SweepHistoryEntry
+        from pulsar.mcp.diagnostics import diagnose_model
 
-        result = diagnose_model(session.model, history=session.sweep_history)
-
-        # Record this attempt for future binary search
-        current_epsilons = [bm.eps for bm in session.model.ball_maps]
-        session.sweep_history.append(
-            SweepHistoryEntry(
-                quality=result.quality,
-                epsilon_min=min(current_epsilons) if current_epsilons else 0.5,
-                epsilon_max=max(current_epsilons) if current_epsilons else 1.5,
-                pca_dims=list(session.model.config.pca.dimensions),
-            )
-        )
-
+        result = diagnose_model(session.model)
         return json.dumps(dataclasses.asdict(result), indent=2)
-    except (ValueError, RuntimeError) as e:
-        error_msg = f"Error diagnosing graph: {e}"
-        logger.error(error_msg)
-        return error_msg
+    except Exception as e:
+        logger.error(f"Error diagnosing graph: {e}")
+        return mcp_error("diagnose_cosmic_graph", str(e))
 
 
 def main():
-    """Entry point for the pulsar-mcp CLI."""
     mcp.run()
 
 

@@ -169,7 +169,7 @@ def test_fit_with_progress_returns_model(basic_config, test_data):
     """fit_with_progress() returns a fitted ThemaRS model."""
     pytest.importorskip("rich")
 
-    from pulsar.progress import fit_with_progress
+    from pulsar.runtime.progress import fit_with_progress
 
     cfg = load_config(basic_config)
     model = fit_with_progress(ThemaRS(cfg), data=test_data)
@@ -191,7 +191,7 @@ def test_fit_with_progress_import_error(basic_config, test_data, monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", mock_import)
 
-    from pulsar.progress import fit_with_progress
+    from pulsar.runtime.progress import fit_with_progress
 
     cfg = load_config(basic_config)
 

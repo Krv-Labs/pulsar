@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from pulsar.config import load_config
-from pulsar.fingerprint import pca_fingerprint
+from pulsar.runtime.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
 
 
