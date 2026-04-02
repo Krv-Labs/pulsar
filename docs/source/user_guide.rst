@@ -4,94 +4,73 @@
 User Guide
 ==========
 
-From installation to production pipelines—everything you need to use Pulsar effectively.
+Everything you need to use Pulsar effectively—from seeing it in action to production pipelines.
 
-Getting Started
----------------
+Demos & Use Cases
+-----------------
 
-.. grid:: 1 2 2 2
-   :gutter: 3
-   :padding: 2 2 0 0
-
-   .. grid-item-card:: :octicon:`download` Installation
-      :link: userGuides/installation
-      :link-type: doc
-      :class-card: intro-card
-      :shadow: md
-
-      Install Pulsar and set up the Rust toolchain.
-
-   .. grid-item-card:: :octicon:`rocket` Quickstart
-      :link: userGuides/quickstart
-      :link-type: doc
-      :class-card: intro-card
-      :shadow: md
-
-      Run your first pipeline in 10 minutes.
-
-   .. grid-item-card:: :octicon:`code` Programmatic API
-      :link: userGuides/programmatic
-      :link-type: doc
-      :class-card: intro-card
-      :shadow: md
-
-      Configure pipelines directly in Python.
-
-Pipeline Configuration
-----------------------
+See Pulsar discover real structure in real data:
 
 .. grid:: 1 2 2 2
    :gutter: 3
    :padding: 2 2 0 0
 
-   .. grid-item-card:: :octicon:`tools` Intermediate
+   .. grid-item-card:: :octicon:`zap` Real Demos
+      :link: demos
+      :link-type: ref
+      :class-card: intro-card
+      :shadow: md
+
+      Five runnable projects: penguins, MMLU, clinical data, ECG, coal plants.
+
+   .. grid-item-card:: :octicon:`star` Why Pulsar?
+      :link: why_pulsar
+      :link-type: ref
+      :class-card: intro-card
+      :shadow: md
+
+      When topological analysis beats traditional clustering. Decision tree.
+
+
+AI Tools & Automation
+---------------------
+
+Use Pulsar with Claude, Gemini, or Cursor—no code required:
+
+.. grid:: 1 2 2 2
+   :gutter: 3
+   :padding: 2 2 0 0
+
+   .. grid-item-card:: :octicon:`hubot` MCP Server & Agents
+      :link: userGuides/mcp
+      :link-type: doc
+      :class-card: intro-card
+      :shadow: md
+
+      Use Pulsar via Claude Desktop, Gemini CLI, Claude Code, Cursor, and Windsurf.
+
+Pipeline Configuration & Tuning
+-------------------------------
+
+Understand parameters and customize your sweeps:
+
+.. grid:: 1 2 2 2
+   :gutter: 3
+   :padding: 2 2 0 0
+
+   .. grid-item-card:: :octicon:`tools` Tuning Guide
       :link: userGuides/intermediate
       :link-type: doc
       :class-card: intro-card
       :shadow: md
 
-      Tuning PCA sweeps and epsilon ranges.
+      Pulsar supported parameters and configuration options.
 
-   .. grid-item-card:: :octicon:`beaker` Advanced
-      :link: userGuides/advanced
+   .. grid-item-card:: :octicon:`tools` Programmatic Control
+      :link: userGuides/programmatic
       :link-type: doc
       :class-card: intro-card
       :shadow: md
 
-      Custom thresholds and Cosmic graph tuning.
+      Full control over the pipeline with the Python API.
 
-Production & Quality
---------------------
-
-.. grid:: 1 2 2 2
-   :gutter: 3
-   :padding: 2 2 0 0
-
-   .. grid-item-card:: :octicon:`checklist` Best Practices
-      :link: userGuides/best_practices
-      :link-type: doc
-      :class-card: intro-card
-      :shadow: md
-
-      Recommended workflows and performance tips.
-
-   .. grid-item-card:: :octicon:`verified` Testing
-      :link: userGuides/testing
-      :link-type: doc
-      :class-card: intro-card
-      :shadow: md
-
-      Validate pipeline outputs and reproducibility.
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Guides
-   :hidden:
-
-   userGuides/installation
-   userGuides/quickstart
-   userGuides/programmatic
-   userGuides/intermediate
-   userGuides/advanced
-   userGuides/best_practices
-   userGuides/testing

@@ -4,105 +4,95 @@
 Pulsar
 ======
 
-**Rust-Accelerated Topological Model Pipeline**
+**Discover Hidden Structure in Your Data**
 
-Pulsar provides a high-performance topological workflow for data analysis: imputation, dimensionality reduction, Ball Mapper graph construction, and representative selection—all powered by a Rust core with a clean Python interface.
+Pulsar is a **topological data analysis tool** that finds the real shape of high-dimensional data. Instead of forcing your data into spheres (like K-means), Pulsar reveals manifolds, clusters, and intricate structure using Ball Mapper — a proven algorithm for topological discovery.
 
-Quick Links
+With an AI assistant (Claude, Gemini, Cursor), you don't even need code.
+
+Get Started
 -----------
 
 .. grid:: 1 2 3 3
    :gutter: 3
    :padding: 2 2 0 0
 
-   .. grid-item-card:: :octicon:`rocket` Quickstart
+   .. grid-item-card:: :octicon:`zap` Try in 5 Minutes
+      :link: demos
+      :link-type: ref
+      :class-card: intro-card
+      :shadow: md
+
+      See Pulsar in action with real data: penguins, MMLU, clinical trajectories, and more.
+
+   .. grid-item-card:: :octicon:`hubot` Use with Claude AI
+      :link: mcp
+      :link-type: ref
+      :class-card: intro-card
+      :shadow: md
+
+      No code required. Let Claude handle the analysis with Pulsar MCP tools.
+
+   .. grid-item-card:: :octicon:`code` Python API
       :link: quickstart
       :link-type: ref
       :class-card: intro-card
       :shadow: md
 
-      Run the full pipeline in minutes with YAML configuration.
+      Write your own analysis with Pulsar's clean Python interface.
 
-   .. grid-item-card:: :octicon:`book` User Guide
-      :link: user_guide
-      :link-type: ref
-      :class-card: intro-card
-      :shadow: md
+Why Pulsar?
+-----------
 
-      Installation, configuration, and advanced workflows.
+**You discover structure that traditional clustering misses.**
 
-   .. grid-item-card:: :octicon:`code` API Reference
-      :link: api-reference
-      :link-type: ref
-      :class-card: intro-card
-      :shadow: md
+K-means forces your data into spheres. DBSCAN gets confused by varying density. Pulsar finds the *true topology* — manifolds, voids, intricate networks.
 
-      Full API documentation for ``pulsar`` modules.
+Here's what you'll discover:
+
+- **Penguins**: Topology recovers species perfectly *without* looking at species labels. And reveals that island and sex are structurally as important as species.
+- **MMLU**: The standard LLM benchmark hides 12 distinct clusters within 57 subjects. Reveals leaderboard blind spots.
+- **Clinical Data**: Patients with identical vital signs can have opposite trajectories. Topology-aware clustering catches this.
+- **Infrastructure**: Coal plants cluster by operational region and capacity, revealing hidden grid structure.
+
+See all demos: :ref:`demos`
 
 What is Pulsar?
 ---------------
 
-Pulsar combines the ergonomics of Python with the speed of Rust to deliver fast topological analysis pipelines. Configure your workflow in YAML, and Pulsar handles:
+Pulsar is a **Rust-accelerated Python library** for topological data analysis:
 
-- **Imputation** of numeric columns with configurable strategies
-- **Scaling and projection** via systematic PCA parameter sweeps
-- **Graph construction** using Ball Mapper with epsilon sweeps
-- **Pseudo-Laplacian accumulation** across embedding configurations
-- **Cosmic graph assembly** with weighted edge aggregation
-- **Representative selection** using topological distances
+- **Input**: CSV, Parquet, or Pandas DataFrame
+- **Process**: Grid sweeps over PCA dimensions and epsilon values (Ball Mapper)
+- **Output**: Weighted network graph (networkx.Graph) showing cluster structure
 
-Typical Workflow
-----------------
+The workflow:
 
 .. mermaid::
 
    graph LR
-      subgraph Input
-         A[params.yaml + dataset]
-      end
+      A["Data<br/>(CSV)"] --> B["Preprocess"]
+      B --> C["PCA Grid"]
+      C --> D["Ball Mapper"]
+      D --> E["Cosmic Graph"]
+      E --> F["Clusters &<br/>Insights"]
 
-      subgraph "Stage 1: Preprocess"
-         B["Impute columns"]
-         C["StandardScaler"]
-      end
-
-      subgraph "Stage 2: Project"
-         D["PCA grid sweep"]
-         E1["dim=2"]
-         E2["dim=5"]
-         E3["dim=10"]
-      end
-
-      subgraph "Stage 3: Graph"
-         F["Ball Mapper sweep"]
-         G["Pseudo-Laplacians"]
-      end
-
-      subgraph "Stage 4: Select"
-         H["Cosmic Graph"]
-         I["Representatives"]
-      end
-
-      A --> B
-      B --> C
-      C --> D
-      D --> E1
-      D --> E2
-      D --> E3
-      E1 --> F
-      E2 --> F
-      E3 --> F
-      F --> G
-      G --> H
-      H --> I
-
-      style Input fill:#f9f9f9,stroke:#999
+      style A fill:#f0f0f0,stroke:#999
       style B fill:#D9EDF7,stroke:#31708F,stroke-width:2px
+      style C fill:#D9EDF7,stroke:#31708F,stroke-width:2px
       style D fill:#D9EDF7,stroke:#31708F,stroke-width:2px
-      style F fill:#D9EDF7,stroke:#31708F,stroke-width:2px
-      style H fill:#DFF0D8,stroke:#3C763D,stroke-width:2px
+      style E fill:#DFF0D8,stroke:#3C763D,stroke-width:2px
+      style F fill:#DFF0D8,stroke:#3C763D,stroke-width:2px
 
-**YAML-Driven (Recommended)**
+**Driven by AI** (recommended for exploration)
+
+Use Pulsar with Claude AI or Gemini. Point it at your CSV and ask for insights. No code.
+
+See: :ref:`mcp`
+
+**Programmatic** (for reproducibility and automation)
+
+Configure YAML or Python, fit the model, extract the cosmic graph.
 
 .. code-block:: python
 
@@ -110,42 +100,34 @@ Typical Workflow
 
    model = ThemaRS("params.yaml")
    model.fit()
-   print(model.cosmic_graph.number_of_edges())
+   cosmic = model.cosmic_graph  # networkx.Graph
 
-**Programmatic Configuration**
+Key Capabilities
+----------------
 
-.. code-block:: python
-
-   from pulsar import ThemaRS
-
-   model = ThemaRS(
-       data="data.csv",
-       pca_dims=[2, 5, 10],
-       epsilon_range=(0.1, 0.5, 5),
-   )
-   model.fit()
-   representatives = model.select_representatives(k=3)
-
-Key Features
-------------
+**Topological Discovery**
+   Ball Mapper + grid sweeps reveal manifold structure, not just spherical clusters.
 
 **Rust Performance**
-   Core algorithms implemented in Rust via PyO3 for 10-100x speedups over pure Python.
+   Core algorithms in Rust via PyO3. 10-100x speedups over pure Python implementations.
 
 **Grid-Based Exploration**
-   Systematic sweeps over PCA dimensions, epsilon values, and imputation seeds.
+   Sweep over PCA dimensions, epsilon values, and random seeds to find robust structure.
 
-**Ball Mapper Graphs**
-   Local neighborhood graphs that preserve topological structure at multiple scales.
+**Temporal Data**
+   TemporalCosmicGraph for 3D tensors (patient × feature × time). Discover trajectory patterns.
 
-**Cosmic Graph Assembly**
-   Aggregate pseudo-Laplacians into a single weighted graph for downstream analysis.
+**AI-Assisted Analysis**
+   Use with Claude Desktop or Gemini. The AI orchestrates parameter tuning and generates statistical dossiers.
 
 **YAML Configuration**
-   Declarative configs for reproducible, shareable pipelines.
+   Declarative, reproducible pipelines. Easy to version control and share.
+
+**Python API**
+   Clean interface: ``ThemaRS.fit()`` → ``networkx.Graph``. Integrate into any pipeline.
 
 Installation
-------------
+-------------
 
 .. code-block:: bash
 
@@ -155,9 +137,9 @@ For development (requires Rust toolchain):
 
 .. code-block:: bash
 
-   git clone https://github.com/Krv-Analytics/pulsar.git
+   git clone https://github.com/Krv-Labs/pulsar.git
    cd pulsar
-   uv sync --group docs
+   uv sync
    uv run maturin develop --release
 
 Supports Python 3.10, 3.11, 3.12.
@@ -165,26 +147,40 @@ Supports Python 3.10, 3.11, 3.12.
 Next Steps
 ----------
 
-- :ref:`Quickstart <quickstart>` - Run your first pipeline
-- :ref:`User Guide <user_guide>` - Installation and configuration details
-- :ref:`API Reference <api-reference>` - Class and function documentation
-- :ref:`Configuration <configuration>` - YAML schema reference
+1. **See it in action**: :ref:`demos` — five real projects you can run in minutes
+2. **Understand why**: :ref:`why_pulsar` — when to use topological analysis and when to use something else
+3. **Use with AI**: :ref:`mcp` — let Claude or Gemini handle the analysis
+4. **Go deeper**: :ref:`user_guide` — installation, configuration, and tuning
+5. **API docs**: :ref:`api-reference` — full class and function reference
 
 .. toctree::
    :maxdepth: 2
-   :caption: API Reference
+   :caption: Getting Started
    :hidden:
 
-   api
+   userGuides/quickstart
+   userGuides/mcp
+   user_guide
 
 .. toctree::
    :maxdepth: 2
    :caption: Guides
    :hidden:
 
+   userGuides/demos
+   userGuides/why_pulsar
+   userGuides/installation
+   userGuides/programmatic
+   userGuides/intermediate
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Reference
+   :hidden:
+
    overview
-   user_guide
    configuration
+   api
 
 References
 ----------

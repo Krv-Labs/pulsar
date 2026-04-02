@@ -9,6 +9,9 @@ uv.lock
 /target/
 Cargo.lock
 
+# Misc
+.DS_Store
+
 # maturin build artifacts
 *.pyd
 *.dylib

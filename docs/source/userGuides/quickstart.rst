@@ -4,19 +4,53 @@
 Quickstart
 ==========
 
-This guide gets you from zero to a Cosmic graph in under 10 minutes.
+Get from zero to insights in under 10 minutes.
 
 Prerequisites
 -------------
 
 - Python 3.10+
 - Pulsar installed (``pip install pulsar``)
-- For development: Rust toolchain for native extensions
+- For development: Rust toolchain
 
-YAML-Driven Workflow
---------------------
+Option 1: Use a Pre-Built Demo (Fastest)
+-----------------------------------------
 
-The recommended way to use Pulsar is with a YAML configuration file. This makes pipelines reproducible and shareable.
+The fastest way to see Pulsar in action:
+
+.. code-block:: bash
+
+   # Run the penguins demo (no data download needed)
+   cd /path/to/pulsar
+   uv sync
+   uv run maturin develop --release
+   python -c "
+   from pulsar.pipeline import ThemaRS
+   config = {'run': {'name': 'penguins', 'data': 'demos/penguins/penguins.csv'}}
+   model = ThemaRS.from_dict(config)
+   model.fit()
+   print(f'Cosmic graph: {len(model.cosmic_graph.nodes())} nodes, {len(model.cosmic_graph.edges())} edges')
+   "
+
+Done! You've discovered penguin species structure without looking at species labels.
+
+For all demos: :ref:`demos`
+
+Option 2: Use with Claude AI (No Code)
+---------------------------------------
+
+Let Claude handle the analysis:
+
+1. Set up Pulsar MCP server (see :ref:`mcp`)
+2. Open Claude Desktop
+3. Paste: *"Analyze the file at ``demos/penguins/penguins.csv`` using Pulsar. Find the hidden structure."*
+
+Claude will orchestrate parameter tuning and generate a statistical dossier.
+
+Option 3: YAML-Driven Workflow (Recommended for Reproducibility)
+-----------------------------------------------------------------
+
+Use YAML configuration for transparent, reproducible pipelines.
 
 **Step 1: Create a configuration file**
 
@@ -26,19 +60,19 @@ Create ``params.yaml``:
 
    data:
      path: "data.csv"
-     target: "label"
 
-   impute:
-     columns: ["age", "income"]
-     method: "median"
-     seed: 42
+   preprocessing:
+     drop_columns: [id]
+     impute:
+       age: {method: fill_mean}
+       salary: {method: fill_median}
 
-   pca:
-     dimensions: [2, 5, 10]
-     seeds: [0, 1, 2]
-
-   ball_mapper:
-     epsilon_range: [0.1, 0.5, 5]  # min, max, steps
+   sweep:
+     pca:
+       dimensions: {values: [2, 5, 10]}
+       seed: {values: [42, 7, 13]}
+     ball_mapper:
+       epsilon: {range: {min: 0.1, max: 0.5, steps: 5}}
 
    cosmic_graph:
      threshold: "auto"
@@ -66,10 +100,10 @@ Create ``params.yaml``:
    for i, rep in enumerate(reps):
        print(f"Representative {i+1}: {rep}")
 
-Programmatic Configuration
---------------------------
+Option 4: Programmatic Configuration (Full Control)
+-----------------------------------------------------
 
-For more control, configure Pulsar directly in Python:
+For maximum control, configure directly in Python:
 
 .. code-block:: python
 
@@ -77,8 +111,6 @@ For more control, configure Pulsar directly in Python:
 
    model = ThemaRS(
        data="data.csv",
-       impute_columns=["age", "income"],
-       impute_method="median",
        pca_dims=[2, 5, 10],
        epsilon_range=(0.1, 0.5, 5),
        random_state=42,
@@ -124,5 +156,4 @@ Next Steps
 
 - :doc:`programmatic` - Full API control
 - :doc:`intermediate` - Tuning sweep parameters
-- :doc:`advanced` - Custom Cosmic graph thresholds
 - :ref:`Configuration <configuration>` - YAML schema reference
