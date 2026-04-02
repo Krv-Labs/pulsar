@@ -1,3 +1,6 @@
+# Claude Code agent memory (ephemeral session state, not for sharing)
+.claude/agent-memory/
+
 # Python
 python-version
 uv.lock
