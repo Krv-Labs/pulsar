@@ -64,8 +64,11 @@ Create ``params.yaml``:
    preprocessing:
      drop_columns: [id]
      impute:
-       age: {method: fill_mean}
-       salary: {method: fill_median}
+       age:      {method: fill_mean}
+       salary:   {method: fill_median}
+       category: {method: sample_categorical, seed: 42}
+     encode:
+       category: {method: one_hot}
 
    sweep:
      pca:
