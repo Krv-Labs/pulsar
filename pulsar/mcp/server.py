@@ -50,21 +50,24 @@ mcp = FastMCP(
         "3. **Variance Curve:** Look at the cumulative variance curve from characterize_dataset. If Dim 3 captures 94% variance, using Dim 5 "
         "adds almost no signal but drastically dilutes distances (curse of dimensionality).\n"
         "4. **Good Graph vs Convenient Graph:** A 'good' graph has structural balance. Look for a `giant_fraction` (the largest component) "
-        "typically between 20% and 60%, accompanied by multiple smaller structural components. It is not necessarily the graph that perfectly fits a preconceived notion of 'K=3 clusters'.\n\n"
+        "typically between 20% and 60%. These metrics apply to the **final aggregated ensemble graph**. It is not necessarily the graph that perfectly fits a preconceived notion of 'K=3 clusters'.\n"
+        "5. **Embrace the Grid (Multi-Scale):** Pulsar is an ensemble method. Do NOT try to find the 'one true epsilon' or 'one best PCA dimension'. "
+        "The graph gains expressive power by accumulating topology across a filtration. Always prefer ranges for epsilon and arrays for PCA dimensions. "
+        "(Exception: You may use single values only for isolated diagnostic runs to 'find the floor' of a massive blob.)\n\n"
         "# The Scientific Posture\n"
         "Treat the cosmic graph as empirical evidence, not a score to maximize.\n"
         "- **Form a hypothesis** before adjusting any configuration.\n"
-        "- **Change ONE parameter at a time** (e.g., epsilon bounds OR PCA dims OR categorical encoding).\n"
+        "- **Change ONE parameter at a time.** Note: An entire Epsilon Range or PCA Array counts as ONE parameter change.\n"
         "- **Observe the exact structural impact** on the cosmic graph (use the diff provided by run_topological_sweep), and re-assess your hypothesis.\n\n"
         "# Workflow\n"
         "1. characterize_dataset -> suggest_initial_config -> explain_suggestion\n"
         "2. run_topological_sweep -> diagnose_cosmic_graph\n"
-        "3. **Iterate:** Change ONE parameter. After each sweep, review the diff. Call `get_experiment_history` when reasoning across multiple iterations.\n"
-        "4. **Blob Recovery:** If run 1 produces a massive blob (`giant_fraction` > 80%), call `explain_suggestion` to understand the initial reasoning *before* blindly deviating. "
-        "Usually, you must decrease epsilon OR reduce PCA dims to break the blob.\n"
-        "5. **Shatter Recovery:** If the graph is fragmented (`component_count` > 20 and `giant_fraction` < 5%), your epsilon is too small or threshold too aggressive. "
-        "Increase epsilon modestly (10-20%) or reduce the threshold before any other change. After calling `explain_suggestion`, return to step 2 (`run_topological_sweep`) with ONE adjusted parameter.\n"
-        "6. generate_cluster_dossier -> compare_clusters\n"
+        "3. **Iterate:** Change ONE parameter (as defined above). After each sweep, review the diff.\n"
+        "4. **Blob Recovery:** If run 1 produces a massive blob (`giant_fraction` > 80%), call `explain_suggestion` to understand the initial reasoning. "
+        "Usually, you must shift your epsilon range lower OR reduce the PCA dimension array to break the blob.\n"
+        "5. **Shatter Recovery:** If the graph is fragmented (`component_count` > 20 and `giant_fraction` < 5%), your epsilon range is too small or threshold too aggressive. "
+        "Increase epsilon bounds modestly (10-20%) or reduce the threshold (e.g., change 'auto' to a float like 0.3) before any other change.\n"
+        "6. generate_cluster_dossier -> compare_clusters_tool\n"
     ),
 )
 
@@ -156,33 +159,43 @@ def _auto_save_config(cfg) -> str:
 @mcp.tool()
 async def suggest_initial_config(dataset_geometry: str, ctx: Context) -> str:
     """
-    Generate an initial configuration YAML based on your interpretation of the raw dataset geometry.
-
-    You MUST call characterize_dataset first, analyze the variance curve and column missingness/cardinality,
-    and then formulate a JSON-encoded summary of the geometry to pass into this tool.
+    Generate an initial configuration YAML based on the raw dataset geometry.
 
     Args:
-        dataset_geometry: A JSON string containing your summary of the geometry (e.g., {"N": 344, "pca_knee_dim": 3, "knn_mean": 0.6}).
+        dataset_geometry: The raw JSON string from characterize_dataset.
 
     Returns:
         A starter config_yaml string.
     """
     try:
         geo = json.loads(dataset_geometry)
-        pca_dims = geo.get("pca_knee_dim", 3)
-        if isinstance(pca_dims, int):
-            pca_dims = [pca_dims]
 
-        eps_min = geo.get("knn_mean", 0.5) * 0.8
-        eps_max = geo.get("knn_mean", 0.5) * 1.5
+        # Handle both raw DatasetProfile and manual summaries
+        knn_mean = geo.get("knn_k5_mean") or geo.get("knn_mean") or 0.5
+        pca_cum_var = geo.get("pca_cumulative_variance", [])
+
+        # Heuristic for PCA knee if not provided
+        pca_knee = 3
+        if pca_cum_var:
+            # Simple elbow heuristic: find where variance > 90%
+            for dim, var in pca_cum_var:
+                if var >= 0.90:
+                    pca_knee = dim
+                    break
+
+        # Generate an ensemble array around the knee to encourage multi-scale mapping
+        pca_dims = [max(2, pca_knee - 1), pca_knee, pca_knee + 1]
+
+        eps_min = knn_mean * 0.8
+        eps_max = knn_mean * 1.5
 
         yaml_str = f"""run:
   name: initial_sweep
   data: "FILL_THIS_IN_WITH_PATH"
 preprocessing:
   drop_columns: []
-  encode: {{}}
-  impute: {{}}
+  encode: {{}} # e.g., {{ species: {{method: one_hot}} }}
+  impute: {{}} # e.g., {{ age: {{method: fill_mean, seed: 42}} }}
 sweep:
   pca:
     dimensions:
@@ -233,7 +246,7 @@ async def explain_suggestion(
 
         n_samples = geo.get("n_samples", "unknown")
         cum_var_map = {int(d): v for d, v in geo.get("pca_cumulative_variance", [])}
-        knn_mean = geo.get("knn_k5_mean")
+        knn_mean = geo.get("knn_k5_mean") or geo.get("knn_mean")
 
         explanation = "### Parameter Reasoning\n\n"
 
@@ -248,13 +261,14 @@ async def explain_suggestion(
 
         if pca_reasons:
             explanation += f"- **PCA Dimensions {pca_dims}**: " + " ".join(pca_reasons)
+            explanation += " An array of dimensions is used rather than a single point estimate to prevent dimension collapse and ensure the CosmicGraph captures topology across varying geometric resolutions.\n"
             if isinstance(n_samples, int):
                 pts_per_dim = n_samples / max(pca_dims)
                 explanation += f" With N={n_samples}, this maintains ~{pts_per_dim:.1f} points per dimension, ensuring sufficient manifold density.\n"
             else:
                 explanation += "\n"
         else:
-            explanation += f"- **PCA Dimensions {pca_dims}**: Chosen based on the variance curve elbow (values not provided in geo summary).\n"
+            explanation += f"- **PCA Dimensions {pca_dims}**: Chosen as a multi-scale array around the variance curve elbow to aggregate varying topological resolutions (values not provided in geo summary).\n"
 
         # 2. Epsilon Reasoning
         if knn_mean:
@@ -264,11 +278,11 @@ async def explain_suggestion(
             if "range" in eps_node:
                 r = eps_node["range"]
                 e_min, e_max = r.get("min", 0), r.get("max", 0)
-                explanation += f"- **Epsilon Range {eps_str}**: Anchored at knn_k5_mean={knn_mean:.4f}. The range spans {e_min / knn_mean:.2f}x to {e_max / knn_mean:.2f}x the mean distance, transitioning from local neighborhoods to global structure.\n"
+                explanation += f"- **Epsilon Range {eps_str}**: Anchored at knn_mean={knn_mean:.4f}. The range spans {e_min / knn_mean:.2f}x to {e_max / knn_mean:.2f}x the mean distance. This filtration sweeps from local neighborhoods to global structures, aggregating multi-scale persistent homology into the final graph.\n"
             else:
-                explanation += f"- **Epsilon {eps_str}**: Evaluated relative to knn_k5_mean={knn_mean:.4f}.\n"
+                explanation += f"- **Epsilon {eps_str}**: Evaluated relative to knn_mean={knn_mean:.4f}. Note: A single epsilon limits the graph to a single scale. Consider sweeping a range to capture ensemble topology.\n"
         else:
-            explanation += f"- **Epsilon {eps_str}**: Search window centered around k-NN mean (knn_k5_mean not provided in summary).\n"
+            explanation += f"- **Epsilon {eps_str}**: Search window centered around k-NN mean (knn_mean not provided in summary).\n"
 
         return explanation
     except Exception as e:
