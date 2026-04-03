@@ -771,9 +771,235 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
 
 
 @mcp.tool()
+async def recommend_preprocessing(dataset_geometry: str, ctx: Context) -> str:
+    """
+    Analyze column profiles from characterize_dataset and return a complete
+    preprocessing block with impute/encode/drop recommendations and per-column rationale.
+
+    Call this after characterize_dataset to get an expert-recommended preprocessing:
+    YAML block before running run_topological_sweep.
+
+    Args:
+        dataset_geometry: The raw JSON string from characterize_dataset.
+
+    Returns:
+        Markdown rationale table + ready-to-paste preprocessing: YAML block.
+    """
+    try:
+        geo = json.loads(dataset_geometry)
+        n_samples = geo.get("n_samples", 0)
+        column_profiles = geo.get("column_profiles", [])
+
+        if not column_profiles:
+            return mcp_error("recommend_preprocessing", "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.")
+
+        drop, impute, encode, rationale = _recommend_preprocessing_block(column_profiles, n_samples)
+
+        result = "## Preprocessing Recommendation\n\n"
+        result += _rationale_table(rationale)
+        result += "\n\n### Recommended preprocessing block\n\n```yaml\n"
+        result += _preprocessing_block_to_yaml(drop, impute, encode)
+        result += "\n```\n"
+        result += "\nCopy this block into your config_yaml, then call `validate_preprocessing_config` to confirm before running `run_topological_sweep`."
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in recommend_preprocessing: {e}")
+        return mcp_error("recommend_preprocessing", str(e))
+
+
+@mcp.tool()
+async def repair_preprocessing_config(
+    error_message: str,
+    config_yaml: str,
+    dataset_geometry: str,
+    ctx: Context,
+) -> str:
+    """
+    Given a preprocessing error from run_topological_sweep, produce a corrected
+    config_yaml with a change log of what was fixed and why.
+
+    Handles: NaN remaining, non-numeric columns, coercion failure, all-missing
+    columns, and cardinality violations.
+
+    Args:
+        error_message: The full error text from the failed sweep.
+        config_yaml: The config_yaml that caused the error.
+        dataset_geometry: The raw JSON string from characterize_dataset.
+
+    Returns:
+        Markdown with error classification, change log table, and patched config_yaml.
+    """
+    try:
+        config_dict = yaml.safe_load(config_yaml)
+        if not isinstance(config_dict, dict):
+            return mcp_error("repair_preprocessing_config", "config_yaml must be a valid YAML mapping.")
+
+        geo = json.loads(dataset_geometry)
+        # Build a name → profile dict for O(1) lookup
+        profiles_by_name: dict[str, Any] = {}
+        for cp in geo.get("column_profiles", []):
+            pname = cp["name"] if isinstance(cp, dict) else cp.name
+            profiles_by_name[pname] = cp
+
+        pre = config_dict.setdefault("preprocessing", {})
+        drop_list: list[str] = pre.setdefault("drop_columns", [])
+        impute_dict: dict[str, Any] = pre.setdefault("impute", {})
+        encode_dict: dict[str, Any] = pre.setdefault("encode", {})
+
+        changes: list[tuple[str, str, str, str]] = []  # (col, old, new, rationale)
+
+        def _get_profile_field(col: str, field: str, default: Any = None) -> Any:
+            cp = profiles_by_name.get(col)
+            if cp is None:
+                return default
+            return cp.get(field, default) if isinstance(cp, dict) else getattr(cp, field, default)
+
+        # Pattern 1: Coercion failure — "configured for numeric imputation"
+        m = re.search(r"Column '([^']+)' is configured for numeric imputation \(([^)]+)\)", error_message)
+        if m:
+            col, old_method = m.group(1), m.group(2)
+            n_unique = _get_profile_field(col, "n_unique", 999)
+            new_method = "fill_mode" if n_unique <= 10 else "sample_categorical"
+            impute_dict[col] = {"method": new_method, "seed": 42}
+            changes.append((col, f"impute: {old_method}", f"impute: {new_method}", "Column contains non-numeric values; switched to string imputation"))
+
+        # Pattern 2: NaN remaining
+        elif "NaN values remain after imputation" in error_message:
+            nan_cols = re.findall(r"'([^']+)' \(\d+ rows\)", error_message)
+            for col in nan_cols:
+                is_numeric = _get_profile_field(col, "is_numeric", True)
+                n_missing = _get_profile_field(col, "n_missing", 0)
+                new_method = "fill_mean" if is_numeric else "sample_categorical"
+                impute_dict[col] = {"method": new_method, "seed": 42}
+                changes.append((col, "no impute rule", f"impute: {new_method}", f"{'Numeric' if is_numeric else 'Categorical'} column with {n_missing} missing rows"))
+
+        # Pattern 3: Non-numeric columns remaining
+        elif "Non-numeric columns remain" in error_message:
+            bad_cols = re.findall(r"'([^']+)' \(dtype=\w+\)", error_message)
+            for col in bad_cols:
+                n_unique = _get_profile_field(col, "n_unique", 999)
+                if n_unique > 50:
+                    drop_list.append(col)
+                    changes.append((col, "no rule", "drop_columns", f"{n_unique} categories — one-hot would add {n_unique} dimensions"))
+                else:
+                    encode_dict[col] = {"method": "one_hot"}
+                    changes.append((col, "no rule", "encode: one_hot", f"{n_unique} unique values — safe to one-hot"))
+
+        # Pattern 4: All-missing
+        elif "is all-missing" in error_message:
+            m2 = re.search(r"Column '([^']+)' is all-missing", error_message)
+            if m2:
+                col = m2.group(1)
+                drop_list.append(col)
+                changes.append((col, "impute/encode", "drop_columns", "Column is entirely null — cannot impute or encode"))
+
+        # Pattern 5: Cardinality exceeded
+        elif "exceeding max_categories" in error_message:
+            m3 = re.search(r"Column '([^']+)' has (\d+) categories", error_message)
+            if m3:
+                col, n_cats = m3.group(1), int(m3.group(2))
+                if n_cats > 100:
+                    drop_list.append(col)
+                    if col in encode_dict:
+                        del encode_dict[col]
+                    changes.append((col, "encode: one_hot", "drop_columns", f"{n_cats} categories is too many even with capping"))
+                else:
+                    new_max = min(20, n_cats // 2)
+                    encode_dict[col] = {"method": "one_hot", "max_categories": new_max}
+                    changes.append((col, "encode: one_hot (no limit)", f"encode: one_hot (max_categories={new_max})", f"Capped at {new_max} to limit dimensionality"))
+
+        else:
+            return mcp_error("repair_preprocessing_config", f"Unrecognized preprocessing error pattern. Raw error:\n{error_message}")
+
+        if not changes:
+            return mcp_error("repair_preprocessing_config", "Error was classified but no changes were needed. Review the error message manually.")
+
+        # Classify error for display
+        if "NaN values remain" in error_message:
+            classification = "`NaN values remain after imputation`"
+        elif "Non-numeric columns" in error_message:
+            classification = "`Non-numeric columns remain after preprocessing`"
+        elif "configured for numeric imputation" in error_message:
+            classification = "`Numeric imputation on non-numeric column`"
+        elif "all-missing" in error_message:
+            classification = "`All-missing column`"
+        elif "exceeding max_categories" in error_message:
+            classification = "`Cardinality limit exceeded`"
+        else:
+            classification = "`Preprocessing error`"
+
+        result = f"## Error Classification\n{classification} — {len(changes)} change(s) made.\n\n"
+        result += "## Changes Made\n\n"
+        result += "| Column | Was | Now | Rationale |\n|---|---|---|---|\n"
+        for col, was, now, reason in changes:
+            result += f"| `{col}` | {was} | {now} | {reason} |\n"
+
+        patched_yaml = yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+        result += f"\n## Patched Config\n\n```yaml\n{patched_yaml}```\n"
+        result += "\nCall `validate_preprocessing_config` with this config before re-running `run_topological_sweep`."
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in repair_preprocessing_config: {e}")
+        return mcp_error("repair_preprocessing_config", str(e))
+
+
+@mcp.tool()
+async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
+    """
+    Dry-run the preprocessing stage only against session data — no PCA, no BallMapper,
+    no sweep cost. Use this to confirm a config is valid before run_topological_sweep.
+
+    Requires a prior run_topological_sweep call (to populate session data).
+
+    Args:
+        config_yaml: Inline YAML config string to validate.
+
+    Returns:
+        PASS with schema summary, or a structured error matching repair_preprocessing_config input format.
+    """
+    session = _get_session(ctx)
+
+    if session.data is None:
+        return mcp_error(
+            "validate_preprocessing_config",
+            "No data in session. Run run_topological_sweep (even with a minimal config) or characterize_dataset first to load data into the session.",
+        )
+
+    try:
+        config_dict = yaml.safe_load(config_yaml)
+        if not isinstance(config_dict, dict):
+            return mcp_error("validate_preprocessing_config", "config_yaml must be a valid YAML mapping.")
+
+        cfg = load_config(config_dict)
+        df_out, layout = await asyncio.to_thread(preprocess_dataframe, session.data, cfg)
+
+        col_preview = list(layout.feature_names[:8])
+        if len(layout.feature_names) > 8:
+            col_preview.append(f"... +{len(layout.feature_names) - 8} more")
+
+        result = "## Preprocessing Validation: PASS\n\n"
+        result += f"- Input rows: {len(session.data)} → Output rows: {layout.n_rows} (no rows dropped)\n"
+        result += f"- Output features: {len(layout.feature_names)}\n"
+        result += f"- Columns: {col_preview}\n"
+        result += "- NaN remaining: 0\n\n"
+        result += "Config is ready for `run_topological_sweep`."
+        return result
+
+    except (ValueError, TypeError) as e:
+        result = "## Preprocessing Validation: FAIL\n\n"
+        result += f"**Error:** {e}\n\n"
+        result += "Call `repair_preprocessing_config(error_message=..., config_yaml=..., dataset_geometry=...)` to fix this automatically."
+        return result
+    except Exception as e:
+        logger.error(f"Error in validate_preprocessing_config: {e}")
+        return mcp_error("validate_preprocessing_config", str(e))
+
 
 def main():
     mcp.run()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
