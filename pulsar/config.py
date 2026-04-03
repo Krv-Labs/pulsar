@@ -57,7 +57,7 @@ class ImputeSpec:
 @dataclass
 class EncodeSpec:
     method: str  # one_hot
-    # Reserved for future: categories, handle_unknown, etc.
+    max_categories: int | None = None  # None = warn at 50; set = hard error at limit
 
 
 @dataclass
@@ -125,6 +125,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     for col, spec in encode_raw.items():
         encode[col] = EncodeSpec(
             method=spec["method"],
+            max_categories=spec.get("max_categories"),
         )
 
     # sweep section
@@ -188,7 +189,10 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
     if cfg.encode:
         encode_block = "\n  encode:"
         for col, spec in cfg.encode.items():
-            encode_block += f"\n    {col}: {{method: {spec.method}}}"
+            parts = f"method: {spec.method}"
+            if spec.max_categories is not None:
+                parts += f", max_categories: {spec.max_categories}"
+            encode_block += f"\n    {col}: {{{parts}}}"
 
     # Threshold
     threshold = cfg.cosmic_graph.threshold
