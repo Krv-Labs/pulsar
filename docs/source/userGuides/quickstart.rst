@@ -6,11 +6,15 @@ Quickstart
 
 Get from zero to insights in under 10 minutes.
 
+.. code-block:: bash
+
+   uv pip install pulsar
+
+
 Prerequisites
 -------------
 
 - Python 3.10+
-- Pulsar installed (``pip install pulsar``)
 - For development: Rust toolchain
 
 Option 1: Use a Pre-Built Demo (Fastest)

@@ -41,4 +41,3 @@ Pulsar exports a compact public surface in ``pulsar.__init__``.
    :hidden:
 
    pulsar
-   configuration

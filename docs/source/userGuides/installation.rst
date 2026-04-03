@@ -13,7 +13,7 @@ For end users:
 
 .. code-block:: bash
 
-   pip install pulsar
+   uv pip install pulsar
 
 Supported Versions
 ------------------
