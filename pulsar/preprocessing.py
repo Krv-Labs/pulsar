@@ -23,9 +23,7 @@ from pulsar._pulsar import impute_column
 from pulsar.config import ImputeSpec, PulsarConfig
 
 # Numeric imputation methods — these require the column to be numeric.
-_NUMERIC_IMPUTE_METHODS = frozenset(
-    {"fill_mean", "fill_median", "sample_normal"}
-)
+_NUMERIC_IMPUTE_METHODS = frozenset({"fill_mean", "fill_median", "sample_normal"})
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +219,7 @@ def preprocess_dataframe(
     nan_counts = df.isna().sum()
     nan_cols = nan_counts[nan_counts > 0]
     if not nan_cols.empty:
-        detail = ", ".join(
-            f"'{c}' ({int(nan_cols[c])} rows)" for c in nan_cols.index
-        )
+        detail = ", ".join(f"'{c}' ({int(nan_cols[c])} rows)" for c in nan_cols.index)
         raise ValueError(
             f"NaN values remain after imputation in {len(nan_cols)} column(s): "
             f"{detail}. Add imputation rules in preprocessing.impute, or drop "
@@ -232,9 +228,7 @@ def preprocess_dataframe(
 
     # 8. Numeric type check
     non_numeric = [
-        (c, str(df[c].dtype))
-        for c in df.columns
-        if not is_numeric_dtype(df[c])
+        (c, str(df[c].dtype)) for c in df.columns if not is_numeric_dtype(df[c])
     ]
     if non_numeric:
         detail = ", ".join(f"'{c}' (dtype={dt})" for c, dt in non_numeric)

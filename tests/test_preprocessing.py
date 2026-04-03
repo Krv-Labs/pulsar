@@ -4,7 +4,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pulsar.config import EncodeSpec, ImputeSpec, PulsarConfig, PCASpec, BallMapperSpec, CosmicGraphSpec
+from pulsar.config import (
+    EncodeSpec,
+    ImputeSpec,
+    PulsarConfig,
+    PCASpec,
+    BallMapperSpec,
+    CosmicGraphSpec,
+)
 from pulsar.preprocessing import (
     impute_string_column,
     preprocess_dataframe,

@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 # Preprocessing recommendation helpers
 # ---------------------------------------------------------------------------
 
+
 def _try_float(s: str) -> bool:
     """Return True if s can be parsed as a float."""
     try:
@@ -81,7 +82,9 @@ def _recommend_preprocessing_block(
         n_unique = cp["n_unique"] if isinstance(cp, dict) else cp.n_unique
         n_missing = cp["n_missing"] if isinstance(cp, dict) else cp.n_missing
         missing_pct = cp["missing_pct"] if isinstance(cp, dict) else cp.missing_pct
-        sample_values = cp["sample_values"] if isinstance(cp, dict) else cp.sample_values
+        sample_values = (
+            cp["sample_values"] if isinstance(cp, dict) else cp.sample_values
+        )
 
         # Rule 1: All-missing
         if missing_pct >= 100.0:
@@ -94,22 +97,46 @@ def _recommend_preprocessing_block(
             if _looks_like_dirty_numeric(sample_values):
                 if missing_pct >= 30:
                     impute[name] = {"method": "sample_normal", "seed": 42}
-                    rationale.append((name, "impute: sample_normal", f"Dirty numeric ({missing_pct:.0f}% missing); string sentinels detected — coercion will rescue it"))
+                    rationale.append(
+                        (
+                            name,
+                            "impute: sample_normal",
+                            f"Dirty numeric ({missing_pct:.0f}% missing); string sentinels detected — coercion will rescue it",
+                        )
+                    )
                 else:
                     impute[name] = {"method": "fill_mean", "seed": 42}
-                    rationale.append((name, "impute: fill_mean", f"Dirty numeric ({missing_pct:.0f}% missing); string sentinels detected — coercion will rescue it"))
+                    rationale.append(
+                        (
+                            name,
+                            "impute: fill_mean",
+                            f"Dirty numeric ({missing_pct:.0f}% missing); string sentinels detected — coercion will rescue it",
+                        )
+                    )
                 continue
 
             # Rule 3: High-cardinality ID
             if n_samples > 0 and n_unique / n_samples > 0.9:
                 drop.append(name)
-                rationale.append((name, "drop", f"ID-like column ({n_unique}/{n_samples} unique) — no topological signal"))
+                rationale.append(
+                    (
+                        name,
+                        "drop",
+                        f"ID-like column ({n_unique}/{n_samples} unique) — no topological signal",
+                    )
+                )
                 continue
 
             # Rule 4: Too many categories to safely one-hot
             if n_unique > 50:
                 drop.append(name)
-                rationale.append((name, "drop", f"{n_unique} categories would add {n_unique} dimensions — distorts Euclidean distance"))
+                rationale.append(
+                    (
+                        name,
+                        "drop",
+                        f"{n_unique} categories would add {n_unique} dimensions — distorts Euclidean distance",
+                    )
+                )
                 continue
 
             # Rule 5: Medium cardinality — warn via max_categories
@@ -117,7 +144,13 @@ def _recommend_preprocessing_block(
                 encode[name] = {"method": "one_hot", "max_categories": 20}
                 if n_missing > 0:
                     impute[name] = {"method": "sample_categorical", "seed": 42}
-                rationale.append((name, "encode: one_hot (max 20)", f"{n_unique} categories — capped at 20 to limit dimensionality expansion"))
+                rationale.append(
+                    (
+                        name,
+                        "encode: one_hot (max 20)",
+                        f"{n_unique} categories — capped at 20 to limit dimensionality expansion",
+                    )
+                )
                 continue
 
             # Rule 6: Binary — fill_mode is safe
@@ -125,25 +158,61 @@ def _recommend_preprocessing_block(
                 encode[name] = {"method": "one_hot"}
                 if n_missing > 0:
                     impute[name] = {"method": "fill_mode", "seed": 42}
-                rationale.append((name, "encode: one_hot", f"Binary column ({n_unique} values)" + (f"; impute: fill_mode ({n_missing} missing)" if n_missing > 0 else "")))
+                rationale.append(
+                    (
+                        name,
+                        "encode: one_hot",
+                        f"Binary column ({n_unique} values)"
+                        + (
+                            f"; impute: fill_mode ({n_missing} missing)"
+                            if n_missing > 0
+                            else ""
+                        ),
+                    )
+                )
                 continue
 
             # Rule 7: Low cardinality categorical
             encode[name] = {"method": "one_hot"}
             if n_missing > 0:
                 impute[name] = {"method": "sample_categorical", "seed": 42}
-            rationale.append((name, "encode: one_hot", f"{n_unique} unique values — safe cardinality" + (f"; impute: sample_categorical ({n_missing} missing)" if n_missing > 0 else "")))
+            rationale.append(
+                (
+                    name,
+                    "encode: one_hot",
+                    f"{n_unique} unique values — safe cardinality"
+                    + (
+                        f"; impute: sample_categorical ({n_missing} missing)"
+                        if n_missing > 0
+                        else ""
+                    ),
+                )
+            )
             continue
 
         # Numeric column
         if missing_pct >= 30:
             impute[name] = {"method": "sample_normal", "seed": 42}
-            rationale.append((name, "impute: sample_normal", f"Numeric, {missing_pct:.0f}% missing — sample_normal preserves distribution shape"))
+            rationale.append(
+                (
+                    name,
+                    "impute: sample_normal",
+                    f"Numeric, {missing_pct:.0f}% missing — sample_normal preserves distribution shape",
+                )
+            )
         elif missing_pct > 0:
             impute[name] = {"method": "fill_mean", "seed": 42}
-            rationale.append((name, "impute: fill_mean", f"Numeric, {missing_pct:.0f}% missing — low missingness, mean fill is stable"))
+            rationale.append(
+                (
+                    name,
+                    "impute: fill_mean",
+                    f"Numeric, {missing_pct:.0f}% missing — low missingness, mean fill is stable",
+                )
+            )
         else:
-            rationale.append((name, "no action", "Numeric, complete — no preprocessing needed"))
+            rationale.append(
+                (name, "no action", "Numeric, complete — no preprocessing needed")
+            )
 
     return drop, impute, encode, rationale
 
@@ -159,7 +228,9 @@ def _preprocessing_block_to_yaml(
     if impute:
         lines.append("  impute:")
         for col, spec in impute.items():
-            lines.append(f"    {col}: {{method: {spec['method']}, seed: {spec.get('seed', 42)}}}")
+            lines.append(
+                f"    {col}: {{method: {spec['method']}, seed: {spec.get('seed', 42)}}}"
+            )
     else:
         lines.append("  impute: {}")
     if encode:
@@ -360,7 +431,9 @@ async def suggest_initial_config(dataset_geometry: str, ctx: Context) -> str:
         # Build preprocessing block from column profiles
         n_samples = geo.get("n_samples", 0)
         column_profiles = geo.get("column_profiles", [])
-        drop, impute, encode, _ = _recommend_preprocessing_block(column_profiles, n_samples)
+        drop, impute, encode, _ = _recommend_preprocessing_block(
+            column_profiles, n_samples
+        )
         preprocessing_block = _preprocessing_block_to_yaml(drop, impute, encode)
 
         yaml_str = f"""run:
@@ -791,9 +864,14 @@ async def recommend_preprocessing(dataset_geometry: str, ctx: Context) -> str:
         column_profiles = geo.get("column_profiles", [])
 
         if not column_profiles:
-            return mcp_error("recommend_preprocessing", "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.")
+            return mcp_error(
+                "recommend_preprocessing",
+                "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.",
+            )
 
-        drop, impute, encode, rationale = _recommend_preprocessing_block(column_profiles, n_samples)
+        drop, impute, encode, rationale = _recommend_preprocessing_block(
+            column_profiles, n_samples
+        )
 
         result = "## Preprocessing Recommendation\n\n"
         result += _rationale_table(rationale)
@@ -833,7 +911,10 @@ async def repair_preprocessing_config(
     try:
         config_dict = yaml.safe_load(config_yaml)
         if not isinstance(config_dict, dict):
-            return mcp_error("repair_preprocessing_config", "config_yaml must be a valid YAML mapping.")
+            return mcp_error(
+                "repair_preprocessing_config",
+                "config_yaml must be a valid YAML mapping.",
+            )
 
         geo = json.loads(dataset_geometry)
         # Build a name → profile dict for O(1) lookup
@@ -853,16 +934,30 @@ async def repair_preprocessing_config(
             cp = profiles_by_name.get(col)
             if cp is None:
                 return default
-            return cp.get(field, default) if isinstance(cp, dict) else getattr(cp, field, default)
+            return (
+                cp.get(field, default)
+                if isinstance(cp, dict)
+                else getattr(cp, field, default)
+            )
 
         # Pattern 1: Coercion failure — "configured for numeric imputation"
-        m = re.search(r"Column '([^']+)' is configured for numeric imputation \(([^)]+)\)", error_message)
+        m = re.search(
+            r"Column '([^']+)' is configured for numeric imputation \(([^)]+)\)",
+            error_message,
+        )
         if m:
             col, old_method = m.group(1), m.group(2)
             n_unique = _get_profile_field(col, "n_unique", 999)
             new_method = "fill_mode" if n_unique <= 10 else "sample_categorical"
             impute_dict[col] = {"method": new_method, "seed": 42}
-            changes.append((col, f"impute: {old_method}", f"impute: {new_method}", "Column contains non-numeric values; switched to string imputation"))
+            changes.append(
+                (
+                    col,
+                    f"impute: {old_method}",
+                    f"impute: {new_method}",
+                    "Column contains non-numeric values; switched to string imputation",
+                )
+            )
 
         # Pattern 2: NaN remaining
         elif "NaN values remain after imputation" in error_message:
@@ -872,7 +967,14 @@ async def repair_preprocessing_config(
                 n_missing = _get_profile_field(col, "n_missing", 0)
                 new_method = "fill_mean" if is_numeric else "sample_categorical"
                 impute_dict[col] = {"method": new_method, "seed": 42}
-                changes.append((col, "no impute rule", f"impute: {new_method}", f"{'Numeric' if is_numeric else 'Categorical'} column with {n_missing} missing rows"))
+                changes.append(
+                    (
+                        col,
+                        "no impute rule",
+                        f"impute: {new_method}",
+                        f"{'Numeric' if is_numeric else 'Categorical'} column with {n_missing} missing rows",
+                    )
+                )
 
         # Pattern 3: Non-numeric columns remaining
         elif "Non-numeric columns remain" in error_message:
@@ -881,10 +983,24 @@ async def repair_preprocessing_config(
                 n_unique = _get_profile_field(col, "n_unique", 999)
                 if n_unique > 50:
                     drop_list.append(col)
-                    changes.append((col, "no rule", "drop_columns", f"{n_unique} categories — one-hot would add {n_unique} dimensions"))
+                    changes.append(
+                        (
+                            col,
+                            "no rule",
+                            "drop_columns",
+                            f"{n_unique} categories — one-hot would add {n_unique} dimensions",
+                        )
+                    )
                 else:
                     encode_dict[col] = {"method": "one_hot"}
-                    changes.append((col, "no rule", "encode: one_hot", f"{n_unique} unique values — safe to one-hot"))
+                    changes.append(
+                        (
+                            col,
+                            "no rule",
+                            "encode: one_hot",
+                            f"{n_unique} unique values — safe to one-hot",
+                        )
+                    )
 
         # Pattern 4: All-missing
         elif "is all-missing" in error_message:
@@ -892,7 +1008,14 @@ async def repair_preprocessing_config(
             if m2:
                 col = m2.group(1)
                 drop_list.append(col)
-                changes.append((col, "impute/encode", "drop_columns", "Column is entirely null — cannot impute or encode"))
+                changes.append(
+                    (
+                        col,
+                        "impute/encode",
+                        "drop_columns",
+                        "Column is entirely null — cannot impute or encode",
+                    )
+                )
 
         # Pattern 5: Cardinality exceeded
         elif "exceeding max_categories" in error_message:
@@ -903,17 +1026,37 @@ async def repair_preprocessing_config(
                     drop_list.append(col)
                     if col in encode_dict:
                         del encode_dict[col]
-                    changes.append((col, "encode: one_hot", "drop_columns", f"{n_cats} categories is too many even with capping"))
+                    changes.append(
+                        (
+                            col,
+                            "encode: one_hot",
+                            "drop_columns",
+                            f"{n_cats} categories is too many even with capping",
+                        )
+                    )
                 else:
                     new_max = min(20, n_cats // 2)
                     encode_dict[col] = {"method": "one_hot", "max_categories": new_max}
-                    changes.append((col, "encode: one_hot (no limit)", f"encode: one_hot (max_categories={new_max})", f"Capped at {new_max} to limit dimensionality"))
+                    changes.append(
+                        (
+                            col,
+                            "encode: one_hot (no limit)",
+                            f"encode: one_hot (max_categories={new_max})",
+                            f"Capped at {new_max} to limit dimensionality",
+                        )
+                    )
 
         else:
-            return mcp_error("repair_preprocessing_config", f"Unrecognized preprocessing error pattern. Raw error:\n{error_message}")
+            return mcp_error(
+                "repair_preprocessing_config",
+                f"Unrecognized preprocessing error pattern. Raw error:\n{error_message}",
+            )
 
         if not changes:
-            return mcp_error("repair_preprocessing_config", "Error was classified but no changes were needed. Review the error message manually.")
+            return mcp_error(
+                "repair_preprocessing_config",
+                "Error was classified but no changes were needed. Review the error message manually.",
+            )
 
         # Classify error for display
         if "NaN values remain" in error_message:
@@ -970,10 +1113,15 @@ async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
     try:
         config_dict = yaml.safe_load(config_yaml)
         if not isinstance(config_dict, dict):
-            return mcp_error("validate_preprocessing_config", "config_yaml must be a valid YAML mapping.")
+            return mcp_error(
+                "validate_preprocessing_config",
+                "config_yaml must be a valid YAML mapping.",
+            )
 
         cfg = load_config(config_dict)
-        df_out, layout = await asyncio.to_thread(preprocess_dataframe, session.data, cfg)
+        df_out, layout = await asyncio.to_thread(
+            preprocess_dataframe, session.data, cfg
+        )
 
         col_preview = list(layout.feature_names[:8])
         if len(layout.feature_names) > 8:
