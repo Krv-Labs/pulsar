@@ -10,15 +10,17 @@ from dataclasses import dataclass
 import json
 import logging
 import os
+import re
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import yaml
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
 
-from pulsar.config import config_to_yaml
+from pulsar.config import config_to_yaml, load_config
+from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
 from pulsar.mcp.interpreter import (
@@ -32,6 +34,155 @@ from pulsar.mcp.errors import mcp_error
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Preprocessing recommendation helpers
+# ---------------------------------------------------------------------------
+
+def _try_float(s: str) -> bool:
+    """Return True if s can be parsed as a float."""
+    try:
+        float(s)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _looks_like_dirty_numeric(sample_values: List[str]) -> bool:
+    """Return True if majority of sample values parse as float.
+
+    Used to detect columns where string sentinels (e.g. 'N/A') caused pandas
+    to cast an otherwise numeric column to object dtype.
+    """
+    if not sample_values:
+        return False
+    parseable = sum(1 for v in sample_values if _try_float(v))
+    return parseable / len(sample_values) > 0.5
+
+
+def _recommend_preprocessing_block(
+    column_profiles: List[Any],
+    n_samples: int,
+) -> tuple[list[str], dict[str, Any], dict[str, Any], list[tuple[str, str, str]]]:
+    """Apply decision tree to column profiles and return preprocessing components.
+
+    Returns:
+        (drop_columns, impute_dict, encode_dict, rationale_rows)
+        where rationale_rows is list of (column, decision_label, rationale).
+    """
+    drop: list[str] = []
+    impute: dict[str, Any] = {}
+    encode: dict[str, Any] = {}
+    rationale: list[tuple[str, str, str]] = []
+
+    for cp in column_profiles:
+        name = cp["name"] if isinstance(cp, dict) else cp.name
+        is_numeric = cp["is_numeric"] if isinstance(cp, dict) else cp.is_numeric
+        n_unique = cp["n_unique"] if isinstance(cp, dict) else cp.n_unique
+        n_missing = cp["n_missing"] if isinstance(cp, dict) else cp.n_missing
+        missing_pct = cp["missing_pct"] if isinstance(cp, dict) else cp.missing_pct
+        sample_values = cp["sample_values"] if isinstance(cp, dict) else cp.sample_values
+
+        # Rule 1: All-missing
+        if missing_pct >= 100.0:
+            drop.append(name)
+            rationale.append((name, "drop", "All values are missing — cannot impute"))
+            continue
+
+        if not is_numeric:
+            # Rule 2: Dirty numeric — object column where values are mostly parseable as float
+            if _looks_like_dirty_numeric(sample_values):
+                if missing_pct >= 30:
+                    impute[name] = {"method": "sample_normal", "seed": 42}
+                    rationale.append((name, "impute: sample_normal", f"Dirty numeric ({missing_pct:.0f}% missing); string sentinels detected — coercion will rescue it"))
+                else:
+                    impute[name] = {"method": "fill_mean", "seed": 42}
+                    rationale.append((name, "impute: fill_mean", f"Dirty numeric ({missing_pct:.0f}% missing); string sentinels detected — coercion will rescue it"))
+                continue
+
+            # Rule 3: High-cardinality ID
+            if n_samples > 0 and n_unique / n_samples > 0.9:
+                drop.append(name)
+                rationale.append((name, "drop", f"ID-like column ({n_unique}/{n_samples} unique) — no topological signal"))
+                continue
+
+            # Rule 4: Too many categories to safely one-hot
+            if n_unique > 50:
+                drop.append(name)
+                rationale.append((name, "drop", f"{n_unique} categories would add {n_unique} dimensions — distorts Euclidean distance"))
+                continue
+
+            # Rule 5: Medium cardinality — warn via max_categories
+            if n_unique > 20:
+                encode[name] = {"method": "one_hot", "max_categories": 20}
+                if n_missing > 0:
+                    impute[name] = {"method": "sample_categorical", "seed": 42}
+                rationale.append((name, "encode: one_hot (max 20)", f"{n_unique} categories — capped at 20 to limit dimensionality expansion"))
+                continue
+
+            # Rule 6: Binary — fill_mode is safe
+            if n_unique == 2:
+                encode[name] = {"method": "one_hot"}
+                if n_missing > 0:
+                    impute[name] = {"method": "fill_mode", "seed": 42}
+                rationale.append((name, "encode: one_hot", f"Binary column ({n_unique} values)" + (f"; impute: fill_mode ({n_missing} missing)" if n_missing > 0 else "")))
+                continue
+
+            # Rule 7: Low cardinality categorical
+            encode[name] = {"method": "one_hot"}
+            if n_missing > 0:
+                impute[name] = {"method": "sample_categorical", "seed": 42}
+            rationale.append((name, "encode: one_hot", f"{n_unique} unique values — safe cardinality" + (f"; impute: sample_categorical ({n_missing} missing)" if n_missing > 0 else "")))
+            continue
+
+        # Numeric column
+        if missing_pct >= 30:
+            impute[name] = {"method": "sample_normal", "seed": 42}
+            rationale.append((name, "impute: sample_normal", f"Numeric, {missing_pct:.0f}% missing — sample_normal preserves distribution shape"))
+        elif missing_pct > 0:
+            impute[name] = {"method": "fill_mean", "seed": 42}
+            rationale.append((name, "impute: fill_mean", f"Numeric, {missing_pct:.0f}% missing — low missingness, mean fill is stable"))
+        else:
+            rationale.append((name, "no action", "Numeric, complete — no preprocessing needed"))
+
+    return drop, impute, encode, rationale
+
+
+def _preprocessing_block_to_yaml(
+    drop: list[str],
+    impute: dict[str, Any],
+    encode: dict[str, Any],
+) -> str:
+    """Render drop/impute/encode dicts as a preprocessing: YAML block."""
+    lines = ["preprocessing:"]
+    lines.append(f"  drop_columns: {json.dumps(drop)}")
+    if impute:
+        lines.append("  impute:")
+        for col, spec in impute.items():
+            lines.append(f"    {col}: {{method: {spec['method']}, seed: {spec.get('seed', 42)}}}")
+    else:
+        lines.append("  impute: {}")
+    if encode:
+        lines.append("  encode:")
+        for col, spec in encode.items():
+            parts = f"method: {spec['method']}"
+            if "max_categories" in spec:
+                parts += f", max_categories: {spec['max_categories']}"
+            lines.append(f"    {col}: {{{parts}}}")
+    else:
+        lines.append("  encode: {}")
+    return "\n".join(lines)
+
+
+def _rationale_table(rows: list[tuple[str, str, str]]) -> str:
+    """Render rationale rows as a markdown table."""
+    lines = ["| Column | Decision | Rationale |", "|---|---|---|"]
+    for col, decision, reason in rows:
+        lines.append(f"| `{col}` | {decision} | {reason} |")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Initialize FastMCP
 mcp = FastMCP(
     "Pulsar",
@@ -60,14 +211,31 @@ mcp = FastMCP(
         "- **Change ONE parameter at a time.** Note: An entire Epsilon Range or PCA Array counts as ONE parameter change.\n"
         "- **Observe the exact structural impact** on the cosmic graph (use the diff provided by run_topological_sweep), and re-assess your hypothesis.\n\n"
         "# Workflow\n"
-        "1. characterize_dataset -> suggest_initial_config -> explain_suggestion\n"
+        "1. characterize_dataset -> suggest_initial_config (includes preprocessing) -> validate_preprocessing_config\n"
         "2. run_topological_sweep -> diagnose_cosmic_graph\n"
         "3. **Iterate:** Change ONE parameter (as defined above). After each sweep, review the diff.\n"
         "4. **Blob Recovery:** If run 1 produces a massive blob (`giant_fraction` > 80%), call `explain_suggestion` to understand the initial reasoning. "
         "Usually, you must shift your epsilon range lower OR reduce the PCA dimension array to break the blob.\n"
         "5. **Shatter Recovery:** If the graph is fragmented (`component_count` > 20 and `giant_fraction` < 5%), your epsilon range is too small or threshold too aggressive. "
         "Increase epsilon bounds modestly (10-20%) or reduce the threshold (e.g., change 'auto' to a float like 0.3) before any other change.\n"
-        "6. generate_cluster_dossier -> compare_clusters_tool\n"
+        "6. generate_cluster_dossier -> compare_clusters_tool\n\n"
+        "# Preprocessing Error Handling\n"
+        "When `run_topological_sweep` returns a preprocessing error (ValueError, TypeError):\n"
+        "1. Call `repair_preprocessing_config(error_message, config_yaml, dataset_geometry)` — pass the exact error text, the failing YAML, and the JSON from `characterize_dataset`.\n"
+        "2. Replace your `config_yaml` with the patched version from the **Patched Config** block.\n"
+        "3. Call `validate_preprocessing_config(patched_config_yaml)` — must return PASS before re-running the sweep.\n"
+        "4. If validation surfaces a new error, repeat from step 1. Preprocessing errors rarely stack more than 2 levels.\n"
+        "5. **Never call `run_topological_sweep` on a config that `validate_preprocessing_config` has rejected.**\n\n"
+        "## Cold Start Preprocessing\n"
+        "`suggest_initial_config` already embeds preprocessing recommendations. Always call "
+        "`validate_preprocessing_config` before the first `run_topological_sweep` to surface any issues without burning sweep time. "
+        "If you want a standalone explanation of each column decision, call `recommend_preprocessing(dataset_geometry)`.\n\n"
+        "## Preprocessing Rules\n"
+        "- Never hand-write impute/encode YAML from raw column stats — use `recommend_preprocessing` or `repair_preprocessing_config`.\n"
+        "- Valid impute methods: `fill_mean`, `fill_median`, `fill_mode`, `sample_normal`, `sample_categorical`.\n"
+        "- Valid encode methods: `one_hot` only.\n"
+        "- Object columns with `n_unique > 50` should be dropped, not encoded — one-hot at that cardinality adds 50+ orthogonal dimensions and destroys Euclidean distance structure.\n"
+        "- Use `sample_categorical` (not `fill_mode`) for missing categoricals unless the column is binary — `fill_mode` collapses all missing values to a single point, distorting the manifold.\n"
     ),
 )
 
@@ -189,13 +357,16 @@ async def suggest_initial_config(dataset_geometry: str, ctx: Context) -> str:
         eps_min = knn_mean * 0.8
         eps_max = knn_mean * 1.5
 
+        # Build preprocessing block from column profiles
+        n_samples = geo.get("n_samples", 0)
+        column_profiles = geo.get("column_profiles", [])
+        drop, impute, encode, _ = _recommend_preprocessing_block(column_profiles, n_samples)
+        preprocessing_block = _preprocessing_block_to_yaml(drop, impute, encode)
+
         yaml_str = f"""run:
   name: initial_sweep
   data: "FILL_THIS_IN_WITH_PATH"
-preprocessing:
-  drop_columns: []
-  encode: {{}} # e.g., {{ species: {{method: one_hot}} }}
-  impute: {{}} # e.g., {{ age: {{method: fill_mean, seed: 42}} }}
+{preprocessing_block}
 sweep:
   pca:
     dimensions:
@@ -389,7 +560,7 @@ async def run_topological_sweep(
         )
 
         session.model = model
-        session.data = model.preprocessed_data
+        session.data = model.data  # raw pre-preprocessing DataFrame
 
         if precomputed is None:
             session.embeddings = model._embeddings
@@ -599,9 +770,10 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
         return mcp_error("diagnose_cosmic_graph", str(e))
 
 
+@mcp.tool()
+
 def main():
     mcp.run()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
