@@ -22,6 +22,9 @@ Cargo.lock
 !demos/mmlu/data/
 demos/mmlu/data/*
 !demos/mmlu/data/model_eval_results.csv
+!demos/penguins/penguins.csv
+demos/penguins/*.yaml
+demos/penguins/*.py
 
 
 # Byte-compiled / optimized / DLL files
