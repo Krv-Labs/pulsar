@@ -5,8 +5,10 @@ Rust-backed Python library for topological data analysis. Implements the Thema p
 Performance-critical algorithms are written in Rust (PyO3/maturin) and exposed as `pulsar._pulsar`. Python orchestrates the pipeline.
 
 
-<details>
-<summary><strong>🤖 MCP Integration: Let the Agent Do the Math</strong></summary>
+
+#### MCP!
+<details> 
+<summary>Let the Agent Do the Math</summary>
 
 Until now, topological data analysis required a Ph.D. in algebraic topology and a masochistic tolerance for parameter tuning. 
 
@@ -19,6 +21,9 @@ We get lots of complaints about it actually, with people asking things like:
 We hear you, but we're not convinced that writing a 50-line hyperparameter grid search is what you really want. You don't want to have to manually calculate k-NN distances every time you load a CSV. And I doubt you really want to stare at a raw NetworkX adjacency matrix either — you want answers. You want to point an LLM at your data and say, "Find the natural clusters and tell me why they exist."
 
 The Pulsar MCP (Model Context Protocol) Server is our attempt to give you what you *actually* want, without any of the downsides of doing something stupid like guessing topological parameters.
+
+> [!NOTE]
+> For more guides, workflows, and an end-to-end MCP example, see [`demos/penguins/README.md`](demos/penguins/README.md).
 
 ### Setup
 

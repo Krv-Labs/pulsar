@@ -27,6 +27,82 @@ Mix styles freely within a config. The total grid size is
 
 ----
 
+Preprocessing
+-------------
+
+Before any sweep runs, Pulsar preprocesses the input DataFrame. All preprocessing is declared in the ``preprocessing:`` block of your config.
+
+``preprocessing.drop_columns``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Columns listed here are removed before any other step:
+
+.. code-block:: yaml
+
+   preprocessing:
+     drop_columns: [id, timestamp, row_index]
+
+``preprocessing.impute``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Numeric imputation is applied before scaling. Each column gets a method and an optional seed:
+
+.. code-block:: yaml
+
+   preprocessing:
+     impute:
+       age:      {method: fill_mean}          # low missingness (< 30%)
+       income:   {method: fill_median}        # skewed distributions
+       weight:   {method: sample_normal, seed: 42}  # high missingness (>= 30%)
+
+Available methods: ``fill_mean``, ``fill_median``, ``fill_mode``, ``sample_normal``, ``sample_categorical``.
+
+.. note::
+
+   Columns **not** listed in ``impute`` or ``encode`` must arrive NaN-free. If any NaN values remain after preprocessing, Pulsar raises a ``ValueError`` naming the offending column(s) and row counts. There is no silent row-dropping.
+
+``preprocessing.encode``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Categorical (string/object) columns must be encoded before they can be passed to the Rust pipeline. Only one-hot encoding is supported:
+
+.. code-block:: yaml
+
+   preprocessing:
+     encode:
+       island:    {method: one_hot}
+       sex:       {method: one_hot}
+       diagnosis: {method: one_hot, max_categories: 20}
+
+**Cardinality rules:**
+
+- If a column has more than 50 unique values, Pulsar emits a ``UserWarning`` — each category adds a dimension that dilates Euclidean distances after scaling.
+- Use ``max_categories: N`` to turn this into a hard error, preventing accidental high-cardinality encodings.
+- Columns with more than 100 unique values should generally be dropped, not encoded.
+
+.. code-block:: yaml
+
+   preprocessing:
+     encode:
+       # Hard limit — raises ValueError if more than 20 categories found
+       icd_code: {method: one_hot, max_categories: 20}
+
+**String imputation before encoding:**
+
+If a categorical column has missing values, add an ``impute`` rule alongside the ``encode`` rule. Use ``sample_categorical`` for multi-class columns (preserves class proportions) or ``fill_mode`` for binary columns:
+
+.. code-block:: yaml
+
+   preprocessing:
+     impute:
+       sex: {method: fill_mode}         # binary — fill_mode is safe
+       island: {method: sample_categorical, seed: 42}  # multi-class
+     encode:
+       sex:    {method: one_hot}
+       island: {method: one_hot}
+
+----
+
 PCA Parameters
 --------------
 
@@ -174,7 +250,12 @@ Example: Full Tuned Config
    preprocessing:
      drop_columns: [id, timestamp]
      impute:
-       age: {method: fill_mean}
+       age:      {method: fill_mean}
+       income:   {method: sample_normal, seed: 42}
+       sex:      {method: fill_mode}
+     encode:
+       sex:      {method: one_hot}
+       category: {method: one_hot, max_categories: 10}
 
    sweep:
      pca:

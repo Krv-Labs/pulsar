@@ -50,7 +50,7 @@ The Value Prop
 - Generates a statistical dossier (z-scores, trait profiles, separation metrics)
 - You read the story, not a confusion matrix
 
-Claude handles all the messy parts: imputation, scaling, categorical encoding, parameter selection, iteration if the results look wrong.
+Claude handles all the messy parts: imputation, categorical encoding, parameter selection, and iterating when the results look wrong. Dedicated tools let Claude fix preprocessing errors in ≤2 tool calls before re-running the sweep.
 
 Setup
 -----
@@ -111,9 +111,11 @@ Once connected, give the AI a goal rather than instructions. The AI already know
 Under the hood the AI will:
 
 1. **Characterize geometry** — probe k-NN distances and PCA variance to ground parameter choices
-2. **Run a topological sweep** — find the most stable version of the data's shape
-3. **Iterate automatically** — tune epsilon if the result is a structureless blob or a shattered mess
-4. **Generate a Dossier** — statistical profiles of each discovered subpopulation
+2. **Generate a preprocessing config** — recommend impute/encode rules for every column with rationale
+3. **Validate preprocessing** — dry-run the preprocessing stage before committing to a full sweep
+4. **Run a topological sweep** — find the most stable version of the data's shape
+5. **Iterate automatically** — repair preprocessing errors and tune epsilon if results are degenerate
+6. **Generate a Dossier** — statistical profiles of each discovered subpopulation
 
 Available MCP Tools
 -------------------
@@ -138,6 +140,12 @@ The server exposes these tools to the AI client. Claude automatically chains the
      - Return your original dataframe with discovered cluster labels attached. Ready for downstream analysis, visualization, or handoff to domain experts.
    * - **diagnose_cosmic_graph**
      - Health metrics on the graph structure: connected components, density, sparsity. Detects degenerate results (blob or shattered) and suggests YAML fixes automatically.
+   * - **recommend_preprocessing**
+     - Analyze column profiles and return a complete ``preprocessing:`` YAML block with per-column rationale. Call this before the first sweep to avoid hand-writing impute/encode rules from raw stats.
+   * - **repair_preprocessing_config**
+     - Parse a preprocessing error from ``run_topological_sweep``, look up the offending column in the dataset profile, and return a patched config with a change log. Fixes most errors in one call.
+   * - **validate_preprocessing_config**
+     - Dry-run only the preprocessing stage against the session data — no PCA, no sweep cost. Returns PASS with a schema summary, or a structured error ready to pass to ``repair_preprocessing_config``.
 
 Example: Palmer Penguins
 ------------------------
