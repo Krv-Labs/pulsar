@@ -36,6 +36,28 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Defensive patch: strip unknown kwargs from non-compliant MCP clients.
+# Some clients (e.g. Gemini CLI) inject orchestration fields like
+# ``wait_for_previous`` into tool calls.  FastMCP's Pydantic validation
+# rejects these.  Patching FunctionTool.run at the class level filters
+# them out *before* validation — one patch protects every tool.
+# ---------------------------------------------------------------------------
+from fastmcp.tools.function_tool import FunctionTool  # noqa: E402
+
+_original_function_tool_run = FunctionTool.run
+
+
+async def _lenient_function_tool_run(self, arguments, context=None):
+    if arguments:
+        valid_keys = set(self.parameters.get("properties", {}).keys())
+        arguments = {k: v for k, v in arguments.items() if k in valid_keys}
+    return await _original_function_tool_run(self, arguments, context)
+
+
+FunctionTool.run = _lenient_function_tool_run
+
+
+# ---------------------------------------------------------------------------
 # Preprocessing recommendation helpers
 # ---------------------------------------------------------------------------
 
@@ -139,16 +161,17 @@ def _recommend_preprocessing_block(
                 )
                 continue
 
-            # Rule 5: Medium cardinality — warn via max_categories
+            # Rule 5: Medium cardinality — cap at actual count so the
+            # validation gate (n_cats > max_categories) passes on first try.
             if n_unique > 20:
-                encode[name] = {"method": "one_hot", "max_categories": 20}
+                encode[name] = {"method": "one_hot", "max_categories": n_unique}
                 if n_missing > 0:
                     impute[name] = {"method": "sample_categorical", "seed": 42}
                 rationale.append(
                     (
                         name,
-                        "encode: one_hot (max 20)",
-                        f"{n_unique} categories — capped at 20 to limit dimensionality expansion",
+                        f"encode: one_hot (max {n_unique})",
+                        f"{n_unique} categories — cap set to actual count to avoid validation failure",
                     )
                 )
                 continue
@@ -212,6 +235,26 @@ def _recommend_preprocessing_block(
         else:
             rationale.append(
                 (name, "no action", "Numeric, complete — no preprocessing needed")
+            )
+
+    # Safety net: catch columns with missing values that slipped through
+    # (e.g. non-numeric columns routed to drop by rules 3-4, or edge cases
+    # in the dirty-numeric detection).
+    for cp in column_profiles:
+        name = cp["name"] if isinstance(cp, dict) else cp.name
+        n_missing = cp["n_missing"] if isinstance(cp, dict) else cp.n_missing
+        col_is_numeric = cp["is_numeric"] if isinstance(cp, dict) else cp.is_numeric
+        if n_missing > 0 and name not in impute and name not in drop:
+            if col_is_numeric:
+                impute[name] = {"method": "fill_mean", "seed": 42}
+            else:
+                impute[name] = {"method": "fill_mode", "seed": 42}
+            rationale.append(
+                (
+                    name,
+                    f"impute: {'fill_mean' if col_is_numeric else 'fill_mode'}",
+                    f"Safety net — {n_missing} missing values not covered by primary rules",
+                )
             )
 
     return drop, impute, encode, rationale
@@ -815,7 +858,12 @@ async def characterize_dataset(csv_path: str, ctx: Context) -> str:
     try:
         from pulsar.analysis.characterization import characterize_dataset as _char
 
-        result = await asyncio.to_thread(_char, csv_path)
+        # Read once, reuse for both session state and characterization.
+        session = _get_session(ctx)
+        df = await asyncio.to_thread(pd.read_csv, csv_path)
+        session.data = df
+
+        result = await asyncio.to_thread(_char, csv_path, dataframe=df)
         return json.dumps(dataclasses.asdict(result), indent=2)
     except Exception as e:
         logger.error(f"Error analyzing dataset: {e}")
@@ -1022,7 +1070,7 @@ async def repair_preprocessing_config(
             m3 = re.search(r"Column '([^']+)' has (\d+) categories", error_message)
             if m3:
                 col, n_cats = m3.group(1), int(m3.group(2))
-                if n_cats > 100:
+                if n_cats > 50:
                     drop_list.append(col)
                     if col in encode_dict:
                         del encode_dict[col]
@@ -1031,18 +1079,19 @@ async def repair_preprocessing_config(
                             col,
                             "encode: one_hot",
                             "drop_columns",
-                            f"{n_cats} categories is too many even with capping",
+                            f"{n_cats} categories is too many for one-hot encoding",
                         )
                     )
                 else:
-                    new_max = min(20, n_cats // 2)
-                    encode_dict[col] = {"method": "one_hot", "max_categories": new_max}
+                    # Raise cap to match actual cardinality so the
+                    # validation gate (n_cats > max_categories) passes.
+                    encode_dict[col] = {"method": "one_hot", "max_categories": n_cats}
                     changes.append(
                         (
                             col,
-                            "encode: one_hot (no limit)",
-                            f"encode: one_hot (max_categories={new_max})",
-                            f"Capped at {new_max} to limit dimensionality",
+                            "encode: one_hot (max_categories too low)",
+                            f"encode: one_hot (max_categories={n_cats})",
+                            f"Raised cap to match actual {n_cats} categories",
                         )
                     )
 

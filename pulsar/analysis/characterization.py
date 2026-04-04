@@ -58,6 +58,8 @@ def characterize_dataset(
     csv_path: str,
     subsample: int = 1000,
     seed: int = 42,
+    *,
+    dataframe: pd.DataFrame | None = None,
 ) -> DatasetProfile:
     """
     Probes dataset geometry before fitting to return raw geometric facts.
@@ -66,6 +68,8 @@ def characterize_dataset(
         csv_path: Path to CSV file (must have >=2 numeric columns)
         subsample: Max rows to analyze (for speed on large datasets)
         seed: Random seed for reproducibility
+        dataframe: Optional pre-loaded DataFrame. When provided, *csv_path*
+            is ignored for reading (but still used for logging/identification).
 
     Returns:
         DatasetProfile containing pure empirical facts.
@@ -74,7 +78,7 @@ def characterize_dataset(
         ValueError: If CSV has fewer than 2 numeric columns
         FileNotFoundError: If CSV file not found
     """
-    df = pd.read_csv(csv_path)
+    df = dataframe if dataframe is not None else pd.read_csv(csv_path)
 
     column_profiles = _profile_columns(df)
     n_columns_total = len(df.columns)
