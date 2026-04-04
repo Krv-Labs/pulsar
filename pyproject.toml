@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "thema-pulsar"
-version = "0.2.0"
+version = "0.2.1"
 authors = [
     { name = "Krv Labs", email = "team@krv.ai" },
 ]
@@ -36,6 +36,7 @@ dev = [
     "maturin>=1.12.6",
     "pytest>=9.0.2",
     "pytest-cov>=7.1.0",
+    "rich>=14.3.3",
     "ruff>=0.15.7",
 ]
 demos = [
