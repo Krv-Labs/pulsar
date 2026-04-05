@@ -47,11 +47,11 @@ from fastmcp.tools.function_tool import FunctionTool  # noqa: E402
 _original_function_tool_run = FunctionTool.run
 
 
-async def _lenient_function_tool_run(self, arguments, context=None):
-    if arguments:
+async def _lenient_function_tool_run(self, arguments):
+    if isinstance(arguments, dict) and arguments:
         valid_keys = set(self.parameters.get("properties", {}).keys())
         arguments = {k: v for k, v in arguments.items() if k in valid_keys}
-    return await _original_function_tool_run(self, arguments, context)
+    return await _original_function_tool_run(self, arguments)
 
 
 FunctionTool.run = _lenient_function_tool_run
