@@ -24,10 +24,10 @@ from pulsar.pipeline import ThemaRS
 logger = logging.getLogger(__name__)
 
 # Clustering strategy constants
-_MAX_COMPONENTS = 50  # Use component strategy if fewer than this
+_MAX_COMPONENTS = 30  # Use component strategy if fewer than this
 _MAX_SINGLETON_RATIO = 0.5  # Reject if >50% of nodes are singletons
 _SPECTRAL_K_MIN = 2
-_SPECTRAL_K_MAX = 15
+_SPECTRAL_K_MAX = 20
 
 
 @dataclass
@@ -444,9 +444,7 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
             h_desc = (
                 "Tight"
                 if f["homogeneity"] < 0.5
-                else "Divergent"
-                if f["homogeneity"] > 1.5
-                else "Normal"
+                else "Divergent" if f["homogeneity"] > 1.5 else "Normal"
             )
             md.append(
                 f"| {f['column']} | {f['mean']:.3f} | {f['global_mean']:.3f} | {f['rank']} | {f['z_score']:.2f} | {h_desc} ({f['homogeneity']:.2f}) |"
