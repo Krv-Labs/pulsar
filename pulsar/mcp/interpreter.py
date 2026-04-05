@@ -19,6 +19,7 @@ from scipy import stats
 from sklearn.cluster import SpectralClustering
 from sklearn.metrics import silhouette_score
 
+from pulsar._pulsar import find_stable_thresholds
 from pulsar.pipeline import ThemaRS
 
 logger = logging.getLogger(__name__)
@@ -52,46 +53,184 @@ class TopologicalDossier:
     global_stats: Dict[str, Any]
 
 
+@dataclass
+class ClusterResult:
+    """Clustering result with provenance metadata."""
+
+    labels: pd.Series
+    method_used: str  # "threshold_stability" | "components" | "spectral"
+    n_clusters: int
+    silhouette_score: float | None
+    failure_reason: str | None
+    edge_weight_threshold_applied: float = 0.0
+    stability_plateaus: list[dict] | None = None
+
+
+def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | None:
+    """Find clusters via H0 persistent homology on edge weights.
+
+    Sweeps a threshold across the weighted adjacency, tracks connected
+    components at each level, and picks the longest stable plateau where
+    ``1 < component_count < MAX_COMPONENTS`` and singletons are < 50%.
+
+    Returns ``None`` if no valid plateau is found (caller should fall back
+    to spectral clustering).
+    """
+    stability = find_stable_thresholds(adj)
+
+    # Serialize top plateaus for provenance
+    plateau_dicts = [
+        {
+            "start": float(p.start_threshold),
+            "end": float(p.end_threshold),
+            "component_count": int(p.component_count),
+            "length": float(p.length),
+        }
+        for p in stability.top_k_plateaus(5)
+    ]
+
+    # Find the longest plateau with a valid component count
+    for plateau in stability.plateaus:
+        comp_count = int(plateau.component_count)
+        if comp_count <= 1 or comp_count >= _MAX_COMPONENTS:
+            continue
+
+        # Check singleton fraction at this threshold
+        threshold = float(plateau.midpoint)
+        adj_thresholded = np.where(adj > threshold, adj, 0.0)
+        graph = nx.from_numpy_array(adj_thresholded)
+        components = list(nx.connected_components(graph))
+        singleton_count = sum(1 for c in components if len(c) == 1)
+
+        if (singleton_count / n) >= _MAX_SINGLETON_RATIO:
+            continue
+
+        # Valid plateau found — use it
+        labels = _cluster_by_components(graph, n)
+        logger.info(
+            "resolve_clusters: threshold_stability, threshold=%.4f, "
+            "n_clusters=%d, plateau_length=%.4f",
+            threshold,
+            comp_count,
+            plateau.length,
+        )
+        return ClusterResult(
+            labels=labels,
+            method_used="threshold_stability",
+            n_clusters=int(labels.nunique()),
+            silhouette_score=None,
+            failure_reason=None,
+            edge_weight_threshold_applied=threshold,
+            stability_plateaus=plateau_dicts,
+        )
+
+    # No valid plateau — return None so caller falls back to spectral
+    logger.info(
+        "resolve_clusters: no valid threshold-stability plateau found, "
+        "will fall back to spectral"
+    )
+    return None
+
+
 def resolve_clusters(
     model: ThemaRS,
     method: str = "auto",
     max_k: int = _SPECTRAL_K_MAX,
-) -> pd.Series:
+    edge_weight_threshold: float = 0.0,
+) -> ClusterResult:
     """
     Finds clusters in the cosmic graph using the specified method.
 
     Args:
         model: Fitted ThemaRS instance.
         method: Clustering strategy.
-            - "auto": Connected components first (if balanced), spectral fallback.
+            - "auto": Threshold-stability first (H0 persistence on edge
+              weights), spectral fallback if no stable plateau exists.
             - "spectral": Force spectral clustering with silhouette-optimized k.
             - "components": Force connected components only.
         max_k: Maximum k for spectral clustering search (default 15).
+        edge_weight_threshold: Drop edges with weight <= this value before
+            clustering.  When set > 0 with method="auto", overrides the
+            auto-detected threshold.
 
     Returns:
-        pd.Series with integer cluster labels.
+        ClusterResult with labels, method metadata, and provenance.
     """
-    graph = model.cosmic_graph
-    adj = model.weighted_adjacency
+    adj = np.array(model.weighted_adjacency, dtype=np.float64)
     n = adj.shape[0]
 
+    # Apply explicit edge weight threshold if provided
+    if edge_weight_threshold > 0.0:
+        adj = np.where(adj > edge_weight_threshold, adj, 0.0)
+        logger.info(
+            "resolve_clusters: applied explicit edge_weight_threshold=%.4f, "
+            "%d / %d edges retained",
+            edge_weight_threshold,
+            int((adj > 0).sum()) // 2,
+            int((model.weighted_adjacency > 0).sum()) // 2,
+        )
+
     if method == "components":
-        return _cluster_by_components(graph, n)
+        graph = nx.from_numpy_array(adj)
+        labels = _cluster_by_components(graph, n)
+        return ClusterResult(
+            labels=labels,
+            method_used="components",
+            n_clusters=int(labels.nunique()),
+            silhouette_score=None,
+            failure_reason=None,
+            edge_weight_threshold_applied=edge_weight_threshold,
+        )
 
     if method == "spectral":
-        return _cluster_by_spectral(adj, n, max_k)
+        labels, score = _cluster_by_spectral(adj, n, max_k)
+        return ClusterResult(
+            labels=labels,
+            method_used="spectral",
+            n_clusters=int(labels.nunique()),
+            silhouette_score=score,
+            failure_reason=None,
+            edge_weight_threshold_applied=edge_weight_threshold,
+        )
 
-    # method == "auto": try components first, then spectral
-    components = list(nx.connected_components(graph))
-    n_comp = len(components)
+    # method == "auto":
+    # 1. If explicit threshold was given, use components at that threshold
+    if edge_weight_threshold > 0.0:
+        graph = nx.from_numpy_array(adj)
+        components = list(nx.connected_components(graph))
+        n_comp = len(components)
+        if 1 < n_comp < _MAX_COMPONENTS:
+            singleton_count = sum(1 for c in components if len(c) == 1)
+            if (singleton_count / n) < _MAX_SINGLETON_RATIO:
+                labels = _cluster_by_components(graph, n)
+                return ClusterResult(
+                    labels=labels,
+                    method_used="components",
+                    n_clusters=int(labels.nunique()),
+                    silhouette_score=None,
+                    failure_reason=None,
+                    edge_weight_threshold_applied=edge_weight_threshold,
+                )
 
-    if 1 < n_comp < _MAX_COMPONENTS:
-        singleton_count = sum(1 for c in components if len(c) == 1)
-        if (singleton_count / n) < _MAX_SINGLETON_RATIO:
-            return _cluster_by_components(graph, n)
+    # 2. Try threshold-stability (H0 persistence on edge weights)
+    stability_result = _cluster_by_threshold_stability(adj, n)
+    if stability_result is not None:
+        return stability_result
 
-    # Spectral fallback
-    return _cluster_by_spectral(adj, n, max_k)
+    # 3. Spectral fallback — threshold-stability found no valid plateau
+    labels, score = _cluster_by_spectral(adj, n, max_k)
+    return ClusterResult(
+        labels=labels,
+        method_used="spectral",
+        n_clusters=int(labels.nunique()),
+        silhouette_score=score,
+        failure_reason=(
+            "No stable multi-component plateau found in edge weight persistence; "
+            "data appears to lie on a single connected manifold. "
+            "Spectral clustering applied as fallback."
+        ),
+        edge_weight_threshold_applied=edge_weight_threshold,
+    )
 
 
 def _cluster_by_components(graph, n: int) -> pd.Series:
@@ -105,8 +244,11 @@ def _cluster_by_components(graph, n: int) -> pd.Series:
     return pd.Series(labels, name="cluster")
 
 
-def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
-    """Spectral clustering with silhouette-optimized k. Raises ValueError on failure."""
+def _cluster_by_spectral(adj, n: int, max_k: int) -> tuple[pd.Series, float]:
+    """Spectral clustering with silhouette-optimized k. Raises ValueError on failure.
+
+    Returns (labels, best_silhouette_score).
+    """
     affinity = np.asarray(adj)
 
     # Silhouette requires a distance matrix if metric="precomputed".
@@ -163,14 +305,15 @@ def _cluster_by_spectral(adj, n: int, max_k: int) -> pd.Series:
             best_k,
             best_score,
         )
-        return pd.Series(best_labels, name="cluster")
+        return pd.Series(best_labels, name="cluster"), best_score
 
     # If we get here, no stable cut was found
     max_score = max(scores_by_k.values()) if scores_by_k else 0.0
     raise ValueError(
-        f"Spectral clustering failed: No stable silhouette score found for k={_SPECTRAL_K_MIN}..{max_k}. "
-        f"Max score was {max_score:.3f}. The graph is likely too uniformly dense ('hairball'). "
-        "Try restricting PCA dimensions or decreasing epsilon to create a topological bottleneck."
+        f"No stable cluster cut found at tested resolutions (k={_SPECTRAL_K_MIN}..{max_k}, "
+        f"max silhouette={max_score:.3f}). This does not mean the data lacks structure — "
+        "it means this pipeline did not find a stable cut under the current parameters. "
+        "Try restricting PCA dimensions or adjusting epsilon."
     )
 
 
