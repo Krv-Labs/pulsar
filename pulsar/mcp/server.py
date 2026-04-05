@@ -13,7 +13,6 @@ import json
 import logging
 import networkx as nx
 import os
-import re
 import time
 from typing import Any
 
@@ -597,7 +596,7 @@ async def run_topological_sweep(
 
         precomputed = None
         if session.embeddings is not None and session.data is not None:
-            fingerprint = pca_fingerprint(cfg, len(session.data))
+            fingerprint = pca_fingerprint(cfg, len(session.data), session.data)
             if fingerprint == session.pca_fingerprint:
                 precomputed = session.embeddings
                 logger.info("Reusing cached PCA embeddings (fingerprint match)")
@@ -626,7 +625,7 @@ async def run_topological_sweep(
 
         if precomputed is None:
             session.embeddings = model._embeddings
-            session.pca_fingerprint = pca_fingerprint(cfg, len(model.data))
+            session.pca_fingerprint = pca_fingerprint(cfg, len(model.data), model.data)
 
         saved_path = _auto_save_config(cfg)
         graph = model.cosmic_graph
