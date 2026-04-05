@@ -92,4 +92,3 @@ def unknown_handle_error(tool: str, handle_name: str, handle_value: str) -> str:
         ),
         details={handle_name: handle_value},
     )
-

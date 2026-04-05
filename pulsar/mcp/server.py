@@ -95,9 +95,7 @@ def _build_initial_config_yaml(
 
     n_samples = geo.get("n_samples", 0)
     column_profiles = geo.get("column_profiles", [])
-    drop, impute, encode, _ = _recommend_preprocessing_block(
-        column_profiles, n_samples
-    )
+    drop, impute, encode, _ = _recommend_preprocessing_block(column_profiles, n_samples)
     preprocessing_block = _preprocessing_block_to_yaml(drop, impute, encode)
 
     return f"""run:
@@ -121,7 +119,6 @@ cosmic_graph:
 output:
   n_reps: 4
 """
-
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +496,9 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
         run_name = intent.strip() or "initial_sweep"
         session = _get_session(ctx)
         session.dataset_id = dataset_id
-        return _build_initial_config_yaml(geo, data_path=dataset_path, run_name=run_name)
+        return _build_initial_config_yaml(
+            geo, data_path=dataset_path, run_name=run_name
+        )
     except LookupError:
         return unknown_handle_error("create_config", "dataset_id", dataset_id)
     except Exception as e:
@@ -582,7 +581,9 @@ async def run_topological_sweep(
                 agent_action=validation.agent_action,
                 details={
                     "resolved_dataset_path": validation.resolved_dataset_path,
-                    "issues": [dataclasses.asdict(issue) for issue in validation.issues],
+                    "issues": [
+                        dataclasses.asdict(issue) for issue in validation.issues
+                    ],
                 },
             )
 

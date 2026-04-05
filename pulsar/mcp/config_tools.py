@@ -26,7 +26,11 @@ _SUPPORTED_IMPUTE_METHODS = {
     "fill_mode",
 }
 _SUPPORTED_ENCODE_METHODS = {"one_hot"}
-_IMPUTE_METHOD_ALIASES = {"mean": "fill_mean", "median": "fill_median", "mode": "fill_mode"}
+_IMPUTE_METHOD_ALIASES = {
+    "mean": "fill_mean",
+    "median": "fill_median",
+    "mode": "fill_mode",
+}
 
 
 @dataclass
@@ -158,7 +162,9 @@ def validate_config_yaml(
     )
 
 
-def apply_overrides(config_yaml: str, overrides: dict[str, Any]) -> ConfigOverrideResult:
+def apply_overrides(
+    config_yaml: str, overrides: dict[str, Any]
+) -> ConfigOverrideResult:
     raw = parse_yaml_mapping(config_yaml)
     applied: list[str] = []
 
@@ -214,7 +220,9 @@ def apply_overrides(config_yaml: str, overrides: dict[str, Any]) -> ConfigOverri
         applied.append("raw")
 
     cfg = load_config(raw)
-    return ConfigOverrideResult(config_yaml=config_to_yaml(cfg), applied_overrides=applied)
+    return ConfigOverrideResult(
+        config_yaml=config_to_yaml(cfg), applied_overrides=applied
+    )
 
 
 def render_validation_report(report: ValidationReport) -> str:
@@ -251,7 +259,9 @@ def render_validation_report(report: ValidationReport) -> str:
     return json.dumps(payload, indent=2)
 
 
-def _validate_known_sections(raw: dict[str, Any], issues: list[ValidationIssue]) -> None:
+def _validate_known_sections(
+    raw: dict[str, Any], issues: list[ValidationIssue]
+) -> None:
     if "dataset" in raw:
         issues.append(
             ValidationIssue(
@@ -285,7 +295,9 @@ def _validate_preprocessing(pre: Any, issues: list[ValidationIssue]) -> None:
         return
     if not isinstance(pre, dict):
         issues.append(
-            ValidationIssue(path="preprocessing", message="preprocessing must be a mapping")
+            ValidationIssue(
+                path="preprocessing", message="preprocessing must be a mapping"
+            )
         )
         return
     if "drop" in pre:
@@ -328,7 +340,9 @@ def _validate_impute(impute: Any, issues: list[ValidationIssue]) -> None:
         return
     if not isinstance(impute, dict):
         issues.append(
-            ValidationIssue(path="preprocessing.impute", message="impute must be a mapping")
+            ValidationIssue(
+                path="preprocessing.impute", message="impute must be a mapping"
+            )
         )
         return
     for col, spec in impute.items():
@@ -367,7 +381,9 @@ def _validate_encode(encode: Any, issues: list[ValidationIssue]) -> None:
         return
     if not isinstance(encode, dict):
         issues.append(
-            ValidationIssue(path="preprocessing.encode", message="encode must be a mapping")
+            ValidationIssue(
+                path="preprocessing.encode", message="encode must be a mapping"
+            )
         )
         return
     for col, spec in encode.items():
@@ -433,7 +449,9 @@ def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> 
         return
     if not isinstance(cosmic_graph, dict):
         issues.append(
-            ValidationIssue(path="cosmic_graph", message="cosmic_graph must be a mapping")
+            ValidationIssue(
+                path="cosmic_graph", message="cosmic_graph must be a mapping"
+            )
         )
         return
     for key in cosmic_graph.keys():
@@ -451,7 +469,9 @@ def _validate_output(output: Any, issues: list[ValidationIssue]) -> None:
     if output is None:
         return
     if not isinstance(output, dict):
-        issues.append(ValidationIssue(path="output", message="output must be a mapping"))
+        issues.append(
+            ValidationIssue(path="output", message="output must be a mapping")
+        )
         return
     for key in output.keys():
         if key not in _ALLOWED_OUTPUT:
@@ -499,7 +519,9 @@ def _infer_issue_error_code(issues: list[ValidationIssue]) -> str:
         if issues[0].message == "Dataset path is missing":
             return "DATASET_PATH_MISSING"
         if issues[0].message.startswith("Dataset path does not exist: "):
-            attempted_path = issues[0].message.removeprefix("Dataset path does not exist: ")
+            attempted_path = issues[0].message.removeprefix(
+                "Dataset path does not exist: "
+            )
             path_context = classify_path(attempted_path)
             if path_context["looks_like_sandbox_path"]:
                 return "HOST_PATH_NOT_VISIBLE"

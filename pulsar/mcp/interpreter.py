@@ -444,7 +444,9 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
             h_desc = (
                 "Tight"
                 if f["homogeneity"] < 0.5
-                else "Divergent" if f["homogeneity"] > 1.5 else "Normal"
+                else "Divergent"
+                if f["homogeneity"] > 1.5
+                else "Normal"
             )
             md.append(
                 f"| {f['column']} | {f['mean']:.3f} | {f['global_mean']:.3f} | {f['rank']} | {f['z_score']:.2f} | {h_desc} ({f['homogeneity']:.2f}) |"

@@ -4,6 +4,7 @@ Preprocessing recommendation and repair helpers for Pulsar MCP tools.
 Extracted from server.py so that preprocessing domain logic is independently
 importable and testable without instantiating the FastMCP server.
 """
+
 from __future__ import annotations
 
 import json
