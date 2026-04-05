@@ -131,7 +131,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - **characterize_dataset**
      - Quick exploratory summary: k-NN distances (is your data sparse or dense?), PCA variance (how many dimensions matter?), missing value patterns. Claude uses this to make smart initial parameter guesses instead of random choices.
    * - **run_topological_sweep**
-     - Execute the full Pulsar pipeline: imputation → PCA → Ball Mapper → cosmic graph, all from inline YAML config. No disk I/O. Results cached per session.
+     - Execute the full Pulsar pipeline: imputation → PCA → Ball Mapper → cosmic graph, all from inline YAML config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
    * - **generate_cluster_dossier**
      - Deep statistical report per discovered cluster: trait profiles, homogeneity scores, separation metrics, concentration measures. Answers "What makes this cluster distinct?" and "How confident are we in the boundaries?"
    * - **compare_clusters_tool**
@@ -139,7 +139,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - **export_labeled_data**
      - Return your original dataframe with discovered cluster labels attached. Ready for downstream analysis, visualization, or handoff to domain experts.
    * - **diagnose_cosmic_graph**
-     - Health metrics on the graph structure: connected components, density, sparsity. Detects degenerate results (blob or shattered) and suggests YAML fixes automatically.
+     - Health metrics on the graph structure: connected components, density, weight quantiles. Returns pure metrics — the agent interprets them to decide adjustments (e.g., high density → reduce epsilon, many singletons → increase epsilon).
    * - **recommend_preprocessing**
      - Analyze column profiles and return a complete ``preprocessing:`` YAML block with per-column rationale. Call this before the first sweep to avoid hand-writing impute/encode rules from raw stats.
    * - **repair_preprocessing_config**
