@@ -57,6 +57,7 @@ class ValidationReport:
 class ConfigOverrideResult:
     config_yaml: str
     applied_overrides: list[str]
+    diff: list[dict[str, Any]]  # [{path, old, new}, ...]
 
 
 def parse_yaml_mapping(config_yaml: str) -> dict[str, Any]:
@@ -162,66 +163,109 @@ def validate_config_yaml(
     )
 
 
+_VALID_OVERRIDE_KEYS = frozenset(
+    {
+        "run_name",
+        "dataset_path",
+        "pca_dims",
+        "pca_seeds",
+        "epsilon_values",
+        "epsilon_range",
+        "threshold",
+        "n_reps",
+        "drop_columns",
+        "impute",
+        "encode",
+        "raw",
+    }
+)
+
+
 def apply_overrides(
     config_yaml: str, overrides: dict[str, Any]
 ) -> ConfigOverrideResult:
+    unknown_keys = set(overrides.keys()) - _VALID_OVERRIDE_KEYS
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown override key(s): {sorted(unknown_keys)}. "
+            f"Valid keys: {sorted(_VALID_OVERRIDE_KEYS)}"
+        )
+
     raw = parse_yaml_mapping(config_yaml)
     applied: list[str] = []
+    diff: list[dict[str, Any]] = []
+
+    def _track(path: str, old: Any, new: Any) -> None:
+        applied.append(path)
+        diff.append({"path": path, "old": old, "new": new})
 
     if "run_name" in overrides:
+        old = raw.get("run", {}).get("name")
         raw.setdefault("run", {})["name"] = overrides["run_name"]
-        applied.append("run.name")
+        _track("run.name", old, overrides["run_name"])
     if "dataset_path" in overrides:
+        old = raw.get("run", {}).get("data")
         raw.setdefault("run", {})["data"] = overrides["dataset_path"]
-        applied.append("run.data")
+        _track("run.data", old, overrides["dataset_path"])
     if "pca_dims" in overrides:
+        old = raw.get("sweep", {}).get("pca", {}).get("dimensions")
         raw.setdefault("sweep", {}).setdefault("pca", {})["dimensions"] = {
             "values": list(overrides["pca_dims"])
         }
-        applied.append("sweep.pca.dimensions.values")
+        _track("sweep.pca.dimensions.values", old, list(overrides["pca_dims"]))
     if "pca_seeds" in overrides:
+        old = raw.get("sweep", {}).get("pca", {}).get("seed")
         raw.setdefault("sweep", {}).setdefault("pca", {})["seed"] = {
             "values": list(overrides["pca_seeds"])
         }
-        applied.append("sweep.pca.seed.values")
+        _track("sweep.pca.seed.values", old, list(overrides["pca_seeds"]))
     if "epsilon_values" in overrides:
+        old = raw.get("sweep", {}).get("ball_mapper", {}).get("epsilon")
         raw.setdefault("sweep", {}).setdefault("ball_mapper", {})["epsilon"] = {
             "values": list(overrides["epsilon_values"])
         }
-        applied.append("sweep.ball_mapper.epsilon.values")
+        _track(
+            "sweep.ball_mapper.epsilon.values", old, list(overrides["epsilon_values"])
+        )
     if "epsilon_range" in overrides:
+        old = raw.get("sweep", {}).get("ball_mapper", {}).get("epsilon")
         raw.setdefault("sweep", {}).setdefault("ball_mapper", {})["epsilon"] = {
             "range": dict(overrides["epsilon_range"])
         }
-        applied.append("sweep.ball_mapper.epsilon.range")
+        _track("sweep.ball_mapper.epsilon.range", old, dict(overrides["epsilon_range"]))
     if "threshold" in overrides:
+        old = raw.get("cosmic_graph", {}).get("threshold")
         raw.setdefault("cosmic_graph", {})["threshold"] = overrides["threshold"]
-        applied.append("cosmic_graph.threshold")
+        _track("cosmic_graph.threshold", old, overrides["threshold"])
     if "n_reps" in overrides:
+        old = raw.get("output", {}).get("n_reps")
         raw.setdefault("output", {})["n_reps"] = overrides["n_reps"]
-        applied.append("output.n_reps")
+        _track("output.n_reps", old, overrides["n_reps"])
     if "drop_columns" in overrides:
+        old = raw.get("preprocessing", {}).get("drop_columns")
         raw.setdefault("preprocessing", {})["drop_columns"] = list(
             overrides["drop_columns"]
         )
-        applied.append("preprocessing.drop_columns")
+        _track("preprocessing.drop_columns", old, list(overrides["drop_columns"]))
     if "impute" in overrides:
+        old = dict(raw.get("preprocessing", {}).get("impute", {}))
         raw.setdefault("preprocessing", {}).setdefault("impute", {}).update(
             overrides["impute"]
         )
-        applied.append("preprocessing.impute")
+        _track("preprocessing.impute", old, overrides["impute"])
     if "encode" in overrides:
+        old = dict(raw.get("preprocessing", {}).get("encode", {}))
         raw.setdefault("preprocessing", {}).setdefault("encode", {}).update(
             overrides["encode"]
         )
-        applied.append("preprocessing.encode")
+        _track("preprocessing.encode", old, overrides["encode"])
     if "raw" in overrides:
         _deep_merge(raw, overrides["raw"])
-        applied.append("raw")
+        _track("raw", "(deep merge)", overrides["raw"])
 
     cfg = load_config(raw)
     return ConfigOverrideResult(
-        config_yaml=config_to_yaml(cfg), applied_overrides=applied
+        config_yaml=config_to_yaml(cfg), applied_overrides=applied, diff=diff
     )
 
 
