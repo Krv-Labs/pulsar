@@ -57,6 +57,7 @@ def path_access_error(
     missing_action: str = (
         "Provide a host-visible absolute path, or call get_runtime_context first."
     ),
+    sandbox_action: str | None = None,
 ) -> str:
     """Return a structured error for path visibility or existence failures."""
     path_context = classify_path(path)
@@ -65,7 +66,8 @@ def path_access_error(
             tool,
             "Path is not visible to the MCP server host filesystem.",
             error_code="HOST_PATH_NOT_VISIBLE",
-            agent_action=(
+            agent_action=sandbox_action
+            or (
                 "Do not use bash/cp as a bridge. Ask the user for a host-visible "
                 "absolute path, or call get_runtime_context first."
             ),
