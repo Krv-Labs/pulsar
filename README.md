@@ -22,9 +22,6 @@ We hear you, but we're not convinced that writing a 50-line hyperparameter grid 
 
 The Pulsar MCP (Model Context Protocol) Server is our attempt to give you what you *actually* want, without any of the downsides of doing something stupid like guessing topological parameters.
 
-> [!NOTE]  
-> For more guides, workflows, and an end-to-end MCP example, see [`demos/penguins/README.md`](demos/penguins/README.md).
-
 ### Setup
 
 Don't overcomplicate this. Add the server to your Claude Desktop config (or Gemini CLI, or whatever you're using):
@@ -84,6 +81,9 @@ We try to make things foolproof, but some of you goofballs are going to try to b
     Pulsar is a geometric engine. It needs floats. `characterize_dataset` will automatically tell the agent which low-cardinality strings to one-hot encode and which high-cardinality strings to drop. Don't fight it.
 
 </details>
+
+> [!NOTE]  
+> For more guides, workflows, and an end-to-end MCP example, see [`demos/penguins/README.md`](demos/penguins/README.md).
 
 ## Citation
 
