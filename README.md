@@ -22,7 +22,7 @@ We hear you, but we're not convinced that writing a 50-line hyperparameter grid 
 
 The Pulsar MCP (Model Context Protocol) Server is our attempt to give you what you *actually* want, without any of the downsides of doing something stupid like guessing topological parameters.
 
-> [!NOTE]
+> [!NOTE]  
 > For more guides, workflows, and an end-to-end MCP example, see [`demos/penguins/README.md`](demos/penguins/README.md).
 
 ### Setup
