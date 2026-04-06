@@ -57,6 +57,9 @@ Setup
 
 Pulsar ships an MCP server entry point (``pulsar-mcp``) in the ``mcp`` dependency group. Wire it into your AI client of choice:
 
+.. note::
+  Pulsar works with any MCP-capable client, including Cursor and Gemini CLI, where you can add Pulsar as an MCP server/tool.
+
 .. tab-set::
 
    .. tab-item:: Claude Desktop
