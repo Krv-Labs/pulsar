@@ -40,6 +40,27 @@ class ColumnProfile:
 
 
 @dataclass
+class NumericProfile:
+    """k-NN and PCA geometry of an arbitrary numeric matrix.
+
+    Shared math core used by both raw characterization and processed-space
+    calibration.  No policy decisions — pure measurement.
+    """
+
+    knn_k5_mean: float
+    knn_k10_mean: float
+    knn_k20_mean: float
+    knn_p5: float
+    knn_p25: float
+    knn_p50: float
+    knn_p75: float
+    knn_p95: float
+    pca_cumulative_variance: list[tuple[int, float]]
+    n_features: int
+    n_samples_profiled: int
+
+
+@dataclass
 class DatasetProfile:
     """Raw measurements only — no derived decisions."""
 
@@ -54,10 +75,90 @@ class DatasetProfile:
     column_profiles: list[ColumnProfile]
 
 
+def profile_numeric_matrix(
+    X: np.ndarray,
+    subsample: int = 1000,
+    seed: int = 42,
+    dims_to_probe: list[int] | None = None,
+) -> NumericProfile:
+    """Compute k-NN distances and PCA variance on an arbitrary numeric matrix.
+
+    This is the shared math core used by both :func:`characterize_dataset`
+    (raw space) and processed-space calibration inside ``create_config``.
+
+    Args:
+        X: 2-D float64 array, already imputed (no NaN) and scaled.
+        subsample: Max rows to analyze.
+        seed: Random seed for reproducibility.
+        dims_to_probe: PCA dimensions to test.  Defaults to
+            ``[2, 3, 5, 10, 15, 20]`` clipped to feature count.
+
+    Returns:
+        NumericProfile with k-NN means and PCA cumulative variance.
+    """
+    rng = np.random.default_rng(seed)
+    n_sub = min(subsample, len(X))
+    indices = rng.choice(len(X), n_sub, replace=False)
+    X_sub = X[indices]
+
+    # k-NN
+    k_max = min(21, n_sub - 1)
+    nn = NearestNeighbors(n_neighbors=k_max, algorithm="auto", metric="euclidean")
+    distances, _ = nn.fit(X_sub).kneighbors(X_sub)
+
+    knn_k5_mean = _bounded_knn_mean(distances, 5)
+    knn_k10_mean = _bounded_knn_mean(distances, 10)
+    knn_k20_mean = _bounded_knn_mean(distances, 20)
+
+    # k-NN distance percentiles (k=5 neighbor distances across all points).
+    # These define the valid epsilon domain for BallMapper.
+    k5_upper = min(5, distances.shape[1] - 1)
+    if k5_upper > 0:
+        k5_dists = distances[:, k5_upper].ravel()
+        knn_p5 = float(np.percentile(k5_dists, 5))
+        knn_p25 = float(np.percentile(k5_dists, 25))
+        knn_p50 = float(np.percentile(k5_dists, 50))
+        knn_p75 = float(np.percentile(k5_dists, 75))
+        knn_p95 = float(np.percentile(k5_dists, 95))
+    else:
+        knn_p5 = knn_p25 = knn_p50 = knn_p75 = knn_p95 = 0.0
+
+    # PCA variance
+    if dims_to_probe is None:
+        dims_to_probe = [d for d in [2, 3, 5, 10, 15, 20] if d <= X_sub.shape[1]]
+        if not dims_to_probe:
+            dims_to_probe = [min(2, X_sub.shape[1])]
+
+    embeddings = pca_grid(np.ascontiguousarray(X_sub), dims_to_probe, [seed])
+
+    total_variance = float(np.var(X_sub, axis=0).sum())
+    pca_cumulative_variance: list[tuple[int, float]] = []
+    for dim, emb in zip(dims_to_probe, embeddings):
+        ev = float(np.var(emb, axis=0).sum())
+        cumvar = round(min(ev / max(total_variance, 1e-12), 1.0), 4)
+        pca_cumulative_variance.append((dim, cumvar))
+
+    return NumericProfile(
+        knn_k5_mean=knn_k5_mean,
+        knn_k10_mean=knn_k10_mean,
+        knn_k20_mean=knn_k20_mean,
+        knn_p5=knn_p5,
+        knn_p25=knn_p25,
+        knn_p50=knn_p50,
+        knn_p75=knn_p75,
+        knn_p95=knn_p95,
+        pca_cumulative_variance=pca_cumulative_variance,
+        n_features=X_sub.shape[1],
+        n_samples_profiled=n_sub,
+    )
+
+
 def characterize_dataset(
     csv_path: str,
     subsample: int = 1000,
     seed: int = 42,
+    *,
+    dataframe: pd.DataFrame | None = None,
 ) -> DatasetProfile:
     """
     Probes dataset geometry before fitting to return raw geometric facts.
@@ -66,6 +167,8 @@ def characterize_dataset(
         csv_path: Path to CSV file (must have >=2 numeric columns)
         subsample: Max rows to analyze (for speed on large datasets)
         seed: Random seed for reproducibility
+        dataframe: Optional pre-loaded DataFrame. When provided, *csv_path*
+            is ignored for reading (but still used for logging/identification).
 
     Returns:
         DatasetProfile containing pure empirical facts.
@@ -74,7 +177,7 @@ def characterize_dataset(
         ValueError: If CSV has fewer than 2 numeric columns
         FileNotFoundError: If CSV file not found
     """
-    df = pd.read_csv(csv_path)
+    df = dataframe if dataframe is not None else pd.read_csv(csv_path)
 
     column_profiles = _profile_columns(df)
     n_columns_total = len(df.columns)
@@ -93,40 +196,19 @@ def characterize_dataset(
     X = SimpleImputer(strategy="mean").fit_transform(
         df[numeric_cols].to_numpy(dtype=np.float64)
     )
-    rng = np.random.default_rng(seed)
-    n_sub = min(subsample, len(X))
-    indices = rng.choice(len(X), n_sub, replace=False)
-    X_sub = SkScaler().fit_transform(X[indices])
+    X_scaled = SkScaler().fit_transform(X)
 
-    k_max = min(21, n_sub - 1)
-    nn = NearestNeighbors(n_neighbors=k_max, algorithm="auto", metric="euclidean")
-    distances, _ = nn.fit(X_sub).kneighbors(X_sub)
-
-    knn_k5_mean = float(distances[:, 1:6].mean())
-    knn_k10_mean = float(distances[:, 1:11].mean())
-    knn_k20_mean = float(distances[:, 1 : min(21, distances.shape[1])].mean())
-
-    dims_to_probe = [d for d in [2, 3, 5, 10, 15, 20] if d <= X_sub.shape[1]]
-    if not dims_to_probe:
-        dims_to_probe = [min(2, X_sub.shape[1])]
-    embeddings = pca_grid(np.ascontiguousarray(X_sub), dims_to_probe, [seed])
-
-    total_variance = float(np.var(X_sub, axis=0).sum())
-    pca_cumulative_variance: list[tuple[int, float]] = []
-    for dim, emb in zip(dims_to_probe, embeddings):
-        ev = float(np.var(emb, axis=0).sum())
-        cumvar = round(min(ev / max(total_variance, 1e-12), 1.0), 4)
-        pca_cumulative_variance.append((dim, cumvar))
+    geo = profile_numeric_matrix(X_scaled, subsample=subsample, seed=seed)
 
     return DatasetProfile(
         n_samples=n_samples,
         n_features=n_features,
         n_columns_total=n_columns_total,
         missingness_pct=missingness_pct,
-        knn_k5_mean=knn_k5_mean,
-        knn_k10_mean=knn_k10_mean,
-        knn_k20_mean=knn_k20_mean,
-        pca_cumulative_variance=pca_cumulative_variance,
+        knn_k5_mean=geo.knn_k5_mean,
+        knn_k10_mean=geo.knn_k10_mean,
+        knn_k20_mean=geo.knn_k20_mean,
+        pca_cumulative_variance=geo.pca_cumulative_variance,
         column_profiles=column_profiles,
     )
 
@@ -173,3 +255,12 @@ def _profile_columns(df: pd.DataFrame, max_sample: int = 5) -> list[ColumnProfil
             )
         )
     return profiles
+
+
+def _bounded_knn_mean(distances: np.ndarray, k: int) -> float:
+    """Return the mean k-NN distance using whatever neighbors are available."""
+    available = distances.shape[1] - 1
+    if available <= 0:
+        return 0.0
+    upper = min(k, available)
+    return float(distances[:, 1 : upper + 1].mean())

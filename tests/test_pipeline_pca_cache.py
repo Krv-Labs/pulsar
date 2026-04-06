@@ -323,3 +323,79 @@ def test_pca_fingerprint_format_is_hash():
     assert isinstance(fp, str), "Fingerprint should be a string"
     assert len(fp) == 64, "SHA256 hex should be 64 characters"
     assert all(c in "0123456789abcdef" for c in fp), "Should be valid hex"
+
+
+def test_pca_fingerprint_changes_on_preprocessing_change():
+    """Assert fingerprint changes when preprocessing changes the PCA input."""
+    cfg1 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "drop_columns": [],
+            "impute": {},
+            "encode": {},
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
+
+    cfg2 = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "drop_columns": ["species"],
+            "impute": {},
+            "encode": {},
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
+
+    fp1 = pca_fingerprint(cfg1, 100)
+    fp2 = pca_fingerprint(cfg2, 100)
+
+    assert fp1 != fp2, "Fingerprint should change when preprocessing changes"
+
+
+def test_pca_fingerprint_changes_on_input_schema_change():
+    """Assert fingerprint changes when raw input schema changes."""
+    cfg = type(
+        "MockConfig",
+        (),
+        {
+            "data": "/path/to/data.csv",
+            "drop_columns": [],
+            "impute": {},
+            "encode": {},
+            "pca": type(
+                "MockPCA",
+                (),
+                {
+                    "dimensions": [2, 3],
+                    "seeds": [42],
+                },
+            )(),
+        },
+    )()
+
+    df1 = pd.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    df2 = pd.DataFrame({"x": [1.0, 2.0], "group": ["a", "b"]})
+
+    fp1 = pca_fingerprint(cfg, len(df1), df1)
+    fp2 = pca_fingerprint(cfg, len(df2), df2)
+
+    assert fp1 != fp2, "Fingerprint should change when raw schema changes"

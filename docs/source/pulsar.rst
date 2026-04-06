@@ -13,10 +13,8 @@ Pulsar package API
    :undoc-members:
    :show-inheritance:
 
-.. automodule:: pulsar.config
-   :members:
-   :undoc-members:
-   :show-inheritance:
+.. note::
+   Configuration classes (``PulsarConfig``, ``ImputeSpec``, ``EncodeSpec``, etc.) are documented in :ref:`configuration`.
 
 Analysis
 --------

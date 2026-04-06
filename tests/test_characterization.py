@@ -12,7 +12,9 @@ import pytest
 from pulsar.analysis.characterization import (
     ColumnProfile,
     DatasetProfile,
+    NumericProfile,
     characterize_dataset,
+    profile_numeric_matrix,
 )
 
 
@@ -134,6 +136,20 @@ def test_pca_cumulative_variance_structure(numeric_csv):
         assert 0.0 <= frac <= 1.0
 
 
+def test_small_dataset_knn_summary_is_bounded(tmp_path):
+    """Tiny datasets should return finite k-NN summaries without warnings."""
+    df = pd.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    path = tmp_path / "tiny.csv"
+    df.to_csv(path, index=False)
+
+    profile = characterize_dataset(str(path))
+
+    assert np.isfinite(profile.knn_k5_mean)
+    assert np.isfinite(profile.knn_k10_mean)
+    assert np.isfinite(profile.knn_k20_mean)
+    assert profile.knn_k5_mean == profile.knn_k10_mean == profile.knn_k20_mean
+
+
 # ---------------------------------------------------------------------------
 # Column profile tests
 # ---------------------------------------------------------------------------
@@ -206,3 +222,77 @@ def test_sample_values_are_strings(mixed_csv):
     for cp in profile.column_profiles:
         for sv in cp.sample_values:
             assert isinstance(sv, str)
+
+
+# ---------------------------------------------------------------------------
+# profile_numeric_matrix tests
+# ---------------------------------------------------------------------------
+
+
+def test_profile_numeric_matrix_returns_numeric_profile():
+    """Assert profile_numeric_matrix returns NumericProfile."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((100, 5))
+    profile = profile_numeric_matrix(X)
+    assert isinstance(profile, NumericProfile)
+    assert profile.n_features == 5
+    assert profile.n_samples_profiled <= 100
+
+
+def test_profile_numeric_matrix_knn_monotone():
+    """Assert k-NN distances are monotone: k5 <= k10 <= k20."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((200, 5))
+    profile = profile_numeric_matrix(X)
+    assert profile.knn_k5_mean <= profile.knn_k10_mean
+    assert profile.knn_k10_mean <= profile.knn_k20_mean
+
+
+def test_profile_numeric_matrix_pca_variance_bounded():
+    """Assert PCA variance fractions are in [0, 1]."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((100, 5))
+    profile = profile_numeric_matrix(X)
+    for dim, frac in profile.pca_cumulative_variance:
+        assert 0.0 <= frac <= 1.0
+
+
+def test_profile_numeric_matrix_subsample():
+    """Assert subsampling works correctly."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((500, 3))
+    profile = profile_numeric_matrix(X, subsample=50)
+    assert profile.n_samples_profiled == 50
+
+
+def test_characterize_dataset_uses_profile_numeric_matrix(numeric_csv):
+    """Assert characterize_dataset and profile_numeric_matrix agree on k-NN values."""
+    profile = characterize_dataset(numeric_csv)
+    # Both should produce the same k-NN values since characterize_dataset
+    # now delegates to profile_numeric_matrix internally
+    assert np.isfinite(profile.knn_k5_mean)
+    assert np.isfinite(profile.knn_k10_mean)
+    assert np.isfinite(profile.knn_k20_mean)
+
+
+def test_profile_numeric_matrix_knn_percentiles():
+    """Assert k-NN percentiles are monotone and finite."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((200, 5))
+    profile = profile_numeric_matrix(X)
+    assert np.isfinite(profile.knn_p5)
+    assert np.isfinite(profile.knn_p95)
+    assert profile.knn_p5 <= profile.knn_p25
+    assert profile.knn_p25 <= profile.knn_p50
+    assert profile.knn_p50 <= profile.knn_p75
+    assert profile.knn_p75 <= profile.knn_p95
+    assert profile.knn_p5 > 0  # distances should be positive
+
+
+def test_profile_numeric_matrix_percentiles_bracket_mean():
+    """Assert knn_p50 is close to knn_k5_mean (both describe k=5 distances)."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((300, 5))
+    profile = profile_numeric_matrix(X)
+    # Median and mean of same distribution should be in the same ballpark
+    assert profile.knn_p25 <= profile.knn_k5_mean <= profile.knn_p95

@@ -20,12 +20,11 @@ from pulsar._pulsar import (
     accumulate_pseudo_laplacians,
     ball_mapper_grid,
     find_stable_thresholds,
-    impute_column,
     pca_grid,
 )
 from pulsar.analysis import cosmic_to_networkx
 from pulsar.config import PulsarConfig, load_config
-from pulsar.preprocessing import impute_string_column
+from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.utils import (
     STAGE_WEIGHTS,
     build_cumulative_fractions,
@@ -123,38 +122,10 @@ class ThemaRS:
 
         self._data = data.copy()
 
-        # 2. Drop unwanted columns
-        drop = [c for c in cfg.drop_columns if c in data.columns]
-        df = data.drop(columns=drop)
+        # 2–3. Preprocessing (drop, coerce, impute, encode, validate)
+        df, _layout = preprocess_dataframe(data, cfg)
+        self._preprocessed_data = df
         _notify()  # load
-
-        # 3a. Add imputation indicator flags (pure Python, before imputing)
-        for col in cfg.impute:
-            if col in df.columns:
-                flag_col = f"{col}_was_missing"
-                df[flag_col] = df[col].isna().astype(np.float64)
-
-        # 3b. Impute columns (Rust for numeric, Python for string/object)
-        for col, spec in cfg.impute.items():
-            if col not in df.columns:
-                continue
-            if df[col].dtype == object:
-                impute_string_column(df, col, spec)
-            else:
-                arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-                imputed = impute_column(arr, spec.method, spec.seed)
-                df[col] = imputed
-
-        # 3c. Encode categorical columns (pure Python)
-        for col, spec in cfg.encode.items():
-            if col not in df.columns:
-                continue
-            if spec.method == "one_hot":
-                df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
-
-        # Drop any remaining NaN rows
-        df = df.dropna(axis=0)
-        self._preprocessed_data = df.reset_index(drop=True)
         _notify()  # impute
 
         # 4. Convert to float64 matrix and scale
@@ -289,12 +260,13 @@ class ThemaRS:
         all_ball_maps: list[BallMapper] = []
         galactic_L_accum: np.ndarray | None = None
         n: int | None = None
+        ref_layout = None
 
         # Collect global vocabulary for categorical encoding (if any)
         # Ensures that pd.get_dummies produces identical columns across datasets
         vocab: dict[str, list[Any]] = {}
         for col in cfg.encode:
-            categories = set()
+            categories: set[Any] = set()
             for ds in datasets:
                 if col in ds.columns:
                     categories.update(ds[col].dropna().unique())
@@ -302,35 +274,15 @@ class ThemaRS:
 
         with rayon_thread_override(rayon_workers):
             for i, data in enumerate(datasets):
-                df = data.copy()
-
-                drop = [c for c in cfg.drop_columns if c in df.columns]
-                df = df.drop(columns=drop)
+                df, layout = preprocess_dataframe(
+                    data,
+                    cfg,
+                    vocab=vocab if vocab else None,
+                    expected_layout=ref_layout,
+                )
+                if ref_layout is None:
+                    ref_layout = layout
                 _notify()  # Dataset i: load
-
-                for col in cfg.impute:
-                    if col in df.columns:
-                        df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
-
-                for col, spec in cfg.impute.items():
-                    if col not in df.columns:
-                        continue
-                    if df[col].dtype == object:
-                        impute_string_column(df, col, spec)
-                    else:
-                        arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-                        df[col] = impute_column(arr, spec.method, spec.seed)
-
-                # Encode categorical columns with shared vocabulary
-                for col, spec in cfg.encode.items():
-                    if col in df.columns:
-                        if spec.method == "one_hot":
-                            df[col] = pd.Categorical(df[col], categories=vocab[col])
-                            df = pd.get_dummies(
-                                df, columns=[col], prefix=col, dtype=np.float64
-                            )
-
-                df = df.dropna(axis=0)
                 _notify()  # Dataset i: impute
 
                 X = df.to_numpy(dtype=np.float64)

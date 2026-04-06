@@ -234,31 +234,33 @@ def test_resolve_clusters_components_method(fitted_model):
     """Assert components method uses connected components."""
     from pulsar.mcp.interpreter import resolve_clusters
 
-    clusters = resolve_clusters(fitted_model, method="components")
-    assert len(clusters.unique()) >= 1
+    result = resolve_clusters(fitted_model, method="components")
+    assert result.method_used == "components"
+    assert len(result.labels.unique()) >= 1
 
 
 def test_resolve_clusters_spectral_method(connected_spectral_model):
     """Assert spectral method clusters deterministic connected affinity."""
     from pulsar.mcp.interpreter import resolve_clusters
 
-    clusters = resolve_clusters(connected_spectral_model, method="spectral")
-    assert len(clusters) == connected_spectral_model.weighted_adjacency.shape[0]
-    assert len(clusters.unique()) >= 2
+    result = resolve_clusters(connected_spectral_model, method="spectral")
+    assert result.method_used == "spectral"
+    assert len(result.labels) == connected_spectral_model.weighted_adjacency.shape[0]
+    assert len(result.labels.unique()) >= 2
 
 
 def test_resolve_clusters_max_k(connected_spectral_model):
     """Assert max_k parameter is respected — higher max_k can find more clusters."""
     from pulsar.mcp.interpreter import resolve_clusters
 
-    clusters_low = resolve_clusters(
+    result_low = resolve_clusters(
         connected_spectral_model, method="spectral", max_k=3
     )
-    clusters_high = resolve_clusters(
+    result_high = resolve_clusters(
         connected_spectral_model, method="spectral", max_k=15
     )
-    assert len(clusters_low.unique()) >= 2
-    assert len(clusters_high.unique()) >= 2
+    assert len(result_low.labels.unique()) >= 2
+    assert len(result_high.labels.unique()) >= 2
 
 
 def test_resolve_clusters_spectral_disconnected_raises(

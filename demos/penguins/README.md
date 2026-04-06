@@ -1,4 +1,4 @@
-# Pulsar MCP: The Domain Expert's Guide to Topological Discovery
+# MCP with Pulsar
 
 Until now, trying to find complex, high-dimensional shapes in your datasets required an annoying amount of custom Python code, a PhD in algebraic topology, and fighting with K-Means until you wanted to throw your laptop out a window.
 

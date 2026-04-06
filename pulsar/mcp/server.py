@@ -4,21 +4,30 @@ FastMCP Server for Pulsar.
 Exposes "Thick Tools" for topological data analysis and interpretation.
 """
 
+from __future__ import annotations
+
 import asyncio
+import base64
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
+import networkx as nx
 import os
 import time
-from typing import Dict, Optional
+from typing import Any
 
 import pandas as pd
 import yaml
 from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
 
-from pulsar.config import config_to_yaml
+import numpy as np
+from sklearn.preprocessing import StandardScaler as SkScaler
+
+from pulsar.analysis.characterization import NumericProfile, profile_numeric_matrix
+from pulsar.config import config_to_yaml, load_config
+from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
 from pulsar.mcp.interpreter import (
@@ -28,43 +37,185 @@ from pulsar.mcp.interpreter import (
     compare_clusters,
     comparison_to_markdown,
 )
-from pulsar.mcp.errors import mcp_error
+from pulsar.mcp.config_tools import (
+    apply_overrides,
+    render_validation_report,
+    validate_config_yaml,
+)
+from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
+from pulsar.mcp.preprocessing import (
+    _preprocessing_block_to_yaml,
+    _rationale_table,
+    _recommend_preprocessing_block,
+    repair_config,
+)
+from pulsar.mcp.registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
+registry = MCPRegistry()
 
+
+# ---------------------------------------------------------------------------
+# Defensive patch: strip unknown kwargs from non-compliant MCP clients.
+# Some clients (e.g. Gemini CLI) inject orchestration fields like
+# ``wait_for_previous`` into tool calls.  FastMCP's Pydantic validation
+# rejects these.  Patching FunctionTool.run at the class level filters
+# known orchestration keys *before* validation — one patch protects every tool.
+# Unknown keys outside the allowlist are logged at WARNING to surface caller bugs.
+# ---------------------------------------------------------------------------
+from fastmcp.tools.function_tool import FunctionTool  # noqa: E402
+
+_original_function_tool_run = FunctionTool.run
+
+# Known non-compliant orchestration keys injected by MCP clients.
+_KNOWN_ORCHESTRATION_KEYS = frozenset({"wait_for_previous"})
+
+
+async def _lenient_function_tool_run(self, arguments):
+    if isinstance(arguments, dict) and arguments:
+        valid_keys = set(self.parameters.get("properties", {}).keys())
+        unknown_keys = set(arguments.keys()) - valid_keys
+        if unknown_keys:
+            unexpected = unknown_keys - _KNOWN_ORCHESTRATION_KEYS
+            if unexpected:
+                logger.warning(
+                    "Stripped unexpected argument(s) %s from tool %s",
+                    sorted(unexpected),
+                    getattr(self, "name", "unknown"),
+                )
+            arguments = {k: v for k, v in arguments.items() if k in valid_keys}
+    return await _original_function_tool_run(self, arguments)
+
+
+FunctionTool.run = _lenient_function_tool_run
+
+
+def _build_initial_config_yaml(
+    geo: dict[str, Any],
+    *,
+    data_path: str,
+    run_name: str = "initial_sweep",
+    processed_profile: NumericProfile | None = None,
+) -> str:
+    """Construct a canonical initial config from dataset geometry.
+
+    When *processed_profile* is provided, epsilon and PCA dimensions are
+    calibrated against the processed feature space (after preprocessing +
+    scaling).  Otherwise falls back to raw-space geometry.
+    """
+    # Use processed-space geometry for calibration when available;
+    # fall back to raw-space otherwise.
+    if processed_profile is not None:
+        knn_mean = processed_profile.knn_k5_mean or 0.5
+        pca_cum_var = processed_profile.pca_cumulative_variance
+        # Use actual distance percentiles for epsilon bounds when available.
+        # p25-p75 captures the core of the distance distribution — wide enough
+        # to aggregate diverse topology, narrow enough to avoid blob/shatter.
+        knn_p25 = processed_profile.knn_p25
+        knn_p75 = processed_profile.knn_p75
+    else:
+        knn_mean = geo.get("knn_k5_mean") or geo.get("knn_mean") or 0.5
+        pca_cum_var = geo.get("pca_cumulative_variance", [])
+        knn_p25 = knn_p75 = 0.0
+
+    pca_knee = 3
+    if pca_cum_var:
+        for dim, var in pca_cum_var:
+            if var >= 0.90:
+                pca_knee = dim
+                break
+
+    # PCA dims: wider array for multi-scale aggregation.
+    # More dimensions = more topological evidence fused into the cosmic graph.
+    pca_dims = sorted(
+        {
+            max(2, pca_knee - 2),
+            max(2, pca_knee - 1),
+            pca_knee,
+            pca_knee + 1,
+            pca_knee + 2,
+        }
+    )
+
+    # Epsilon range: use percentile bounds when available, fall back to
+    # knn_mean multipliers.  Wider range = better multi-scale fusion.
+    if knn_p25 > 0 and knn_p75 > 0:
+        eps_min = knn_p25 * 0.8
+        eps_max = knn_p75 * 1.3
+    else:
+        eps_min = knn_mean * 0.8
+        eps_max = knn_mean * 1.5
+
+    n_samples = geo.get("n_samples", 0)
+    column_profiles = geo.get("column_profiles", [])
+    drop, impute, encode, _ = _recommend_preprocessing_block(column_profiles, n_samples)
+    preprocessing_block = _preprocessing_block_to_yaml(drop, impute, encode)
+
+    return f"""run:
+  name: {run_name}
+  data: {data_path}
+{preprocessing_block}
+sweep:
+  pca:
+    dimensions:
+      values: {pca_dims}
+    seed:
+      values: [42, 7]
+  ball_mapper:
+    epsilon:
+      range:
+        min: {eps_min:.4f}
+        max: {eps_max:.4f}
+        steps: 20
+cosmic_graph:
+  threshold: auto
+output:
+  n_reps: 4
+"""
+
+
+# ---------------------------------------------------------------------------
 # Initialize FastMCP
 mcp = FastMCP(
     "Pulsar",
     instructions=(
-        "You are a topological cartographer. Your job is to reveal the shape of the data, not impose one.\n\n"
-        "# Your Mental Model\n"
-        "- **Manifold Recovery, Not Clustering:** You are mapping the continuous geometric structure of the dataset. "
-        "Do not force data into neat, disconnected clusters if they do not organically exist.\n"
-        "- **The Cosmic Graph:** This is your primary artifact. It is the aggregated topological signal of the data across multiple spatial scales.\n\n"
-        "# Core Principles\n"
-        "1. **Dimensionality vs. Scale:** Higher dimensions compress Euclidean distance into a narrow band. This requires a larger epsilon "
-        "to capture local neighborhoods, which rapidly leads to a massive, uninformative 'blob' (a fully connected component). "
-        "Manage dimensionality (e.g., PCA dims) tightly before aggressively tuning your scale (epsilon) parameters.\n"
-        "2. **Respect Categoricals:** Categorical variables (e.g., island, group) add rigid, orthogonal structure to the manifold. "
-        "They are not noise. Never drop them simply to force spatial separation. If the reality of the data is partitioned, the topology must reflect that.\n"
-        "3. **Variance Curve:** Look at the cumulative variance curve from characterize_dataset. If Dim 3 captures 94% variance, using Dim 5 "
-        "adds almost no signal but drastically dilutes distances (curse of dimensionality).\n"
-        "4. **Good Graph vs Convenient Graph:** A 'good' graph has structural balance. Look for a `giant_fraction` (the largest component) "
-        "typically between 20% and 60%, accompanied by multiple smaller structural components. It is not necessarily the graph that perfectly fits a preconceived notion of 'K=3 clusters'.\n\n"
-        "# The Scientific Posture\n"
-        "Treat the cosmic graph as empirical evidence, not a score to maximize.\n"
-        "- **Form a hypothesis** before adjusting any configuration.\n"
-        "- **Change ONE parameter at a time** (e.g., epsilon bounds OR PCA dims OR categorical encoding).\n"
-        "- **Observe the exact structural impact** on the cosmic graph (use the diff provided by run_topological_sweep), and re-assess your hypothesis.\n\n"
-        "# Workflow\n"
-        "1. characterize_dataset -> suggest_initial_config -> explain_suggestion\n"
-        "2. run_topological_sweep -> diagnose_cosmic_graph\n"
-        "3. **Iterate:** Change ONE parameter. After each sweep, review the diff. Call `get_experiment_history` when reasoning across multiple iterations.\n"
-        "4. **Blob Recovery:** If run 1 produces a massive blob (`giant_fraction` > 80%), call `explain_suggestion` to understand the initial reasoning *before* blindly deviating. "
-        "Usually, you must decrease epsilon OR reduce PCA dims to break the blob.\n"
-        "5. **Shatter Recovery:** If the graph is fragmented (`component_count` > 20 and `giant_fraction` < 5%), your epsilon is too small or threshold too aggressive. "
-        "Increase epsilon modestly (10-20%) or reduce the threshold before any other change. After calling `explain_suggestion`, return to step 2 (`run_topological_sweep`) with ONE adjusted parameter.\n"
-        "6. generate_cluster_dossier -> compare_clusters\n"
+        "Reveal the dataset's topology; do not force convenient clusters.\n\n"
+        "Primary workflow:\n"
+        "1. Ingest data (ingest_dataset or ingest_dataset_base64).\n"
+        "2. create_config(dataset_id) — calibrates epsilon and PCA against the processed feature space.\n"
+        "3. validate_config(config_yaml, dataset_id).\n"
+        "4. run_topological_sweep(config_yaml, dataset_id) -> diagnose_cosmic_graph.\n"
+        "5. generate_cluster_dossier -> compare_clusters_tool.\n"
+        "6. Iterate by changing one parameter family at a time via refine_config and reading the sweep diff.\n\n"
+        "Tool routing:\n"
+        "- Host-visible absolute file: ingest_dataset(path).\n"
+        "- Small or medium upload: ingest_dataset_base64(filename, content_base64).\n"
+        "- Large upload: begin_dataset_upload -> append_dataset_chunk -> finalize_dataset_upload.\n"
+        "- After ingest, prefer dataset_id everywhere.\n\n"
+        "Calibration:\n"
+        "- create_config calibrates epsilon against the processed feature space (after preprocessing + scaling), not raw columns.\n"
+        "- create_config returns knn_distance_percentiles showing the valid epsilon domain. Epsilon outside [p5, p95] will produce degenerate graphs.\n"
+        "- suggest_initial_config is a legacy/debug tool that uses raw-space calibration only.\n\n"
+        "Multi-scale aggregation (critical):\n"
+        "- Pulsar is NOT a hyperparameter optimizer. It is a multi-scale topological aggregator.\n"
+        "- Every (PCA_dim, seed, epsilon) combination produces a ball map. ALL ball maps are fused into ONE cosmic graph via pseudo-Laplacian accumulation.\n"
+        "- More grid points = more topological evidence = better graph. A sweep with 5 PCA dims x 2 seeds x 20 epsilons = 200 ball maps fused together.\n"
+        "- The correct strategy is: cast a WIDE net on the first sweep. Only narrow if you need to investigate a specific resolution.\n"
+        "- Do NOT iterate narrow epsilon windows trying to find the 'right' value. Instead, use a wide range and let accumulation do the work.\n\n"
+        "Clustering:\n"
+        "- Edge weights are topological consensus scores: the fraction of ball maps that placed two points together.\n"
+        "- generate_cluster_dossier(method='auto') uses H0 persistent homology on edge weights to find the threshold where components are most stable (longest plateau). This is the primary clustering method.\n"
+        "- Spectral clustering is the fallback only when no stable threshold-based split exists (single-manifold data).\n"
+        "- If auto-clustering results are poor, use get_threshold_stability_curve to see the full component-count-vs-threshold curve and reason about alternative thresholds.\n"
+        "- You can override with edge_weight_threshold to manually set the consensus cutoff.\n\n"
+        "Modeling rules:\n"
+        "- Treat the cosmic graph as evidence, not a score to maximize.\n"
+        "- component_count=1 at the base graph is normal. Threshold-stability clustering will find the edge weight level where components naturally separate.\n"
+        "- Aim for graph density between 10% and 80%. Below 10% the graph is too sparse; above 80% it is too dense ('hairball').\n"
+        "- Prefer wide PCA dimension arrays and epsilon ranges over narrow ones.\n"
+        "- Respect categorical structure; do not drop categoricals just to force separation.\n\n"
+        "Environment rule:\n"
+        "- The MCP server may not share the bash sandbox filesystem. Use dataset ingest tools instead of ad hoc copying. Call get_runtime_context if path visibility is unclear.\n"
     ),
 )
 
@@ -77,16 +228,18 @@ class SweepRecord:
 
 
 # Session state: stores (model, data, clusters) per session
-@dataclasses.dataclass
+@dataclass
 class _PulsarSession:
     """Session state for a single MCP client."""
 
-    model: Optional[ThemaRS] = None
-    data: Optional[pd.DataFrame] = None
-    clusters: Optional[pd.Series] = None
-    embeddings: Optional[list] = None  # cached PCA output from last fit
-    pca_fingerprint: Optional[str] = None  # SHA256 of (data_path, dims, seeds, n_rows)
-    sweep_history: list[SweepRecord] = dataclasses.field(default_factory=list)
+    model: ThemaRS | None = None
+    data: pd.DataFrame | None = None
+    clusters: pd.Series | None = None
+    embeddings: list | None = None  # cached PCA output from last fit
+    pca_fingerprint: str | None = None  # SHA256 of (data_path, dims, seeds, n_rows)
+    sweep_history: list[SweepRecord] = field(default_factory=list)
+    dataset_id: str | None = None
+    latest_run_id: str | None = None
 
 
 # Global session storage, keyed by session_id (or "default" for STDIO)
@@ -94,7 +247,7 @@ class _PulsarSession:
 # Under STDIO, each process serves exactly one client. _sessions will contain at most
 # one entry, keyed "default". If ported to SSE/WebSocket (multi-client), replace this
 # with a bounded LRU dict capped at MAX_SESSIONS.
-_sessions: Dict[str, _PulsarSession] = {}
+_sessions: dict[str, _PulsarSession] = {}
 _MAX_SESSIONS = 1
 
 
@@ -118,6 +271,60 @@ def _get_session(ctx: Context) -> _PulsarSession:
             )
         _sessions[key] = _PulsarSession()
     return _sessions[key]
+
+
+def _resolve_dataset_record(dataset_id: str):
+    record = registry.get_dataset(dataset_id)
+    if record is None:
+        raise LookupError(dataset_id)
+    return record
+
+
+def _resolve_dataset_path(dataset_id: str) -> str:
+    return _resolve_dataset_record(dataset_id).path
+
+
+def _build_graph_summary(model: ThemaRS) -> dict[str, Any]:
+    graph = model.cosmic_graph
+    components = list(nx.connected_components(graph))
+    component_sizes = sorted((len(component) for component in components), reverse=True)
+
+    component_by_node: dict[int, int] = {}
+    for component_id, component in enumerate(components):
+        for node in component:
+            component_by_node[int(node)] = component_id
+
+    nodes = []
+    for node in sorted(graph.nodes()):
+        nodes.append(
+            {
+                "node": int(node),
+                "component_id": component_by_node[int(node)],
+                "degree": int(graph.degree(node)),
+                "weighted_degree": float(graph.degree(node, weight="weight")),
+            }
+        )
+
+    edges = []
+    for source, target, data in graph.edges(data=True):
+        edges.append(
+            {
+                "source": int(source),
+                "target": int(target),
+                "weight": float(data.get("weight", 0.0)),
+            }
+        )
+    edges.sort(key=lambda edge: (-edge["weight"], edge["source"], edge["target"]))
+
+    return {
+        "node_count": graph.number_of_nodes(),
+        "edge_count": graph.number_of_edges(),
+        "resolved_threshold": float(model.resolved_threshold),
+        "component_count": len(components),
+        "component_sizes": component_sizes,
+        "nodes": nodes,
+        "edges": edges,
+    }
 
 
 def _format_epsilon(cfg: dict) -> str:
@@ -156,51 +363,33 @@ def _auto_save_config(cfg) -> str:
 @mcp.tool()
 async def suggest_initial_config(dataset_geometry: str, ctx: Context) -> str:
     """
-    Generate an initial configuration YAML based on your interpretation of the raw dataset geometry.
-
-    You MUST call characterize_dataset first, analyze the variance curve and column missingness/cardinality,
-    and then formulate a JSON-encoded summary of the geometry to pass into this tool.
+    Generate an initial configuration YAML based on the raw dataset geometry.
+    Deprecated: prefer create_config(dataset_id) for processed-space calibration.
 
     Args:
-        dataset_geometry: A JSON string containing your summary of the geometry (e.g., {"N": 344, "pca_knee_dim": 3, "knn_mean": 0.6}).
+        dataset_geometry: The raw JSON string from characterize_dataset.
 
     Returns:
-        A starter config_yaml string.
+        JSON with config_yaml and calibration provenance.
     """
     try:
         geo = json.loads(dataset_geometry)
-        pca_dims = geo.get("pca_knee_dim", 3)
-        if isinstance(pca_dims, int):
-            pca_dims = [pca_dims]
-
-        eps_min = geo.get("knn_mean", 0.5) * 0.8
-        eps_max = geo.get("knn_mean", 0.5) * 1.5
-
-        yaml_str = f"""run:
-  name: initial_sweep
-  data: "FILL_THIS_IN_WITH_PATH"
-preprocessing:
-  drop_columns: []
-  encode: {{}}
-  impute: {{}}
-sweep:
-  pca:
-    dimensions:
-      values: {pca_dims}
-    seed:
-      values: [42]
-  ball_mapper:
-    epsilon:
-      range:
-        min: {eps_min:.4f}
-        max: {eps_max:.4f}
-        steps: 15
-cosmic_graph:
-  threshold: auto
-output:
-  n_reps: 4
-"""
-        return yaml_str
+        config_yaml = _build_initial_config_yaml(
+            geo, data_path="FILL_THIS_IN_WITH_PATH", run_name="initial_sweep"
+        )
+        return json.dumps(
+            {
+                "status": "ok",
+                "config_yaml": config_yaml,
+                "calibration_space": "raw",
+                "calibration_note": (
+                    "Raw-space calibration only. Epsilon and PCA dimensions "
+                    "reflect raw numeric columns, not the processed feature space. "
+                    "Prefer create_config(dataset_id) for processed-space calibration."
+                ),
+            },
+            indent=2,
+        )
     except Exception as e:
         return mcp_error("suggest_initial_config", str(e))
 
@@ -233,7 +422,7 @@ async def explain_suggestion(
 
         n_samples = geo.get("n_samples", "unknown")
         cum_var_map = {int(d): v for d, v in geo.get("pca_cumulative_variance", [])}
-        knn_mean = geo.get("knn_k5_mean")
+        knn_mean = geo.get("knn_k5_mean") or geo.get("knn_mean")
 
         explanation = "### Parameter Reasoning\n\n"
 
@@ -248,13 +437,14 @@ async def explain_suggestion(
 
         if pca_reasons:
             explanation += f"- **PCA Dimensions {pca_dims}**: " + " ".join(pca_reasons)
+            explanation += " An array of dimensions is used rather than a single point estimate to prevent dimension collapse and ensure the CosmicGraph captures topology across varying geometric resolutions.\n"
             if isinstance(n_samples, int):
                 pts_per_dim = n_samples / max(pca_dims)
                 explanation += f" With N={n_samples}, this maintains ~{pts_per_dim:.1f} points per dimension, ensuring sufficient manifold density.\n"
             else:
                 explanation += "\n"
         else:
-            explanation += f"- **PCA Dimensions {pca_dims}**: Chosen based on the variance curve elbow (values not provided in geo summary).\n"
+            explanation += f"- **PCA Dimensions {pca_dims}**: Chosen as a multi-scale array around the variance curve elbow to aggregate varying topological resolutions (values not provided in geo summary).\n"
 
         # 2. Epsilon Reasoning
         if knn_mean:
@@ -264,11 +454,11 @@ async def explain_suggestion(
             if "range" in eps_node:
                 r = eps_node["range"]
                 e_min, e_max = r.get("min", 0), r.get("max", 0)
-                explanation += f"- **Epsilon Range {eps_str}**: Anchored at knn_k5_mean={knn_mean:.4f}. The range spans {e_min / knn_mean:.2f}x to {e_max / knn_mean:.2f}x the mean distance, transitioning from local neighborhoods to global structure.\n"
+                explanation += f"- **Epsilon Range {eps_str}**: Anchored at knn_mean={knn_mean:.4f}. The range spans {e_min / knn_mean:.2f}x to {e_max / knn_mean:.2f}x the mean distance. This filtration sweeps from local neighborhoods to global structures, aggregating multi-scale persistent homology into the final graph.\n"
             else:
-                explanation += f"- **Epsilon {eps_str}**: Evaluated relative to knn_k5_mean={knn_mean:.4f}.\n"
+                explanation += f"- **Epsilon {eps_str}**: Evaluated relative to knn_mean={knn_mean:.4f}. Note: A single epsilon limits the graph to a single scale. Consider sweeping a range to capture ensemble topology.\n"
         else:
-            explanation += f"- **Epsilon {eps_str}**: Search window centered around k-NN mean (knn_k5_mean not provided in summary).\n"
+            explanation += f"- **Epsilon {eps_str}**: Search window centered around k-NN mean (knn_mean not provided in summary).\n"
 
         return explanation
     except Exception as e:
@@ -309,9 +499,398 @@ async def get_experiment_history(ctx: Context) -> str:
 
 
 @mcp.tool()
+async def get_runtime_context(ctx: Context = None) -> str:
+    """
+    Return the MCP server runtime context so agents can reason about path visibility
+    and handle lifecycle before attempting file-based operations.
+    """
+    session = _get_session(ctx)
+    payload = {
+        "cwd": os.getcwd(),
+        "cache_dir": str(registry.cache_dir),
+        "temp_dir": os.getenv("TMPDIR", "/tmp"),
+        "transport_assumption": "stdio-single-client",
+        "session_id": _session_key(ctx),
+        "dataset_handle_persistence": "on-disk registry under cache_dir",
+        "run_handle_persistence": "on-disk registry under cache_dir/runs",
+        "latest_dataset_id": session.dataset_id,
+        "latest_run_id": session.latest_run_id,
+        "path_guidance": [
+            "Use ingest_dataset(path) for host-visible absolute paths.",
+            "For small or medium sandbox/upload files, use ingest_dataset_base64(filename, content_base64).",
+            "For large sandbox/upload files, use begin_dataset_upload -> append_dataset_chunk -> finalize_dataset_upload.",
+            "Use ingest_dataset_content(filename, content) only as a legacy text-only fallback.",
+            "config_path must point to a file visible to the MCP server process.",
+            "config_yaml must be raw YAML, not fenced Markdown.",
+        ],
+    }
+    return json.dumps(payload, indent=2)
+
+
+@mcp.tool()
+async def ingest_dataset(path: str, ctx: Context = None) -> str:
+    """
+    Register a host-visible absolute dataset path and return a stable dataset_id handle.
+    Use this only when the MCP server can read the path directly.
+    """
+    try:
+        record = registry.register_dataset(path)
+        session = _get_session(ctx)
+        session.dataset_id = record.dataset_id
+        return json.dumps(dataclasses.asdict(record), indent=2)
+    except FileNotFoundError:
+        return path_access_error(
+            "ingest_dataset",
+            path,
+            missing_action=(
+                "Ask the user for a host-visible absolute dataset path, then call "
+                "ingest_dataset again."
+            ),
+            sandbox_action=(
+                "If the file only exists in a sandbox/upload area, use "
+                "ingest_dataset_base64 for small or medium uploads, or the staged "
+                "upload tools for larger files. Otherwise ask the user for a "
+                "host-visible absolute path."
+            ),
+        )
+    except PermissionError:
+        return mcp_error(
+            "ingest_dataset",
+            "Dataset path exists but is not readable by the MCP server.",
+            error_code="FILE_PERMISSION_DENIED",
+            agent_action="Provide a readable host-visible dataset path.",
+            details={"path_context": {"attempted_path": path}},
+        )
+    except Exception as e:
+        return mcp_error("ingest_dataset", str(e))
+
+
+@mcp.tool()
+async def ingest_dataset_base64(
+    filename: str,
+    content_base64: str,
+    media_type: str = "text/csv",
+    ctx: Context = None,
+) -> str:
+    """
+    Persist a small or medium uploaded dataset sent as base64 and return dataset_id.
+    Prefer this over raw text content for one-shot uploads. Use staged upload for larger files.
+    """
+    try:
+        if media_type not in {"text/csv", "application/octet-stream"}:
+            return mcp_error(
+                "ingest_dataset_base64",
+                f"Unsupported media_type '{media_type}'.",
+                error_code="UPLOAD_MEDIA_TYPE_UNSUPPORTED",
+                agent_action=(
+                    "Use text/csv for CSV uploads, or application/octet-stream if the "
+                    "client cannot provide a specific text media type."
+                ),
+            )
+        try:
+            content_bytes = base64.b64decode(content_base64, validate=True)
+        except Exception:
+            return mcp_error(
+                "ingest_dataset_base64",
+                "Base64 payload could not be decoded.",
+                error_code="UPLOAD_DECODE_FAILED",
+                agent_action="Provide valid base64 content for one-shot upload, or use staged upload for large files.",
+            )
+        record = registry.register_dataset_bytes(
+            filename,
+            content_bytes,
+            source="base64",
+        )
+        session = _get_session(ctx)
+        session.dataset_id = record.dataset_id
+        return json.dumps(dataclasses.asdict(record), indent=2)
+    except Exception as e:
+        return mcp_error("ingest_dataset_base64", str(e))
+
+
+@mcp.tool()
+async def begin_dataset_upload(
+    filename: str,
+    media_type: str = "text/csv",
+    ctx: Context = None,
+) -> str:
+    """
+    Begin a staged server-side upload for a dataset that is not reachable by path.
+    Use this for larger sandboxed uploads, then append chunks and finalize to get dataset_id.
+    """
+    try:
+        record = registry.begin_upload(filename, media_type=media_type)
+        return json.dumps(dataclasses.asdict(record), indent=2)
+    except Exception as e:
+        return mcp_error("begin_dataset_upload", str(e))
+
+
+@mcp.tool()
+async def append_dataset_chunk(
+    upload_id: str,
+    chunk: str,
+    encoding: str = "base64",
+    ctx: Context = None,
+) -> str:
+    """
+    Append one chunk to a staged dataset upload.
+    Use base64 encoding by default to avoid newline and control-character corruption.
+    """
+    try:
+        if encoding == "base64":
+            try:
+                chunk_bytes = base64.b64decode(chunk, validate=True)
+            except Exception:
+                return mcp_error(
+                    "append_dataset_chunk",
+                    "Chunk payload could not be decoded from base64.",
+                    error_code="UPLOAD_DECODE_FAILED",
+                    agent_action="Retry with valid base64 chunk data.",
+                )
+        elif encoding == "utf-8":
+            chunk_bytes = chunk.encode("utf-8")
+        else:
+            return mcp_error(
+                "append_dataset_chunk",
+                f"Unsupported chunk encoding '{encoding}'.",
+                error_code="UPLOAD_ENCODING_UNSUPPORTED",
+                agent_action="Use encoding='base64' for binary-safe chunk transport.",
+            )
+
+        record = registry.append_upload_chunk(upload_id, chunk_bytes)
+        if record is None:
+            return unknown_handle_error("append_dataset_chunk", "upload_id", upload_id)
+        return json.dumps(dataclasses.asdict(record), indent=2)
+    except Exception as e:
+        return mcp_error("append_dataset_chunk", str(e))
+
+
+@mcp.tool()
+async def finalize_dataset_upload(upload_id: str, ctx: Context = None) -> str:
+    """
+    Finalize a staged upload and register it as a dataset_id for downstream tools.
+    """
+    try:
+        record = registry.finalize_upload(upload_id)
+        if record is None:
+            return unknown_handle_error(
+                "finalize_dataset_upload", "upload_id", upload_id
+            )
+        session = _get_session(ctx)
+        session.dataset_id = record.dataset_id
+        return json.dumps(dataclasses.asdict(record), indent=2)
+    except Exception as e:
+        return mcp_error("finalize_dataset_upload", str(e))
+
+
+@mcp.tool()
+async def ingest_dataset_content(
+    filename: str,
+    content: str,
+    ctx: Context = None,
+) -> str:
+    """
+    Persist uploaded or sandbox-local dataset content into the MCP server cache and
+    return a stable dataset_id handle. This is a legacy text-only fallback.
+    Prefer ingest_dataset_base64 for one-shot uploads and staged upload for larger files.
+    """
+    try:
+        record = registry.register_dataset_content(filename, content)
+        session = _get_session(ctx)
+        session.dataset_id = record.dataset_id
+        return json.dumps(dataclasses.asdict(record), indent=2)
+    except Exception as e:
+        return mcp_error("ingest_dataset_content", str(e))
+
+
+def _calibrate_processed_space(
+    df: pd.DataFrame,
+    column_profiles: list[Any],
+    n_samples: int,
+    data_path: str,
+) -> NumericProfile | None:
+    """Run recommended preprocessing + scaling, then profile the result.
+
+    Returns ``None`` if preprocessing fails (e.g. too few numeric columns
+    after encoding).  The caller should fall back to raw-space calibration.
+    """
+    drop, impute_dict, encode_dict, _ = _recommend_preprocessing_block(
+        column_profiles, n_samples
+    )
+
+    # Build a minimal config just for preprocessing (sweep/cosmic values
+    # are irrelevant — we only need preprocessing fields + data path).
+    from pulsar.config import (
+        BallMapperSpec,
+        CosmicGraphSpec,
+        EncodeSpec,
+        ImputeSpec,
+        PCASpec,
+        PulsarConfig,
+    )
+
+    impute_specs = {
+        col: ImputeSpec(method=spec["method"], seed=spec.get("seed", 42))
+        for col, spec in impute_dict.items()
+    }
+    encode_specs = {
+        col: EncodeSpec(
+            method=spec["method"], max_categories=spec.get("max_categories")
+        )
+        for col, spec in encode_dict.items()
+    }
+    temp_cfg = PulsarConfig(
+        data=data_path,
+        impute=impute_specs,
+        encode=encode_specs,
+        drop_columns=drop,
+        pca=PCASpec(),
+        ball_mapper=BallMapperSpec(),
+        cosmic_graph=CosmicGraphSpec(),
+    )
+
+    try:
+        df_processed, layout = preprocess_dataframe(df, temp_cfg)
+    except (ValueError, TypeError):
+        logger.info("Processed-space calibration failed; falling back to raw geometry")
+        return None
+
+    X = df_processed.to_numpy(dtype=np.float64)
+    if X.shape[1] < 2:
+        return None
+    X_scaled = SkScaler().fit_transform(X)
+    return profile_numeric_matrix(X_scaled)
+
+
+@mcp.tool()
+async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) -> str:
+    """
+    Generate canonical Pulsar YAML for an ingested dataset_id.
+
+    Calibrates epsilon and PCA dimensions against the processed feature
+    space (after recommended preprocessing + scaling), not raw columns.
+    """
+    try:
+        dataset_path = _resolve_dataset_path(dataset_id)
+        from pulsar.analysis.characterization import characterize_dataset as _char
+
+        df = await asyncio.to_thread(pd.read_csv, dataset_path)
+        result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
+        geo = dataclasses.asdict(result)
+        run_name = intent.strip() or "initial_sweep"
+        session = _get_session(ctx)
+        session.dataset_id = dataset_id
+        session.data = df
+
+        # Calibrate against processed feature space
+        processed = await asyncio.to_thread(
+            _calibrate_processed_space,
+            df,
+            geo["column_profiles"],
+            geo["n_samples"],
+            dataset_path,
+        )
+
+        config_yaml = _build_initial_config_yaml(
+            geo,
+            data_path=dataset_path,
+            run_name=run_name,
+            processed_profile=processed,
+        )
+
+        # Build response with calibration provenance
+        calibration_space = "processed" if processed is not None else "raw"
+        response: dict[str, Any] = {
+            "status": "ok",
+            "config_yaml": config_yaml,
+            "calibration_space": calibration_space,
+        }
+        if processed is not None:
+            response["processed_feature_count"] = processed.n_features
+            raw_features = geo["n_features"]
+            response["raw_to_processed_expansion_ratio"] = round(
+                processed.n_features / max(raw_features, 1), 2
+            )
+            response["knn_distance_percentiles"] = {
+                "p5": round(processed.knn_p5, 4),
+                "p25": round(processed.knn_p25, 4),
+                "p50": round(processed.knn_p50, 4),
+                "p75": round(processed.knn_p75, 4),
+                "p95": round(processed.knn_p95, 4),
+            }
+            response["calibration_note"] = (
+                "Geometry calibrated under recommended initial preprocessing policy. "
+                "Epsilon and PCA dimensions reflect the processed feature space "
+                "(after drop/impute/encode/scale), not raw columns. "
+                "knn_distance_percentiles show the valid epsilon domain — "
+                "epsilon values outside [p5, p95] will produce degenerate graphs."
+            )
+        else:
+            response["calibration_note"] = (
+                "Processed-space calibration unavailable; epsilon and PCA "
+                "dimensions are calibrated against raw numeric columns only."
+            )
+
+        return json.dumps(response, indent=2)
+    except LookupError:
+        return unknown_handle_error("create_config", "dataset_id", dataset_id)
+    except Exception as e:
+        return mcp_error("create_config", str(e))
+
+
+@mcp.tool()
+async def refine_config(config_yaml: str, overrides: dict[str, Any]) -> str:
+    """
+    Apply constrained overrides to canonical Pulsar YAML and return normalized YAML.
+    """
+    try:
+        result = apply_overrides(config_yaml, overrides)
+        payload = {
+            "status": "ok",
+            "applied_overrides": result.applied_overrides,
+            "diff": result.diff,
+            "config_yaml": result.config_yaml,
+        }
+        return json.dumps(payload, indent=2)
+    except ValueError as e:
+        return mcp_error(
+            "refine_config",
+            str(e),
+            error_code="UNKNOWN_OVERRIDE_KEY",
+            agent_action="Use only valid override keys. See error message for valid key list.",
+        )
+    except Exception as e:
+        return mcp_error("refine_config", str(e))
+
+
+@mcp.tool()
+async def validate_config(
+    config_yaml: str,
+    dataset_id: str = "",
+    ctx: Context = None,
+) -> str:
+    """
+    Validate full Pulsar config shape and normalize it into canonical YAML.
+    Prefer dataset_id once data has been ingested.
+    """
+    try:
+        dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
+        report = validate_config_yaml(config_yaml, dataset_path=dataset_path)
+        if dataset_id:
+            _get_session(ctx).dataset_id = dataset_id
+        return render_validation_report(report)
+    except LookupError:
+        return unknown_handle_error("validate_config", "dataset_id", dataset_id)
+    except Exception as e:
+        return mcp_error("validate_config", str(e))
+
+
+@mcp.tool()
 async def run_topological_sweep(
     config_path: str = "",
     config_yaml: str = "",
+    dataset_id: str = "",
+    save_config: bool = False,
     ctx: Context = None,
 ) -> str:
     """
@@ -323,34 +902,47 @@ async def run_topological_sweep(
     Args:
         config_path: Path to a params.yaml file on disk.
         config_yaml: Inline YAML string (preferred).
+        dataset_id: Preferred dataset handle when data has already been ingested.
+        save_config: If True, persist the resolved config YAML to disk.
     """
-    if config_yaml:
-        config_dict = yaml.safe_load(config_yaml)
-        if not isinstance(config_dict, dict):
-            raise ToolError("config_yaml must be a valid YAML mapping")
-        current_yaml = config_yaml
-    elif config_path:
-        _validate_config_path(config_path)
-        with open(config_path) as f:
-            current_yaml = f.read()
-    else:
-        raise ToolError("Provide either config_path or config_yaml.")
-
-    session = _get_session(ctx)
-
     try:
         if config_yaml:
-            logger.info("Starting topological sweep from inline YAML")
-            model = ThemaRS(config_dict)
+            current_yaml = config_yaml
+        elif config_path:
+            _validate_config_path(config_path)
+            with open(config_path) as f:
+                current_yaml = f.read()
         else:
-            logger.info("Starting topological sweep for: %s", config_path)
-            model = ThemaRS(config_path)
+            raise ToolError("Provide either config_path or config_yaml.")
+
+        session = _get_session(ctx)
+        dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
+        validation = validate_config_yaml(current_yaml, dataset_path=dataset_path)
+        if not validation.ok or validation.normalized_yaml is None:
+            return mcp_error(
+                "run_topological_sweep",
+                "Config validation failed before execution.",
+                error_code=validation.error_code or "CONFIG_VALIDATION_FAILED",
+                agent_action=validation.agent_action,
+                details={
+                    "resolved_dataset_path": validation.resolved_dataset_path,
+                    "issues": [
+                        dataclasses.asdict(issue) for issue in validation.issues
+                    ],
+                },
+            )
+
+        current_yaml = validation.normalized_yaml
+        config_dict = yaml.safe_load(current_yaml)
+
+        logger.info("Starting topological sweep from normalized YAML")
+        model = ThemaRS(config_dict)
 
         cfg = model.config
 
         precomputed = None
         if session.embeddings is not None and session.data is not None:
-            fingerprint = pca_fingerprint(cfg, len(session.data))
+            fingerprint = pca_fingerprint(cfg, len(session.data), session.data)
             if fingerprint == session.pca_fingerprint:
                 precomputed = session.embeddings
                 logger.info("Reusing cached PCA embeddings (fingerprint match)")
@@ -375,77 +967,97 @@ async def run_topological_sweep(
         )
 
         session.model = model
-        session.data = model.preprocessed_data
+        session.data = model.data  # raw pre-preprocessing DataFrame
 
         if precomputed is None:
             session.embeddings = model._embeddings
-            session.pca_fingerprint = pca_fingerprint(cfg, len(model.data))
+            session.pca_fingerprint = pca_fingerprint(cfg, len(model.data), model.data)
 
-        saved_path = _auto_save_config(cfg)
-        graph = model.cosmic_graph
+        saved_path = _auto_save_config(cfg) if save_config else None
 
         # Calculate metrics for diff
         from pulsar.mcp.diagnostics import diagnose_model
 
         current_metrics_obj = diagnose_model(model)
         current_metrics = dataclasses.asdict(current_metrics_obj)
+        graph_summary = _build_graph_summary(model)
 
-        # Build Diff block
-        diff_block = (
-            "### Experiment Diff\n\n| Parameter | Previous | Current |\n|---|---|---|\n"
-        )
-        if not session.sweep_history:
-            diff_block += "| (Initial Run) | - | - |\n"
-        else:
+        # Build structured diff
+        diff: list[dict[str, Any]] = []
+        if session.sweep_history:
             prev_record = session.sweep_history[-1]
             prev_cfg = yaml.safe_load(prev_record.config_yaml)
             curr_cfg = yaml.safe_load(current_yaml)
 
-            p_pca = str(
+            p_pca = (
                 prev_cfg.get("sweep", {})
                 .get("pca", {})
                 .get("dimensions", {})
                 .get("values", [])
             )
-            c_pca = str(
+            c_pca = (
                 curr_cfg.get("sweep", {})
                 .get("pca", {})
                 .get("dimensions", {})
                 .get("values", [])
             )
-            if p_pca != c_pca:
-                diff_block += f"| pca_dims | {p_pca} | {c_pca} |\n"
+            if str(p_pca) != str(c_pca):
+                diff.append({"field": "pca_dims", "previous": p_pca, "current": c_pca})
 
             p_eps = _format_epsilon(prev_cfg)
             c_eps = _format_epsilon(curr_cfg)
             if p_eps != c_eps:
-                diff_block += f"| epsilon | {p_eps} | {c_eps} |\n"
+                diff.append({"field": "epsilon", "previous": p_eps, "current": c_eps})
 
             pm = prev_record.metrics
             cm = current_metrics
-            diff_block += (
-                f"| Edges | {pm.get('n_edges', 0):,} | {cm.get('n_edges', 0):,} |\n"
-            )
-            diff_block += f"| Components | {pm.get('component_count', 0)} | {cm.get('component_count', 0)} |\n"
-            diff_block += f"| Giant Fraction | {pm.get('giant_fraction', 0):.2%} | {cm.get('giant_fraction', 0):.2%} |\n"
+            for key in ("n_edges", "component_count", "giant_fraction"):
+                pv, cv = pm.get(key, 0), cm.get(key, 0)
+                if pv != cv:
+                    diff.append({"field": key, "previous": pv, "current": cv})
 
         # Record history
         session.sweep_history.append(
             SweepRecord(time.time(), current_yaml, current_metrics)
         )
-
-        result = f"{diff_block}\n\n"
-        result += (
-            "### Execution Summary\n"
-            "Successfully ran topological sweep.\n"
-            f"- Nodes: {graph.number_of_nodes()}\n"
-            f"- Edges: {graph.number_of_edges()}\n"
-            f"- Resolution: {model.resolved_threshold:.4f}\n"
-            f"- Data Shape: {session.data.shape}\n"
-            f"- Config saved: {saved_path}"
+        run_record = registry.save_run(
+            dataset_id=dataset_id or session.dataset_id,
+            config_yaml=current_yaml,
+            metrics=current_metrics,
+            resolved_threshold=model.resolved_threshold,
+            graph_summary=graph_summary,
         )
-        return result
+        session.latest_run_id = run_record.run_id
+        if dataset_id:
+            session.dataset_id = dataset_id
 
+        response: dict[str, Any] = {
+            "status": "ok",
+            "run_id": run_record.run_id,
+            "metrics": current_metrics,
+            "diff": diff,
+            "config_yaml_normalized": current_yaml,
+            "data_shape": list(session.data.shape),
+        }
+        if saved_path:
+            response["saved_config_path"] = saved_path
+        if dataset_id:
+            response["dataset_id"] = dataset_id
+
+        return json.dumps(response, indent=2)
+
+    except FileNotFoundError:
+        return path_access_error(
+            "run_topological_sweep",
+            config_path,
+            missing_code="CONFIG_FILE_NOT_VISIBLE",
+            missing_reason="Config file does not exist on the MCP host filesystem.",
+            missing_action=(
+                "Use config_yaml directly, or provide a host-visible absolute config path."
+            ),
+        )
+    except LookupError:
+        return unknown_handle_error("run_topological_sweep", "dataset_id", dataset_id)
     except Exception as e:
         logger.error(f"Error running sweep: {e}")
         return mcp_error("run_topological_sweep", str(e))
@@ -455,10 +1067,23 @@ async def run_topological_sweep(
 async def generate_cluster_dossier(
     method: str = "auto",
     max_k: int = 15,
+    edge_weight_threshold: float = 0.0,
+    format: str = "json",
     ctx: Context = None,
 ) -> str:
     """
     Generate a statistical dossier of the topological clusters.
+
+    Args:
+        method: Clustering method ("auto", "spectral", "components").
+        max_k: Maximum k for spectral clustering search.
+        edge_weight_threshold: Drop edges with weight <= this value before
+            clustering.  Edge weights are the fraction of ball maps that
+            placed two points together.  Use weight percentiles from
+            diagnose_cosmic_graph to choose a value (e.g. weight_p50 to
+            keep only the stronger half of edges).
+        format: Response format. "json" (structured fields only, default),
+            "markdown" (human-readable summary only), or "full" (both).
     """
     session = _get_session(ctx)
 
@@ -469,14 +1094,77 @@ async def generate_cluster_dossier(
         raise ToolError(
             f"method must be 'auto', 'spectral', or 'components', got '{method}'"
         )
+    if format not in ("json", "markdown", "full"):
+        raise ToolError(f"format must be 'json', 'markdown', or 'full', got '{format}'")
 
     try:
-        clusters = resolve_clusters(session.model, method=method, max_k=max_k)
-        session.clusters = clusters
+        result = resolve_clusters(
+            session.model,
+            method=method,
+            max_k=max_k,
+            edge_weight_threshold=edge_weight_threshold,
+        )
+        session.clusters = result.labels
 
-        dossier = build_dossier(session.model, session.data, clusters)
+        dossier = build_dossier(session.model, session.data, result.labels)
+
+        cluster_meta = {
+            "method_used": result.method_used,
+            "n_clusters": result.n_clusters,
+            "silhouette_score": result.silhouette_score,
+            "edge_weight_threshold_applied": result.edge_weight_threshold_applied,
+            "stability_plateaus": result.stability_plateaus,
+            "failure_reason": result.failure_reason,
+        }
+
+        if format == "markdown":
+            markdown = dossier_to_markdown(dossier)
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "cluster_result": cluster_meta,
+                    "markdown_summary": markdown,
+                },
+                indent=2,
+            )
+
+        dossier_dict = {
+            "n_total": dossier.n_total,
+            "n_clusters": dossier.n_clusters,
+            "clusters": [
+                {
+                    "cluster_id": cp.cluster_id,
+                    "size": cp.size,
+                    "size_pct": cp.size_pct,
+                    "numeric_features": cp.numeric_features,
+                    "categorical_features": cp.categorical_features,
+                }
+                for cp in dossier.clusters
+            ],
+            "global_stats": dossier.global_stats,
+        }
+
+        if format == "json":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "cluster_result": cluster_meta,
+                    "dossier": dossier_dict,
+                },
+                indent=2,
+            )
+
+        # format == "full"
         markdown = dossier_to_markdown(dossier)
-        return markdown
+        return json.dumps(
+            {
+                "status": "ok",
+                "cluster_result": cluster_meta,
+                "dossier": dossier_dict,
+                "markdown_summary": markdown,
+            },
+            indent=2,
+        )
 
     except Exception as e:
         logger.error(f"Error generating dossier: {e}")
@@ -515,7 +1203,7 @@ async def compare_clusters_tool(
 
 @mcp.tool()
 async def export_labeled_data(
-    cluster_names: Dict[int, str], output_path: str, ctx: Context
+    cluster_names: dict[int, str], output_path: str, ctx: Context
 ) -> str:
     """
     Assign semantic names to clusters and export the labeled dataset to CSV.
@@ -549,16 +1237,48 @@ async def export_labeled_data(
 
 
 @mcp.tool()
-async def characterize_dataset(csv_path: str, ctx: Context) -> str:
+async def characterize_dataset(
+    csv_path: str = "",
+    dataset_id: str = "",
+    ctx: Context = None,
+) -> str:
     """
     Probes dataset geometry to return raw facts (N, features, variance curve, k-NN mean).
-    Use this signal to form a hypothesis and pass your summary into suggest_initial_config.
+    Prefer dataset_id after ingest. Use csv_path only for host-visible files.
     """
     try:
         from pulsar.analysis.characterization import characterize_dataset as _char
 
-        result = await asyncio.to_thread(_char, csv_path)
+        if dataset_id:
+            csv_path = _resolve_dataset_path(dataset_id)
+        if not csv_path:
+            raise ToolError("Provide either csv_path or dataset_id.")
+
+        # Read once, reuse for both session state and characterization.
+        session = _get_session(ctx)
+        df = await asyncio.to_thread(pd.read_csv, csv_path)
+        session.data = df
+        if dataset_id:
+            session.dataset_id = dataset_id
+
+        result = await asyncio.to_thread(_char, csv_path, dataframe=df)
         return json.dumps(dataclasses.asdict(result), indent=2)
+    except FileNotFoundError:
+        return path_access_error(
+            "characterize_dataset",
+            csv_path,
+            missing_action=(
+                "Ask the user for a host-visible absolute dataset path, or use "
+                "ingest_dataset first and pass dataset_id."
+            ),
+            sandbox_action=(
+                "If the file only exists in a sandbox/upload area, prefer staged "
+                "upload tools first, then retry with dataset_id. Use "
+                "ingest_dataset_content only for small text uploads."
+            ),
+        )
+    except LookupError:
+        return unknown_handle_error("characterize_dataset", "dataset_id", dataset_id)
     except Exception as e:
         logger.error(f"Error analyzing dataset: {e}")
         return mcp_error("characterize_dataset", str(e))
@@ -583,6 +1303,334 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
     except Exception as e:
         logger.error(f"Error diagnosing graph: {e}")
         return mcp_error("diagnose_cosmic_graph", str(e))
+
+
+@mcp.tool()
+async def get_threshold_stability_curve(ctx: Context) -> str:
+    """
+    Return the full component-count-vs-edge-weight-threshold curve.
+
+    Uses H0 persistent homology on the cosmic graph's weighted adjacency
+    to show how many connected components exist at each edge weight threshold.
+    Use this to reason about alternative clustering thresholds after the
+    initial auto-clustering.
+
+    Returns:
+        JSON with thresholds, component_counts, top plateaus, and the
+        auto-selected threshold (midpoint of longest valid plateau).
+    """
+    session = _get_session(ctx)
+
+    if session.model is None:
+        raise ToolError("No model found. Run run_topological_sweep() first.")
+
+    try:
+        from pulsar._pulsar import find_stable_thresholds
+
+        adj = session.model.weighted_adjacency
+        stability = await asyncio.to_thread(find_stable_thresholds, adj)
+
+        plateaus = [
+            {
+                "start": float(p.start_threshold),
+                "end": float(p.end_threshold),
+                "component_count": int(p.component_count),
+                "length": float(p.length),
+                "midpoint": float(p.midpoint),
+            }
+            for p in stability.top_k_plateaus(10)
+        ]
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "optimal_threshold": float(stability.optimal_threshold),
+                "plateaus": plateaus,
+                "thresholds": [float(t) for t in stability.thresholds],
+                "component_counts": [int(c) for c in stability.component_counts],
+            },
+            indent=2,
+        )
+    except Exception as e:
+        logger.error(f"Error computing stability curve: {e}")
+        return mcp_error("get_threshold_stability_curve", str(e))
+
+
+@mcp.tool()
+async def get_topological_skeleton(run_id: str = "", ctx: Context = None) -> str:
+    """
+    Return structured graph connectivity for the latest run or an explicit run_id.
+    """
+    try:
+        session = _get_session(ctx)
+        target_run_id = run_id or session.latest_run_id
+        if not target_run_id:
+            raise ToolError("No run available. Run run_topological_sweep() first.")
+        record = registry.get_run(target_run_id)
+        if record is None:
+            return unknown_handle_error(
+                "get_topological_skeleton", "run_id", target_run_id
+            )
+        payload = {
+            "run_id": record.run_id,
+            "dataset_id": record.dataset_id,
+            "config_yaml": record.config_yaml,
+            "resolved_threshold": record.resolved_threshold,
+            "graph": record.graph_summary,
+        }
+        return json.dumps(payload, indent=2)
+    except Exception as e:
+        return mcp_error("get_topological_skeleton", str(e))
+
+
+@mcp.tool()
+async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
+    """
+    Compare two persisted sweep runs by config and graph metrics.
+    """
+    try:
+        record_a = registry.get_run(run_a)
+        record_b = registry.get_run(run_b)
+        if record_a is None:
+            return unknown_handle_error("compare_sweeps", "run_id", run_a)
+        if record_b is None:
+            return unknown_handle_error("compare_sweeps", "run_id", run_b)
+
+        cfg_a = yaml.safe_load(record_a.config_yaml)
+        cfg_b = yaml.safe_load(record_b.config_yaml)
+        metrics_a = record_a.metrics
+        metrics_b = record_b.metrics
+
+        lines = [
+            "### Sweep Comparison",
+            "",
+            f"- Run A: {record_a.run_id}",
+            f"- Run B: {record_b.run_id}",
+            f"- Dataset A: {record_a.dataset_id}",
+            f"- Dataset B: {record_b.dataset_id}",
+            "",
+            "| Field | Run A | Run B |",
+            "|---|---|---|",
+            f"| pca_dims | {cfg_a.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} | {cfg_b.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} |",
+            f"| epsilon | {_format_epsilon(cfg_a)} | {_format_epsilon(cfg_b)} |",
+            f"| threshold | {cfg_a.get('cosmic_graph', {}).get('threshold', 'auto')} | {cfg_b.get('cosmic_graph', {}).get('threshold', 'auto')} |",
+            f"| nodes | {metrics_a.get('n_nodes')} | {metrics_b.get('n_nodes')} |",
+            f"| edges | {metrics_a.get('n_edges')} | {metrics_b.get('n_edges')} |",
+            f"| components | {metrics_a.get('component_count')} | {metrics_b.get('component_count')} |",
+            f"| giant_fraction | {metrics_a.get('giant_fraction', 0):.2%} | {metrics_b.get('giant_fraction', 0):.2%} |",
+            f"| weight_p95 | {metrics_a.get('weight_p95', 0):.4f} | {metrics_b.get('weight_p95', 0):.4f} |",
+        ]
+        return "\n".join(lines)
+    except Exception as e:
+        return mcp_error("compare_sweeps", str(e))
+
+
+@mcp.tool()
+async def recommend_preprocessing(
+    dataset_geometry: str = "",
+    dataset_id: str = "",
+    ctx: Context = None,
+) -> str:
+    """
+    Analyze column profiles and return preprocessing recommendations.
+    Prefer dataset_id after ingest; accepts dataset_geometry as fallback.
+
+    Args:
+        dataset_geometry: The raw JSON string from characterize_dataset.
+        dataset_id: Preferred dataset handle. When provided, characterizes
+            the dataset automatically (dataset_geometry is ignored).
+
+    Returns:
+        JSON with preprocessing_yaml, per-column rationale, and expansion estimate.
+    """
+    try:
+        if dataset_id:
+            from pulsar.analysis.characterization import characterize_dataset as _char
+
+            dataset_path = _resolve_dataset_path(dataset_id)
+            result = await asyncio.to_thread(_char, dataset_path)
+            geo = dataclasses.asdict(result)
+        elif dataset_geometry:
+            geo = json.loads(dataset_geometry)
+        else:
+            return mcp_error(
+                "recommend_preprocessing",
+                "Provide either dataset_id or dataset_geometry.",
+                error_code="MISSING_INPUT",
+                agent_action="Pass dataset_id after ingest, or dataset_geometry JSON from characterize_dataset.",
+            )
+
+        n_samples = geo.get("n_samples", 0)
+        column_profiles = geo.get("column_profiles", [])
+
+        if not column_profiles:
+            return mcp_error(
+                "recommend_preprocessing",
+                "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.",
+            )
+
+        drop, impute, encode, rationale = _recommend_preprocessing_block(
+            column_profiles, n_samples
+        )
+
+        preprocessing_yaml = _preprocessing_block_to_yaml(drop, impute, encode)
+
+        # Estimate expansion: each encoded column adds ~n_unique dummy columns
+        expansion_estimate = 0
+        for raw_cp in column_profiles:
+            cp = (
+                raw_cp
+                if isinstance(raw_cp, dict)
+                else {"name": raw_cp.name, "n_unique": raw_cp.n_unique}
+            )
+            name = cp["name"]
+            if name in encode:
+                expansion_estimate += cp.get("n_unique", 2)
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "preprocessing_yaml": preprocessing_yaml,
+                "rationale": [
+                    {"column": col, "decision": dec, "reason": reason}
+                    for col, dec, reason in rationale
+                ],
+                "expansion_estimate": expansion_estimate,
+                "markdown_summary": _rationale_table(rationale),
+            },
+            indent=2,
+        )
+
+    except Exception as e:
+        logger.error(f"Error in recommend_preprocessing: {e}")
+        return mcp_error("recommend_preprocessing", str(e))
+
+
+@mcp.tool()
+async def repair_preprocessing_config(
+    error_message: str,
+    config_yaml: str,
+    dataset_geometry: str,
+    ctx: Context,
+) -> str:
+    """
+    Given a preprocessing error from run_topological_sweep, produce a corrected
+    config_yaml with a change log of what was fixed and why.
+
+    Handles: NaN remaining, non-numeric columns, coercion failure, all-missing
+    columns, and cardinality violations.
+
+    Args:
+        error_message: The full error text from the failed sweep.
+        config_yaml: The config_yaml that caused the error.
+        dataset_geometry: The raw JSON string from characterize_dataset.
+
+    Returns:
+        Markdown with error classification, change log table, and patched config_yaml.
+    """
+    try:
+        geo = json.loads(dataset_geometry)
+        if not geo.get("column_profiles"):
+            return mcp_error(
+                "repair_preprocessing_config",
+                "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.",
+                error_code="MISSING_COLUMN_PROFILES",
+                agent_action="Call characterize_dataset first, then pass its full JSON output.",
+            )
+        profiles_by_name: dict[str, Any] = {}
+        for cp in geo.get("column_profiles", []):
+            pname = cp["name"] if isinstance(cp, dict) else cp.name
+            profiles_by_name[pname] = cp
+        return repair_config(config_yaml, error_message, profiles_by_name)
+    except Exception as e:
+        logger.error(f"Error in repair_preprocessing_config: {e}")
+        return mcp_error("repair_preprocessing_config", str(e))
+
+
+@mcp.tool()
+async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
+    """
+    Dry-run the preprocessing stage only against session data — no PCA, no BallMapper,
+    no sweep cost. Use this to confirm a config is valid before run_topological_sweep.
+
+    Requires a prior run_topological_sweep call (to populate session data).
+
+    Args:
+        config_yaml: Inline YAML config string to validate.
+
+    Returns:
+        PASS with schema summary, or a structured error matching repair_preprocessing_config input format.
+    """
+    session = _get_session(ctx)
+
+    if session.data is None:
+        return mcp_error(
+            "validate_preprocessing_config",
+            "No data in session. Run run_topological_sweep (even with a minimal config) or characterize_dataset first to load data into the session.",
+        )
+
+    try:
+        config_dict = yaml.safe_load(config_yaml)
+        if not isinstance(config_dict, dict):
+            return mcp_error(
+                "validate_preprocessing_config",
+                "config_yaml must be a valid YAML mapping.",
+            )
+
+        cfg = load_config(config_dict)
+        df_out, layout = await asyncio.to_thread(
+            preprocess_dataframe, session.data, cfg
+        )
+
+        # Compute expansion diagnostics
+        input_cols = set(session.data.columns)
+        output_names = layout.feature_names
+        dummy_count = sum(
+            1 for name in output_names if "_" in name and name not in input_cols
+        )
+        missingness_flag_count = sum(
+            1 for name in output_names if name.endswith("_was_missing")
+        )
+        high_cardinality_encoded = [
+            col for col, cats in layout.vocab.items() if len(cats) > 20
+        ]
+
+        col_preview = list(output_names[:8])
+        if len(output_names) > 8:
+            col_preview.append(f"... +{len(output_names) - 8} more")
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "valid": True,
+                "input_rows": len(session.data),
+                "output_rows": layout.n_rows,
+                "output_feature_count": len(output_names),
+                "dummy_expansion_count": dummy_count,
+                "missingness_flag_count": missingness_flag_count,
+                "high_cardinality_encoded_columns": high_cardinality_encoded,
+                "feature_names_preview": list(col_preview),
+                "nan_remaining": 0,
+            },
+            indent=2,
+        )
+
+    except (ValueError, TypeError) as e:
+        return json.dumps(
+            {
+                "status": "error",
+                "valid": False,
+                "error": str(e),
+                "agent_action": (
+                    "Call repair_preprocessing_config(error_message=..., "
+                    "config_yaml=..., dataset_geometry=...) to fix this automatically."
+                ),
+            },
+            indent=2,
+        )
+    except Exception as e:
+        logger.error(f"Error in validate_preprocessing_config: {e}")
+        return mcp_error("validate_preprocessing_config", str(e))
 
 
 def main():
