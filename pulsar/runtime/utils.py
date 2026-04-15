@@ -52,3 +52,37 @@ def rayon_thread_override(workers: int | None):
             os.environ.pop("RAYON_NUM_THREADS", None)
         else:
             os.environ["RAYON_NUM_THREADS"] = prev
+
+
+# ---------------------------------------------------------------------------
+# Terminal Graphics Utilities
+# ---------------------------------------------------------------------------
+
+_SPARK_CHARS = "  ▂▃▄▅▆▇█"
+_BAR_FILLED = "█"
+_BAR_EMPTY = "░"
+
+
+def generate_distribution_sparkline(
+    data: list[float] | np.ndarray, bins: int = 10
+) -> str:
+    """Creates a Unicode sparkline histogram for a numeric distribution."""
+    import numpy as np
+
+    if len(data) == 0:
+        return ""
+    counts, _ = np.histogram(data, bins=bins)
+    if counts.max() == 0:
+        return _SPARK_CHARS[0] * bins
+    scaled = (counts / counts.max() * (len(_SPARK_CHARS) - 1)).astype(int)
+    return "".join(_SPARK_CHARS[i] for i in scaled)
+
+
+def generate_proportion_bar(value: float, max_value: float, length: int = 10) -> str:
+    """Creates a horizontal progress-bar style graphic for a proportion."""
+    if max_value <= 0:
+        return _BAR_EMPTY * length
+    frac = max(0.0, min(1.0, value / max_value))
+    filled_len = int(frac * length)
+    empty_len = length - filled_len
+    return (_BAR_FILLED * filled_len) + (_BAR_EMPTY * empty_len)

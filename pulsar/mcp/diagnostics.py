@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import networkx as nx
 
+from pulsar.runtime.utils import generate_distribution_sparkline
+
 if TYPE_CHECKING:
     from pulsar.pipeline import ThemaRS
 
@@ -36,6 +38,7 @@ class GraphMetrics:
     nonzero_fraction: float
     weight_p50: float
     weight_p95: float
+    weight_distribution_sparkline: str
     component_sizes: list[int]  # sorted descending — agent sees balance at a glance
 
 
@@ -78,6 +81,7 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
     nonzero_fraction = float(len(nonzero) / len(upper)) if len(upper) > 0 else 0.0
     weight_p50 = float(np.percentile(upper, 50)) if len(upper) > 0 else 0.0
     weight_p95 = float(np.percentile(upper, 95)) if len(upper) > 0 else 0.0
+    weight_dist_spark = generate_distribution_sparkline(upper) if len(upper) > 0 else ""
 
     logger.info(
         "diagnose_model: nodes=%d, edges=%d, components=%d",
@@ -99,5 +103,6 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
         nonzero_fraction=nonzero_fraction,
         weight_p50=weight_p50,
         weight_p95=weight_p95,
+        weight_distribution_sparkline=weight_dist_spark,
         component_sizes=sizes,
     )

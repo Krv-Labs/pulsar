@@ -116,6 +116,45 @@ class MCPRegistry:
             source="content",
         )
 
+    def register_dataset_from_file(
+        self,
+        filename: str,
+        path: Path,
+        *,
+        source: str,
+    ) -> DatasetRecord:
+        """Register a dataset from an existing file using streaming move (zero RAM)."""
+        import shutil
+
+        safe_name = Path(filename).name or "uploaded.csv"
+
+        # Compute hash in chunks to avoid OOM
+        sha256_hash = hashlib.sha256(source.encode("utf-8") + b"\x00")
+        with path.open("rb") as f:
+            for byte_block in iter(lambda: f.read(65536), b""):
+                sha256_hash.update(byte_block)
+
+        dataset_id = f"ds_{sha256_hash.hexdigest()[:12]}"
+        stored_path = _DATASET_FILES_DIR / f"{dataset_id}_{safe_name}"
+
+        # Move the file to the final destination (fast atomic rename on same mount)
+        shutil.move(str(path), str(stored_path))
+
+        stat = stored_path.stat()
+        record = DatasetRecord(
+            dataset_id=dataset_id,
+            path=str(stored_path),
+            name=safe_name,
+            size_bytes=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            ingested_at=time.time(),
+            source=source,
+        )
+        datasets = self._load_datasets()
+        datasets[record.dataset_id] = asdict(record)
+        self._write_json(_DATASETS_PATH, datasets)
+        return record
+
     def begin_upload(self, filename: str, media_type: str = "text/csv") -> UploadRecord:
         upload_id = f"upload_{uuid.uuid4().hex[:12]}"
         safe_name = Path(filename).name or "uploaded.csv"
@@ -145,12 +184,13 @@ class MCPRegistry:
         if record is None:
             return None
         staging_path = self._staging_path(upload_id)
-        dataset = self.register_dataset_bytes(
+        # Streaming move to avoid OOM for large files
+        dataset = self.register_dataset_from_file(
             record.filename,
-            staging_path.read_bytes(),
+            staging_path,
             source="upload",
         )
-        staging_path.unlink(missing_ok=True)
+        # register_dataset_from_file already moved the staging file
         self._upload_meta_path(upload_id).unlink(missing_ok=True)
         return dataset
 

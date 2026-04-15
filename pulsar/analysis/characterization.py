@@ -213,48 +213,70 @@ def characterize_dataset(
     )
 
 
-def _profile_columns(df: pd.DataFrame, max_sample: int = 5) -> list[ColumnProfile]:
+def _profile_columns(df: pd.DataFrame) -> list[ColumnProfile]:
+    """Generates sparse profiles for ALL columns (Map View)."""
     profiles: list[ColumnProfile] = []
     n_rows = len(df)
     for col in df.columns:
         series = df[col]
-        is_numeric = pd.api.types.is_numeric_dtype(series)
-        non_null = series.dropna()
-        n_missing = int(series.isna().sum())
-        n_unique = int(non_null.nunique())
-        sample_vals = [str(v) for v in non_null.unique()[:max_sample]]
-
-        mean = std = min_val = max_val = None
-        top_values = None
-
-        if is_numeric and len(non_null) > 0:
-            mean = round(float(non_null.mean()), 4)
-            std = round(float(non_null.std()), 4) if len(non_null) > 1 else None
-            min_val = round(float(non_null.min()), 4)
-            max_val = round(float(non_null.max()), 4)
-        elif not is_numeric:
-            vc = series.value_counts().head(5)
-            top_values = [(str(k), int(v)) for k, v in vc.items()]
-
         profiles.append(
             ColumnProfile(
                 name=col,
                 dtype=str(series.dtype),
-                is_numeric=is_numeric,
-                n_unique=n_unique,
-                n_missing=n_missing,
-                missing_pct=round(float(n_missing / n_rows * 100), 2)
+                is_numeric=pd.api.types.is_numeric_dtype(series),
+                n_unique=int(series.nunique()),
+                n_missing=int(series.isna().sum()),
+                missing_pct=round(float(series.isna().mean() * 100), 2)
                 if n_rows > 0
                 else 0.0,
-                sample_values=sample_vals,
-                mean=mean,
-                std=std,
-                min_val=min_val,
-                max_val=max_val,
-                top_values=top_values,
+                # Explicitly skip expensive fields in the global map
+                sample_values=[],
+                mean=None,
+                std=None,
+                min_val=None,
+                max_val=None,
+                top_values=None,
             )
         )
     return profiles
+
+
+def profile_column_details(df: pd.DataFrame, col: str, max_sample: int = 10) -> ColumnProfile:
+    """Generates a rich, detailed profile for a single column (Magnifying Glass)."""
+    series = df[col]
+    is_numeric = pd.api.types.is_numeric_dtype(series)
+    non_null = series.dropna()
+    n_rows = len(df)
+    n_missing = int(series.isna().sum())
+    n_unique = int(non_null.nunique())
+    sample_vals = [str(v) for v in non_null.unique()[:max_sample]]
+
+    mean = std = min_val = max_val = None
+    top_values = None
+
+    if is_numeric and len(non_null) > 0:
+        mean = round(float(non_null.mean()), 4)
+        std = round(float(non_null.std()), 4) if len(non_null) > 1 else None
+        min_val = round(float(non_null.min()), 4)
+        max_val = round(float(non_null.max()), 4)
+    elif not is_numeric:
+        vc = series.value_counts().head(10)
+        top_values = [(str(k), int(v)) for k, v in vc.items()]
+
+    return ColumnProfile(
+        name=col,
+        dtype=str(series.dtype),
+        is_numeric=is_numeric,
+        n_unique=n_unique,
+        n_missing=n_missing,
+        missing_pct=round(float(n_missing / n_rows * 100), 2) if n_rows > 0 else 0.0,
+        sample_values=sample_vals,
+        mean=mean,
+        std=std,
+        min_val=min_val,
+        max_val=max_val,
+        top_values=top_values,
+    )
 
 
 def _bounded_knn_mean(distances: np.ndarray, k: int) -> float:

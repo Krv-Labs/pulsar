@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import OrderedDict
 import dataclasses
 from dataclasses import dataclass, field
+import gc
 import json
 import logging
 import networkx as nx
@@ -34,6 +36,7 @@ from pulsar.mcp.interpreter import (
     resolve_clusters,
     build_dossier,
     dossier_to_markdown,
+    dossier_to_html,
     compare_clusters,
     comparison_to_markdown,
 )
@@ -180,42 +183,25 @@ mcp = FastMCP(
     "Pulsar",
     instructions=(
         "Reveal the dataset's topology; do not force convenient clusters.\n\n"
-        "Primary workflow:\n"
-        "1. Ingest data (ingest_dataset or ingest_dataset_base64).\n"
-        "2. create_config(dataset_id) — calibrates epsilon and PCA against the processed feature space.\n"
-        "3. validate_config(config_yaml, dataset_id).\n"
-        "4. run_topological_sweep(config_yaml, dataset_id) -> diagnose_cosmic_graph.\n"
-        "5. generate_cluster_dossier -> compare_clusters_tool.\n"
-        "6. Iterate by changing one parameter family at a time via refine_config and reading the sweep diff.\n\n"
-        "Tool routing:\n"
-        "- Host-visible absolute file: ingest_dataset(path).\n"
-        "- Small or medium upload: ingest_dataset_base64(filename, content_base64).\n"
-        "- Large upload: begin_dataset_upload -> append_dataset_chunk -> finalize_dataset_upload.\n"
-        "- After ingest, prefer dataset_id everywhere.\n\n"
-        "Calibration:\n"
-        "- create_config calibrates epsilon against the processed feature space (after preprocessing + scaling), not raw columns.\n"
-        "- create_config returns knn_distance_percentiles showing the valid epsilon domain. Epsilon outside [p5, p95] will produce degenerate graphs.\n"
-        "- suggest_initial_config is a legacy/debug tool that uses raw-space calibration only.\n\n"
-        "Multi-scale aggregation (critical):\n"
-        "- Pulsar is NOT a hyperparameter optimizer. It is a multi-scale topological aggregator.\n"
-        "- Every (PCA_dim, seed, epsilon) combination produces a ball map. ALL ball maps are fused into ONE cosmic graph via pseudo-Laplacian accumulation.\n"
-        "- More grid points = more topological evidence = better graph. A sweep with 5 PCA dims x 2 seeds x 20 epsilons = 200 ball maps fused together.\n"
-        "- The correct strategy is: cast a WIDE net on the first sweep. Only narrow if you need to investigate a specific resolution.\n"
-        "- Do NOT iterate narrow epsilon windows trying to find the 'right' value. Instead, use a wide range and let accumulation do the work.\n\n"
-        "Clustering:\n"
-        "- Edge weights are topological consensus scores: the fraction of ball maps that placed two points together.\n"
-        "- generate_cluster_dossier(method='auto') uses H0 persistent homology on edge weights to find the threshold where components are most stable (longest plateau). This is the primary clustering method.\n"
-        "- Spectral clustering is the fallback only when no stable threshold-based split exists (single-manifold data).\n"
-        "- If auto-clustering results are poor, use get_threshold_stability_curve to see the full component-count-vs-threshold curve and reason about alternative thresholds.\n"
-        "- You can override with edge_weight_threshold to manually set the consensus cutoff.\n\n"
-        "Modeling rules:\n"
-        "- Treat the cosmic graph as evidence, not a score to maximize.\n"
-        "- component_count=1 at the base graph is normal. Threshold-stability clustering will find the edge weight level where components naturally separate.\n"
-        "- Aim for graph density between 10% and 80%. Below 10% the graph is too sparse; above 80% it is too dense ('hairball').\n"
-        "- Prefer wide PCA dimension arrays and epsilon ranges over narrow ones.\n"
-        "- Respect categorical structure; do not drop categoricals just to force separation.\n\n"
-        "Environment rule:\n"
-        "- The MCP server may not share the bash sandbox filesystem. Use dataset ingest tools instead of ad hoc copying. Call get_runtime_context if path visibility is unclear.\n"
+        "### PHASE I: INGEST & CALIBRATE\n"
+        "1. Ingest: Use ingest_dataset handles. Prefer dataset_id everywhere.\n"
+        "2. Characterize: characterize_dataset(dataset_id) returns a sparse schema (types and missingness) for ALL columns. If you need to see exact string values or distributions to write a custom encoder, use probe_columns(dataset_id, ['col_name']).\n"
+        "3. Calibrate: create_config(dataset_id) is mandatory. It returns the [p5, p95] epsilon domain. EPSILON OUTSIDE THIS RANGE PRODUCES DEGENERATE GRAPHS.\n"
+        "4. Validate Config: validate_config(config_yaml, dataset_id).\n\n"
+        "### PHASE II: EXECUTE & VALIDATE\n"
+        "4. Run: run_topological_sweep.\n"
+        "5. Validate: diagnose_cosmic_graph.\n"
+        "   - GATE: If density > 0.8 or < 0.1, STOP. Refine config (Step 2).\n"
+        "   - GATE: component_count=1 is normal; do not force separation by narrowing epsilon.\n\n"
+        "### PHASE III: CONTRASTIVE INTERPRETATION\n"
+        "6. Cluster: generate_cluster_dossier.\n"
+        "7. Contrast: Perform comparative analysis. Identify the 'Pivot Feature'—the variable that most cleanly separates Cluster A from its topological neighbors. Do not name in isolation.\n"
+        "8. Report: export_html_report. CRITICAL: YOU MUST pass synthesized, highly informative 'cluster_names' based on Step 7. Names must be descriptive (e.g., 'Male Gentoos w/ Large Flippers'). Passing 'cluster_names' is the difference between a raw Data Dump and a high-impact Research Paper.\n\n"
+        "### PHILOSOPHY\n"
+        "- Pulsar is a multi-scale aggregator, not a tuner. More grid points = more topological evidence. ALL ball maps are fused into ONE cosmic graph.\n"
+        "- Wide PCA arrays and epsilon ranges are always superior to single points.\n"
+        "- The cosmic graph is evidence, not a score to maximize.\n"
+        "- Environment: MCP server may not share the bash sandbox filesystem. Use ingest tools.\n"
     ),
 )
 
@@ -240,15 +226,30 @@ class _PulsarSession:
     sweep_history: list[SweepRecord] = field(default_factory=list)
     dataset_id: str | None = None
     latest_run_id: str | None = None
+    report_exclude_columns: list[str] | None = None
+
+    def calculate_memory_mb(self) -> float:
+        """Estimate current session memory footprint in MB."""
+        bytes_total = 0
+        if self.data is not None:
+            # Deep memory usage for Pandas (captures string objects etc)
+            bytes_total += self.data.memory_usage(deep=True).sum()
+
+        if self.model is not None and self.model._weighted_adjacency is not None:
+            bytes_total += self.model._weighted_adjacency.nbytes
+
+        if self.embeddings is not None:
+            for emb in self.embeddings:
+                if hasattr(emb, "nbytes"):
+                    bytes_total += emb.nbytes
+
+        return round(float(bytes_total) / (1024 * 1024), 2)
 
 
 # Global session storage, keyed by session_id (or "default" for STDIO)
-# STDIO transport assumption: mcp.run() with no transport argument defaults to STDIO.
-# Under STDIO, each process serves exactly one client. _sessions will contain at most
-# one entry, keyed "default". If ported to SSE/WebSocket (multi-client), replace this
-# with a bounded LRU dict capped at MAX_SESSIONS.
-_sessions: dict[str, _PulsarSession] = {}
-_MAX_SESSIONS = 1
+# Using OrderedDict for LRU (Least Recently Used) eviction policy.
+_sessions: OrderedDict[str, _PulsarSession] = OrderedDict()
+_MAX_SESSIONS = int(os.environ.get("PULSAR_MAX_SESSIONS", "3"))
 
 
 def _session_key(ctx: Context | None) -> str:
@@ -259,18 +260,30 @@ def _session_key(ctx: Context | None) -> str:
 
 
 def _get_session(ctx: Context) -> _PulsarSession:
-    """Get or create session state for the current client."""
+    """Get or create session state for the current client with LRU eviction."""
     key = _session_key(ctx)
-    if key not in _sessions:
-        if len(_sessions) >= _MAX_SESSIONS:
-            logger.warning(
-                "_sessions has %d entries; expected %d under STDIO transport. "
-                "If using a multi-client transport, this server needs LRU eviction.",
-                len(_sessions),
-                _MAX_SESSIONS,
-            )
-        _sessions[key] = _PulsarSession()
-    return _sessions[key]
+
+    if key in _sessions:
+        # Move to end (mark as recently used)
+        _sessions.move_to_end(key)
+        return _sessions[key]
+
+    # Create new session
+    if len(_sessions) >= _MAX_SESSIONS:
+        # Evict oldest session
+        evicted_key, evicted_session = _sessions.popitem(last=False)
+        logger.info(
+            "Evicting oldest session '%s' to free memory (Max sessions: %d)",
+            evicted_key,
+            _MAX_SESSIONS,
+        )
+        # Cleanup
+        del evicted_session
+        gc.collect()
+
+    session = _PulsarSession()
+    _sessions[key] = session
+    return session
 
 
 def _resolve_dataset_record(dataset_id: str):
@@ -358,40 +371,6 @@ def _auto_save_config(cfg) -> str:
         f.write(config_to_yaml(cfg))
     logger.info("Config saved to %s", save_path)
     return save_path
-
-
-@mcp.tool()
-async def suggest_initial_config(dataset_geometry: str, ctx: Context) -> str:
-    """
-    Generate an initial configuration YAML based on the raw dataset geometry.
-    Deprecated: prefer create_config(dataset_id) for processed-space calibration.
-
-    Args:
-        dataset_geometry: The raw JSON string from characterize_dataset.
-
-    Returns:
-        JSON with config_yaml and calibration provenance.
-    """
-    try:
-        geo = json.loads(dataset_geometry)
-        config_yaml = _build_initial_config_yaml(
-            geo, data_path="FILL_THIS_IN_WITH_PATH", run_name="initial_sweep"
-        )
-        return json.dumps(
-            {
-                "status": "ok",
-                "config_yaml": config_yaml,
-                "calibration_space": "raw",
-                "calibration_note": (
-                    "Raw-space calibration only. Epsilon and PCA dimensions "
-                    "reflect raw numeric columns, not the processed feature space. "
-                    "Prefer create_config(dataset_id) for processed-space calibration."
-                ),
-            },
-            indent=2,
-        )
-    except Exception as e:
-        return mcp_error("suggest_initial_config", str(e))
 
 
 @mcp.tool()
@@ -1035,6 +1014,8 @@ async def run_topological_sweep(
             "status": "ok",
             "run_id": run_record.run_id,
             "metrics": current_metrics,
+            "pca_cached": precomputed is not None,
+            "memory_usage_mb": session.calculate_memory_mb(),
             "diff": diff,
             "config_yaml_normalized": current_yaml,
             "data_shape": list(session.data.shape),
@@ -1069,6 +1050,7 @@ async def generate_cluster_dossier(
     max_k: int = 15,
     edge_weight_threshold: float = 0.0,
     format: str = "json",
+    exclude_columns: list[str] | None = None,
     ctx: Context = None,
 ) -> str:
     """
@@ -1084,6 +1066,9 @@ async def generate_cluster_dossier(
             keep only the stronger half of edges).
         format: Response format. "json" (structured fields only, default),
             "markdown" (human-readable summary only), or "full" (both).
+        exclude_columns: Optional list of columns to exclude from the report.
+            This hides columns from the final dossier but does NOT affect the
+            topological modeling itself.
     """
     session = _get_session(ctx)
 
@@ -1105,8 +1090,11 @@ async def generate_cluster_dossier(
             edge_weight_threshold=edge_weight_threshold,
         )
         session.clusters = result.labels
+        session.report_exclude_columns = exclude_columns
 
-        dossier = build_dossier(session.model, session.data, result.labels)
+        dossier = build_dossier(
+            session.model, session.data, result.labels, exclude_columns=exclude_columns
+        )
 
         cluster_meta = {
             "method_used": result.method_used,
@@ -1141,7 +1129,7 @@ async def generate_cluster_dossier(
                 }
                 for cp in dossier.clusters
             ],
-            "global_stats": dossier.global_stats,
+            "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
         }
 
         if format == "json":
@@ -1151,7 +1139,8 @@ async def generate_cluster_dossier(
                     "cluster_result": cluster_meta,
                     "dossier": dossier_dict,
                 },
-                indent=2,
+                separators=(",", ":") if len(dossier.clusters) > 10 else None,
+                indent=None if len(dossier.clusters) > 10 else 2,
             )
 
         # format == "full"
@@ -1163,7 +1152,8 @@ async def generate_cluster_dossier(
                 "dossier": dossier_dict,
                 "markdown_summary": markdown,
             },
-            indent=2,
+            separators=(",", ":") if len(dossier.clusters) > 10 else None,
+            indent=None if len(dossier.clusters) > 10 else 2,
         )
 
     except Exception as e:
@@ -1639,3 +1629,109 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+@mcp.tool()
+async def export_html_report(
+    dataset_id: str = "",
+    exclude_columns: list[str] | None = None,
+    cluster_names: dict[str, str] | None = None,
+    ctx: Context = None,
+) -> str:
+    """
+    Generate a rich HTML report of the latest topological analysis.
+
+    Args:
+        dataset_id: The dataset to report on.
+        exclude_columns: Optional list of columns to exclude from the report.
+            Defaults to the exclusion list used in generate_cluster_dossier.
+        cluster_names: Optional dictionary mapping string cluster IDs to semantic names.
+            e.g. {"0": "Metabolic Syndrome Cohort", "1": "Healthy Baseline"}
+            Use this to provide LLM-generated descriptive names based on feature importance.
+            CRITICAL: The system will generate robotic fallback names (e.g. '[Auto] High X, Low Y')
+            if you do not provide this. It is YOUR responsibility as the analytical agent
+            to provide human-tractable, scientific cohort names.
+    """
+    session = _get_session(ctx)
+    if session.model is None or session.data is None:
+        return mcp_error("export_html_report", "No model found. Run run_topological_sweep first.")
+    
+    if session.clusters is None:
+        return mcp_error("export_html_report", "No clusters found. Run generate_cluster_dossier first.")
+
+    # Use explicitly passed columns, or fallback to session defaults
+    cols_to_exclude = exclude_columns if exclude_columns is not None else session.report_exclude_columns
+
+    try:
+        dossier = build_dossier(
+            session.model, session.data, session.clusters, exclude_columns=cols_to_exclude
+        )
+        
+        # Apply LLM-provided cluster names if available
+        if cluster_names:
+            for p in dossier.clusters:
+                str_id = str(p.cluster_id)
+                if str_id in cluster_names:
+                    p.semantic_name = cluster_names[str_id]
+
+        html = dossier_to_html(dossier, model=session.model)
+        
+        # Save to a file near the dataset if possible, or current dir
+        dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else "pulsar_report.html"
+        if os.path.isfile(dataset_path):
+            report_path = os.path.splitext(dataset_path)[0] + "_report.html"
+        else:
+            report_path = os.path.join(os.getcwd(), "pulsar_report.html")
+            
+        with open(report_path, "w") as f:
+            f.write(html)
+            
+        return json.dumps({
+            "status": "ok",
+            "report_path": report_path,
+            "report_url": f"file://{os.path.abspath(report_path)}",
+            "message": "HTML report exported successfully. Open the report_url in your browser."
+        }, indent=2)
+    except Exception as e:
+        return mcp_error("export_html_report", str(e))
+
+@mcp.tool()
+async def probe_columns(
+    dataset_id: str,
+    columns: list[str],
+    ctx: Context = None,
+) -> str:
+    """
+    Generate rich, detailed profiles for specific columns (Magnifying Glass).
+    Use this when you need sample values or distributions for specific columns
+    after seeing the global sparse schema from characterize_dataset.
+
+    Args:
+        dataset_id: Handle for the ingested dataset.
+        columns: List of column names to probe (max 20).
+    """
+    from pulsar.analysis.characterization import profile_column_details
+
+    if len(columns) > 20:
+        return mcp_error("probe_columns", "Too many columns requested. Max 20 at a time.")
+
+    session = _get_session(ctx)
+    if session.data is None:
+        try:
+            record = _resolve_dataset_record(dataset_id)
+            session.data = await asyncio.to_thread(pd.read_csv, record.path)
+        except Exception as e:
+            return mcp_error("probe_columns", f"Could not load data: {e}")
+
+    try:
+        profiles = []
+        for col in columns:
+            if col not in session.data.columns:
+                continue
+            profiles.append(dataclasses.asdict(profile_column_details(session.data, col)))
+        
+        return json.dumps({
+            "status": "ok",
+            "column_profiles": profiles
+        }, indent=2)
+    except Exception as e:
+        return mcp_error("probe_columns", str(e))

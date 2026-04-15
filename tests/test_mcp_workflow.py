@@ -573,32 +573,3 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert "data_shape" in result
 
 
-def test_suggest_initial_config_returns_json():
-    """suggest_initial_config should return JSON with calibration_space: raw."""
-    geo = json.dumps(
-        {
-            "n_samples": 100,
-            "n_features": 5,
-            "knn_k5_mean": 1.5,
-            "pca_cumulative_variance": [[2, 0.7], [3, 0.85], [5, 0.95]],
-            "column_profiles": [
-                {
-                    "name": f"f{i}",
-                    "dtype": "float64",
-                    "is_numeric": True,
-                    "n_unique": 100,
-                    "n_missing": 0,
-                    "missing_pct": 0.0,
-                    "sample_values": ["1.0", "2.0"],
-                }
-                for i in range(5)
-            ],
-        }
-    )
-
-    result = json.loads(asyncio.run(server.suggest_initial_config(geo, ctx=None)))
-
-    assert result["status"] == "ok"
-    assert result["calibration_space"] == "raw"
-    assert "config_yaml" in result
-    assert "calibration_note" in result
