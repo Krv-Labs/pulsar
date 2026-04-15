@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
+import numpy as np
+
 # Approximate wall-clock fraction per pipeline stage (estimates, not guarantees).
 # Order matters — stages are consumed sequentially by a cursor.
 # PCA weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
@@ -67,8 +69,6 @@ def generate_distribution_sparkline(
     data: list[float] | np.ndarray, bins: int = 10
 ) -> str:
     """Creates a Unicode sparkline histogram for a numeric distribution."""
-    import numpy as np
-
     if len(data) == 0:
         return ""
     counts, _ = np.histogram(data, bins=bins)
