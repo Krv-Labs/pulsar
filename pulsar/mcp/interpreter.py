@@ -36,7 +36,7 @@ _MAX_SINGLETON_RATIO = 0.5  # Reject if >50% of nodes are singletons
 _SPECTRAL_K_MIN = 2
 _SPECTRAL_K_MAX = 20
 _MAX_SIGNAL_MATRIX_NUMERIC = 10
-_MAX_SIGNAL_MATRIX_CATEGORICAL = 6
+_MAX_SIGNAL_MATRIX_CATEGORICAL = 5
 
 
 @dataclass
@@ -973,7 +973,7 @@ def _render_report_styles() -> str:
       overflow-x: auto;
       border-radius: var(--radius-lg);
       background: var(--surface);
-      padding: 8px 0;
+      padding: 4px 0;
       min-width: 0;
       max-width: 100%;
     }
@@ -989,7 +989,7 @@ def _render_report_styles() -> str:
     .heatmap-table td,
     .data-table th,
     .data-table td {
-      padding: 12px 14px;
+      padding: 8px 10px;
       border-bottom: 1px solid var(--hairline);
       text-align: left;
       vertical-align: top;
@@ -997,9 +997,9 @@ def _render_report_styles() -> str:
 
     .heatmap-table th,
     .data-table th {
-      font-size: 0.73rem;
+      font-size: 0.68rem;
       text-transform: uppercase;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.1em;
       color: var(--muted);
       font-weight: 600;
     }
@@ -1011,7 +1011,7 @@ def _render_report_styles() -> str:
 
     .heatmap-table td:first-child,
     .heatmap-table th:first-child {
-      min-width: 14rem;
+      min-width: 12.5rem;
     }
 
     .heat-cell {
@@ -1022,17 +1022,19 @@ def _render_report_styles() -> str:
     .heat-value {
       display: block;
       font-family: var(--font-sans);
-      font-size: 0.88rem;
+      font-size: 0.8rem;
       color: var(--ink);
       font-weight: 500;
+      line-height: 1.15;
     }
 
     .heat-subvalue {
       display: block;
-      margin-top: 4px;
-      font-size: 0.72rem;
+      margin-top: 2px;
+      font-size: 0.64rem;
       color: var(--muted);
       letter-spacing: 0.01em;
+      line-height: 1.15;
     }
 
     .heat-positive {
@@ -1619,7 +1621,7 @@ def _render_topology_section(
 def _render_heatmap_section(dossier: TopologicalDossier) -> str:
     """Render a bounded cohort signal matrix with numeric and categorical groups."""
     numeric_scores: dict[str, float] = {}
-    categorical_scores: dict[tuple[str, str], float] = {}
+    categorical_scores: dict[str, float] = {}
 
     for profile in dossier.clusters:
         for feature in profile.numeric_features:
@@ -1627,9 +1629,14 @@ def _render_heatmap_section(dossier: TopologicalDossier) -> str:
                 feature["column"], 0.0
             ) + abs(float(feature.get("z_score", 0.0)))
         for feature in profile.categorical_features:
-            key = (str(feature["column"]), str(feature["value"]))
-            categorical_scores[key] = categorical_scores.get(key, 0.0) + float(
+            column_name = str(feature["column"])
+            prevalence = float(
                 feature.get("in_cluster_prevalence", feature.get("concentration", 0.0))
+            )
+            global_recall = float(feature.get("global_recall", 0.0))
+            score = prevalence + (0.25 * global_recall)
+            categorical_scores[column_name] = (
+                categorical_scores.get(column_name, 0.0) + score
             )
 
     numeric_features = [
@@ -1638,15 +1645,15 @@ def _render_heatmap_section(dossier: TopologicalDossier) -> str:
             numeric_scores.items(), key=lambda item: (-item[1], item[0])
         )[:_MAX_SIGNAL_MATRIX_NUMERIC]
     ]
-    categorical_features = [
-        key
-        for key, _score in sorted(
+    categorical_columns = [
+        name
+        for name, _score in sorted(
             categorical_scores.items(),
-            key=lambda item: (-item[1], item[0][0], item[0][1]),
+            key=lambda item: (-item[1], item[0]),
         )[:_MAX_SIGNAL_MATRIX_CATEGORICAL]
     ]
 
-    if not numeric_features and not categorical_features:
+    if not numeric_features and not categorical_columns:
         return ""
 
     parts = [
@@ -1656,7 +1663,7 @@ def _render_heatmap_section(dossier: TopologicalDossier) -> str:
         "<span class='section-eyebrow'>Figure 2</span>",
         "<h2>Cohort signal matrix</h2>",
         "</div>",
-        f"<p class='section-subtitle'>Bounded for readability: up to {_MAX_SIGNAL_MATRIX_NUMERIC} numeric features and {_MAX_SIGNAL_MATRIX_CATEGORICAL} categorical signals. Numeric values are cohort means, and the smaller line below each numeric value is the z-shift.</p>",
+        f"<p class='section-subtitle'>Bounded for readability: up to {_MAX_SIGNAL_MATRIX_NUMERIC} numeric features and {_MAX_SIGNAL_MATRIX_CATEGORICAL} categorical columns. Numeric values are cohort means, and the smaller line below each numeric value is the z-shift.</p>",
         "</div>",
         "<div class='heatmap-shell'>",
         "<table class='heatmap-table'><thead>",
@@ -1665,15 +1672,15 @@ def _render_heatmap_section(dossier: TopologicalDossier) -> str:
     ]
     if numeric_features:
         parts.append(f"<th colspan='{len(numeric_features)}'>Numeric means</th>")
-    if categorical_features:
+    if categorical_columns:
         parts.append(
-            f"<th colspan='{len(categorical_features)}'>Categorical prevalence</th>"
+            f"<th colspan='{len(categorical_columns)}'>Dominant categories</th>"
         )
     parts.append("</tr><tr>")
     for feature_name in numeric_features:
         parts.append(f"<th>{_escape_html(feature_name)}</th>")
-    for column_name, value in categorical_features:
-        parts.append(f"<th>{_escape_html(column_name)}={_escape_html(value)}</th>")
+    for column_name in categorical_columns:
+        parts.append(f"<th>{_escape_html(column_name)}</th>")
     parts.append("</tr></thead><tbody>")
     for profile in dossier.clusters:
         parts.append(
@@ -1710,28 +1717,48 @@ def _render_heatmap_section(dossier: TopologicalDossier) -> str:
                 f"<span class='heat-subvalue'>z {z_score:+.2f}</span>"
                 "</td>"
             )
-        categorical_map = {
-            (str(feature["column"]), str(feature["value"])): feature
-            for feature in profile.categorical_features
-        }
-        for key in categorical_features:
-            feature = categorical_map.get(key)
-            prevalence = (
-                float(
-                    feature.get(
-                        "in_cluster_prevalence", feature.get("concentration", 0.0)
-                    )
+        categorical_map: dict[str, list[dict[str, Any]]] = {}
+        for feature in profile.categorical_features:
+            categorical_map.setdefault(str(feature["column"]), []).append(feature)
+        for column_name in categorical_columns:
+            column_features = categorical_map.get(column_name, [])
+            if not column_features:
+                parts.append(
+                    "<td class='heat-cell'>"
+                    "<span class='heat-value'>—</span>"
+                    "<span class='heat-subvalue'>no match</span>"
+                    "</td>"
                 )
-                if feature is not None
-                else 0.0
+                continue
+            feature = max(
+                column_features,
+                key=lambda item: (
+                    float(
+                        item.get(
+                            "in_cluster_prevalence", item.get("concentration", 0.0)
+                        )
+                    ),
+                    int(item.get("count", 0)),
+                ),
             )
-            count = int(feature.get("count", 0)) if feature is not None else 0
+            prevalence = float(
+                feature.get("in_cluster_prevalence", feature.get("concentration", 0.0))
+            )
+            count = int(feature.get("count", 0))
+            if count <= 0 or prevalence <= 0:
+                parts.append(
+                    "<td class='heat-cell'>"
+                    "<span class='heat-value'>—</span>"
+                    "<span class='heat-subvalue'>no match</span>"
+                    "</td>"
+                )
+                continue
             alpha = min(0.38, prevalence * 0.0038)
             tone_class = "heat-positive" if prevalence >= 50.0 else ""
             style = f" style='--heat-alpha:{alpha:.2f}'" if prevalence > 0 else ""
             parts.append(
                 f"<td class='heat-cell {tone_class}'{style}>"
-                f"<span class='heat-value'>{_escape_html(key[1])}</span>"
+                f"<span class='heat-value'>{_escape_html(feature['value'])}</span>"
                 f"<span class='heat-subvalue'>{count}/{profile.size} · {prevalence:.1f}%</span>"
                 "</td>"
             )

@@ -40,6 +40,16 @@ def _sample_dossier() -> TopologicalDossier:
             ],
             categorical_features=[
                 {
+                    "column": "sex",
+                    "value": "female",
+                    "count": 12,
+                    "concentration": 100.0,
+                    "in_cluster_prevalence": 100.0,
+                    "global_recall": 80.0,
+                    "cluster_size": 12,
+                    "global_count": 15,
+                },
+                {
                     "column": "species",
                     "value": "<img src=x onerror=alert(1)>",
                     "count": 8,
@@ -48,7 +58,7 @@ def _sample_dossier() -> TopologicalDossier:
                     "global_recall": 88.0,
                     "cluster_size": 8,
                     "global_count": 9,
-                }
+                },
             ],
             central_rows=[
                 {"unsafe_value": "<b>bold</b>", 'quoted"field': "x & y"},
@@ -70,7 +80,18 @@ def _sample_dossier() -> TopologicalDossier:
                     "sparkline": "█▇▅▃▁",
                 }
             ],
-            categorical_features=[],
+            categorical_features=[
+                {
+                    "column": "sex",
+                    "value": "male",
+                    "count": 7,
+                    "concentration": 87.5,
+                    "in_cluster_prevalence": 87.5,
+                    "global_recall": 70.0,
+                    "cluster_size": 8,
+                    "global_count": 10,
+                }
+            ],
             central_rows=[{"stable": "row"}],
         ),
     ]
@@ -116,7 +137,7 @@ def test_dossier_to_html_renders_research_report_shell_and_graph_state():
     assert "class='report-shell'" in html
     assert "Cohort signal matrix" in html
     assert "Numeric means" in html
-    assert "Categorical prevalence" in html
+    assert "Dominant categories" in html
     assert "z +" in html or "z -" in html
     assert "Quick links" in html
     assert "C00 —" in html
@@ -131,6 +152,10 @@ def test_dossier_to_html_renders_research_report_shell_and_graph_state():
     assert "paramsYaml" in html
     assert "name: demo" in html
     assert "&lt;img src=x onerror=alert(1)&gt;" in html
+    assert "no match" in html
+    assert "<th>sex</th>" in html
+    assert "female" in html
+    assert "male" in html
 
 
 def test_build_dossier_reports_prevalence_and_global_recall_for_categories():
