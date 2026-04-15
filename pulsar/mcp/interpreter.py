@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass, field
+from html import escape
 from typing import Any, Dict, List
 
 import numpy as np
@@ -21,7 +22,10 @@ from sklearn.metrics import silhouette_score
 
 from pulsar._pulsar import find_stable_thresholds
 from pulsar.pipeline import ThemaRS
-from pulsar.runtime.utils import generate_distribution_sparkline, generate_proportion_bar
+from pulsar.runtime.utils import (
+    generate_distribution_sparkline,
+    generate_proportion_bar,
+)
 from pulsar.mcp.diagnostics import diagnose_model
 
 logger = logging.getLogger(__name__)
@@ -80,9 +84,10 @@ def resolve_clusters(
     W = model.weighted_adjacency
     n = W.shape[0]
 
-    # 1. Component Strategy (if very obvious gaps)
-    if edge_weight_threshold > 0:
-        adj = (W > edge_weight_threshold).astype(np.int64)
+    # 1. Component Strategy
+    if method == "components" or edge_weight_threshold > 0:
+        thresh = edge_weight_threshold if edge_weight_threshold > 0 else 0.0
+        adj = (W > thresh).astype(np.int64)
         G = nx.from_numpy_array(adj)
         labels = np.zeros(n, dtype=int)
         comps = list(nx.connected_components(G))
@@ -95,7 +100,7 @@ def resolve_clusters(
             n_clusters=len(comps),
             silhouette_score=None,
             failure_reason=None,
-            edge_weight_threshold_applied=edge_weight_threshold,
+            edge_weight_threshold_applied=thresh,
         )
 
     # 2. Threshold Stability (PH-based)
@@ -106,6 +111,9 @@ def resolve_clusters(
 
     # 3. Spectral Fallback
     if method in ("auto", "spectral"):
+        if method == "spectral":
+            # Explicit spectral request — let errors propagate to the caller.
+            return _cluster_spectral(W, n, max_k)
         try:
             return _cluster_spectral(W, n, max_k)
         except Exception as e:
@@ -167,6 +175,13 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
 
 def _cluster_spectral(adj: np.ndarray, n: int, max_k: int) -> ClusterResult:
     """Fall back to spectral clustering if no stable threshold split exists."""
+    G = nx.from_numpy_array((adj > 0).astype(np.int64))
+    if not nx.is_connected(G):
+        raise ValueError(
+            "Graph is disconnected — spectral clustering requires a connected affinity graph. "
+            "Use method='components' or increase epsilon to connect the graph."
+        )
+
     # Distance = 1 - Affinity
     affinity = adj.copy()
     np.fill_diagonal(affinity, 1.0)
@@ -213,11 +228,16 @@ def _cluster_spectral(adj: np.ndarray, n: int, max_k: int) -> ClusterResult:
 
 
 def build_dossier(
-    model: ThemaRS, data: pd.DataFrame, clusters: pd.Series, exclude_columns: list[str] | None = None
+    model: ThemaRS,
+    data: pd.DataFrame,
+    clusters: pd.Series,
+    exclude_columns: list[str] | None = None,
 ) -> TopologicalDossier:
     """Computes per-cluster statistical profiles."""
     if len(clusters) != len(data):
-        raise ValueError(f"Alignment error: clusters({len(clusters)}) != data({len(data)})")
+        raise ValueError(
+            f"Alignment error: clusters({len(clusters)}) != data({len(data)})"
+        )
 
     if exclude_columns:
         to_drop = [c for c in exclude_columns if c in data.columns]
@@ -240,7 +260,9 @@ def build_dossier(
         c_size = len(c_data)
         c_means = c_data[numeric_cols].mean()
 
-        profile = ClusterProfile(cluster_id=int(cid), size=c_size, size_pct=(c_size / n_total) * 100)
+        profile = ClusterProfile(
+            cluster_id=int(cid), size=c_size, size_pct=(c_size / n_total) * 100
+        )
         c_numeric = []
         for col in numeric_cols:
             c_mean = c_means[col]
@@ -251,24 +273,46 @@ def build_dossier(
             importance = abs(z_score) / (homogeneity + 0.1)
             spark = generate_distribution_sparkline(c_data[col].dropna())
 
-            c_numeric.append({
-                "column": col, "mean": float(c_mean), "global_mean": float(g_mean),
-                "z_score": float(z_score), "homogeneity": float(homogeneity),
-                "importance": float(importance), "sparkline": spark
-            })
+            c_numeric.append(
+                {
+                    "column": col,
+                    "mean": float(c_mean),
+                    "global_mean": float(g_mean),
+                    "z_score": float(z_score),
+                    "homogeneity": float(homogeneity),
+                    "importance": float(importance),
+                    "sparkline": spark,
+                }
+            )
 
-        profile.numeric_features = sorted(c_numeric, key=lambda x: x["importance"], reverse=True)[:10]
+        profile.numeric_features = sorted(
+            c_numeric, key=lambda x: x["importance"], reverse=True
+        )[:10]
 
         # Semantic Naming (Fallbacks)
         if len(profile.numeric_features) >= 2:
             f1, f2 = profile.numeric_features[0], profile.numeric_features[1]
+
             def desc(f):
-                adj = "High" if f["z_score"] > 0.5 else "Low" if f["z_score"] < -0.5 else "Normal"
+                adj = (
+                    "High"
+                    if f["z_score"] > 0.5
+                    else "Low"
+                    if f["z_score"] < -0.5
+                    else "Normal"
+                )
                 return f"{adj} {f['column']}"
+
             profile.semantic_name = f"[Auto] {desc(f1)}, {desc(f2)}"
         elif len(profile.numeric_features) == 1:
             f1 = profile.numeric_features[0]
-            adj = "High" if f1["z_score"] > 0.5 else "Low" if f1["z_score"] < -0.5 else "Normal"
+            adj = (
+                "High"
+                if f1["z_score"] > 0.5
+                else "Low"
+                if f1["z_score"] < -0.5
+                else "Normal"
+            )
             profile.semantic_name = f"[Auto] {adj} {f1['column']}"
         else:
             profile.semantic_name = f"Cluster {cid}"
@@ -280,10 +324,17 @@ def build_dossier(
             global_counts = data[col].value_counts()
             for val, count in counts.head(5).items():
                 concentration = (count / global_counts[val]) * 100
-                c_categorical.append({
-                    "column": col, "value": str(val), "count": int(count), "concentration": float(concentration)
-                })
-        profile.categorical_features = sorted(c_categorical, key=lambda x: x["concentration"], reverse=True)[:10]
+                c_categorical.append(
+                    {
+                        "column": col,
+                        "value": str(val),
+                        "count": int(count),
+                        "concentration": float(concentration),
+                    }
+                )
+        profile.categorical_features = sorted(
+            c_categorical, key=lambda x: x["concentration"], reverse=True
+        )[:10]
 
         # Central Rows (Compressed)
         try:
@@ -295,8 +346,12 @@ def build_dossier(
                 top_cols = [f["column"] for f in profile.numeric_features[:10]]
                 if profile.categorical_features:
                     top_cols += [f["column"] for f in profile.categorical_features[:5]]
-                top_cols = list(set(top_cols)) if top_cols else data.columns[:10].tolist()
-                profile.central_rows = data.iloc[central_ids][top_cols].to_dict("records")
+                top_cols = (
+                    list(set(top_cols)) if top_cols else data.columns[:10].tolist()
+                )
+                profile.central_rows = data.iloc[central_ids][top_cols].to_dict(
+                    "records"
+                )
         except Exception:
             top_cols = [f["column"] for f in profile.numeric_features[:10]]
             top_cols = list(set(top_cols)) if top_cols else data.columns[:10].tolist()
@@ -306,22 +361,954 @@ def build_dossier(
 
     try:
         from dataclasses import asdict
+
         graph_metrics = asdict(diagnose_model(model))
     except Exception:
         graph_metrics = {}
 
     return TopologicalDossier(
-        n_total=n_total, n_clusters=n_clusters, clusters=cluster_profiles,
-        global_stats={"numeric": global_means.to_dict(), "columns": data.columns.tolist(), "graph_metrics": graph_metrics},
-        cluster_labels=clusters
+        n_total=n_total,
+        n_clusters=n_clusters,
+        clusters=cluster_profiles,
+        global_stats={
+            "numeric": global_means.to_dict(),
+            "columns": data.columns.tolist(),
+            "graph_metrics": graph_metrics,
+        },
+        cluster_labels=clusters,
     )
 
 
-def _generate_cosmic_graph_svg(model: ThemaRS, width: int = 800, height: int = 400, cluster_labels: pd.Series | None = None) -> str:
-    """Generates an optimized Google Research style SVG with topological coverage sampling."""
+def _escape_html(value: Any) -> str:
+    """Escape arbitrary content before inserting it into HTML."""
+    if value is None:
+        return ""
+    return escape(str(value), quote=True)
+
+
+def _format_value(value: Any, digits: int = 3) -> str:
+    """Format scalar values consistently for report display."""
+    if value is None:
+        return "N/A"
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}"
+    if isinstance(value, (float, np.floating)):
+        if np.isnan(value):
+            return "NaN"
+        return f"{float(value):.{digits}f}"
+    return str(value)
+
+
+def _signal_tone(z_score: float) -> tuple[str, str]:
+    """Return semantic label and CSS class for a z-score."""
+    if z_score > 1.0:
+        return "Enriched", "signal-pos"
+    if z_score < -1.0:
+        return "Depleted", "signal-neg"
+    return "Baseline", "signal-neu"
+
+
+def _cluster_palette(clusters: List[ClusterProfile]) -> dict[int, str]:
+    """Muted palette for cohort accents in figures and cards."""
+    colors = [
+        "#1a73e8",
+        "#669df6",
+        "#147d64",
+        "#8ab4f8",
+        "#f29900",
+        "#5f6368",
+        "#00acc1",
+        "#7baaf7",
+        "#c58a00",
+        "#7c8b95",
+    ]
+    return {
+        profile.cluster_id: colors[i % len(colors)]
+        for i, profile in enumerate(clusters)
+    }
+
+
+def _cluster_trait_summary(profile: ClusterProfile) -> str:
+    """Create a short textual summary for overview cards."""
+    fragments = []
+    for feature in profile.numeric_features[:3]:
+        direction = (
+            "high"
+            if feature["z_score"] > 0.5
+            else "low"
+            if feature["z_score"] < -0.5
+            else "stable"
+        )
+        fragments.append(f"{direction} {feature['column']}")
+    return ", ".join(fragments) if fragments else "No dominant numeric signal captured."
+
+
+def _build_key_findings(
+    dossier: TopologicalDossier, gm: Dict[str, Any]
+) -> list[tuple[str, str]]:
+    """Generate concise top-level findings for the hero panel."""
+    findings: list[tuple[str, str]] = []
+    if dossier.clusters:
+        dominant = max(dossier.clusters, key=lambda profile: profile.size)
+        findings.append(
+            (
+                "Largest cohort",
+                f"{dominant.semantic_name} accounts for {dominant.size_pct:.1f}% of the population.",
+            )
+        )
+
+        strongest_feature = None
+        strongest_cluster = None
+        strongest_score = -1.0
+        for profile in dossier.clusters:
+            for feature in profile.numeric_features:
+                score = abs(float(feature["z_score"]))
+                if score > strongest_score:
+                    strongest_feature = feature
+                    strongest_cluster = profile
+                    strongest_score = score
+        if strongest_feature is not None and strongest_cluster is not None:
+            findings.append(
+                (
+                    "Sharpest shift",
+                    f"{strongest_cluster.semantic_name} shows the strongest deviation on "
+                    f"{strongest_feature['column']} ({strongest_feature['z_score']:+.2f} z).",
+                )
+            )
+
+    if gm:
+        findings.append(
+            (
+                "Topology footprint",
+                f"{gm.get('component_count', 'N/A')} stable components across "
+                f"{gm.get('n_nodes', 'N/A')} graph nodes and {gm.get('n_edges', 'N/A')} edges.",
+            )
+        )
+    return findings[:3]
+
+
+def _render_report_styles() -> str:
+    """Return the standalone report CSS."""
+    return """
+    :root {
+      --bg: #ffffff;
+      --surface: #f8f9fa;
+      --surface-strong: #f1f3f4;
+      --ink: #1f1f1f;
+      --muted: #5f6368;
+      --border: rgba(60, 64, 67, 0.14);
+      --hairline: rgba(60, 64, 67, 0.10);
+      --accent: #1a73e8;
+      --accent-soft: rgba(26, 115, 232, 0.08);
+      --positive: #147d64;
+      --negative: #c2482b;
+      --neutral: #6b7280;
+      --radius-lg: 18px;
+      --radius-md: 12px;
+      --radius-sm: 999px;
+      --font-sans: "Avenir Next", "Segoe UI Variable", "Helvetica Neue", "Nimbus Sans", sans-serif;
+      --font-mono: "SFMono-Regular", "JetBrains Mono", "Cascadia Code", "Menlo", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: var(--font-sans);
+      line-height: 1.62;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .report-shell {
+      min-height: 100vh;
+    }
+
+    .report-nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      padding: 1rem 0;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid rgba(60, 64, 67, 0.08);
+    }
+
+    .report-nav__inner,
+    .report-main {
+      width: min(100%, 1120px);
+      margin: 0 auto;
+      padding-left: 40px;
+      padding-right: 40px;
+    }
+
+    .report-nav__inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1.25rem;
+    }
+
+    .report-nav__brand {
+      display: flex;
+      align-items: baseline;
+      gap: 0.9rem;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      font-size: 0.72rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .report-nav h1 {
+      margin: 0;
+      font-size: 0.98rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+    }
+
+    .report-nav p,
+    .section-subtitle,
+    .hero-copy p,
+    .figure-caption,
+    .finding-card p,
+    .cluster-card__summary,
+    .cluster-card__meta,
+    .panel-note,
+    .instance-card,
+    .cluster-section__summary,
+    .hero-list li,
+    .cluster-lede,
+    .overview-note {
+      color: var(--muted);
+    }
+
+    .report-nav nav {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .nav-label {
+      color: var(--muted);
+      margin-right: 0.25rem;
+    }
+
+    .nav-link {
+      padding: 0.45rem 0.75rem;
+      border-radius: var(--radius-sm);
+      color: var(--muted);
+      font-size: 0.92rem;
+      font-weight: 500;
+      transition: color 0.18s ease, background-color 0.18s ease;
+      white-space: nowrap;
+    }
+
+    .nav-link:hover,
+    .nav-link:focus-visible {
+      outline: none;
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .nav-link.is-active {
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .report-nav__footer {
+      display: none;
+    }
+
+    .report-main {
+      padding-top: 52px;
+      padding-bottom: 96px;
+    }
+
+    .report-stack {
+      max-width: 780px;
+      margin: 0 auto;
+      display: grid;
+      gap: 64px;
+    }
+
+    .report-section {
+      scroll-margin-top: 100px;
+    }
+
+    .section-eyebrow {
+      display: inline-block;
+      font-size: 0.72rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .hero-grid {
+      display: grid;
+      gap: 22px;
+    }
+
+    .hero-copy h2 {
+      margin: 10px 0 14px;
+      font-size: clamp(2.7rem, 8vw, 4.8rem);
+      line-height: 0.98;
+      letter-spacing: -0.045em;
+      font-weight: 750;
+    }
+
+    .hero-copy p {
+      font-size: 1.08rem;
+      margin: 0;
+    }
+
+    .hero-panel {
+      background: var(--surface);
+      border-radius: var(--radius-lg);
+      padding: 18px 20px;
+    }
+
+    .hero-metrics {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 12px;
+    }
+
+    .metric-card {
+      padding: 14px 0 16px;
+      border-bottom: 1px solid var(--hairline);
+    }
+
+    .metric-value {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .metric-label {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 600;
+    }
+
+    .findings-grid {
+      margin-top: 8px;
+    }
+
+    .hero-list {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .hero-list strong {
+      color: var(--ink);
+    }
+
+    .section-header {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 22px;
+    }
+
+    .section-header h2,
+    .cluster-section__heading h2 {
+      margin: 0;
+      font-size: clamp(1.65rem, 4vw, 2.35rem);
+      line-height: 1.04;
+      letter-spacing: -0.035em;
+      font-weight: 720;
+    }
+
+    .figure-frame {
+      margin: 0;
+      padding: 18px 18px 14px;
+      background: var(--surface);
+      border-radius: var(--radius-lg);
+    }
+
+    .figure-toolbar {
+      display: grid;
+      gap: 12px;
+      justify-content: start;
+      margin-bottom: 14px;
+    }
+
+    .figure-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .figure-subtitle {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .legend-chip,
+    .trait-chip,
+    .detail-chip,
+    .signal-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .legend-chip {
+      padding: 0;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .legend-chip::before,
+    .detail-dot {
+      content: "";
+      width: 0.65rem;
+      height: 0.65rem;
+      border-radius: 999px;
+      background: var(--cluster-accent, var(--accent));
+      flex: 0 0 auto;
+    }
+
+    .figure-caption {
+      margin: 14px auto 0;
+      max-width: 640px;
+      font-size: 0.9rem;
+      text-align: center;
+    }
+
+    .figure-caption strong {
+      color: var(--ink);
+    }
+
+    .graph-wrapper svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: transparent;
+    }
+
+    .search-shell {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    .cluster-search {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      border: none;
+      background: var(--surface);
+      color: var(--ink);
+      font: inherit;
+    }
+
+    .cluster-search:focus-visible {
+      outline: 2px solid rgba(37, 99, 235, 0.16);
+    }
+
+    .cluster-grid {
+      display: grid;
+      gap: 0;
+    }
+
+    .cluster-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      padding: 18px 0;
+      color: inherit;
+      border-bottom: 1px solid var(--hairline);
+      transition: color 0.18s ease, background-color 0.18s ease;
+    }
+
+    .cluster-card:hover,
+    .cluster-card:focus-visible {
+      outline: none;
+      color: var(--accent);
+      background: linear-gradient(90deg, rgba(248, 249, 250, 0.95), rgba(248, 249, 250, 0));
+    }
+
+    .cluster-card__topline,
+    .cluster-section__topline {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    .cluster-id {
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .cluster-share {
+      font: 600 0.95rem/1 var(--font-mono);
+      color: var(--ink);
+    }
+
+    .cluster-card h3,
+    .cluster-section__heading h2 {
+      margin: 0;
+    }
+
+    .cluster-card h3 {
+      font-size: 1.22rem;
+      line-height: 1.12;
+      letter-spacing: -0.02em;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .cluster-card__summary {
+      margin: 8px 0 12px;
+      font-size: 0.95rem;
+    }
+
+    .bar-track {
+      width: 100%;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(95, 99, 104, 0.12);
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: inherit;
+      background: var(--cluster-accent, var(--accent));
+    }
+
+    .cluster-card__traits,
+    .cluster-section__traits,
+    .instance-details {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .trait-chip,
+    .detail-chip {
+      padding: 0;
+      background: transparent;
+      color: var(--ink);
+      font-size: 0.84rem;
+    }
+
+    .detail-chip strong {
+      font-weight: 700;
+    }
+
+    .heatmap-shell {
+      overflow-x: auto;
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      padding: 8px 0;
+    }
+
+    .heatmap-table,
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 42rem;
+    }
+
+    .heatmap-table th,
+    .heatmap-table td,
+    .data-table th,
+    .data-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--hairline);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .heatmap-table th,
+    .data-table th {
+      font-size: 0.73rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .heatmap-table tbody tr:last-child td,
+    .data-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .heatmap-table td:first-child,
+    .heatmap-table th:first-child {
+      min-width: 14rem;
+    }
+
+    .heat-cell {
+      text-align: center;
+      font-family: var(--font-mono);
+      font-size: 0.86rem;
+      white-space: nowrap;
+    }
+
+    .heat-positive {
+      background: rgba(20, 125, 100, var(--heat-alpha, 0));
+    }
+
+    .heat-negative {
+      background: rgba(242, 153, 0, var(--heat-alpha, 0));
+    }
+
+    .cluster-section {
+      padding-top: 6px;
+      border-top: 1px solid var(--hairline);
+    }
+
+    .cluster-section__heading {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+
+    .cluster-section__summary {
+      margin: 0;
+      font-size: 1rem;
+      max-width: 700px;
+    }
+
+    .cluster-lede {
+      font-size: 1rem;
+      margin: 0;
+    }
+
+    .overview-note {
+      margin: 0;
+      font-size: 1rem;
+    }
+
+    .cluster-detail-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 26px;
+      align-items: start;
+    }
+
+    .cluster-secondary-stack {
+      display: grid;
+      gap: 26px;
+    }
+
+    .panel {
+      padding: 0;
+    }
+
+    .panel h3 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      line-height: 1.25;
+      letter-spacing: -0.01em;
+      font-weight: 700;
+    }
+
+    .panel-note {
+      margin: 0 0 12px;
+      font-size: 0.9rem;
+    }
+
+    .data-table {
+      min-width: 100%;
+    }
+
+    .sparkline {
+      font-family: var(--font-mono);
+      color: var(--accent);
+      font-size: 1.1rem;
+      letter-spacing: -0.08em;
+    }
+
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.86em;
+      color: var(--ink);
+      background: var(--surface);
+      padding: 0.16rem 0.38rem;
+      border-radius: 0.45rem;
+    }
+
+    .signal-badge {
+      padding: 0.34rem 0.62rem;
+      background: transparent;
+    }
+
+    .signal-pos {
+      color: var(--positive);
+    }
+
+    .signal-neg {
+      color: var(--negative);
+    }
+
+    .signal-neu {
+      color: var(--neutral);
+    }
+
+    .instances-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .instance-card {
+      padding: 14px 16px;
+      background: var(--surface);
+      border-radius: var(--radius-md);
+    }
+
+    .instance-label {
+      margin-bottom: 10px;
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .empty-state {
+      padding: 14px 16px;
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    @media (max-width: 1080px) {
+      .hero-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 720px) {
+      .report-nav__inner,
+      .report-main {
+        padding-left: 20px;
+        padding-right: 20px;
+      }
+
+      .report-nav__inner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .report-main {
+        padding-top: 32px;
+        padding-bottom: 64px;
+      }
+
+      .hero-copy h2 {
+        font-size: 2.55rem;
+      }
+
+      .hero-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .cluster-card {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+    }
+    """
+
+
+def _render_report_script() -> str:
+    """Return the standalone report JS."""
+    return """
+    window.addEventListener('DOMContentLoaded', () => {
+      const navLinks = Array.from(document.querySelectorAll('.nav-link'));
+      const sections = Array.from(document.querySelectorAll('.report-section[id], .cluster-section[id]'));
+
+      const setActiveNav = (id) => {
+        navLinks.forEach((link) => {
+          link.classList.toggle('is-active', link.getAttribute('href') === `#${id}`);
+        });
+      };
+
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const id = entry.target.getAttribute('id');
+            if (id) setActiveNav(id);
+          }
+        });
+      }, { rootMargin: '-20% 0px -65% 0px', threshold: 0.05 });
+
+      sections.forEach((section) => observer.observe(section));
+
+      const resetGraphNodes = () => {
+        document.querySelectorAll('.graph-node').forEach((node) => {
+          node.setAttribute('fill-opacity', node.dataset.baseOpacity || '0.78');
+          node.setAttribute('r', node.dataset.baseRadius || '2');
+          node.setAttribute('fill', node.dataset.baseFill || '#2563eb');
+          node.removeAttribute('stroke');
+          node.removeAttribute('stroke-width');
+        });
+      };
+
+      const highlightCluster = (clusterId) => {
+        document.querySelectorAll('.graph-node').forEach((node) => {
+          const isMatch = node.dataset.cluster === clusterId;
+          if (isMatch) {
+            node.setAttribute('fill-opacity', '1');
+            node.setAttribute('r', String(Math.max(Number(node.dataset.baseRadius || '2'), 4.4)));
+            node.setAttribute('stroke', node.dataset.baseFill || '#2563eb');
+            node.setAttribute('stroke-width', '1.1');
+          } else {
+            node.setAttribute('fill-opacity', '0.12');
+          }
+        });
+      };
+
+      document.querySelectorAll('[data-cluster-id]').forEach((target) => {
+        target.addEventListener('mouseenter', () => highlightCluster(target.dataset.clusterId));
+        target.addEventListener('focus', () => highlightCluster(target.dataset.clusterId), true);
+        target.addEventListener('mouseleave', resetGraphNodes);
+        target.addEventListener('blur', resetGraphNodes, true);
+      });
+
+      const searchInput = document.getElementById('clusterSearch');
+      if (searchInput) {
+        searchInput.addEventListener('input', (event) => {
+          const query = event.target.value.trim().toLowerCase();
+          document.querySelectorAll('.cluster-card').forEach((card) => {
+            const matches = card.textContent.toLowerCase().includes(query);
+            card.hidden = !matches;
+          });
+        });
+      }
+    });
+    """
+
+
+def _render_nav(dossier: TopologicalDossier) -> str:
+    """Render the persistent navigation rail."""
+    parts = [
+        "<aside class='report-nav'>",
+        "<div class='report-nav__inner'>",
+        "<div class='report-nav__brand'>",
+        "<span class='brand-mark'>Topological report</span>",
+        "<h1>Pulsar dossier</h1>",
+        "</div>",
+        "<nav aria-label='Section navigation'>",
+        "<a class='nav-link is-active' href='#summary'>Executive summary</a>",
+        "<a class='nav-link' href='#topology'>Topology</a>",
+        "<a class='nav-link' href='#heatmap'>Feature drift</a>",
+        "<a class='nav-link' href='#clusters'>Cohorts</a>",
+    ]
+    for profile in dossier.clusters:
+        parts.append(
+            f"<a class='nav-link' href='#cluster-{profile.cluster_id}'>"
+            f"C{profile.cluster_id:02d}</a>"
+        )
+    parts.extend(
+        [
+            "</nav>",
+            "<div class='report-nav__footer'>Generated by Pulsar Topological Engine.</div>",
+            "</div>",
+            "</aside>",
+        ]
+    )
+    return "".join(parts)
+
+
+def _render_summary_section(dossier: TopologicalDossier, gm: Dict[str, Any]) -> str:
+    """Render the executive summary section."""
+    findings = _build_key_findings(dossier, gm)
+    column_count = len(dossier.global_stats.get("columns", []))
+    metrics = [
+        ("Observations", f"{dossier.n_total:,}"),
+        ("Cohorts", f"{dossier.n_clusters}"),
+        ("Graph nodes", _format_value(gm.get("n_nodes", "N/A"), digits=0)),
+        ("Graph edges", _format_value(gm.get("n_edges", "N/A"), digits=0)),
+        ("Columns profiled", f"{column_count}"),
+    ]
+    parts = [
+        "<section id='summary' class='report-section'>",
+        "<div class='hero-grid'>",
+        "<div class='hero-copy'>",
+        "<span class='section-eyebrow'>Executive summary</span>",
+        "<h2>A restrained reading of the dataset’s latent structure.</h2>",
+        "<p>This export is designed like a technical note rather than a dashboard: <strong>tight typography</strong>, a narrow reading column, and figures that interrupt the narrative at deliberate intervals. The goal is simple: make the manifold legible without surrounding it with UI noise.</p>",
+        "</div>",
+        "<div class='hero-panel'>",
+        "<span class='section-eyebrow'>How to read it</span>",
+        "<p class='panel-note'>Start with the topology figure for global shape, confirm the separation in the feature drift matrix, then use the cohort sections as evidence pages. Hover a cohort row to isolate its support in the graph.</p>",
+        "</div>",
+        "</div>",
+        "<div class='hero-metrics'>",
+    ]
+    for label, value in metrics:
+        parts.append(
+            "<div class='metric-card'>"
+            f"<div class='metric-value'>{_escape_html(value)}</div>"
+            f"<div class='metric-label'>{_escape_html(label)}</div>"
+            "</div>"
+        )
+    parts.append("</div>")
+    if findings:
+        parts.append("<div class='findings-grid'><ul class='hero-list'>")
+        for title, body in findings:
+            parts.append(
+                f"<li><strong>{_escape_html(title)}.</strong> {_escape_html(body)}</li>"
+            )
+        parts.append("</ul></div>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def _generate_cosmic_graph_svg(
+    model: ThemaRS,
+    width: int = 920,
+    height: int = 500,
+    cluster_labels: pd.Series | None = None,
+    palette: dict[int, str] | None = None,
+) -> str:
+    """Generate a sampled SVG topology figure with persistent node state for interaction."""
     G = model.cosmic_graph
-    if G.number_of_nodes() == 0: return ""
-    
+    if G.number_of_nodes() == 0:
+        return ""
+
     budget = 1000
     if G.number_of_nodes() > budget:
         sampled = set()
@@ -329,278 +1316,399 @@ def _generate_cosmic_graph_svg(model: ThemaRS, width: int = 800, height: int = 4
             for cid in sorted(cluster_labels.unique()):
                 c_mask = cluster_labels == cid
                 c_nodes = cluster_labels.index[c_mask].tolist()
-                c_nodes = [n for n in c_nodes if G.has_node(n)]
-                if not c_nodes: continue
+                c_nodes = [node for node in c_nodes if G.has_node(node)]
+                if not c_nodes:
+                    continue
                 n_sample = max(10, int(len(c_nodes) * 0.05))
-                sampled.update(sorted(c_nodes, key=lambda n: G.degree(n), reverse=True)[:n_sample])
-        
+                sampled.update(
+                    sorted(c_nodes, key=lambda node: G.degree(node), reverse=True)[
+                        :n_sample
+                    ]
+                )
+
         remaining = budget - len(sampled)
         if remaining > 0:
-            global_sorted = sorted(G.nodes(), key=lambda n: G.degree(n), reverse=True)
-            for n in global_sorted:
-                if n not in sampled:
-                    sampled.add(n)
+            global_sorted = sorted(
+                G.nodes(), key=lambda node: G.degree(node), reverse=True
+            )
+            for node in global_sorted:
+                if node not in sampled:
+                    sampled.add(node)
                     remaining -= 1
-                if remaining <= 0: break
+                if remaining <= 0:
+                    break
         G_sub = G.subgraph(sampled)
     else:
         G_sub = G
 
-    pos = nx.spring_layout(G_sub, seed=42, k=1.5/np.sqrt(max(1, G_sub.number_of_nodes())))
-    x_vals = [p[0] for p in pos.values()]; y_vals = [p[1] for p in pos.values()]
-    if not x_vals: return ""
+    pos = nx.spring_layout(
+        G_sub, seed=42, k=1.5 / np.sqrt(max(1, G_sub.number_of_nodes()))
+    )
+    x_vals = [point[0] for point in pos.values()]
+    y_vals = [point[1] for point in pos.values()]
+    if not x_vals:
+        return ""
+
     xmin, xmax, ymin, ymax = min(x_vals), max(x_vals), min(y_vals), max(y_vals)
     padding = 40
-    def sc(v, v_min, v_max, t_max):
-        return padding + (v - v_min) / (v_max - v_min + 1e-9) * (t_max - 2 * padding)
 
-    svg = [f'<svg id="cosmicGraph" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" style="background:#fff; width:100%; height:auto;">']
-    opacity_bands = {}
+    def scale(
+        value: float, value_min: float, value_max: float, target_max: int
+    ) -> float:
+        return padding + (value - value_min) / (value_max - value_min + 1e-9) * (
+            target_max - 2 * padding
+        )
+
+    svg = [
+        f"<svg id='cosmicGraph' viewBox='0 0 {width} {height}' xmlns='http://www.w3.org/2000/svg' role='img' aria-label='Topological skeleton projection'>",
+        f"<rect x='0' y='0' width='{width}' height='{height}' fill='#ffffff' rx='24' />",
+    ]
+
+    opacity_bands: dict[float, list[str]] = {}
     for u, v, data in G_sub.edges(data=True):
-        x1, y1 = sc(pos[u][0], xmin, xmax, width), sc(pos[u][1], ymin, ymax, height)
-        x2, y2 = sc(pos[v][0], xmin, xmax, width), sc(pos[v][1], ymin, ymax, height)
-        band = round(max(0.1, 0.1 + data.get("weight", 0.1) * 0.3), 1)
-        opacity_bands.setdefault(band, []).append(f"M{x1:.1f} {y1:.1f} L{x2:.1f} {y2:.1f}")
-    
-    for op, segs in opacity_bands.items():
-        svg.append(f'<path d="{" ".join(segs)}" stroke="#dadce0" stroke-width="0.5" stroke-opacity="{op}" fill="none" />')
-    
+        x1 = scale(pos[u][0], xmin, xmax, width)
+        y1 = scale(pos[u][1], ymin, ymax, height)
+        x2 = scale(pos[v][0], xmin, xmax, width)
+        y2 = scale(pos[v][1], ymin, ymax, height)
+        band = round(max(0.10, 0.08 + data.get("weight", 0.1) * 0.22), 2)
+        opacity_bands.setdefault(band, []).append(
+            f"M{x1:.1f} {y1:.1f} L{x2:.1f} {y2:.1f}"
+        )
+
+    for opacity, segments in sorted(opacity_bands.items()):
+        svg.append(
+            f"<path d='{' '.join(segments)}' stroke='#a8afb8' stroke-width='0.65' "
+            f"stroke-opacity='{opacity}' fill='none' />"
+        )
+
     for node in G_sub.nodes():
-        x, y = sc(pos[node][0], xmin, xmax, width), sc(pos[node][1], ymin, ymax, height)
-        deg = G.degree(node)
-        radius = 1.5 + (deg / max(1, G.number_of_nodes()) * 8)
-        cid = str(cluster_labels[node]) if cluster_labels is not None and node in cluster_labels.index else ""
-        svg.append(f'<circle cx="{x}" cy="{y}" r="{radius}" fill="#4285F4" fill-opacity="0.6" class="graph-node" data-cluster="{cid}" style="transition: all 0.2s ease;"><title>Node {node} (deg: {deg}, cluster: {cid})</title></circle>')
-    
+        x = scale(pos[node][0], xmin, xmax, width)
+        y = scale(pos[node][1], ymin, ymax, height)
+        degree = G.degree(node)
+        radius = 1.8 + (degree / max(1, G.number_of_nodes()) * 7.5)
+        cluster_id = None
+        if cluster_labels is not None and node in cluster_labels.index:
+            cluster_id = int(cluster_labels[node])
+        base_fill = palette.get(cluster_id, "#2563eb") if palette else "#2563eb"
+        svg.append(
+            f"<circle cx='{x:.2f}' cy='{y:.2f}' r='{radius:.2f}' fill='{base_fill}' fill-opacity='0.78' "
+            f"class='graph-node' data-cluster='{'' if cluster_id is None else cluster_id}' "
+            f"data-base-radius='{radius:.2f}' data-base-fill='{base_fill}' data-base-opacity='0.78'>"
+            f"<title>Node {node} (degree {degree}, cluster {'' if cluster_id is None else cluster_id})</title>"
+            "</circle>"
+        )
+
     svg.append("</svg>")
     return "".join(svg)
 
 
-def dossier_to_html(dossier: TopologicalDossier, model: ThemaRS | None = None) -> str:
-    """Renders the dossier as a rich, high-fidelity HTML report with Google Research aesthetic."""
-    gm = dossier.global_stats.get("graph_metrics", {})
-    
-    html = [
-        "<!DOCTYPE html>",
-        "<html lang='en'>",
-        "<head>",
-        "<meta charset='utf-8'>",
-        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
-        "<title>Pulsar Cosmic Dossier</title>",
-        "<style>",
-        """
-        :root {
-          --google-blue: #4285F4; --google-red: #EA4335; --google-yellow: #FBBC05; --google-green: #34A853;
-          --text-primary: #202124; --text-secondary: #5f6368; --border-color: #dadce0; --bg-color: #ffffff;
-          --surface-color: #f8f9fa;
-          --font-main: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          --font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Code', 'Segoe UI Mono', Menlo, Monaco, Consolas, monospace;
-        }
-        html { scroll-behavior: smooth; }
-        body { font-family: var(--font-main); background-color: var(--bg-color); color: var(--text-primary); margin: 0; display: flex; line-height: 1.6; }
-        aside { width: 300px; height: 100vh; position: sticky; top: 0; background: var(--bg-color); border-right: 1px solid var(--border-color); padding: 2.5rem 1.5rem; box-sizing: border-box; overflow-y: auto; }
-        main { flex: 1; padding: 4rem 5rem; max-width: 1100px; margin: 0; }
-        h1, h2, h3, h4 { font-weight: 700; color: var(--text-primary); margin-top: 1.5em; letter-spacing: -0.02em; }
-        h1 { font-size: 2.5rem; margin-top: 0; }
-        nav ul { list-style: none; padding: 0; margin: 2rem 0; }
-        nav li { margin-bottom: 0.25rem; }
-        nav a { display: block; padding: 8px 12px; color: var(--text-secondary); text-decoration: none; font-size: 0.9rem; border-left: 3px solid transparent; transition: all 0.15s ease; border-radius: 0 4px 4px 0; }
-        nav a:hover { background: var(--surface-color); color: var(--google-blue); }
-        nav a.active { color: var(--google-blue); border-left-color: var(--google-blue); background: rgba(66, 133, 244, 0.05); font-weight: 600; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1.5rem; margin: 3rem 0; }
-        .stat-card { background: var(--bg-color); padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border-color); }
-        .stat-value { font-size: 1.75rem; font-weight: 700; color: var(--google-blue); font-family: var(--font-mono); margin-bottom: 0.25rem; }
-        .stat-label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
-        table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
-        th { background: var(--surface-color); padding: 12px 16px; text-align: left; font-size: 0.75rem; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 2px solid var(--border-color); }
-        td { padding: 16px; border-bottom: 1px solid var(--border-color); font-size: 0.95rem; }
-        tr:last-child td { border-bottom: none; }
-        .sparkline { font-family: var(--font-mono); color: var(--google-blue); font-size: 1.25rem; letter-spacing: -0.05em; line-height: 1; opacity: 0.8; }
-        .bar-outer { background: #e8eaed; width: 80px; height: 6px; border-radius: 3px; display: inline-block; vertical-align: middle; margin-left: 10px; }
-        .bar-inner { background: var(--google-blue); height: 100%; border-radius: 3px; }
-        .tag { padding: 4px 10px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
-        .tag-pos { background: rgba(52, 168, 83, 0.1); color: var(--google-green); }
-        .tag-neg { background: rgba(234, 67, 53, 0.1); color: var(--google-red); }
-        .tag-neu { background: rgba(95, 99, 104, 0.1); color: var(--text-secondary); }
-        .central-row { font-family: var(--font-mono); font-size: 0.8rem; padding: 1.25rem; background: var(--surface-color); border-radius: 8px; margin-bottom: 0.75rem; color: var(--text-secondary); border: 1px solid transparent; transition: border-color 0.2s; }
-        .central-row:hover { border-color: var(--border-color); color: var(--text-primary); }
-        code { font-family: var(--font-mono); background: var(--surface-color); padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: var(--google-blue); }
-        hr { border: 0; border-top: 1px solid var(--border-color); margin: 4rem 0; }
-        .graph-container { border: 1px solid var(--border-color); border-radius: 12px; margin: 3rem 0; padding: 2.5rem; background: #ffffff; text-align: center; }
-        .cluster-header { display: flex; align-items: baseline; gap: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem; margin-bottom: 2rem; }
-        .cluster-name { font-size: 1.5rem; font-weight: 500; color: var(--text-secondary); }
-        .hero-text { font-size: 1.25rem; color: var(--text-secondary); max-width: 800px; margin-bottom: 3rem; }
-        section { scroll-margin-top: 2rem; }
-        .highlight-row { background-color: transparent; cursor: pointer; transition: background-color 0.2s; }
-        .highlight-row:hover { background-color: rgba(66, 133, 244, 0.05); }
-        """,
-        "</style>",
-        "</head>",
-        "<body>",
-        "<aside>",
-        "<div style='margin-bottom: 3rem;'><svg width='40' height='40' viewBox='0 0 40 40' fill='none' xmlns='http://www.w3.org/2000/svg'><circle cx='20' cy='20' r='18' stroke='#4285F4' stroke-width='4'/><path d='M20 10V30M10 20H30' stroke='#4285F4' stroke-width='4' stroke-linecap='round'/></svg><h2 style='margin-top: 1rem; font-size: 1.2rem;'>Pulsar Analysis</h2></div>",
-        "<nav><ul>",
-        "<li><a href='#summary' class='active'>Executive Summary</a></li>",
-        "<li><a href='#heatmap'>Feature Drift</a></li>",
-        "<li><a href='#clusters'>Cluster Matrix</a></li>",
-        "<li><hr style='margin: 1.5rem 0;'></li>",
+def _render_topology_section(
+    dossier: TopologicalDossier,
+    model: ThemaRS | None,
+    palette: dict[int, str],
+) -> str:
+    """Render the topology figure and legend."""
+    parts = [
+        "<section id='topology' class='report-section'>",
+        "<div class='section-header'>",
+        "<div>",
+        "<span class='section-eyebrow'>Figure 1</span>",
+        "<h2>Topological skeleton projection</h2>",
+        "</div>",
+        "<p class='section-subtitle'>The figure is sampled from the cosmic graph for responsiveness, but the cohort coloring stays consistent with the rest of the document.</p>",
+        "</div>",
+        "<div class='figure-frame'>",
+        "<div class='figure-toolbar'>",
+        "<div>",
+        "<div class='figure-title'>Global manifold view</div>",
+        "<p class='figure-subtitle'>Edges are intentionally quiet. The emphasis stays on node structure and cohort support.</p>",
+        "</div>",
+        "<div class='legend'>",
     ]
+    for profile in dossier.clusters:
+        parts.append(
+            f"<span class='legend-chip' style='--cluster-accent:{palette[profile.cluster_id]}'>"
+            f"C{profile.cluster_id:02d} · {_escape_html(profile.semantic_name)}</span>"
+        )
+    parts.extend(["</div>", "</div>", "<div class='graph-wrapper'>"])
+    if model is not None:
+        parts.append(
+            _generate_cosmic_graph_svg(
+                model,
+                cluster_labels=dossier.cluster_labels,
+                palette=palette,
+            )
+        )
+        parts.append(
+            "<p class='figure-caption'><strong>Figure note.</strong> Nodes are sampled manifold landmarks. Edges encode topological consensus. Hover a cohort row below to isolate its sampled support.</p>"
+        )
+    else:
+        parts.append(
+            "<div class='empty-state'>Graph view unavailable for this report.</div>"
+        )
+    parts.extend(["</div>", "</div>", "</section>"])
+    return "".join(parts)
 
-    for p in dossier.clusters:
-        html.append(f"<li><a href='#cluster-{p.cluster_id}'>Cluster {p.cluster_id}</a></li>")
-    
-    html.extend([
-        "</ul></nav>",
-        "<div style='margin-top: auto; font-size: 0.7rem; color: var(--text-secondary); opacity: 0.6;'>Generated by Pulsar Topological Engine</div>",
-        "</aside>",
-        "<main>",
-        "<section id='summary'>",
-        "<h1>Cosmic Dossier</h1>",
-        "<p class='hero-text'>Topological manifold decomposition revealing the latent structure of the dataset through multi-scale persistence aggregation.</p>",
-        "<div class='stats-grid'>",
-        f"<div class='stat-card'><div class='stat-value'>{dossier.n_total:,}</div><div class='stat-label'>Total Observations</div></div>",
-        f"<div class='stat-card'><div class='stat-value'>{gm.get('n_nodes', 'N/A')}</div><div class='stat-label'>Graph Nodes</div></div>",
-        f"<div class='stat-card'><div class='stat-value'>{gm.get('n_edges', 'N/A')}</div><div class='stat-label'>Graph Edges</div></div>",
-        f"<div class='stat-card'><div class='stat-value'>{gm.get('component_count', 'N/A')}</div><div class='stat-label'>Stable Components</div></div>",
+
+def _render_heatmap_section(dossier: TopologicalDossier) -> str:
+    """Render the cross-cluster feature drift heatmap."""
+    features = sorted(
+        {
+            feature["column"]
+            for profile in dossier.clusters
+            for feature in profile.numeric_features[:5]
+        }
+    )
+    if not features:
+        return ""
+
+    parts = [
+        "<section id='heatmap' class='report-section'>",
+        "<div class='section-header'>",
+        "<div>",
+        "<span class='section-eyebrow'>Figure 2</span>",
+        "<h2>Feature drift matrix</h2>",
         "</div>",
-    ])
-
-    if model:
-        html.append("<div class='graph-container'>")
-        html.append("<h4 style='margin-top: 0; margin-bottom: 2rem; text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.75rem; color: var(--text-secondary);'>Topological Skeleton Projection</h4>")
-        html.append(_generate_cosmic_graph_svg(model, cluster_labels=dossier.cluster_labels))
-        html.append("<p style='font-size: 0.75rem; color: var(--text-secondary); margin-top: 2rem; font-style: italic;'>Geometric projection of the high-dimensional manifold. Edges represent topological consensus across the ensemble.</p>")
-        html.append("</div>")
-
-    # Feature Drift Heatmap
-    all_features = set()
-    for p in dossier.clusters:
-        for f in p.numeric_features[:5]:
-            all_features.add(f["column"])
-    sorted_features = sorted(list(all_features))
-
-    if sorted_features:
-        html.append("<section id='heatmap'>")
-        html.append("<h2>Feature Drift Heatmap</h2>")
-        html.append("<p style='color: var(--text-secondary); margin-bottom: 2rem;'>Comparative Z-score intensity across cohorts. Green indicates Enrichment, Red indicates Depletion.</p>")
-        html.append("<div style='overflow-x: auto;'>")
-        html.append("<table><thead><tr><th>Cohort</th>")
-        for feat in sorted_features:
-            html.append(f"<th>{feat}</th>")
-        html.append("</tr></thead><tbody>")
-        for p in dossier.clusters:
-            html.append(f"<tr><td><strong>{p.semantic_name}</strong></td>")
-            feat_map = {f["column"]: f["z_score"] for f in p.numeric_features}
-            for feat in sorted_features:
-                z = feat_map.get(feat, 0.0)
-                opacity = min(0.4, abs(z) * 0.15)
-                bg = f"rgba(52, 168, 83, {opacity})" if z > 0.5 else f"rgba(234, 67, 53, {opacity})" if z < -0.5 else "transparent"
-                html.append(f"<td style='background-color: {bg}; text-align: center; font-family: var(--font-mono); font-size: 0.85rem;'>{z:+.2f}</td>")
-            html.append("</tr>")
-        html.append("</tbody></table></div></section>")
-
-    html.extend([
-        "</section>",
-        "<section id='clusters'>",
-        "<h2>Cluster Matrix</h2>",
-        "<div style='margin-bottom: 2rem;'>",
-        "<input type='text' id='clusterSearch' placeholder='Search clusters...' style='width: 100%; padding: 12px 16px; border: 1px solid var(--border-color); border-radius: 8px; font-family: var(--font-main); font-size: 0.95rem;'>",
+        "<p class='section-subtitle'>Signed z-scores across cohorts. Positive cells indicate enrichment, negative cells indicate depletion.</p>",
         "</div>",
-        "<table id='clusterTable'><thead><tr><th>ID</th><th>Semantic Cohort Name</th><th>Population Share</th><th>Defining Characteristics</th></tr></thead><tbody>",
-    ])
+        "<div class='heatmap-shell'>",
+        "<table class='heatmap-table'><thead><tr><th>Cohort</th>",
+    ]
+    for feature_name in features:
+        parts.append(f"<th>{_escape_html(feature_name)}</th>")
+    parts.append("</tr></thead><tbody>")
+    for profile in dossier.clusters:
+        parts.append(
+            f"<tr><td><strong>{_escape_html(profile.semantic_name)}</strong></td>"
+        )
+        feature_map = {
+            feature["column"]: feature["z_score"]
+            for feature in profile.numeric_features
+        }
+        for feature_name in features:
+            z_score = float(feature_map.get(feature_name, 0.0))
+            alpha = min(0.38, abs(z_score) * 0.14)
+            tone_class = (
+                "heat-positive"
+                if z_score > 0.5
+                else "heat-negative"
+                if z_score < -0.5
+                else ""
+            )
+            style = f" style='--heat-alpha:{alpha:.2f}'" if tone_class else ""
+            parts.append(
+                f"<td class='heat-cell {tone_class}'{style}><code>{z_score:+.2f}</code></td>"
+            )
+        parts.append("</tr>")
+    parts.extend(["</tbody></table>", "</div>", "</section>"])
+    return "".join(parts)
 
-    for p in dossier.clusters:
-        traits = ", ".join([f["column"] for f in p.numeric_features[:3]])
-        html.append(f"<tr class='highlight-row' data-cluster-id='{p.cluster_id}'><td><code>{p.cluster_id:02d}</code></td>")
-        html.append(f"<td><div style='font-weight: 600; color: var(--google-blue); margin-bottom: 4px;'>{p.semantic_name}</div></td>")
-        html.append(f"<td><span style='font-family: var(--font-mono); font-weight: 500;'>{p.size_pct:.1f}%</span><div class='bar-outer'><div class='bar-inner' style='width: {p.size_pct}%'></div></div></td>")
-        html.append(f"<td><div style='font-size: 0.85rem; color: var(--text-secondary);'>{traits}</div></td></tr>")
-    
-    html.append("</tbody></table></section>")
 
-    for p in dossier.clusters:
-        html.append(f"<hr><section id='cluster-{p.cluster_id}'>")
-        html.append("<div class='cluster-header'>")
-        html.append(f"<h2 style='margin: 0;'>Cluster {p.cluster_id}</h2>")
-        html.append(f"<div class='cluster-name'>{p.semantic_name}</div>")
-        html.append("</div>")
-        html.append(f"<p>This cohort comprises <strong>{p.size:,}</strong> points, representing <strong>{p.size_pct:.1f}%</strong> of total population.</p>")
-        html.append("<h3>Numeric Profile</h3>")
-        html.append("<table><thead><tr><th>Feature</th><th>Distribution</th><th>Mean</th><th>Z-Score</th><th>Signal</th></tr></thead><tbody>")
-        for f in p.numeric_features:
-            z = f["z_score"]
-            z_class = "tag-pos" if z > 1.0 else "tag-neg" if z < -1.0 else "tag-neu"
-            h_text = "Enriched" if z > 1.0 else "Depleted" if z < -1.0 else "Baseline"
-            html.append(f"<tr><td><strong>{f['column']}</strong></td>")
-            html.append(f"<td class='sparkline'>{f.get('sparkline', '')}</td>")
-            html.append(f"<td><code>{f['mean']:.3f}</code></td><td><code>{z:+.2f}</code></td>")
-            html.append(f"<td><span class='tag {z_class}'>{h_text}</span></td></tr>")
-        html.append("</tbody></table>")
+def _render_cluster_overview_section(
+    dossier: TopologicalDossier, palette: dict[int, str]
+) -> str:
+    """Render the cohort overview cards."""
+    parts = [
+        "<section id='clusters' class='report-section'>",
+        "<div class='section-header'>",
+        "<div>",
+        "<span class='section-eyebrow'>Cohort overview</span>",
+        "<h2>Population structure, reduced to the essentials</h2>",
+        "</div>",
+        "<p class='section-subtitle'>Each row is a compact abstract: cohort identity, share, and the few traits most worth carrying into the detailed read.</p>",
+        "</div>",
+        "<div class='search-shell'>",
+        "<input id='clusterSearch' class='cluster-search' type='search' placeholder='Search clusters, signals, or traits…' aria-label='Search cohorts'>",
+        "<p class='overview-note'>The overview is deliberately spare. Click through only when a cohort looks meaningfully distinct.</p>",
+        "</div>",
+        "<div class='cluster-grid'>",
+    ]
+    for profile in dossier.clusters:
+        trait_chips = []
+        for feature in profile.numeric_features[:3]:
+            trait_chips.append(
+                f"<span class='trait-chip'>{_escape_html(feature['column'])}</span>"
+            )
+        parts.append(
+            f"<a class='cluster-card' href='#cluster-{profile.cluster_id}' data-cluster-id='{profile.cluster_id}' "
+            f"style='--cluster-accent:{palette[profile.cluster_id]}'>"
+            "<div>"
+            "<div class='cluster-card__topline'>"
+            f"<span class='cluster-id'>Cohort {profile.cluster_id:02d}</span>"
+            f"<span class='legend-chip' style='--cluster-accent:{palette[profile.cluster_id]}'>"
+            f"{_escape_html(profile.semantic_name)}</span>"
+            "</div>"
+            f"<p class='cluster-card__summary'>{_escape_html(_cluster_trait_summary(profile))}</p>"
+            f"<div class='cluster-card__traits'>{''.join(trait_chips)}</div>"
+            "</div>"
+            "<div>"
+            f"<div class='cluster-share'>{profile.size_pct:.1f}%</div>"
+            f"<div class='bar-track'><div class='bar-fill' style='width:{profile.size_pct:.2f}%;'></div></div>"
+            f"<p class='cluster-card__meta'>{profile.size:,} rows</p>"
+            "</div>"
+            "</a>"
+        )
+    parts.extend(["</div>", "</section>"])
+    return "".join(parts)
 
-        if p.categorical_features:
-            html.append("<h3>Categorical Concentrations</h3>")
-            html.append("<table><thead><tr><th>Feature</th><th>Value</th><th>Concentration</th></tr></thead><tbody>")
-            for f in p.categorical_features:
-                html.append(f"<tr><td>{f['column']}</td><td><code>{f['value']}</code></td>")
-                html.append(f"<td>{f['concentration']:.1f}% <div class='bar-outer'><div class='bar-inner' style='background: var(--google-green); width: {f['concentration']}%'></div></div></td></tr>")
-            html.append("</tbody></table>")
 
-        html.append("<h3>Representative Instances</h3>")
-        for i, row in enumerate(p.central_rows):
-            summary = ", ".join([f"<span style='font-weight: 500;'>{k}</span>: {v}" for k, v in row.items()])
-            html.append(f"<div class='central-row'>#{i+1:02d} &mdash; {summary}...</div>")
-        html.append("</section>")
+def _render_numeric_panel(profile: ClusterProfile) -> str:
+    """Render the numeric signal table for a cluster."""
+    parts = [
+        "<section class='panel'>",
+        "<h3>Dominant numeric signals</h3>",
+        "<p class='panel-note'>Top features are ranked by shift magnitude adjusted for within-cohort homogeneity.</p>",
+        "<table class='data-table'><thead><tr><th>Feature</th><th>Distribution</th><th>Mean</th><th>Z-score</th><th>Signal</th></tr></thead><tbody>",
+    ]
+    for feature in profile.numeric_features:
+        label, tone_class = _signal_tone(float(feature["z_score"]))
+        parts.append(
+            "<tr>"
+            f"<td><strong>{_escape_html(feature['column'])}</strong></td>"
+            f"<td class='sparkline'>{_escape_html(feature.get('sparkline', ''))}</td>"
+            f"<td><code>{float(feature['mean']):.3f}</code></td>"
+            f"<td><code>{float(feature['z_score']):+.2f}</code></td>"
+            f"<td><span class='signal-badge {tone_class}'>{label}</span></td>"
+            "</tr>"
+        )
+    parts.extend(["</tbody></table>", "</section>"])
+    return "".join(parts)
 
-    html.append("</main>")
-    html.append("<script>")
-    html.append("""
-    window.addEventListener('DOMContentLoaded', () => {
-        const observer = new IntersectionObserver(entries => {
-            entries.forEach(entry => {
-                const id = entry.target.getAttribute('id');
-                if (entry.isIntersecting) {
-                    document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
-                    const targetLink = document.querySelector(`nav a[href="#${id}"]`);
-                    if (targetLink) targetLink.classList.add('active');
-                }
-            });
-        }, { threshold: 0.1 });
-        document.querySelectorAll('section').forEach(s => observer.observe(s));
 
-        const searchInput = document.getElementById('clusterSearch');
-        searchInput.addEventListener('keyup', (e) => {
-            const query = e.target.value.toLowerCase();
-            document.querySelectorAll('#clusterTable tbody tr').forEach(row => {
-                row.style.display = row.textContent.toLowerCase().includes(query) ? '' : 'none';
-            });
-        });
+def _render_categorical_panel(profile: ClusterProfile, accent_color: str) -> str:
+    """Render categorical concentrations for a cluster."""
+    if not profile.categorical_features:
+        return "<section class='panel'><h3>Categorical concentrations</h3><div class='empty-state'>No categorical enrichment was captured for this cohort.</div></section>"
 
-        document.querySelectorAll('.highlight-row').forEach(row => {
-            row.addEventListener('mouseenter', () => {
-                const cid = row.getAttribute('data-cluster-id');
-                document.querySelectorAll('.graph-node').forEach(node => {
-                    if (node.getAttribute('data-cluster') === cid) {
-                        node.setAttribute('fill-opacity', '1');
-                        node.setAttribute('r', '5');
-                        node.setAttribute('stroke', 'var(--google-blue)');
-                        node.setAttribute('stroke-width', '1');
-                    } else {
-                        node.setAttribute('fill-opacity', '0.1');
-                    }
-                });
-            });
-            row.addEventListener('mouseleave', () => {
-                document.querySelectorAll('.graph-node').forEach(node => {
-                    node.setAttribute('fill-opacity', '0.6');
-                    node.setAttribute('r', '2');
-                    node.removeAttribute('stroke');
-                });
-            });
-        });
-    });
-    """)
-    html.append("</script></body></html>")
-    return "\n".join(html)
+    parts = [
+        "<section class='panel'>",
+        "<h3>Categorical concentrations</h3>",
+        "<table class='data-table'><thead><tr><th>Feature</th><th>Value</th><th>Concentration</th></tr></thead><tbody>",
+    ]
+    for feature in profile.categorical_features:
+        parts.append(
+            "<tr>"
+            f"<td>{_escape_html(feature['column'])}</td>"
+            f"<td><code>{_escape_html(feature['value'])}</code></td>"
+            "<td>"
+            f"{feature['concentration']:.1f}%"
+            "<div class='bar-track' style='margin-top:0.45rem;'>"
+            f"<div class='bar-fill' style='width:{feature['concentration']:.2f}%; --cluster-accent:{accent_color};'></div>"
+            "</div>"
+            "</td>"
+            "</tr>"
+        )
+    parts.extend(["</tbody></table>", "</section>"])
+    return "".join(parts)
+
+
+def _render_instances_panel(profile: ClusterProfile) -> str:
+    """Render representative instances as compact cards."""
+    parts = [
+        "<section class='panel'>",
+        "<h3>Representative instances</h3>",
+        "<p class='panel-note'>Rows chosen from the cohort core so the values stay close to the local manifold center.</p>",
+    ]
+    if not profile.central_rows:
+        parts.append(
+            "<div class='empty-state'>No representative rows available for this cohort.</div></section>"
+        )
+        return "".join(parts)
+
+    parts.append("<div class='instances-grid'>")
+    for index, row in enumerate(profile.central_rows, start=1):
+        details = []
+        for key, value in row.items():
+            details.append(
+                f"<span class='detail-chip'><strong>{_escape_html(key)}</strong>: {_escape_html(_format_value(value))}</span>"
+            )
+        parts.append(
+            "<article class='instance-card'>"
+            f"<div class='instance-label'>Example {index:02d}</div>"
+            f"<div class='instance-details'>{''.join(details)}</div>"
+            "</article>"
+        )
+    parts.extend(["</div>", "</section>"])
+    return "".join(parts)
+
+
+def _render_cluster_section(profile: ClusterProfile, accent_color: str) -> str:
+    """Render a detailed cluster section."""
+    traits = "".join(
+        f"<span class='trait-chip'>{_escape_html(feature['column'])}</span>"
+        for feature in profile.numeric_features[:5]
+    )
+    return "".join(
+        [
+            f"<section id='cluster-{profile.cluster_id}' class='report-section cluster-section' "
+            f"data-cluster-id='{profile.cluster_id}' style='--cluster-accent:{accent_color}'>",
+            "<div class='cluster-section__heading'>",
+            "<div class='cluster-section__topline'>",
+            f"<span class='cluster-id'>Cohort {profile.cluster_id:02d}</span>",
+            f"<span class='legend-chip' style='--cluster-accent:{accent_color}'>{profile.size_pct:.1f}% of population</span>",
+            "</div>",
+            f"<h2>{_escape_html(profile.semantic_name)}</h2>",
+            (
+                f"<p class='cluster-section__summary'>This cohort contains <strong>{profile.size:,}</strong> observations "
+                f"and represents <strong>{profile.size_pct:.1f}%</strong> of the analyzed population. "
+                "Treat the numeric and categorical tables below as the evidence sheet for this slice of the manifold.</p>"
+            ),
+            f"<div class='cluster-section__traits'>{traits}</div>",
+            "</div>",
+            "<div class='cluster-detail-grid'>",
+            _render_numeric_panel(profile),
+            "<div class='cluster-secondary-stack'>",
+            _render_categorical_panel(profile, accent_color),
+            _render_instances_panel(profile),
+            "</div>",
+            "</div>",
+            "</section>",
+        ]
+    )
+
+
+def dossier_to_html(dossier: TopologicalDossier, model: ThemaRS | None = None) -> str:
+    """Render the dossier as a polished standalone HTML research report."""
+    graph_metrics = dossier.global_stats.get("graph_metrics", {})
+    palette = _cluster_palette(dossier.clusters)
+    sections = [
+        _render_summary_section(dossier, graph_metrics),
+        _render_topology_section(dossier, model, palette),
+        _render_heatmap_section(dossier),
+        _render_cluster_overview_section(dossier, palette),
+    ]
+    sections.extend(
+        _render_cluster_section(profile, palette[profile.cluster_id])
+        for profile in dossier.clusters
+    )
+    return "\n".join(
+        [
+            "<!DOCTYPE html>",
+            "<html lang='en'>",
+            "<head>",
+            "<meta charset='utf-8'>",
+            "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
+            "<title>Pulsar Topological Dossier</title>",
+            "<style>",
+            _render_report_styles(),
+            "</style>",
+            "</head>",
+            "<body>",
+            "<div class='report-shell'>",
+            _render_nav(dossier),
+            "<main class='report-main'>",
+            "<div class='report-stack'>",
+            *[section for section in sections if section],
+            "</div>",
+            "</main>",
+            "</div>",
+            "<script>",
+            _render_report_script(),
+            "</script>",
+            "</body>",
+            "</html>",
+        ]
+    )
 
 
 def dossier_to_markdown(dossier: TopologicalDossier) -> str:
@@ -620,18 +1728,30 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
         md.append(f"- **Size**: {p.size} points ({p.size_pct:.1f}%) {size_bar}")
 
         md.append("\n#### Top Defining Numeric Features (Shifted & Homogeneous)")
-        md.append("| Feature | Distribution | Cluster Mean | Global Mean | Z-Score | Homogeneity |")
+        md.append(
+            "| Feature | Distribution | Cluster Mean | Global Mean | Z-Score | Homogeneity |"
+        )
         md.append("|---|:---|---|---|---|---|")
         for f in p.numeric_features:
-            h_desc = "Tight" if f["homogeneity"] < 0.5 else "Divergent" if f["homogeneity"] > 1.5 else "Normal"
-            md.append(f"| {f['column']} | `{f.get('sparkline', '')}` | {f['mean']:.3f} | {f['global_mean']:.3f} | {f['z_score']:.2f} | {h_desc} ({f['homogeneity']:.2f}) |")
+            h_desc = (
+                "Tight"
+                if f["homogeneity"] < 0.5
+                else "Divergent"
+                if f["homogeneity"] > 1.5
+                else "Normal"
+            )
+            md.append(
+                f"| {f['column']} | `{f.get('sparkline', '')}` | {f['mean']:.3f} | {f['global_mean']:.3f} | {f['z_score']:.2f} | {h_desc} ({f['homogeneity']:.2f}) |"
+            )
 
         if p.categorical_features:
             md.append("\n#### Distinctive Categories (Concentration)")
             md.append("| Feature | Value | Concentration (% of all instances) |")
             md.append("|---|---|---|")
             for f in p.categorical_features:
-                md.append(f"| {f['column']} | {f['value']} | {f['concentration']:.1f}% |")
+                md.append(
+                    f"| {f['column']} | {f['value']} | {f['concentration']:.1f}% |"
+                )
 
         md.append("\n#### Central Representative Rows")
         for i, row in enumerate(p.central_rows):
