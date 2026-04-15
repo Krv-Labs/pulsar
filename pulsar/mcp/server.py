@@ -1699,7 +1699,14 @@ async def export_html_report(
                 if str_id in normalized_names:
                     p.semantic_name = normalized_names[str_id]
 
-        html = dossier_to_html(dossier, model=session.model)
+        config_yaml = (
+            session.sweep_history[-1].config_yaml if session.sweep_history else None
+        )
+        html = dossier_to_html(
+            dossier,
+            model=session.model,
+            config_yaml=config_yaml,
+        )
 
         # Save to a file near the dataset if possible, or current dir
         dataset_path = (
