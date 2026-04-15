@@ -192,28 +192,25 @@ def test_column_profiles_missing_detected(mixed_csv):
     assert by_name["weight"].missing_pct == 0.0
 
 
-def test_column_profiles_top_values_for_strings(mixed_csv):
-    """Assert top_values populated for non-numeric columns."""
+def test_column_profiles_top_values_sparse(mixed_csv):
+    """characterize_dataset returns sparse profiles — top_values is always None.
+    Use probe_columns / profile_column_details for rich per-column detail.
+    """
     profile = characterize_dataset(mixed_csv)
-    by_name = {cp.name: cp for cp in profile.column_profiles}
-    assert by_name["gender"].top_values is not None
-    assert len(by_name["gender"].top_values) == 3  # M, F, NB
-    for val, count in by_name["gender"].top_values:
-        assert isinstance(val, str)
-        assert isinstance(count, int)
-    assert by_name["weight"].top_values is None
+    for cp in profile.column_profiles:
+        assert cp.top_values is None
 
 
-def test_column_profiles_numeric_stats(mixed_csv):
-    """Assert numeric stats populated for numeric columns."""
+def test_column_profiles_numeric_stats_sparse(mixed_csv):
+    """characterize_dataset returns sparse profiles — numeric stats are always None.
+    Use probe_columns / profile_column_details for mean, std, min, max.
+    """
     profile = characterize_dataset(mixed_csv)
-    by_name = {cp.name: cp for cp in profile.column_profiles}
-    assert by_name["weight"].mean is not None
-    assert by_name["weight"].std is not None
-    assert by_name["weight"].min_val is not None
-    assert by_name["weight"].max_val is not None
-    assert by_name["gender"].mean is None
-    assert by_name["gender"].std is None
+    for cp in profile.column_profiles:
+        assert cp.mean is None
+        assert cp.std is None
+        assert cp.min_val is None
+        assert cp.max_val is None
 
 
 def test_sample_values_are_strings(mixed_csv):

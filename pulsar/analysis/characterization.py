@@ -214,7 +214,13 @@ def characterize_dataset(
 
 
 def _profile_columns(df: pd.DataFrame) -> list[ColumnProfile]:
-    """Generates sparse profiles for ALL columns (Map View)."""
+    """Generates sparse profiles for ALL columns (Map View).
+
+    Expensive per-column fields (mean, std, min_val, max_val, top_values,
+    sample_values) are intentionally omitted here to keep the payload small
+    for wide/high-dimensional datasets.  Use profile_column_details() or the
+    probe_columns MCP tool for deep per-column inspection.
+    """
     profiles: list[ColumnProfile] = []
     n_rows = len(df)
     for col in df.columns:
@@ -229,7 +235,6 @@ def _profile_columns(df: pd.DataFrame) -> list[ColumnProfile]:
                 missing_pct=round(float(series.isna().mean() * 100), 2)
                 if n_rows > 0
                 else 0.0,
-                # Explicitly skip expensive fields in the global map
                 sample_values=[],
                 mean=None,
                 std=None,
