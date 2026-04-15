@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import networkx as nx
 import pandas as pd
 
-from pulsar.mcp.interpreter import ClusterProfile, TopologicalDossier, dossier_to_html
+from pulsar.mcp.interpreter import (
+    ClusterProfile,
+    TopologicalDossier,
+    build_dossier,
+    dossier_to_html,
+)
 
 
 def _sample_dossier() -> TopologicalDossier:
@@ -38,7 +43,11 @@ def _sample_dossier() -> TopologicalDossier:
                     "column": "species",
                     "value": "<img src=x onerror=alert(1)>",
                     "count": 8,
-                    "concentration": 88.0,
+                    "concentration": 100.0,
+                    "in_cluster_prevalence": 100.0,
+                    "global_recall": 88.0,
+                    "cluster_size": 8,
+                    "global_count": 9,
                 }
             ],
             central_rows=[
@@ -98,13 +107,55 @@ def test_dossier_to_html_escapes_untrusted_content():
 
 
 def test_dossier_to_html_renders_research_report_shell_and_graph_state():
-    html = dossier_to_html(_sample_dossier(), model=_sample_model())
+    html = dossier_to_html(
+        _sample_dossier(),
+        model=_sample_model(),
+        config_yaml="run:\n  name: demo\noutput:\n  n_reps: 1\n",
+    )
 
     assert "class='report-shell'" in html
-    assert "Population structure, reduced to the essentials" in html
+    assert "Cohort signal matrix" in html
+    assert "Numeric means" in html
+    assert "Categorical prevalence" in html
+    assert "z +" in html or "z -" in html
+    assert "Quick links" in html
+    assert "C00 —" in html
     assert "Topological skeleton projection" in html
-    assert "class='cluster-card'" in html
+    assert "data-cluster-id='0'" in html
     assert "data-base-radius" in html
     assert "data-base-fill" in html
     assert "const resetGraphNodes" in html
-    assert "Feature drift matrix" in html
+    assert "fonts.googleapis.com" in html
+    assert "Run parameters" in html
+    assert "Copy YAML" in html
+    assert "paramsYaml" in html
+    assert "name: demo" in html
+    assert "&lt;img src=x onerror=alert(1)&gt;" in html
+
+
+def test_build_dossier_reports_prevalence_and_global_recall_for_categories():
+    data = pd.DataFrame(
+        {
+            "x": [0.1, 0.2, 2.1, 2.2],
+            "sex": ["female", "female", "female", "male"],
+        }
+    )
+    clusters = pd.Series([0, 0, 1, 1], name="cluster")
+    model = SimpleNamespace(cosmic_graph=nx.Graph([(0, 1), (2, 3)]))
+
+    dossier = build_dossier(model, data, clusters)
+    cluster_zero = next(
+        profile for profile in dossier.clusters if profile.cluster_id == 0
+    )
+    sex_feature = next(
+        feature
+        for feature in cluster_zero.categorical_features
+        if feature["value"] == "female"
+    )
+
+    assert sex_feature["count"] == 2
+    assert sex_feature["cluster_size"] == 2
+    assert sex_feature["global_count"] == 3
+    assert sex_feature["in_cluster_prevalence"] == 100.0
+    assert round(sex_feature["global_recall"], 1) == 66.7
+    assert sex_feature["concentration"] == sex_feature["in_cluster_prevalence"]

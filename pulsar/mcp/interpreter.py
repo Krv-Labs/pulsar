@@ -35,6 +35,8 @@ _MAX_COMPONENTS = 30  # Use component strategy if fewer than this
 _MAX_SINGLETON_RATIO = 0.5  # Reject if >50% of nodes are singletons
 _SPECTRAL_K_MIN = 2
 _SPECTRAL_K_MAX = 20
+_MAX_SIGNAL_MATRIX_NUMERIC = 10
+_MAX_SIGNAL_MATRIX_CATEGORICAL = 6
 
 
 @dataclass
@@ -323,17 +325,34 @@ def build_dossier(
             counts = c_data[col].value_counts()
             global_counts = data[col].value_counts()
             for val, count in counts.head(5).items():
-                concentration = (count / global_counts[val]) * 100
+                in_cluster_prevalence = (count / c_size) * 100 if c_size > 0 else 0.0
+                global_recall = (
+                    (count / global_counts[val]) * 100
+                    if global_counts[val] > 0
+                    else 0.0
+                )
                 c_categorical.append(
                     {
                         "column": col,
                         "value": str(val),
                         "count": int(count),
-                        "concentration": float(concentration),
+                        # Backward-compatible alias: concentration now reflects the
+                        # primary user-facing signal, namely in-cluster prevalence.
+                        "concentration": float(in_cluster_prevalence),
+                        "in_cluster_prevalence": float(in_cluster_prevalence),
+                        "global_recall": float(global_recall),
+                        "cluster_size": int(c_size),
+                        "global_count": int(global_counts[val]),
                     }
                 )
         profile.categorical_features = sorted(
-            c_categorical, key=lambda x: x["concentration"], reverse=True
+            c_categorical,
+            key=lambda x: (
+                x["in_cluster_prevalence"],
+                x["global_recall"],
+                x["count"],
+            ),
+            reverse=True,
         )[:10]
 
         # Central Rows (Compressed)
@@ -397,6 +416,25 @@ def _format_value(value: Any, digits: int = 3) -> str:
             return "NaN"
         return f"{float(value):.{digits}f}"
     return str(value)
+
+
+def _format_heatmap_value(value: Any) -> str:
+    """Format heatmap values with restrained precision."""
+    if value is None:
+        return "—"
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}"
+    if isinstance(value, (float, np.floating)):
+        value = float(value)
+        if np.isnan(value):
+            return "NaN"
+        abs_value = abs(value)
+        if abs_value >= 100:
+            return f"{value:,.0f}"
+        if abs_value >= 10:
+            return f"{value:,.1f}"
+        return f"{value:,.2f}"
+    return _escape_html(value)
 
 
 def _signal_tone(z_score: float) -> tuple[str, str]:
@@ -506,7 +544,8 @@ def _render_report_styles() -> str:
       --radius-lg: 18px;
       --radius-md: 12px;
       --radius-sm: 999px;
-      --font-sans: "Avenir Next", "Segoe UI Variable", "Helvetica Neue", "Nimbus Sans", sans-serif;
+      --font-heading: "Google Sans", "Google Sans Text", "Product Sans", Roboto, Arial, sans-serif;
+      --font-sans: Roboto, Arial, sans-serif;
       --font-mono: "SFMono-Regular", "JetBrains Mono", "Cascadia Code", "Menlo", monospace;
     }
 
@@ -529,56 +568,30 @@ def _render_report_styles() -> str:
     }
 
     .report-shell {
-      min-height: 100vh;
+      width: min(100%, 1320px);
+      margin: 0 auto;
+      padding: 28px 44px 112px;
+      display: grid;
+      grid-template-columns: minmax(0, 940px) 260px;
+      gap: 68px;
+      align-items: start;
+    }
+
+    .report-main {
+      min-width: 0;
+      max-width: 100%;
     }
 
     .report-nav {
       position: sticky;
-      top: 0;
-      z-index: 20;
-      padding: 1rem 0;
-      background: rgba(255, 255, 255, 0.92);
-      backdrop-filter: blur(14px);
-      border-bottom: 1px solid rgba(60, 64, 67, 0.08);
-    }
-
-    .report-nav__inner,
-    .report-main {
-      width: min(100%, 1120px);
-      margin: 0 auto;
-      padding-left: 40px;
-      padding-right: 40px;
-    }
-
-    .report-nav__inner {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1.25rem;
+      top: 24px;
+      max-height: calc(100vh - 48px);
+      overflow-y: auto;
+      padding-right: 8px;
     }
 
     .report-nav__brand {
-      display: flex;
-      align-items: baseline;
-      gap: 0.9rem;
-      min-width: 0;
-    }
-
-    .brand-mark {
-      font-size: 0.72rem;
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
-      color: var(--muted);
-      font-weight: 600;
-      white-space: nowrap;
-    }
-
-    .report-nav h1 {
-      margin: 0;
-      font-size: 0.98rem;
-      font-weight: 700;
-      letter-spacing: -0.01em;
-      color: var(--ink);
+      margin-bottom: 18px;
     }
 
     .report-nav p,
@@ -598,26 +611,59 @@ def _render_report_styles() -> str:
     }
 
     .report-nav nav {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      flex-wrap: wrap;
-      justify-content: flex-end;
+      display: grid;
+      gap: 2px;
+    }
+
+    .report-nav__eyebrow,
+    .section-eyebrow {
+      display: inline-block;
+      font-size: 0.72rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .brand-mark {
+      margin-bottom: 10px;
+    }
+
+    .report-nav h1,
+    .hero-copy h1,
+    .section-header h2,
+    .cluster-section__heading h2 {
+      font-family: var(--font-heading);
+    }
+
+    .report-nav h1 {
+      margin: 0 0 6px;
+      font-size: 1.04rem;
+      line-height: 1.2;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+    }
+
+    .nav-group {
+      display: grid;
+      gap: 2px;
+      margin-bottom: 18px;
     }
 
     .nav-label {
-      color: var(--muted);
-      margin-right: 0.25rem;
+      margin-bottom: 8px;
     }
 
     .nav-link {
-      padding: 0.45rem 0.75rem;
-      border-radius: var(--radius-sm);
-      color: var(--muted);
-      font-size: 0.92rem;
+      display: block;
+      padding: 6px 10px;
+      border-radius: 10px;
+      color: #6f7275;
+      font-size: 0.88rem;
       font-weight: 500;
+      line-height: 1.35;
       transition: color 0.18s ease, background-color 0.18s ease;
-      white-space: nowrap;
     }
 
     .nav-link:hover,
@@ -636,29 +682,17 @@ def _render_report_styles() -> str:
       display: none;
     }
 
-    .report-main {
-      padding-top: 52px;
-      padding-bottom: 96px;
-    }
-
     .report-stack {
-      max-width: 780px;
-      margin: 0 auto;
       display: grid;
       gap: 64px;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .report-section {
-      scroll-margin-top: 100px;
-    }
-
-    .section-eyebrow {
-      display: inline-block;
-      font-size: 0.72rem;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--muted);
-      font-weight: 600;
+      scroll-margin-top: 28px;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .hero-grid {
@@ -667,6 +701,7 @@ def _render_report_styles() -> str:
     }
 
     .hero-copy h2 {
+      font-family: var(--font-heading);
       margin: 10px 0 14px;
       font-size: clamp(2.7rem, 8vw, 4.8rem);
       line-height: 0.98;
@@ -677,12 +712,6 @@ def _render_report_styles() -> str:
     .hero-copy p {
       font-size: 1.08rem;
       margin: 0;
-    }
-
-    .hero-panel {
-      background: var(--surface);
-      border-radius: var(--radius-lg);
-      padding: 18px 20px;
     }
 
     .hero-metrics {
@@ -747,6 +776,9 @@ def _render_report_styles() -> str:
       padding: 18px 18px 14px;
       background: var(--surface);
       border-radius: var(--radius-lg);
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
     }
 
     .figure-toolbar {
@@ -890,6 +922,7 @@ def _render_report_styles() -> str:
     }
 
     .cluster-card h3 {
+      font-family: var(--font-heading);
       font-size: 1.22rem;
       line-height: 1.12;
       letter-spacing: -0.02em;
@@ -941,6 +974,8 @@ def _render_report_styles() -> str:
       border-radius: var(--radius-lg);
       background: var(--surface);
       padding: 8px 0;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .heatmap-table,
@@ -981,9 +1016,23 @@ def _render_report_styles() -> str:
 
     .heat-cell {
       text-align: center;
-      font-family: var(--font-mono);
-      font-size: 0.86rem;
       white-space: nowrap;
+    }
+
+    .heat-value {
+      display: block;
+      font-family: var(--font-sans);
+      font-size: 0.88rem;
+      color: var(--ink);
+      font-weight: 500;
+    }
+
+    .heat-subvalue {
+      display: block;
+      margin-top: 4px;
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.01em;
     }
 
     .heat-positive {
@@ -992,6 +1041,23 @@ def _render_report_styles() -> str:
 
     .heat-negative {
       background: rgba(242, 153, 0, var(--heat-alpha, 0));
+    }
+
+    .heatmap-subsection {
+      margin-top: 18px;
+    }
+
+    .heatmap-subsection h3 {
+      margin: 0 0 8px;
+      font-size: 0.98rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .heatmap-subsection p {
+      margin: 0 0 12px;
+      font-size: 0.9rem;
+      color: var(--muted);
     }
 
     .cluster-section {
@@ -1115,25 +1181,94 @@ def _render_report_styles() -> str:
       font-size: 0.92rem;
     }
 
-    @media (max-width: 1080px) {
+    .config-appendix {
+      display: grid;
+      gap: 14px;
+      padding-top: 8px;
+      border-top: 1px solid var(--hairline);
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .config-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .config-toolbar p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .copy-button {
+      appearance: none;
+      border: none;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 10px 14px;
+      border-radius: 10px;
+      font: 500 0.9rem/1 var(--font-sans);
+      cursor: pointer;
+      transition: background-color 0.18s ease, color 0.18s ease;
+    }
+
+    .copy-button:hover,
+    .copy-button:focus-visible {
+      outline: none;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .config-textarea {
+      width: 100%;
+      min-height: 320px;
+      max-width: 100%;
+      resize: vertical;
+      border: none;
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      color: var(--ink);
+      padding: 18px;
+      font: 0.88rem/1.55 "Roboto Mono", var(--font-mono);
+      white-space: pre;
+      overflow: auto;
+    }
+
+    .config-textarea:focus-visible {
+      outline: 2px solid rgba(26, 115, 232, 0.16);
+    }
+
+    @media (max-width: 1180px) {
+      .report-shell {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 36px;
+      }
+
+      .report-nav {
+        position: static;
+        max-height: none;
+        overflow: visible;
+        order: -1;
+      }
+
+      .report-nav nav {
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      }
+
       .hero-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
 
     @media (max-width: 720px) {
-      .report-nav__inner,
-      .report-main {
-        padding-left: 20px;
-        padding-right: 20px;
+      .report-shell {
+        padding: 20px 20px 72px;
       }
 
-      .report-nav__inner {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-
-      .report-main {
-        padding-top: 32px;
-        padding-bottom: 64px;
+      .report-stack {
+        gap: 44px;
       }
 
       .hero-copy h2 {
@@ -1217,6 +1352,32 @@ def _render_report_script() -> str:
           });
         });
       }
+
+      document.querySelectorAll('[data-copy-target]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const target = document.getElementById(button.dataset.copyTarget);
+          if (!target) return;
+
+          const text = target.value || target.textContent || '';
+          try {
+            if (navigator.clipboard && window.isSecureContext) {
+              await navigator.clipboard.writeText(text);
+            } else {
+              target.focus();
+              target.select();
+              document.execCommand('copy');
+            }
+            const original = button.textContent;
+            button.textContent = 'Copied';
+            window.setTimeout(() => {
+              button.textContent = original;
+            }, 1400);
+          } catch (_error) {
+            target.focus();
+            target.select();
+          }
+        });
+      });
     });
     """
 
@@ -1225,27 +1386,31 @@ def _render_nav(dossier: TopologicalDossier) -> str:
     """Render the persistent navigation rail."""
     parts = [
         "<aside class='report-nav'>",
-        "<div class='report-nav__inner'>",
         "<div class='report-nav__brand'>",
-        "<span class='brand-mark'>Topological report</span>",
-        "<h1>Pulsar dossier</h1>",
+        "<span class='report-nav__eyebrow brand-mark'>Quick links</span>",
+        "<h1>Pulsar topological report</h1>",
+        f"<p>{dossier.n_total:,} observations · {dossier.n_clusters} cohorts</p>",
         "</div>",
         "<nav aria-label='Section navigation'>",
-        "<a class='nav-link is-active' href='#summary'>Executive summary</a>",
-        "<a class='nav-link' href='#topology'>Topology</a>",
+        "<div class='nav-group'>",
+        "<div class='nav-label report-nav__eyebrow'>Sections</div>",
+        "<a class='nav-link is-active' href='#summary'>Summary</a>",
+        "<a class='nav-link' href='#topology'>Topology figure</a>",
         "<a class='nav-link' href='#heatmap'>Feature drift</a>",
-        "<a class='nav-link' href='#clusters'>Cohorts</a>",
+        "<a class='nav-link' href='#config'>Run parameters</a>",
+        "</div>",
+        "<div class='nav-group'>",
+        "<div class='nav-label report-nav__eyebrow'>Clusters</div>",
     ]
     for profile in dossier.clusters:
         parts.append(
-            f"<a class='nav-link' href='#cluster-{profile.cluster_id}'>"
-            f"C{profile.cluster_id:02d}</a>"
+            f"<a class='nav-link' href='#cluster-{profile.cluster_id}' data-cluster-id='{profile.cluster_id}'>"
+            f"C{profile.cluster_id:02d} — {_escape_html(profile.semantic_name)}</a>"
         )
     parts.extend(
         [
-            "</nav>",
-            "<div class='report-nav__footer'>Generated by Pulsar Topological Engine.</div>",
             "</div>",
+            "</nav>",
             "</aside>",
         ]
     )
@@ -1267,13 +1432,14 @@ def _render_summary_section(dossier: TopologicalDossier, gm: Dict[str, Any]) -> 
         "<section id='summary' class='report-section'>",
         "<div class='hero-grid'>",
         "<div class='hero-copy'>",
-        "<span class='section-eyebrow'>Executive summary</span>",
-        "<h2>A restrained reading of the dataset’s latent structure.</h2>",
-        "<p>This export is designed like a technical note rather than a dashboard: <strong>tight typography</strong>, a narrow reading column, and figures that interrupt the narrative at deliberate intervals. The goal is simple: make the manifold legible without surrounding it with UI noise.</p>",
-        "</div>",
-        "<div class='hero-panel'>",
-        "<span class='section-eyebrow'>How to read it</span>",
-        "<p class='panel-note'>Start with the topology figure for global shape, confirm the separation in the feature drift matrix, then use the cohort sections as evidence pages. Hover a cohort row to isolate its support in the graph.</p>",
+        "<span class='section-eyebrow'>Summary</span>",
+        "<h2>Latent structure report</h2>",
+        (
+            f"<p>{dossier.n_total:,} observations resolve into <strong>{dossier.n_clusters}</strong> cohorts. "
+            f"The supporting topology contains <strong>{_escape_html(_format_value(gm.get('n_nodes', 'N/A'), digits=0))}</strong> nodes, "
+            f"<strong>{_escape_html(_format_value(gm.get('n_edges', 'N/A'), digits=0))}</strong> edges, and "
+            f"<strong>{_escape_html(_format_value(gm.get('component_count', 'N/A'), digits=0))}</strong> stable components.</p>"
+        ),
         "</div>",
         "</div>",
         "<div class='hero-metrics'>",
@@ -1415,7 +1581,7 @@ def _render_topology_section(
         "<span class='section-eyebrow'>Figure 1</span>",
         "<h2>Topological skeleton projection</h2>",
         "</div>",
-        "<p class='section-subtitle'>The figure is sampled from the cosmic graph for responsiveness, but the cohort coloring stays consistent with the rest of the document.</p>",
+        "<p class='section-subtitle'>Sampled from the cosmic graph for responsiveness. Cohort colors stay consistent across the full report.</p>",
         "</div>",
         "<div class='figure-frame'>",
         "<div class='figure-toolbar'>",
@@ -1451,15 +1617,36 @@ def _render_topology_section(
 
 
 def _render_heatmap_section(dossier: TopologicalDossier) -> str:
-    """Render the cross-cluster feature drift heatmap."""
-    features = sorted(
-        {
-            feature["column"]
-            for profile in dossier.clusters
-            for feature in profile.numeric_features[:5]
-        }
-    )
-    if not features:
+    """Render a bounded cohort signal matrix with numeric and categorical groups."""
+    numeric_scores: dict[str, float] = {}
+    categorical_scores: dict[tuple[str, str], float] = {}
+
+    for profile in dossier.clusters:
+        for feature in profile.numeric_features:
+            numeric_scores[feature["column"]] = numeric_scores.get(
+                feature["column"], 0.0
+            ) + abs(float(feature.get("z_score", 0.0)))
+        for feature in profile.categorical_features:
+            key = (str(feature["column"]), str(feature["value"]))
+            categorical_scores[key] = categorical_scores.get(key, 0.0) + float(
+                feature.get("in_cluster_prevalence", feature.get("concentration", 0.0))
+            )
+
+    numeric_features = [
+        name
+        for name, _score in sorted(
+            numeric_scores.items(), key=lambda item: (-item[1], item[0])
+        )[:_MAX_SIGNAL_MATRIX_NUMERIC]
+    ]
+    categorical_features = [
+        key
+        for key, _score in sorted(
+            categorical_scores.items(),
+            key=lambda item: (-item[1], item[0][0], item[0][1]),
+        )[:_MAX_SIGNAL_MATRIX_CATEGORICAL]
+    ]
+
+    if not numeric_features and not categorical_features:
         return ""
 
     parts = [
@@ -1467,26 +1654,47 @@ def _render_heatmap_section(dossier: TopologicalDossier) -> str:
         "<div class='section-header'>",
         "<div>",
         "<span class='section-eyebrow'>Figure 2</span>",
-        "<h2>Feature drift matrix</h2>",
+        "<h2>Cohort signal matrix</h2>",
         "</div>",
-        "<p class='section-subtitle'>Signed z-scores across cohorts. Positive cells indicate enrichment, negative cells indicate depletion.</p>",
+        f"<p class='section-subtitle'>Bounded for readability: up to {_MAX_SIGNAL_MATRIX_NUMERIC} numeric features and {_MAX_SIGNAL_MATRIX_CATEGORICAL} categorical signals. Numeric values are cohort means, and the smaller line below each numeric value is the z-shift.</p>",
         "</div>",
         "<div class='heatmap-shell'>",
-        "<table class='heatmap-table'><thead><tr><th>Cohort</th>",
+        "<table class='heatmap-table'><thead>",
+        "<tr>",
+        "<th rowspan='2'>Cohort</th>",
     ]
-    for feature_name in features:
+    if numeric_features:
+        parts.append(f"<th colspan='{len(numeric_features)}'>Numeric means</th>")
+    if categorical_features:
+        parts.append(
+            f"<th colspan='{len(categorical_features)}'>Categorical prevalence</th>"
+        )
+    parts.append("</tr><tr>")
+    for feature_name in numeric_features:
         parts.append(f"<th>{_escape_html(feature_name)}</th>")
+    for column_name, value in categorical_features:
+        parts.append(f"<th>{_escape_html(column_name)}={_escape_html(value)}</th>")
     parts.append("</tr></thead><tbody>")
     for profile in dossier.clusters:
         parts.append(
-            f"<tr><td><strong>{_escape_html(profile.semantic_name)}</strong></td>"
+            f"<tr data-cluster-id='{profile.cluster_id}'>"
+            "<td>"
+            f"<div><strong>C{profile.cluster_id:02d} — {_escape_html(profile.semantic_name)}</strong></div>"
+            f"<div class='cluster-card__meta'>n = {profile.size:,} · {profile.size_pct:.1f}%</div>"
+            "</td>"
         )
-        feature_map = {
-            feature["column"]: feature["z_score"]
-            for feature in profile.numeric_features
+        numeric_map = {
+            feature["column"]: feature for feature in profile.numeric_features
         }
-        for feature_name in features:
-            z_score = float(feature_map.get(feature_name, 0.0))
+        for feature_name in numeric_features:
+            feature = numeric_map.get(feature_name)
+            if feature is None:
+                parts.append(
+                    "<td class='heat-cell'><span class='heat-subvalue'>—</span></td>"
+                )
+                continue
+            z_score = float(feature.get("z_score", 0.0))
+            mean_value = feature.get("mean")
             alpha = min(0.38, abs(z_score) * 0.14)
             tone_class = (
                 "heat-positive"
@@ -1497,7 +1705,35 @@ def _render_heatmap_section(dossier: TopologicalDossier) -> str:
             )
             style = f" style='--heat-alpha:{alpha:.2f}'" if tone_class else ""
             parts.append(
-                f"<td class='heat-cell {tone_class}'{style}><code>{z_score:+.2f}</code></td>"
+                f"<td class='heat-cell {tone_class}'{style}>"
+                f"<span class='heat-value'>{_escape_html(_format_heatmap_value(mean_value))}</span>"
+                f"<span class='heat-subvalue'>z {z_score:+.2f}</span>"
+                "</td>"
+            )
+        categorical_map = {
+            (str(feature["column"]), str(feature["value"])): feature
+            for feature in profile.categorical_features
+        }
+        for key in categorical_features:
+            feature = categorical_map.get(key)
+            prevalence = (
+                float(
+                    feature.get(
+                        "in_cluster_prevalence", feature.get("concentration", 0.0)
+                    )
+                )
+                if feature is not None
+                else 0.0
+            )
+            count = int(feature.get("count", 0)) if feature is not None else 0
+            alpha = min(0.38, prevalence * 0.0038)
+            tone_class = "heat-positive" if prevalence >= 50.0 else ""
+            style = f" style='--heat-alpha:{alpha:.2f}'" if prevalence > 0 else ""
+            parts.append(
+                f"<td class='heat-cell {tone_class}'{style}>"
+                f"<span class='heat-value'>{_escape_html(key[1])}</span>"
+                f"<span class='heat-subvalue'>{count}/{profile.size} · {prevalence:.1f}%</span>"
+                "</td>"
             )
         parts.append("</tr>")
     parts.extend(["</tbody></table>", "</div>", "</section>"])
@@ -1583,19 +1819,28 @@ def _render_categorical_panel(profile: ClusterProfile, accent_color: str) -> str
     parts = [
         "<section class='panel'>",
         "<h3>Categorical concentrations</h3>",
-        "<table class='data-table'><thead><tr><th>Feature</th><th>Value</th><th>Concentration</th></tr></thead><tbody>",
+        "<p class='panel-note'>Prevalence reports what share of this cohort has the value. Global recall reports how much of the overall value population this cohort captures.</p>",
+        "<table class='data-table'><thead><tr><th>Feature</th><th>Value</th><th>Prevalence</th><th>Global recall</th></tr></thead><tbody>",
     ]
     for feature in profile.categorical_features:
+        prevalence = float(
+            feature.get("in_cluster_prevalence", feature.get("concentration", 0.0))
+        )
+        global_recall = float(feature.get("global_recall", 0.0))
+        count = int(feature.get("count", 0))
+        cluster_size = int(feature.get("cluster_size", profile.size))
+        global_count = int(feature.get("global_count", count))
         parts.append(
             "<tr>"
             f"<td>{_escape_html(feature['column'])}</td>"
             f"<td><code>{_escape_html(feature['value'])}</code></td>"
             "<td>"
-            f"{feature['concentration']:.1f}%"
+            f"{prevalence:.1f}% <span class='cluster-card__meta'>({count}/{cluster_size})</span>"
             "<div class='bar-track' style='margin-top:0.45rem;'>"
-            f"<div class='bar-fill' style='width:{feature['concentration']:.2f}%; --cluster-accent:{accent_color};'></div>"
+            f"<div class='bar-fill' style='width:{prevalence:.2f}%; --cluster-accent:{accent_color};'></div>"
             "</div>"
             "</td>"
+            f"<td>{global_recall:.1f}% <span class='cluster-card__meta'>({count}/{global_count})</span></td>"
             "</tr>"
         )
     parts.extend(["</tbody></table>", "</section>"])
@@ -1644,10 +1889,10 @@ def _render_cluster_section(profile: ClusterProfile, accent_color: str) -> str:
             f"data-cluster-id='{profile.cluster_id}' style='--cluster-accent:{accent_color}'>",
             "<div class='cluster-section__heading'>",
             "<div class='cluster-section__topline'>",
-            f"<span class='cluster-id'>Cohort {profile.cluster_id:02d}</span>",
-            f"<span class='legend-chip' style='--cluster-accent:{accent_color}'>{profile.size_pct:.1f}% of population</span>",
+            f"<span class='cluster-id'>C{profile.cluster_id:02d}</span>",
+            f"<span class='legend-chip' style='--cluster-accent:{accent_color}'>n = {profile.size:,} · {profile.size_pct:.1f}%</span>",
             "</div>",
-            f"<h2>{_escape_html(profile.semantic_name)}</h2>",
+            f"<h2>C{profile.cluster_id:02d} — {_escape_html(profile.semantic_name)}</h2>",
             (
                 f"<p class='cluster-section__summary'>This cohort contains <strong>{profile.size:,}</strong> observations "
                 f"and represents <strong>{profile.size_pct:.1f}%</strong> of the analyzed population. "
@@ -1667,7 +1912,47 @@ def _render_cluster_section(profile: ClusterProfile, accent_color: str) -> str:
     )
 
 
-def dossier_to_html(dossier: TopologicalDossier, model: ThemaRS | None = None) -> str:
+def _render_config_appendix(config_yaml: str | None) -> str:
+    """Render a copyable params appendix at the bottom of the report."""
+    if not config_yaml:
+        return ""
+
+    return "".join(
+        [
+            "<section id='config' class='report-section config-appendix'>",
+            "<div class='section-header'>",
+            "<div>",
+            "<span class='section-eyebrow'>Appendix</span>",
+            "<h2>Run parameters</h2>",
+            "</div>",
+            "<p class='section-subtitle'>Normalized params.yaml used for the exported run.</p>",
+            "</div>",
+            "<div class='config-toolbar'>",
+            "<p>Readonly, formatted for direct copy and reuse.</p>",
+            "<button type='button' class='copy-button' data-copy-target='paramsYaml'>Copy YAML</button>",
+            "</div>",
+            f"<textarea id='paramsYaml' class='config-textarea' readonly spellcheck='false'>{_escape_html(config_yaml)}</textarea>",
+            "</section>",
+        ]
+    )
+
+
+def _render_font_links() -> str:
+    """Load Google-hosted body fonts with immediate local fallbacks when offline."""
+    return "\n".join(
+        [
+            "<link rel='preconnect' href='https://fonts.googleapis.com'>",
+            "<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin>",
+            "<link href='https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500;700&display=swap' rel='stylesheet'>",
+        ]
+    )
+
+
+def dossier_to_html(
+    dossier: TopologicalDossier,
+    model: ThemaRS | None = None,
+    config_yaml: str | None = None,
+) -> str:
     """Render the dossier as a polished standalone HTML research report."""
     graph_metrics = dossier.global_stats.get("graph_metrics", {})
     palette = _cluster_palette(dossier.clusters)
@@ -1675,12 +1960,12 @@ def dossier_to_html(dossier: TopologicalDossier, model: ThemaRS | None = None) -
         _render_summary_section(dossier, graph_metrics),
         _render_topology_section(dossier, model, palette),
         _render_heatmap_section(dossier),
-        _render_cluster_overview_section(dossier, palette),
     ]
     sections.extend(
         _render_cluster_section(profile, palette[profile.cluster_id])
         for profile in dossier.clusters
     )
+    sections.append(_render_config_appendix(config_yaml))
     return "\n".join(
         [
             "<!DOCTYPE html>",
@@ -1689,18 +1974,19 @@ def dossier_to_html(dossier: TopologicalDossier, model: ThemaRS | None = None) -
             "<meta charset='utf-8'>",
             "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
             "<title>Pulsar Topological Dossier</title>",
+            _render_font_links(),
             "<style>",
             _render_report_styles(),
             "</style>",
             "</head>",
             "<body>",
             "<div class='report-shell'>",
-            _render_nav(dossier),
             "<main class='report-main'>",
             "<div class='report-stack'>",
             *[section for section in sections if section],
             "</div>",
             "</main>",
+            _render_nav(dossier),
             "</div>",
             "<script>",
             _render_report_script(),
@@ -1746,11 +2032,16 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
 
         if p.categorical_features:
             md.append("\n#### Distinctive Categories (Concentration)")
-            md.append("| Feature | Value | Concentration (% of all instances) |")
-            md.append("|---|---|---|")
+            md.append("| Feature | Value | In-cluster prevalence | Global recall |")
+            md.append("|---|---|---|---|")
             for f in p.categorical_features:
+                prevalence = f.get("in_cluster_prevalence", f.get("concentration", 0.0))
+                global_recall = f.get("global_recall", 0.0)
+                count = f.get("count", 0)
+                cluster_size = f.get("cluster_size", p.size)
+                global_count = f.get("global_count", count)
                 md.append(
-                    f"| {f['column']} | {f['value']} | {f['concentration']:.1f}% |"
+                    f"| {f['column']} | {f['value']} | {prevalence:.1f}% ({count}/{cluster_size}) | {global_recall:.1f}% ({count}/{global_count}) |"
                 )
 
         md.append("\n#### Central Representative Rows")
