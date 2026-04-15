@@ -185,7 +185,7 @@ mcp = FastMCP(
         "Reveal the dataset's topology; do not force convenient clusters.\n\n"
         "### PHASE I: INGEST & CALIBRATE\n"
         "1. Ingest: Use ingest_dataset handles. Prefer dataset_id everywhere.\n"
-        "2. Characterize: characterize_dataset(dataset_id) returns a sparse schema (types and missingness) for ALL columns. If you need to see exact string values or distributions to write a custom encoder, use probe_columns(dataset_id, ['col_name']).\n"
+        "2. Characterize: characterize_dataset(dataset_id) returns a SPARSE schema — dtype, n_unique, missingness — for ALL columns. Numeric stats and top_values are intentionally omitted to keep payload small for wide datasets. Use probe_columns(dataset_id, ['col_name']) for deep per-column inspection (sample values, distributions). Max 20 columns per probe call.\n"
         "3. Calibrate: create_config(dataset_id) is mandatory. It returns the [p5, p95] epsilon domain. EPSILON OUTSIDE THIS RANGE PRODUCES DEGENERATE GRAPHS.\n"
         "4. Validate Config: validate_config(config_yaml, dataset_id).\n\n"
         "### PHASE II: EXECUTE & VALIDATE\n"
@@ -250,6 +250,7 @@ class _PulsarSession:
 # Using OrderedDict for LRU (Least Recently Used) eviction policy.
 _sessions: OrderedDict[str, _PulsarSession] = OrderedDict()
 _MAX_SESSIONS = int(os.environ.get("PULSAR_MAX_SESSIONS", "3"))
+_MAX_EDGES_IN_SUMMARY = 500
 
 
 def _session_key(ctx: Context | None) -> str:
@@ -329,14 +330,20 @@ def _build_graph_summary(model: ThemaRS) -> dict[str, Any]:
         )
     edges.sort(key=lambda edge: (-edge["weight"], edge["source"], edge["target"]))
 
+    total_edges = len(edges)
+    truncated = total_edges > _MAX_EDGES_IN_SUMMARY
+    edges = edges[:_MAX_EDGES_IN_SUMMARY]
+
     return {
         "node_count": graph.number_of_nodes(),
-        "edge_count": graph.number_of_edges(),
+        "edge_count": total_edges,
         "resolved_threshold": float(model.resolved_threshold),
         "component_count": len(components),
         "component_sizes": component_sizes,
         "nodes": nodes,
         "edges": edges,
+        "edges_truncated": truncated,
+        "edges_shown": len(edges),
     }
 
 
@@ -1206,7 +1213,7 @@ async def export_labeled_data(
         )
 
     actual_ids = set(session.clusters.unique().tolist())
-    provided_ids = set(int(k) for k in cluster_names.keys())
+    provided_ids = set(int(str(k).lstrip("_")) for k in cluster_names.keys())
     missing_ids = actual_ids - provided_ids
     if missing_ids:
         raise ToolError(
@@ -1216,7 +1223,7 @@ async def export_labeled_data(
     try:
         df = session.data.copy()
         df["topological_cluster_id"] = session.clusters
-        names_map = {int(k): v for k, v in cluster_names.items()}
+        names_map = {int(str(k).lstrip("_")): v for k, v in cluster_names.items()}
         df["topological_cluster_name"] = df["topological_cluster_id"].map(names_map)
         df.to_csv(output_path, index=False)
         return f"Successfully exported labeled data to {output_path}"
@@ -1350,6 +1357,11 @@ async def get_threshold_stability_curve(ctx: Context) -> str:
 async def get_topological_skeleton(run_id: str = "", ctx: Context = None) -> str:
     """
     Return structured graph connectivity for the latest run or an explicit run_id.
+
+    The edge list is capped at 500 entries (top edges by weight). If the graph
+    has more edges, edges_truncated=true and edge_count shows the true total.
+    Use edge_count and component_sizes for density reasoning — do not rely on
+    len(edges) when edges_truncated is true.
     """
     try:
         session = _get_session(ctx)
@@ -1630,6 +1642,7 @@ def main():
 if __name__ == "__main__":
     main()
 
+
 @mcp.tool()
 async def export_html_report(
     dataset_id: str = "",
@@ -1653,46 +1666,65 @@ async def export_html_report(
     """
     session = _get_session(ctx)
     if session.model is None or session.data is None:
-        return mcp_error("export_html_report", "No model found. Run run_topological_sweep first.")
-    
+        return mcp_error(
+            "export_html_report", "No model found. Run run_topological_sweep first."
+        )
+
     if session.clusters is None:
-        return mcp_error("export_html_report", "No clusters found. Run generate_cluster_dossier first.")
+        return mcp_error(
+            "export_html_report",
+            "No clusters found. Run generate_cluster_dossier first.",
+        )
 
     # Use explicitly passed columns, or fallback to session defaults
-    cols_to_exclude = exclude_columns if exclude_columns is not None else session.report_exclude_columns
+    cols_to_exclude = (
+        exclude_columns
+        if exclude_columns is not None
+        else session.report_exclude_columns
+    )
 
     try:
         dossier = build_dossier(
-            session.model, session.data, session.clusters, exclude_columns=cols_to_exclude
+            session.model,
+            session.data,
+            session.clusters,
+            exclude_columns=cols_to_exclude,
         )
-        
+
         # Apply LLM-provided cluster names if available
         if cluster_names:
+            normalized_names = {str(k).lstrip("_"): v for k, v in cluster_names.items()}
             for p in dossier.clusters:
                 str_id = str(p.cluster_id)
-                if str_id in cluster_names:
-                    p.semantic_name = cluster_names[str_id]
+                if str_id in normalized_names:
+                    p.semantic_name = normalized_names[str_id]
 
         html = dossier_to_html(dossier, model=session.model)
-        
+
         # Save to a file near the dataset if possible, or current dir
-        dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else "pulsar_report.html"
+        dataset_path = (
+            _resolve_dataset_path(dataset_id) if dataset_id else "pulsar_report.html"
+        )
         if os.path.isfile(dataset_path):
             report_path = os.path.splitext(dataset_path)[0] + "_report.html"
         else:
             report_path = os.path.join(os.getcwd(), "pulsar_report.html")
-            
-        with open(report_path, "w") as f:
+
+        with open(report_path, "w", encoding="utf-8") as f:
             f.write(html)
-            
-        return json.dumps({
-            "status": "ok",
-            "report_path": report_path,
-            "report_url": f"file://{os.path.abspath(report_path)}",
-            "message": "HTML report exported successfully. Open the report_url in your browser."
-        }, indent=2)
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "report_path": report_path,
+                "report_url": f"file://{os.path.abspath(report_path)}",
+                "message": "HTML report exported successfully. Open the report_url in your browser.",
+            },
+            indent=2,
+        )
     except Exception as e:
         return mcp_error("export_html_report", str(e))
+
 
 @mcp.tool()
 async def probe_columns(
@@ -1712,7 +1744,9 @@ async def probe_columns(
     from pulsar.analysis.characterization import profile_column_details
 
     if len(columns) > 20:
-        return mcp_error("probe_columns", "Too many columns requested. Max 20 at a time.")
+        return mcp_error(
+            "probe_columns", "Too many columns requested. Max 20 at a time."
+        )
 
     session = _get_session(ctx)
     if session.data is None:
@@ -1727,11 +1761,10 @@ async def probe_columns(
         for col in columns:
             if col not in session.data.columns:
                 continue
-            profiles.append(dataclasses.asdict(profile_column_details(session.data, col)))
-        
-        return json.dumps({
-            "status": "ok",
-            "column_profiles": profiles
-        }, indent=2)
+            profiles.append(
+                dataclasses.asdict(profile_column_details(session.data, col))
+            )
+
+        return json.dumps({"status": "ok", "column_profiles": profiles}, indent=2)
     except Exception as e:
         return mcp_error("probe_columns", str(e))
