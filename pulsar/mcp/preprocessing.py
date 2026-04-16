@@ -208,6 +208,15 @@ def _recommend_preprocessing_block(
                     f"Numeric, {missing_pct:.0f}% missing — sample_normal preserves distribution shape",
                 )
             )
+        elif missing_pct >= 10:
+            impute[name] = {"method": "sample_normal", "seed": 42}
+            rationale.append(
+                (
+                    name,
+                    "impute: sample_normal",
+                    f"Numeric, {missing_pct:.0f}% missing — variance preservation required to prevent artificial topological gravity",
+                )
+            )
         elif missing_pct > 0:
             impute[name] = {"method": "fill_mean", "seed": 42}
             rationale.append(
