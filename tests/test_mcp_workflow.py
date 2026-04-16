@@ -19,6 +19,17 @@ def _write_dataset(tmp_path, rows: int = 30, cols: int = 6) -> str:
     return str(path)
 
 
+def _write_parquet_dataset(tmp_path, rows: int = 30, cols: int = 6) -> str:
+    rng = np.random.default_rng(11)
+    df = pd.DataFrame(
+        rng.standard_normal((rows, cols)),
+        columns=[f"f{i}" for i in range(cols)],
+    )
+    path = tmp_path / "dataset.parquet"
+    df.to_parquet(path, index=False)
+    return str(path)
+
+
 def _dataset_csv_content(rows: int = 30, cols: int = 6) -> str:
     rng = np.random.default_rng(7)
     df = pd.DataFrame(
@@ -109,7 +120,8 @@ def test_ingest_dataset_classifies_sandbox_local_missing_path():
     assert report["status"] == "error"
     assert report["error_code"] == "HOST_PATH_NOT_VISIBLE"
     assert report["details"]["path_context"]["looks_like_sandbox_path"] is True
-    assert "ingest_dataset_base64" in report["agent_action"]
+    assert "DO NOT use base64 or chunked uploads" in report["agent_action"]
+    assert "get_runtime_context" in report["agent_action"]
 
 
 def test_ingest_dataset_classifies_host_missing_path():
@@ -258,6 +270,50 @@ def test_ingest_modes_produce_equivalent_downstream_configs(tmp_path):
         == _normalize_config_data_path(base64_cfg)
         == _normalize_config_data_path(upload_cfg)
     )
+
+
+def test_create_config_supports_parquet_dataset_id(tmp_path):
+    parquet_path = _write_parquet_dataset(tmp_path)
+
+    dataset = json.loads(asyncio.run(server.ingest_dataset(parquet_path)))
+    create_response = json.loads(
+        asyncio.run(server.create_config(dataset["dataset_id"], "parquet_sweep"))
+    )
+    report = json.loads(
+        asyncio.run(server.validate_config(create_response["config_yaml"], dataset["dataset_id"]))
+    )
+
+    assert create_response["status"] == "ok"
+    assert "name: parquet_sweep" in create_response["config_yaml"]
+    assert f"data: {parquet_path}" in create_response["config_yaml"]
+    assert report["status"] == "ok"
+    assert report["resolved_dataset_path"] == parquet_path
+
+
+def test_probe_columns_reloads_for_requested_dataset_id(tmp_path):
+    path_a = tmp_path / "dataset_a.csv"
+    path_b = tmp_path / "dataset_b.csv"
+    pd.DataFrame({"a_only": [1, 2], "shared": [3, 4]}).to_csv(path_a, index=False)
+    pd.DataFrame({"b_only": [5, 6], "shared": [7, 8]}).to_csv(path_b, index=False)
+
+    dataset_a = json.loads(asyncio.run(server.ingest_dataset(str(path_a))))
+    dataset_b = json.loads(asyncio.run(server.ingest_dataset(str(path_b))))
+
+    asyncio.run(server.characterize_dataset(dataset_id=dataset_a["dataset_id"]))
+    payload = json.loads(
+        asyncio.run(
+            server.probe_columns(dataset_b["dataset_id"], ["b_only", "shared"])
+        )
+    )
+
+    names = {profile["name"] for profile in payload["column_profiles"]}
+    shared_profile = next(
+        profile for profile in payload["column_profiles"] if profile["name"] == "shared"
+    )
+
+    assert payload["status"] == "ok"
+    assert names == {"b_only", "shared"}
+    assert shared_profile["sample_values"] == ["7", "8"]
 
 
 def test_staged_dataset_upload_round_trip():
@@ -540,6 +596,7 @@ def test_refine_config_returns_diff(tmp_path):
 
 def test_run_topological_sweep_returns_json(tmp_path):
     """run_topological_sweep should return structured JSON, not Markdown."""
+    server._sessions.clear()
     csv_path = _write_dataset(tmp_path)
     dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
@@ -571,5 +628,80 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert isinstance(result["diff"], list)
     assert "config_yaml_normalized" in result
     assert "data_shape" in result
+    assert "is_connected" in result
+    assert "singleton_fraction" in result
+    assert "spectral_clustering_allowed" in result
+    assert "graph_health" in result
+    assert "recommended_next_action" in result
+    assert result["pca_cached"] is False
+    assert result["pca_cache_status"] == {
+        "scope": "session",
+        "status": "miss",
+        "reason": "no_cached_embeddings",
+    }
 
 
+def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
+    server._sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    create_response = json.loads(
+        asyncio.run(server.create_config(dataset["dataset_id"], "active_config"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            server.refine_active_config(
+                {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+            )
+        )
+    )
+
+    active_before = json.loads(asyncio.run(server.get_active_config()))
+    result = json.loads(asyncio.run(server.run_topological_sweep()))
+
+    assert create_response["status"] == "ok"
+    assert refined["status"] == "ok"
+    assert active_before["config_yaml"] == refined["config_yaml"]
+    assert result["status"] == "ok"
+    assert result["dataset_id"] == dataset["dataset_id"]
+    assert result["config_yaml_normalized"] == refined["config_yaml"]
+
+
+def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):
+    server._sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(server.create_config(dataset["dataset_id"], "cache_hit"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            server.refine_config(
+                config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+            )
+        )
+    )["config_yaml"]
+
+    first = json.loads(
+        asyncio.run(
+            server.run_topological_sweep(
+                config_yaml=refined, dataset_id=dataset["dataset_id"]
+            )
+        )
+    )
+    second = json.loads(
+        asyncio.run(
+            server.run_topological_sweep(
+                config_yaml=refined, dataset_id=dataset["dataset_id"]
+            )
+        )
+    )
+
+    assert first["pca_cached"] is False
+    assert first["pca_cache_status"]["reason"] == "no_cached_embeddings"
+    assert second["pca_cached"] is True
+    assert second["pca_cache_status"] == {
+        "scope": "session",
+        "status": "hit",
+        "reason": "fingerprint_match",
+    }
