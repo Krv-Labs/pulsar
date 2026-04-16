@@ -356,7 +356,8 @@ def _graph_cluster_adjacency(
     }
     for (cluster_a, cluster_b), bridge_weight in pair_weights.items():
         denom = math.sqrt(
-            max(cluster_sizes.get(cluster_a, 1), 1) * max(cluster_sizes.get(cluster_b, 1), 1)
+            max(cluster_sizes.get(cluster_a, 1), 1)
+            * max(cluster_sizes.get(cluster_b, 1), 1)
         )
         normalized_weight = bridge_weight / max(denom, 1.0)
         bridge_strength = bridge_weight / max(
@@ -402,14 +403,25 @@ def _strongest_neighbor(
 def _apply_numeric_scores(rows: list[dict[str, Any]]) -> None:
     metric_names = [
         ("effect_mean_std", lambda row: abs(float(row.get("effect_mean_std", 0.0)))),
-        ("effect_median_mad", lambda row: abs(float(row.get("effect_median_mad", 0.0)))),
+        (
+            "effect_median_mad",
+            lambda row: abs(float(row.get("effect_median_mad", 0.0))),
+        ),
         ("ks_stat", lambda row: float(row.get("ks_stat", 0.0))),
         ("wasserstein_norm", lambda row: float(row.get("wasserstein_norm", 0.0))),
-        ("concentration_gain", lambda row: max(float(row.get("concentration_gain", 0.0)), 0.0)),
+        (
+            "concentration_gain",
+            lambda row: max(float(row.get("concentration_gain", 0.0)), 0.0),
+        ),
         ("specificity_score", lambda row: float(row.get("specificity_score", 0.0))),
-        ("one_vs_rest_sig", lambda row: -math.log10(float(row.get("one_vs_rest_q", 1.0)) + _EPS)),
+        (
+            "one_vs_rest_sig",
+            lambda row: -math.log10(float(row.get("one_vs_rest_q", 1.0)) + _EPS),
+        ),
         ("global_sig", lambda row: -math.log10(float(row.get("global_q", 1.0)) + _EPS)),
-        ("neighbor_effect", lambda row: abs(float(row.get("neighbor_effect", 0.0))),
+        (
+            "neighbor_effect",
+            lambda row: abs(float(row.get("neighbor_effect", 0.0))),
         ),
     ]
     component_percentiles: dict[str, list[float]] = {}
@@ -425,7 +437,9 @@ def _apply_numeric_scores(rows: list[dict[str, Any]]) -> None:
             for metric_name, _getter in metric_names
         }
         positive = [max(value, 0.0) + 1e-6 for value in evidence_vector.values()]
-        aggregate = float(math.exp(np.mean(np.log(positive))) - 1e-6) if positive else 0.0
+        aggregate = (
+            float(math.exp(np.mean(np.log(positive))) - 1e-6) if positive else 0.0
+        )
         row["aggregate_score"] = max(aggregate, 0.0)
         row["evidence_vector"] = evidence_vector
         aggregate_components.append(row["aggregate_score"])
@@ -441,7 +455,10 @@ def _apply_categorical_scores(rows: list[dict[str, Any]]) -> None:
         ("log_lift", lambda row: abs(float(row.get("log_lift", 0.0)))),
         ("specificity", lambda row: abs(float(row.get("specificity", 0.0)))),
         ("global_recall", lambda row: float(row.get("global_recall", 0.0))),
-        ("neighbor_specificity", lambda row: abs(float(row.get("neighbor_specificity", 0.0)))),
+        (
+            "neighbor_specificity",
+            lambda row: abs(float(row.get("neighbor_specificity", 0.0))),
+        ),
         ("mi_contrib", lambda row: abs(float(row.get("mi_contrib", 0.0)))),
         ("fisher_sig", lambda row: -math.log10(float(row.get("fisher_q", 1.0)) + _EPS)),
         ("global_sig", lambda row: -math.log10(float(row.get("global_q", 1.0)) + _EPS)),
@@ -459,7 +476,9 @@ def _apply_categorical_scores(rows: list[dict[str, Any]]) -> None:
             for metric_name, _getter in metric_names
         }
         positive = [max(value, 0.0) + 1e-6 for value in evidence_vector.values()]
-        aggregate = float(math.exp(np.mean(np.log(positive))) - 1e-6) if positive else 0.0
+        aggregate = (
+            float(math.exp(np.mean(np.log(positive))) - 1e-6) if positive else 0.0
+        )
         row["aggregate_score"] = max(aggregate, 0.0)
         row["evidence_vector"] = evidence_vector
         aggregates.append(row["aggregate_score"])
@@ -553,7 +572,9 @@ def _compact_categorical_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _detail_numeric_rows(rows: list[dict[str, Any]], detail: str) -> list[dict[str, Any]]:
+def _detail_numeric_rows(
+    rows: list[dict[str, Any]], detail: str
+) -> list[dict[str, Any]]:
     core = [row for row in rows if row["signal_tier"] == "core"]
     supporting = [row for row in rows if row["signal_tier"] == "supporting"]
     context = [row for row in rows if row["signal_tier"] == "context"]
@@ -565,7 +586,9 @@ def _detail_numeric_rows(rows: list[dict[str, Any]], detail: str) -> list[dict[s
     return rows
 
 
-def _detail_categorical_rows(rows: list[dict[str, Any]], detail: str) -> list[dict[str, Any]]:
+def _detail_categorical_rows(
+    rows: list[dict[str, Any]], detail: str
+) -> list[dict[str, Any]]:
     core = [row for row in rows if row["signal_tier"] == "core"]
     supporting = [row for row in rows if row["signal_tier"] == "supporting"]
     context = [row for row in rows if row["signal_tier"] == "context"]
@@ -608,15 +631,21 @@ def _compute_numeric_rows(
             except ValueError:
                 p_value = 1.0
         global_scale = np.std(_normalize_numeric(data[column]))
-        mean_dispersion = np.std([_safe_mean(values) for values in grouped]) if grouped else 0.0
+        mean_dispersion = (
+            np.std([_safe_mean(values) for values in grouped]) if grouped else 0.0
+        )
         global_numeric_stats[column] = {
             "p_value": p_value,
             "effect": float(mean_dispersion / max(global_scale, _EPS)),
         }
 
-    global_qs = _bh_fdr([global_numeric_stats[column]["p_value"] for column in numeric_cols])
+    global_qs = _bh_fdr(
+        [global_numeric_stats[column]["p_value"] for column in numeric_cols]
+    )
     for column, q_value in zip(numeric_cols, global_qs):
-        global_numeric_stats[column]["q_value"] = 1.0 if q_value is None else float(q_value)
+        global_numeric_stats[column]["q_value"] = (
+            1.0 if q_value is None else float(q_value)
+        )
 
     rows: list[dict[str, Any]] = []
     for cluster_id in cluster_values:
@@ -642,9 +671,9 @@ def _compute_numeric_rows(
             std_rest = _safe_std(rest_values_arr)
             mad_cluster = _safe_mad(cluster_values_arr)
             mad_rest = _safe_mad(rest_values_arr)
-            effect_mean_std = (_safe_mean(cluster_values_arr) - _safe_mean(rest_values_arr)) / max(
-                pooled, _EPS
-            )
+            effect_mean_std = (
+                _safe_mean(cluster_values_arr) - _safe_mean(rest_values_arr)
+            ) / max(pooled, _EPS)
             effect_median_mad = (
                 _safe_median(cluster_values_arr) - _safe_median(rest_values_arr)
             ) / max(1.4826 * max(mad_rest, global_mad), _EPS)
@@ -659,7 +688,10 @@ def _compute_numeric_rows(
                 / max(global_iqr, _EPS)
             )
             variance_ratio_log = float(
-                math.log((_safe_var(cluster_values_arr) + _EPS) / (_safe_var(rest_values_arr) + _EPS))
+                math.log(
+                    (_safe_var(cluster_values_arr) + _EPS)
+                    / (_safe_var(rest_values_arr) + _EPS)
+                )
             )
             concentration_gain = float(
                 max(0.0, 1.0 - ((std_cluster + _EPS) / max(global_std, _EPS)))
@@ -710,7 +742,9 @@ def _compute_numeric_rows(
                 "mad_rest": mad_rest,
                 "global_mean": _safe_mean(global_values_arr),
                 "global_mean_rest": _safe_mean(rest_values_arr),
-                "z_score": (_safe_mean(cluster_values_arr) - _safe_mean(global_values_arr))
+                "z_score": (
+                    _safe_mean(cluster_values_arr) - _safe_mean(global_values_arr)
+                )
                 / max(global_std, _EPS),
                 "homogeneity": std_cluster / max(global_std, _EPS),
                 "effect_mean_std": float(effect_mean_std),
@@ -781,7 +815,9 @@ def _compute_categorical_rows(
         [global_categorical_stats[column]["p_value"] for column in categorical_cols]
     )
     for column, q_value in zip(categorical_cols, global_qs):
-        global_categorical_stats[column]["q_value"] = 1.0 if q_value is None else float(q_value)
+        global_categorical_stats[column]["q_value"] = (
+            1.0 if q_value is None else float(q_value)
+        )
 
     rows: list[dict[str, Any]] = []
     n_total = len(data)
@@ -809,7 +845,8 @@ def _compute_categorical_rows(
                 neighbor_prevalence = 0.0
                 if neighbor_mask is not None and neighbor_size:
                     neighbor_prevalence = float(
-                        ((global_values.loc[neighbor_mask] == value).sum()) / neighbor_size
+                        ((global_values.loc[neighbor_mask] == value).sum())
+                        / neighbor_size
                     )
                 p_cv = count / max(n_total, 1)
                 p_c = cluster_size / max(n_total, 1)
@@ -846,8 +883,12 @@ def _compute_categorical_rows(
                         "lift": float(lift),
                         "log_lift": float(log_lift),
                         "specificity": float(prevalence_cluster - prevalence_rest),
-                        "global_recall": float((count / global_count) * 100.0 if global_count else 0.0),
-                        "neighbor_specificity": float(prevalence_cluster - neighbor_prevalence),
+                        "global_recall": float(
+                            (count / global_count) * 100.0 if global_count else 0.0
+                        ),
+                        "neighbor_specificity": float(
+                            prevalence_cluster - neighbor_prevalence
+                        ),
                         "mi_contrib": float(mi_contrib),
                         "fisher_p": float(fisher_p),
                         "fisher_q": 1.0,
@@ -872,22 +913,33 @@ def _compute_categorical_rows(
 def _rank_numeric_columns(rows: list[dict[str, Any]]) -> list[str]:
     scores: dict[str, float] = {}
     for row in rows:
-        scores[row["column"]] = max(scores.get(row["column"], 0.0), row["aggregate_score"])
+        scores[row["column"]] = max(
+            scores.get(row["column"], 0.0), row["aggregate_score"]
+        )
     return [
         column
-        for column, _score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        for column, _score in sorted(
+            scores.items(), key=lambda item: (-item[1], item[0])
+        )
     ]
 
 
 def _rank_categorical_values(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ranked = sorted(
         rows,
-        key=lambda row: (-row["aggregate_score"], row["column"], row["value"], row["cluster_id"]),
+        key=lambda row: (
+            -row["aggregate_score"],
+            row["column"],
+            row["value"],
+            row["cluster_id"],
+        ),
     )
     return [_categorical_ranking_payload(row) for row in ranked]
 
 
-def _assemble_signal_matrix(cluster_bundles: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def _assemble_signal_matrix(
+    cluster_bundles: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
     numeric_columns = sorted(
         {
             row["column"]
@@ -910,7 +962,9 @@ def _assemble_signal_matrix(cluster_bundles: dict[int, dict[str, Any]]) -> dict[
     for cluster_id in sorted(cluster_bundles):
         bundle = cluster_bundles[cluster_id]
         numeric_map = {row["column"]: row for row in bundle["numeric"]}
-        categorical_map = {(row["column"], row["value"]): row for row in bundle["categorical"]}
+        categorical_map = {
+            (row["column"], row["value"]): row for row in bundle["categorical"]
+        }
         numeric_rows.append(
             {
                 "cluster_id": cluster_id,
@@ -930,8 +984,12 @@ def _assemble_signal_matrix(cluster_bundles: dict[int, dict[str, Any]]) -> dict[
                 "cluster_id": cluster_id,
                 "values": {
                     f"{column}={value}": {
-                        "prevalence": categorical_map[(column, value)]["in_cluster_prevalence"],
-                        "aggregate_score": categorical_map[(column, value)]["aggregate_score"],
+                        "prevalence": categorical_map[(column, value)][
+                            "in_cluster_prevalence"
+                        ],
+                        "aggregate_score": categorical_map[(column, value)][
+                            "aggregate_score"
+                        ],
                         "signal_tier": categorical_map[(column, value)]["signal_tier"],
                     }
                     for column, value in categorical_pairs
@@ -952,14 +1010,10 @@ def _assemble_signal_matrix(cluster_bundles: dict[int, dict[str, Any]]) -> dict[
 
 def _auto_semantic_name(bundle: dict[str, Any], cluster_id: int) -> str:
     numeric_candidates = [
-        row
-        for row in bundle["numeric"]
-        if row["signal_tier"] in {"core", "supporting"}
+        row for row in bundle["numeric"] if row["signal_tier"] in {"core", "supporting"}
     ]
     categorical_candidates = [
-        row
-        for row in bundle["categorical"]
-        if row["signal_tier"] == "core"
+        row for row in bundle["categorical"] if row["signal_tier"] == "core"
     ]
     fragments: list[str] = []
     for row in numeric_candidates[:2]:
@@ -1098,11 +1152,17 @@ def build_dossier(
             size_pct=float(bundle["size_pct"]),
             semantic_name=str(bundle["semantic_name"]),
             numeric_tiers={
-                "core": [row for row in bundle["numeric"] if row["signal_tier"] == "core"],
-                "supporting": [
-                    row for row in bundle["numeric"] if row["signal_tier"] == "supporting"
+                "core": [
+                    row for row in bundle["numeric"] if row["signal_tier"] == "core"
                 ],
-                "context": [row for row in bundle["numeric"] if row["signal_tier"] == "context"],
+                "supporting": [
+                    row
+                    for row in bundle["numeric"]
+                    if row["signal_tier"] == "supporting"
+                ],
+                "context": [
+                    row for row in bundle["numeric"] if row["signal_tier"] == "context"
+                ],
             },
             categorical_tiers={
                 "core": [
@@ -1114,7 +1174,9 @@ def build_dossier(
                     if row["signal_tier"] == "supporting"
                 ],
                 "context": [
-                    row for row in bundle["categorical"] if row["signal_tier"] == "context"
+                    row
+                    for row in bundle["categorical"]
+                    if row["signal_tier"] == "context"
                 ],
             },
             topological_neighbors=list(bundle["topological_neighbors"]),
@@ -1158,7 +1220,9 @@ def build_dossier(
         global_stats={
             "numeric": {
                 column: stats_payload["effect"]
-                for column, stats_payload in evidence_index.metadata["global_numeric_stats"].items()
+                for column, stats_payload in evidence_index.metadata[
+                    "global_numeric_stats"
+                ].items()
             },
             "columns": evidence_index.metadata["columns"],
             "graph_metrics": graph_metrics,
