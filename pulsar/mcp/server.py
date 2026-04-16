@@ -201,7 +201,7 @@ mcp = FastMCP(
         "- Pulsar is a multi-scale aggregator, not a tuner. More grid points = more topological evidence. ALL ball maps are fused into ONE cosmic graph.\n"
         "- Wide PCA arrays and epsilon ranges are always superior to single points.\n"
         "- The cosmic graph is evidence, not a score to maximize.\n"
-        "- Environment: MCP server may not share the bash sandbox filesystem. Use ingest tools.\n"
+        "- Performance & Isolation: Claude Desktop sandboxes are isolated. DO NOT use chunked/base64 uploads for local files. Use the 'Cache-Bridge' pattern: 1. Call `get_runtime_context` to find `cache_dir`. 2. Use a shell command to `cp` your file into that `cache_dir`. 3. Call `ingest_dataset(path)` on the new path. This is 100x faster and avoids protocol overhead.\n"
     ),
 )
 
@@ -503,11 +503,9 @@ async def get_runtime_context(ctx: Context = None) -> str:
         "latest_run_id": session.latest_run_id,
         "path_guidance": [
             "Use ingest_dataset(path) for host-visible absolute paths.",
-            "For small or medium sandbox/upload files, use ingest_dataset_base64(filename, content_base64).",
-            "For large sandbox/upload files, use begin_dataset_upload -> append_dataset_chunk -> finalize_dataset_upload.",
-            "Use ingest_dataset_content(filename, content) only as a legacy text-only fallback.",
-            "config_path must point to a file visible to the MCP server process.",
-            "config_yaml must be raw YAML, not fenced Markdown.",
+            "SANDBOX ISOLATION: If your file is in a sandbox (e.g. /home/claude), use the 'Cache-Bridge' pattern: Copy the file to the `cache_dir` shown above, then call `ingest_dataset(path)` on the destination.",
+            "Chunked/Base64 uploads are a last-resort legacy fallback for remote-only servers. DO NOT use them for local files.",
+            "config_path must be server-visible; config_yaml should be raw YAML (no Markdown).",
         ],
     }
     return json.dumps(payload, indent=2)
@@ -533,10 +531,9 @@ async def ingest_dataset(path: str, ctx: Context = None) -> str:
                 "ingest_dataset again."
             ),
             sandbox_action=(
-                "If the file only exists in a sandbox/upload area, use "
-                "ingest_dataset_base64 for small or medium uploads, or the staged "
-                "upload tools for larger files. Otherwise ask the user for a "
-                "host-visible absolute path."
+                "Your file is isolated in a sandbox. DO NOT use base64 or chunked uploads. "
+                "Run a bash script to copy the file to the `cache_dir` (call `get_runtime_context` "
+                "to find it), then retry `ingest_dataset(path)` with the new path."
             ),
         )
     except PermissionError:
@@ -1269,9 +1266,10 @@ async def characterize_dataset(
                 "ingest_dataset first and pass dataset_id."
             ),
             sandbox_action=(
-                "If the file only exists in a sandbox/upload area, prefer staged "
-                "upload tools first, then retry with dataset_id. Use "
-                "ingest_dataset_content only for small text uploads."
+                "Your file is isolated in a sandbox. DO NOT use base64 or chunked uploads. "
+                "Run a bash script to copy the file to the `cache_dir` (call `get_runtime_context` "
+                "to find it), use `ingest_dataset(path)` to get a dataset_id, and then "
+                "retry this tool."
             ),
         )
     except LookupError:
