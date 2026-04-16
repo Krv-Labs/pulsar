@@ -12,10 +12,12 @@ from collections import OrderedDict
 import dataclasses
 from dataclasses import dataclass, field
 import gc
+import hashlib
 import json
 import logging
 import networkx as nx
 import os
+from pathlib import Path
 import time
 from typing import Any
 
@@ -34,11 +36,16 @@ from pulsar.runtime.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
 from pulsar.mcp.interpreter import (
     resolve_clusters,
+    build_feature_evidence_index,
     build_dossier,
+    cluster_profile_payload,
     dossier_to_markdown,
     dossier_to_html,
     compare_clusters,
     comparison_to_markdown,
+    feature_signal_payload,
+    signal_matrix_payload,
+    FeatureEvidenceIndex,
 )
 from pulsar.mcp.config_tools import (
     apply_overrides,
@@ -201,7 +208,9 @@ mcp = FastMCP(
         "- Pulsar is a multi-scale aggregator, not a tuner. More grid points = more topological evidence. ALL ball maps are fused into ONE cosmic graph.\n"
         "- Wide PCA arrays and epsilon ranges are always superior to single points.\n"
         "- The cosmic graph is evidence, not a score to maximize.\n"
-        "- Performance & Isolation: Claude Desktop sandboxes are isolated. DO NOT use chunked/base64 uploads for local files. Use the 'Cache-Bridge' pattern: 1. Call `get_runtime_context` to find `cache_dir`. 2. Use a shell command to `cp` your file into that `cache_dir`. 3. Call `ingest_dataset(path)` on the new path. This is 100x faster and avoids protocol overhead.\n"
+        "- Performance & Isolation: Claude Desktop sandboxes are isolated. DO NOT use chunked/base64 uploads for local files. Use the 'Cache-Bridge' pattern: 1. Call `get_runtime_context` to find `cache_dir`. 2. Use a shell command to `cp` your file into that `cache_dir`. 3. Call `ingest_dataset(path)` on the new path. This is 100x faster and avoids protocol overhead.\n\n"
+        "### SEMANTIC SAFETY\n"
+        "- Preprocessing blindspots: `recommend_preprocessing` is purely structural. It may suggest dropping high-cardinality geographic (lat/lon), temporal, or ID columns. You MUST manually review these against the user's domain goal. Do not drop critical signal just because the schema looks sparse.\n"
     ),
 )
 
@@ -227,6 +236,13 @@ class _PulsarSession:
     dataset_id: str | None = None
     latest_run_id: str | None = None
     report_exclude_columns: list[str] | None = None
+    data_dataset_id: str | None = None
+    data_path: str | None = None
+    feature_evidence_index: FeatureEvidenceIndex | None = None
+    feature_evidence_fingerprint: str | None = None
+    feature_evidence_cluster_meta: dict[str, Any] | None = None
+    active_config_yaml: str | None = None
+    active_config_dataset_id: str | None = None
 
     def calculate_memory_mb(self) -> float:
         """Estimate current session memory footprint in MB."""
@@ -296,6 +312,281 @@ def _resolve_dataset_record(dataset_id: str):
 
 def _resolve_dataset_path(dataset_id: str) -> str:
     return _resolve_dataset_record(dataset_id).path
+
+
+def _normalize_data_path(path: str) -> str:
+    expanded = Path(path).expanduser()
+    return str(expanded.resolve(strict=False))
+
+
+def _read_dataset_file(path: str) -> pd.DataFrame:
+    normalized_path = _normalize_data_path(path)
+    if normalized_path.lower().endswith(".parquet"):
+        return pd.read_parquet(normalized_path)
+    return pd.read_csv(normalized_path)
+
+
+def _bind_session_data(
+    session: _PulsarSession,
+    df: pd.DataFrame,
+    *,
+    dataset_id: str | None = None,
+    data_path: str | None = None,
+) -> None:
+    session.data = df
+    session.data_dataset_id = dataset_id
+    session.data_path = _normalize_data_path(data_path) if data_path else None
+    if dataset_id:
+        session.dataset_id = dataset_id
+
+
+def _dataset_id_for_path(dataset_id: str | None, data_path: str | None) -> str | None:
+    if not dataset_id or not data_path:
+        return None
+
+    try:
+        dataset_path = _normalize_data_path(_resolve_dataset_path(dataset_id))
+    except LookupError:
+        return None
+
+    normalized_path = _normalize_data_path(data_path)
+    return dataset_id if dataset_path == normalized_path else None
+
+
+async def _load_session_dataframe(
+    session: _PulsarSession,
+    *,
+    dataset_id: str = "",
+    data_path: str = "",
+) -> tuple[pd.DataFrame, str]:
+    if dataset_id:
+        resolved_path = _resolve_dataset_path(dataset_id)
+        normalized_path = _normalize_data_path(resolved_path)
+        if (
+            session.data is not None
+            and session.data_dataset_id == dataset_id
+            and session.data_path == normalized_path
+        ):
+            session.dataset_id = dataset_id
+            return session.data, normalized_path
+
+        df = await asyncio.to_thread(_read_dataset_file, normalized_path)
+        _bind_session_data(
+            session,
+            df,
+            dataset_id=dataset_id,
+            data_path=normalized_path,
+        )
+        return df, normalized_path
+
+    if not data_path:
+        raise ToolError("Provide either data_path or dataset_id.")
+
+    normalized_path = _normalize_data_path(data_path)
+    if (
+        session.data is not None
+        and session.data_dataset_id is None
+        and session.data_path == normalized_path
+    ):
+        return session.data, normalized_path
+
+    df = await asyncio.to_thread(_read_dataset_file, normalized_path)
+    _bind_session_data(session, df, data_path=normalized_path)
+    return df, normalized_path
+
+
+def _invalidate_feature_evidence_cache(session: _PulsarSession) -> None:
+    session.feature_evidence_index = None
+    session.feature_evidence_fingerprint = None
+    session.feature_evidence_cluster_meta = None
+    session.clusters = None
+
+
+def _feature_evidence_fingerprint(
+    *,
+    run_id: str | None,
+    labels: pd.Series,
+    method: str,
+    edge_weight_threshold: float,
+    exclude_columns: list[str] | None,
+) -> str:
+    payload = {
+        "run_id": run_id,
+        "labels": labels.astype(int).tolist(),
+        "method": method,
+        "edge_weight_threshold": edge_weight_threshold,
+        "exclude_columns": sorted(exclude_columns or []),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
+    density = float(metrics.get("density", 0.0))
+    component_count = int(metrics.get("component_count", 0))
+    singleton_fraction = float(metrics.get("singleton_fraction", 0.0))
+    is_connected = component_count <= 1
+    if density > 0.8:
+        return "hairball", is_connected, "Refine epsilon downward or raise threshold before clustering."
+    if singleton_fraction > 0.25 or component_count > max(3, int(metrics.get("n_nodes", 0) * 0.1)):
+        return "fragmented", is_connected, "Increase epsilon support or fall back to component-based clustering."
+    if density < 0.05:
+        return "sparse", is_connected, "Broaden the sweep or inspect threshold stability before spectral clustering."
+    return "connected", is_connected, "Proceed to clustering; graph structure is suitable for interpretive analysis."
+
+
+def _pca_cache_status(
+    session: _PulsarSession,
+    cfg: Any,
+) -> tuple[list | None, dict[str, Any]]:
+    """Return reusable PCA embeddings and an operational status payload."""
+    status: dict[str, Any] = {
+        "scope": "session",
+        "status": "miss",
+        "reason": "no_cached_embeddings",
+    }
+    if session.embeddings is None:
+        return None, status
+    if session.data is None:
+        status["reason"] = "no_session_data"
+        return None, status
+    if session.pca_fingerprint is None:
+        status["reason"] = "no_cached_fingerprint"
+        return None, status
+
+    fingerprint = pca_fingerprint(cfg, len(session.data), session.data)
+    if fingerprint != session.pca_fingerprint:
+        status["reason"] = "fingerprint_mismatch"
+        return None, status
+
+    return (
+        session.embeddings,
+        {
+            "scope": "session",
+            "status": "hit",
+            "reason": "fingerprint_match",
+        },
+    )
+
+
+def _cluster_result_payload(result: Any) -> dict[str, Any]:
+    return {
+        "method_used": result.method_used,
+        "n_clusters": result.n_clusters,
+        "silhouette_score": result.silhouette_score,
+        "edge_weight_threshold_applied": result.edge_weight_threshold_applied,
+        "stability_plateaus": result.stability_plateaus,
+        "failure_reason": result.failure_reason,
+    }
+
+
+def _cluster_payload_from_dossier(dossier: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "cluster_id": profile.cluster_id,
+            "size": profile.size,
+            "size_pct": profile.size_pct,
+            "semantic_name": profile.semantic_name,
+            "topological_neighbors": profile.topological_neighbors,
+            "numeric_features": profile.numeric_features,
+            "categorical_features": profile.categorical_features,
+            "numeric_tiers": profile.numeric_tiers,
+            "categorical_tiers": profile.categorical_tiers,
+            "central_rows": profile.central_rows,
+        }
+        for profile in dossier.clusters
+    ]
+
+
+def _resolve_response_format(
+    *,
+    response_format: str,
+    legacy_format: str,
+    detail: str,
+) -> tuple[str, str]:
+    resolved_detail = detail or "summary"
+    resolved_format = response_format or "json"
+    if legacy_format:
+        if legacy_format == "full":
+            resolved_detail = "full"
+            resolved_format = "json"
+        elif legacy_format in {"json", "markdown"}:
+            resolved_format = legacy_format
+        else:
+            raise ToolError(
+                f"format must be 'json', 'markdown', or 'full', got '{legacy_format}'"
+            )
+    if resolved_detail not in {"summary", "standard", "full"}:
+        raise ToolError(
+            f"detail must be 'summary', 'standard', or 'full', got '{resolved_detail}'"
+        )
+    if resolved_format not in {"json", "markdown"}:
+        raise ToolError(
+            f"response_format must be 'json' or 'markdown', got '{resolved_format}'"
+        )
+    return resolved_detail, resolved_format
+
+
+def _build_evidence_payload(
+    dossier: Any,
+    cluster_meta: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "cluster_result": cluster_meta,
+        "detail": dossier.global_stats.get("detail", "standard"),
+        "evidence_metadata": dossier.global_stats.get("evidence_metadata", {}),
+        "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
+        "signal_matrix": dossier.global_stats.get("signal_matrix", {}),
+        "numeric_global_ranking": dossier.global_stats.get("numeric_global_ranking", []),
+        "categorical_global_ranking": dossier.global_stats.get(
+            "categorical_global_ranking", []
+        ),
+        "clusters": _cluster_payload_from_dossier(dossier),
+    }
+
+
+def _get_or_build_evidence_index(
+    session: _PulsarSession,
+    *,
+    cluster_result: Any,
+    exclude_columns: list[str] | None,
+) -> FeatureEvidenceIndex:
+    fingerprint = _feature_evidence_fingerprint(
+        run_id=session.latest_run_id,
+        labels=cluster_result.labels,
+        method=cluster_result.method_used,
+        edge_weight_threshold=cluster_result.edge_weight_threshold_applied,
+        exclude_columns=exclude_columns,
+    )
+    if (
+        session.feature_evidence_index is not None
+        and session.feature_evidence_fingerprint == fingerprint
+    ):
+        return session.feature_evidence_index
+
+    evidence_index = build_feature_evidence_index(
+        session.model,
+        session.data,
+        cluster_result.labels,
+        exclude_columns=exclude_columns,
+    )
+    session.feature_evidence_index = evidence_index
+    session.feature_evidence_fingerprint = fingerprint
+    session.feature_evidence_cluster_meta = _cluster_result_payload(cluster_result)
+    return evidence_index
+
+
+def _require_cluster_state(session: _PulsarSession) -> tuple[FeatureEvidenceIndex, dict[str, Any]]:
+    if session.model is None or session.data is None:
+        raise ToolError("No model found. Run run_topological_sweep() first.")
+    if session.clusters is None or session.feature_evidence_index is None:
+        raise ToolError("No cluster evidence found. Run generate_cluster_dossier() first.")
+    return (
+        session.feature_evidence_index,
+        session.feature_evidence_cluster_meta or {},
+    )
 
 
 def _build_graph_summary(model: ThemaRS) -> dict[str, Any]:
@@ -752,18 +1043,20 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
 
     Calibrates epsilon and PCA dimensions against the processed feature
     space (after recommended preprocessing + scaling), not raw columns.
+    Supports ingested CSV and Parquet datasets.
     """
     try:
         dataset_path = _resolve_dataset_path(dataset_id)
         from pulsar.analysis.characterization import characterize_dataset as _char
 
-        df = await asyncio.to_thread(pd.read_csv, dataset_path)
+        session = _get_session(ctx)
+        df, normalized_path = await _load_session_dataframe(
+            session,
+            dataset_id=dataset_id,
+        )
         result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
         geo = dataclasses.asdict(result)
         run_name = intent.strip() or "initial_sweep"
-        session = _get_session(ctx)
-        session.dataset_id = dataset_id
-        session.data = df
 
         # Calibrate against processed feature space
         processed = await asyncio.to_thread(
@@ -771,15 +1064,17 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
             df,
             geo["column_profiles"],
             geo["n_samples"],
-            dataset_path,
+            normalized_path,
         )
 
         config_yaml = _build_initial_config_yaml(
             geo,
-            data_path=dataset_path,
+            data_path=normalized_path,
             run_name=run_name,
             processed_profile=processed,
         )
+        session.active_config_yaml = config_yaml
+        session.active_config_dataset_id = dataset_id
 
         # Build response with calibration provenance
         calibration_space = "processed" if processed is not None else "raw"
@@ -847,6 +1142,60 @@ async def refine_config(config_yaml: str, overrides: dict[str, Any]) -> str:
 
 
 @mcp.tool()
+async def get_active_config(ctx: Context = None) -> str:
+    """Return the active in-session config, if any."""
+    session = _get_session(ctx)
+    if not session.active_config_yaml:
+        return mcp_error(
+            "get_active_config",
+            "No active config in session. Run create_config or refine_active_config first.",
+            error_code="ACTIVE_CONFIG_MISSING",
+            agent_action="Create or refine a config before requesting the active session config.",
+        )
+    return json.dumps(
+        {
+            "status": "ok",
+            "config_yaml": session.active_config_yaml,
+            "dataset_id": session.active_config_dataset_id,
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def refine_active_config(overrides: dict[str, Any], ctx: Context = None) -> str:
+    """Apply constrained overrides to the session's active config."""
+    session = _get_session(ctx)
+    if not session.active_config_yaml:
+        return mcp_error(
+            "refine_active_config",
+            "No active config in session. Run create_config first.",
+            error_code="ACTIVE_CONFIG_MISSING",
+            agent_action="Call create_config(dataset_id) before refining the session config.",
+        )
+    try:
+        result = apply_overrides(session.active_config_yaml, overrides)
+        session.active_config_yaml = result.config_yaml
+        payload = {
+            "status": "ok",
+            "applied_overrides": result.applied_overrides,
+            "diff": result.diff,
+            "config_yaml": result.config_yaml,
+            "dataset_id": session.active_config_dataset_id,
+        }
+        return json.dumps(payload, indent=2)
+    except ValueError as e:
+        return mcp_error(
+            "refine_active_config",
+            str(e),
+            error_code="UNKNOWN_OVERRIDE_KEY",
+            agent_action="Use only valid override keys. See error message for valid key list.",
+        )
+    except Exception as e:
+        return mcp_error("refine_active_config", str(e))
+
+
+@mcp.tool()
 async def validate_config(
     config_yaml: str,
     dataset_id: str = "",
@@ -889,16 +1238,19 @@ async def run_topological_sweep(
         save_config: If True, persist the resolved config YAML to disk.
     """
     try:
+        session = _get_session(ctx)
         if config_yaml:
             current_yaml = config_yaml
         elif config_path:
             _validate_config_path(config_path)
             with open(config_path) as f:
                 current_yaml = f.read()
+        elif session.active_config_yaml:
+            current_yaml = session.active_config_yaml
         else:
-            raise ToolError("Provide either config_path or config_yaml.")
-
-        session = _get_session(ctx)
+            raise ToolError(
+                "Provide either config_path or config_yaml, or establish an active config first."
+            )
         dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
         validation = validate_config_yaml(current_yaml, dataset_path=dataset_path)
         if not validation.ok or validation.normalized_yaml is None:
@@ -917,18 +1269,23 @@ async def run_topological_sweep(
 
         current_yaml = validation.normalized_yaml
         config_dict = yaml.safe_load(current_yaml)
+        session.active_config_yaml = current_yaml
+        resolved_dataset_id = dataset_id or _dataset_id_for_path(
+            session.active_config_dataset_id,
+            validation.resolved_dataset_path,
+        )
+        session.active_config_dataset_id = (
+            resolved_dataset_id or session.active_config_dataset_id
+        )
 
         logger.info("Starting topological sweep from normalized YAML")
         model = ThemaRS(config_dict)
 
         cfg = model.config
 
-        precomputed = None
-        if session.embeddings is not None and session.data is not None:
-            fingerprint = pca_fingerprint(cfg, len(session.data), session.data)
-            if fingerprint == session.pca_fingerprint:
-                precomputed = session.embeddings
-                logger.info("Reusing cached PCA embeddings (fingerprint match)")
+        precomputed, pca_cache_status = _pca_cache_status(session, cfg)
+        if precomputed is not None:
+            logger.info("Reusing cached PCA embeddings (fingerprint match)")
 
         loop = asyncio.get_running_loop()
 
@@ -950,7 +1307,18 @@ async def run_topological_sweep(
         )
 
         session.model = model
-        session.data = model.data  # raw pre-preprocessing DataFrame
+        bound_data_path = _normalize_data_path(cfg.data) if cfg.data else None
+        bound_dataset_id = (
+            dataset_id
+            or _dataset_id_for_path(session.dataset_id, bound_data_path)
+        )
+        _bind_session_data(
+            session,
+            model.data,  # raw pre-preprocessing DataFrame
+            dataset_id=bound_dataset_id,
+            data_path=bound_data_path,
+        )
+        _invalidate_feature_evidence_cache(session)
 
         if precomputed is None:
             session.embeddings = model._embeddings
@@ -1003,31 +1371,41 @@ async def run_topological_sweep(
         session.sweep_history.append(
             SweepRecord(time.time(), current_yaml, current_metrics)
         )
+        persisted_dataset_id = (
+            dataset_id
+            or _dataset_id_for_path(session.dataset_id, cfg.data)
+        )
         run_record = registry.save_run(
-            dataset_id=dataset_id or session.dataset_id,
+            dataset_id=persisted_dataset_id,
             config_yaml=current_yaml,
             metrics=current_metrics,
             resolved_threshold=model.resolved_threshold,
             graph_summary=graph_summary,
         )
         session.latest_run_id = run_record.run_id
-        if dataset_id:
-            session.dataset_id = dataset_id
-
         response: dict[str, Any] = {
             "status": "ok",
             "run_id": run_record.run_id,
             "metrics": current_metrics,
             "pca_cached": precomputed is not None,
+            "pca_cache_status": pca_cache_status,
             "memory_usage_mb": session.calculate_memory_mb(),
             "diff": diff,
             "config_yaml_normalized": current_yaml,
             "data_shape": list(session.data.shape),
         }
+        graph_health, is_connected, recommended_next_action = _graph_health_summary(
+            current_metrics
+        )
+        response["is_connected"] = is_connected
+        response["singleton_fraction"] = current_metrics.get("singleton_fraction", 0.0)
+        response["spectral_clustering_allowed"] = bool(is_connected)
+        response["graph_health"] = graph_health
+        response["recommended_next_action"] = recommended_next_action
         if saved_path:
             response["saved_config_path"] = saved_path
-        if dataset_id:
-            response["dataset_id"] = dataset_id
+        if persisted_dataset_id:
+            response["dataset_id"] = persisted_dataset_id
 
         return json.dumps(response, indent=2)
 
@@ -1053,7 +1431,9 @@ async def generate_cluster_dossier(
     method: str = "auto",
     max_k: int = 15,
     edge_weight_threshold: float = 0.0,
-    format: str = "json",
+    detail: str = "summary",
+    response_format: str = "json",
+    format: str = "",
     exclude_columns: list[str] | None = None,
     ctx: Context = None,
 ) -> str:
@@ -1068,8 +1448,13 @@ async def generate_cluster_dossier(
             placed two points together.  Use weight percentiles from
             diagnose_cosmic_graph to choose a value (e.g. weight_p50 to
             keep only the stronger half of edges).
-        format: Response format. "json" (structured fields only, default),
-            "markdown" (human-readable summary only), or "full" (both).
+        detail: Payload richness. "summary" is compact, "standard" retains
+            full evidence for core/supporting signals, and "full" returns the
+            full evidence matrix.
+        response_format: "json" for structured payloads or "markdown" for
+            narrative output only.
+        format: Legacy alias. "full" maps to detail="full"; "json" and
+            "markdown" map to response_format.
         exclude_columns: Optional list of columns to exclude from the report.
             This hides columns from the final dossier but does NOT affect the
             topological modeling itself.
@@ -1083,10 +1468,13 @@ async def generate_cluster_dossier(
         raise ToolError(
             f"method must be 'auto', 'spectral', or 'components', got '{method}'"
         )
-    if format not in ("json", "markdown", "full"):
-        raise ToolError(f"format must be 'json', 'markdown', or 'full', got '{format}'")
 
     try:
+        detail, response_format = _resolve_response_format(
+            response_format=response_format,
+            legacy_format=format,
+            detail=detail,
+        )
         result = resolve_clusters(
             session.model,
             method=method,
@@ -1095,74 +1483,157 @@ async def generate_cluster_dossier(
         )
         session.clusters = result.labels
         session.report_exclude_columns = exclude_columns
+        session.feature_evidence_cluster_meta = _cluster_result_payload(result)
 
-        dossier = build_dossier(
-            session.model, session.data, result.labels, exclude_columns=exclude_columns
+        evidence_index = _get_or_build_evidence_index(
+            session,
+            cluster_result=result,
+            exclude_columns=exclude_columns,
         )
 
-        cluster_meta = {
-            "method_used": result.method_used,
-            "n_clusters": result.n_clusters,
-            "silhouette_score": result.silhouette_score,
-            "edge_weight_threshold_applied": result.edge_weight_threshold_applied,
-            "stability_plateaus": result.stability_plateaus,
-            "failure_reason": result.failure_reason,
-        }
+        dossier = build_dossier(
+            session.model,
+            session.data,
+            result.labels,
+            exclude_columns=exclude_columns,
+            detail="standard" if response_format == "markdown" and detail == "summary" else detail,
+            evidence_index=evidence_index,
+        )
+        cluster_meta = _cluster_result_payload(result)
+        if response_format == "markdown":
+            return dossier_to_markdown(dossier)
 
-        if format == "markdown":
-            markdown = dossier_to_markdown(dossier)
-            return json.dumps(
-                {
-                    "status": "ok",
-                    "cluster_result": cluster_meta,
-                    "markdown_summary": markdown,
-                },
-                indent=2,
-            )
-
-        dossier_dict = {
-            "n_total": dossier.n_total,
-            "n_clusters": dossier.n_clusters,
-            "clusters": [
-                {
-                    "cluster_id": cp.cluster_id,
-                    "size": cp.size,
-                    "size_pct": cp.size_pct,
-                    "numeric_features": cp.numeric_features,
-                    "categorical_features": cp.categorical_features,
-                }
-                for cp in dossier.clusters
-            ],
-            "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
-        }
-
-        if format == "json":
-            return json.dumps(
-                {
-                    "status": "ok",
-                    "cluster_result": cluster_meta,
-                    "dossier": dossier_dict,
-                },
-                separators=(",", ":") if len(dossier.clusters) > 10 else None,
-                indent=None if len(dossier.clusters) > 10 else 2,
-            )
-
-        # format == "full"
-        markdown = dossier_to_markdown(dossier)
+        payload = _build_evidence_payload(dossier, cluster_meta)
         return json.dumps(
-            {
-                "status": "ok",
-                "cluster_result": cluster_meta,
-                "dossier": dossier_dict,
-                "markdown_summary": markdown,
-            },
+            payload,
             separators=(",", ":") if len(dossier.clusters) > 10 else None,
             indent=None if len(dossier.clusters) > 10 else 2,
         )
 
+    except ValueError as e:
+        if "Graph is disconnected" in str(e):
+            return mcp_error(
+                "generate_cluster_dossier",
+                "Spectral clustering requires a connected affinity graph. Your current threshold has disconnected the manifold.",
+                error_code="GRAPH_DISCONNECTED",
+                agent_action="Decrease edge_weight_threshold or increase epsilon sweep range to connect the graph.",
+            )
+        logger.error(f"Error generating dossier: {e}")
+        return mcp_error("generate_cluster_dossier", str(e))
     except Exception as e:
         logger.error(f"Error generating dossier: {e}")
         return mcp_error("generate_cluster_dossier", str(e))
+
+
+@mcp.tool()
+async def get_cluster_profile(
+    cluster_id: int,
+    detail: str = "standard",
+    response_format: str = "json",
+    ctx: Context = None,
+) -> str:
+    """Return targeted evidence for one cluster from the cached dossier state."""
+    try:
+        if detail not in {"summary", "standard", "full"}:
+            raise ToolError(
+                f"detail must be 'summary', 'standard', or 'full', got '{detail}'"
+            )
+        if response_format not in {"json", "markdown"}:
+            raise ToolError(
+                f"response_format must be 'json' or 'markdown', got '{response_format}'"
+            )
+
+        session = _get_session(ctx)
+        evidence_index, cluster_meta = _require_cluster_state(session)
+        payload = {
+            "status": "ok",
+            "cluster_result": cluster_meta,
+            "detail": detail,
+            "cluster": cluster_profile_payload(
+                evidence_index,
+                cluster_id,
+                detail=detail,
+            ),
+        }
+        if response_format == "markdown":
+            cluster = payload["cluster"]
+            lines = [
+                f"## Cluster {cluster['cluster_id']}: {cluster['semantic_name']}",
+                "",
+                f"- Size: {cluster['size']} ({cluster['size_pct']:.1f}%)",
+                f"- Topological neighbors: {', '.join(str(neighbor['cluster_id']) for neighbor in cluster['topological_neighbors']) or 'None'}",
+                "",
+                "### Numeric signals",
+            ]
+            for row in cluster["numeric_features"]:
+                lines.append(
+                    f"- {row['column']}: {row.get('direction', 'mixed')} signal ({row['signal_tier']}, score={row['aggregate_score']:.3f})"
+                )
+            lines.append("")
+            lines.append("### Categorical signals")
+            for row in cluster["categorical_features"]:
+                lines.append(
+                    f"- {row['column']}={row['value']}: {row['signal_tier']} signal (lift={row.get('lift', 0.0):.2f}, score={row['aggregate_score']:.3f})"
+                )
+            return "\n".join(lines)
+        return json.dumps(payload, indent=2)
+    except KeyError:
+        return mcp_error(
+            "get_cluster_profile",
+            f"Unknown cluster_id '{cluster_id}'.",
+            error_code="CLUSTER_ID_UNKNOWN",
+            agent_action="Use generate_cluster_dossier first and inspect available cluster IDs.",
+        )
+    except Exception as e:
+        return mcp_error("get_cluster_profile", str(e))
+
+
+@mcp.tool()
+async def get_feature_signal(
+    feature_names: list[str],
+    cluster_ids: list[int] | None = None,
+    ctx: Context = None,
+) -> str:
+    """Return cross-cluster evidence for specific feature columns."""
+    try:
+        session = _get_session(ctx)
+        evidence_index, cluster_meta = _require_cluster_state(session)
+        payload = {
+            "status": "ok",
+            "cluster_result": cluster_meta,
+            "signals": feature_signal_payload(
+                evidence_index,
+                feature_names,
+                cluster_ids=cluster_ids,
+            ),
+        }
+        return json.dumps(payload, indent=2)
+    except Exception as e:
+        return mcp_error("get_feature_signal", str(e))
+
+
+@mcp.tool()
+async def get_cluster_signal_matrix(
+    cluster_ids: list[int] | None = None,
+    include_context: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Return the cached cross-cluster signal matrix without regenerating the full dossier."""
+    try:
+        session = _get_session(ctx)
+        evidence_index, cluster_meta = _require_cluster_state(session)
+        payload = {
+            "status": "ok",
+            "cluster_result": cluster_meta,
+            "signal_matrix": signal_matrix_payload(
+                evidence_index,
+                cluster_ids=cluster_ids,
+                include_context=include_context,
+            ),
+        }
+        return json.dumps(payload, indent=2)
+    except Exception as e:
+        return mcp_error("get_cluster_signal_matrix", str(e))
 
 
 @mcp.tool()
@@ -1238,7 +1709,7 @@ async def characterize_dataset(
 ) -> str:
     """
     Probes dataset geometry to return raw facts (N, features, variance curve, k-NN mean).
-    Prefer dataset_id after ingest. Use csv_path only for host-visible files.
+    Prefer dataset_id after ingest. Use csv_path only for host-visible CSV or Parquet files.
     """
     try:
         from pulsar.analysis.characterization import characterize_dataset as _char
@@ -1248,14 +1719,19 @@ async def characterize_dataset(
         if not csv_path:
             raise ToolError("Provide either csv_path or dataset_id.")
 
-        # Read once, reuse for both session state and characterization.
         session = _get_session(ctx)
-        df = await asyncio.to_thread(pd.read_csv, csv_path)
-        session.data = df
         if dataset_id:
-            session.dataset_id = dataset_id
+            df, normalized_path = await _load_session_dataframe(
+                session,
+                dataset_id=dataset_id,
+            )
+        else:
+            df, normalized_path = await _load_session_dataframe(
+                session,
+                data_path=csv_path,
+            )
 
-        result = await asyncio.to_thread(_char, csv_path, dataframe=df)
+        result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
         return json.dumps(dataclasses.asdict(result), indent=2)
     except FileNotFoundError:
         return path_access_error(
@@ -1633,19 +2109,11 @@ async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
         return mcp_error("validate_preprocessing_config", str(e))
 
 
-def main():
-    mcp.run()
-
-
-if __name__ == "__main__":
-    main()
-
-
 @mcp.tool()
 async def export_html_report(
     dataset_id: str = "",
     exclude_columns: list[str] | None = None,
-    cluster_names: dict[str, str] | None = None,
+    cluster_names: list[dict[str, str]] | dict[str, str] | None = None,
     ctx: Context = None,
 ) -> str:
     """
@@ -1655,9 +2123,10 @@ async def export_html_report(
         dataset_id: The dataset to report on.
         exclude_columns: Optional list of columns to exclude from the report.
             Defaults to the exclusion list used in generate_cluster_dossier.
-        cluster_names: Optional dictionary mapping string cluster IDs to semantic names.
-            e.g. {"0": "Metabolic Syndrome Cohort", "1": "Healthy Baseline"}
-            Use this to provide LLM-generated descriptive names based on feature importance.
+        cluster_names: Optional dictionary or list of objects mapping string cluster IDs
+            to semantic names.
+            Preferred format (List of Objects): [{"id": "0", "name": "Metabolic Cohort"}]
+            Legacy format (Dictionary): {"0": "Metabolic Cohort"}
             CRITICAL: The system will generate robotic fallback names (e.g. '[Auto] High X, Low Y')
             if you do not provide this. It is YOUR responsibility as the analytical agent
             to provide human-tractable, scientific cohort names.
@@ -1682,16 +2151,55 @@ async def export_html_report(
     )
 
     try:
+        evidence_index = None
+        if (
+            session.feature_evidence_index is not None
+            and cols_to_exclude == session.report_exclude_columns
+        ):
+            evidence_index = session.feature_evidence_index
+
         dossier = build_dossier(
             session.model,
             session.data,
             session.clusters,
             exclude_columns=cols_to_exclude,
+            detail="full",
+            evidence_index=evidence_index,
         )
 
         # Apply LLM-provided cluster names if available
         if cluster_names:
-            normalized_names = {str(k).lstrip("_"): v for k, v in cluster_names.items()}
+            import re
+
+            def normalize_key(k: str) -> str:
+                # Extract digits to handle "u0", "cluster_0", "_0", etc.
+                match = re.search(r"(\d+)", str(k))
+                return match.group(1) if match else str(k)
+
+            # Handle both formats: List[dict] and dict
+            if isinstance(cluster_names, list):
+                raw_names = {}
+                for item in cluster_names:
+                    # Support multiple key names for flexibility
+                    cid = item.get("id") or item.get("cluster_id") or item.get("cid")
+                    name = item.get("name") or item.get("semantic_name") or item.get("label")
+                    if cid is not None and name is not None:
+                        raw_names[str(cid)] = name
+            else:
+                raw_names = cluster_names
+
+            normalized_names = {normalize_key(k): v for k, v in raw_names.items()}
+            
+            # Check for total mismatch to provide better feedback
+            valid_ids = {str(p.cluster_id) for p in dossier.clusters}
+            provided_ids = set(normalized_names.keys())
+            if not (provided_ids & valid_ids) and raw_names:
+                logger.warning(
+                    "export_html_report: Provided cluster_names keys %s do not match any cluster IDs %s",
+                    list(provided_ids),
+                    list(valid_ids),
+                )
+
             for p in dossier.clusters:
                 str_id = str(p.cluster_id)
                 if str_id in normalized_names:
@@ -1754,22 +2262,30 @@ async def probe_columns(
         )
 
     session = _get_session(ctx)
-    if session.data is None:
-        try:
-            record = _resolve_dataset_record(dataset_id)
-            session.data = await asyncio.to_thread(pd.read_csv, record.path)
-        except Exception as e:
-            return mcp_error("probe_columns", f"Could not load data: {e}")
+    try:
+        df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
+    except LookupError:
+        return unknown_handle_error("probe_columns", "dataset_id", dataset_id)
+    except Exception as e:
+        return mcp_error("probe_columns", f"Could not load data: {e}")
 
     try:
         profiles = []
         for col in columns:
-            if col not in session.data.columns:
+            if col not in df.columns:
                 continue
             profiles.append(
-                dataclasses.asdict(profile_column_details(session.data, col))
+                dataclasses.asdict(profile_column_details(df, col))
             )
 
         return json.dumps({"status": "ok", "column_profiles": profiles}, indent=2)
     except Exception as e:
         return mcp_error("probe_columns", str(e))
+
+
+def main():
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
