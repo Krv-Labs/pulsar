@@ -246,7 +246,9 @@ def _profile_columns(df: pd.DataFrame) -> list[ColumnProfile]:
     return profiles
 
 
-def profile_column_details(df: pd.DataFrame, col: str, max_sample: int = 10) -> ColumnProfile:
+def profile_column_details(
+    df: pd.DataFrame, col: str, max_sample: int = 10
+) -> ColumnProfile:
     """Generates a rich, detailed profile for a single column (Magnifying Glass)."""
     series = df[col]
     is_numeric = pd.api.types.is_numeric_dtype(series)
