@@ -208,9 +208,7 @@ mcp = FastMCP(
         "- Pulsar is a multi-scale aggregator, not a tuner. More grid points = more topological evidence. ALL ball maps are fused into ONE cosmic graph.\n"
         "- Wide PCA arrays and epsilon ranges are always superior to single points.\n"
         "- The cosmic graph is evidence, not a score to maximize.\n"
-        "- Performance & Isolation: Claude Desktop sandboxes are isolated. DO NOT use chunked/base64 uploads for local files. Use the 'Cache-Bridge' pattern: 1. Call `get_runtime_context` to find `cache_dir`. 2. Use a shell command to `cp` your file into that `cache_dir`. 3. Call `ingest_dataset(path)` on the new path. This is 100x faster and avoids protocol overhead.\n\n"
-        "### SEMANTIC SAFETY\n"
-        "- Preprocessing blindspots: `recommend_preprocessing` is purely structural. It may suggest dropping high-cardinality geographic (lat/lon), temporal, or ID columns. You MUST manually review these against the user's domain goal. Do not drop critical signal just because the schema looks sparse.\n"
+        "- Performance & Isolation: Claude Desktop sandboxes are isolated. DO NOT use chunked/base64 uploads for local files. Use the 'Cache-Bridge' pattern: 1. Call `get_runtime_context` to find `cache_dir`. 2. Use a shell command to `cp` your file into that `cache_dir`. 3. Call `ingest_dataset(path)` on the new path. This is 100x faster and avoids protocol overhead.\n"
     ),
 )
 
@@ -428,12 +426,30 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
     singleton_fraction = float(metrics.get("singleton_fraction", 0.0))
     is_connected = component_count <= 1
     if density > 0.8:
-        return "hairball", is_connected, "Refine epsilon downward or raise threshold before clustering."
-    if singleton_fraction > 0.25 or component_count > max(3, int(metrics.get("n_nodes", 0) * 0.1)):
-        return "fragmented", is_connected, "Increase epsilon support or fall back to component-based clustering."
+        return (
+            "hairball",
+            is_connected,
+            "Refine epsilon downward or raise threshold before clustering.",
+        )
+    if singleton_fraction > 0.25 or component_count > max(
+        3, int(metrics.get("n_nodes", 0) * 0.1)
+    ):
+        return (
+            "fragmented",
+            is_connected,
+            "Increase epsilon support or fall back to component-based clustering.",
+        )
     if density < 0.05:
-        return "sparse", is_connected, "Broaden the sweep or inspect threshold stability before spectral clustering."
-    return "connected", is_connected, "Proceed to clustering; graph structure is suitable for interpretive analysis."
+        return (
+            "sparse",
+            is_connected,
+            "Broaden the sweep or inspect threshold stability before spectral clustering.",
+        )
+    return (
+        "connected",
+        is_connected,
+        "Proceed to clustering; graph structure is suitable for interpretive analysis.",
+    )
 
 
 def _pca_cache_status(
@@ -539,7 +555,9 @@ def _build_evidence_payload(
         "evidence_metadata": dossier.global_stats.get("evidence_metadata", {}),
         "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
         "signal_matrix": dossier.global_stats.get("signal_matrix", {}),
-        "numeric_global_ranking": dossier.global_stats.get("numeric_global_ranking", []),
+        "numeric_global_ranking": dossier.global_stats.get(
+            "numeric_global_ranking", []
+        ),
         "categorical_global_ranking": dossier.global_stats.get(
             "categorical_global_ranking", []
         ),
@@ -578,11 +596,15 @@ def _get_or_build_evidence_index(
     return evidence_index
 
 
-def _require_cluster_state(session: _PulsarSession) -> tuple[FeatureEvidenceIndex, dict[str, Any]]:
+def _require_cluster_state(
+    session: _PulsarSession,
+) -> tuple[FeatureEvidenceIndex, dict[str, Any]]:
     if session.model is None or session.data is None:
         raise ToolError("No model found. Run run_topological_sweep() first.")
     if session.clusters is None or session.feature_evidence_index is None:
-        raise ToolError("No cluster evidence found. Run generate_cluster_dossier() first.")
+        raise ToolError(
+            "No cluster evidence found. Run generate_cluster_dossier() first."
+        )
     return (
         session.feature_evidence_index,
         session.feature_evidence_cluster_meta or {},
@@ -1308,9 +1330,8 @@ async def run_topological_sweep(
 
         session.model = model
         bound_data_path = _normalize_data_path(cfg.data) if cfg.data else None
-        bound_dataset_id = (
-            dataset_id
-            or _dataset_id_for_path(session.dataset_id, bound_data_path)
+        bound_dataset_id = dataset_id or _dataset_id_for_path(
+            session.dataset_id, bound_data_path
         )
         _bind_session_data(
             session,
@@ -1371,9 +1392,8 @@ async def run_topological_sweep(
         session.sweep_history.append(
             SweepRecord(time.time(), current_yaml, current_metrics)
         )
-        persisted_dataset_id = (
-            dataset_id
-            or _dataset_id_for_path(session.dataset_id, cfg.data)
+        persisted_dataset_id = dataset_id or _dataset_id_for_path(
+            session.dataset_id, cfg.data
         )
         run_record = registry.save_run(
             dataset_id=persisted_dataset_id,
@@ -1496,7 +1516,11 @@ async def generate_cluster_dossier(
             session.data,
             result.labels,
             exclude_columns=exclude_columns,
-            detail="standard" if response_format == "markdown" and detail == "summary" else detail,
+            detail=(
+                "standard"
+                if response_format == "markdown" and detail == "summary"
+                else detail
+            ),
             evidence_index=evidence_index,
         )
         cluster_meta = _cluster_result_payload(result)
@@ -2182,14 +2206,18 @@ async def export_html_report(
                 for item in cluster_names:
                     # Support multiple key names for flexibility
                     cid = item.get("id") or item.get("cluster_id") or item.get("cid")
-                    name = item.get("name") or item.get("semantic_name") or item.get("label")
+                    name = (
+                        item.get("name")
+                        or item.get("semantic_name")
+                        or item.get("label")
+                    )
                     if cid is not None and name is not None:
                         raw_names[str(cid)] = name
             else:
                 raw_names = cluster_names
 
             normalized_names = {normalize_key(k): v for k, v in raw_names.items()}
-            
+
             # Check for total mismatch to provide better feedback
             valid_ids = {str(p.cluster_id) for p in dossier.clusters}
             provided_ids = set(normalized_names.keys())
@@ -2274,9 +2302,7 @@ async def probe_columns(
         for col in columns:
             if col not in df.columns:
                 continue
-            profiles.append(
-                dataclasses.asdict(profile_column_details(df, col))
-            )
+            profiles.append(dataclasses.asdict(profile_column_details(df, col)))
 
         return json.dumps({"status": "ok", "column_profiles": profiles}, indent=2)
     except Exception as e:
