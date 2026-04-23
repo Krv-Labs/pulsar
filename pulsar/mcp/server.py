@@ -59,6 +59,7 @@ from pulsar.mcp.preprocessing import (
     _recommend_preprocessing_block,
     repair_config,
 )
+from pulsar.mcp.prompts import WORKFLOW_PROMPT
 from pulsar.mcp.registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
@@ -189,26 +190,27 @@ output:
 mcp = FastMCP(
     "Pulsar",
     instructions=(
-        "Reveal the dataset's topology; do not force convenient clusters.\n\n"
-        "### PHASE I: INGEST & CALIBRATE\n"
-        "1. Ingest: Use ingest_dataset handles. Prefer dataset_id everywhere.\n"
-        "2. Characterize: characterize_dataset(dataset_id) returns a SPARSE schema — dtype, n_unique, missingness — for ALL columns. Numeric stats and top_values are intentionally omitted to keep payload small for wide datasets. Use probe_columns(dataset_id, ['col_name']) for deep per-column inspection (sample values, distributions). Max 20 columns per probe call.\n"
-        "3. Calibrate: create_config(dataset_id) is mandatory. It returns the [p5, p95] epsilon domain. EPSILON OUTSIDE THIS RANGE PRODUCES DEGENERATE GRAPHS.\n"
-        "4. Validate Config: validate_config(config_yaml, dataset_id).\n\n"
-        "### PHASE II: EXECUTE & VALIDATE\n"
-        "4. Run: run_topological_sweep.\n"
-        "5. Validate: diagnose_cosmic_graph.\n"
-        "   - GATE: If density > 0.8 or < 0.1, STOP. Refine config (Step 2).\n"
-        "   - GATE: component_count=1 is normal; do not force separation by narrowing epsilon.\n\n"
-        "### PHASE III: CONTRASTIVE INTERPRETATION\n"
-        "6. Cluster: generate_cluster_dossier.\n"
-        "7. Contrast: Perform comparative analysis. Identify the 'Pivot Feature'—the variable that most cleanly separates Cluster A from its topological neighbors. Do not name in isolation.\n"
-        "8. Report: export_html_report. CRITICAL: YOU MUST pass synthesized, highly informative 'cluster_names' based on Step 7. Names must be descriptive (e.g., 'Male Gentoos w/ Large Flippers'). Passing 'cluster_names' is the difference between a raw Data Dump and a high-impact Research Paper.\n\n"
-        "### PHILOSOPHY\n"
-        "- Pulsar is a multi-scale aggregator, not a tuner. More grid points = more topological evidence. ALL ball maps are fused into ONE cosmic graph.\n"
-        "- Wide PCA arrays and epsilon ranges are always superior to single points.\n"
-        "- The cosmic graph is evidence, not a score to maximize.\n"
-        "- Performance & Isolation: Claude Desktop sandboxes are isolated. DO NOT use chunked/base64 uploads for local files. Use the 'Cache-Bridge' pattern: 1. Call `get_runtime_context` to find `cache_dir`. 2. Use a shell command to `cp` your file into that `cache_dir`. 3. Call `ingest_dataset(path)` on the new path. This is 100x faster and avoids protocol overhead.\n"
+        "Topological data analysis for tabular datasets. Call "
+        "`get_workflow_guide` for the recommended end-to-end phase-by-phase "
+        "procedure.\n\n"
+        "Tool map:\n"
+        "- Ingest: `ingest_dataset` (local path) or the chunked "
+        "`begin_dataset_upload` / `append_dataset_chunk` / "
+        "`finalize_dataset_upload` trio for remote transports. Returns a "
+        "`dataset_id` handle.\n"
+        "- Characterize: `characterize_dataset`, `probe_columns`, "
+        "`recommend_preprocessing`.\n"
+        "- Configure: `create_config`, `validate_config`, `refine_config`, "
+        "`get_active_config`, `refine_active_config`.\n"
+        "- Run: `run_topological_sweep`, `validate_preprocessing_config`, "
+        "`repair_preprocessing_config`.\n"
+        "- Diagnose: `diagnose_cosmic_graph`, "
+        "`get_threshold_stability_curve`, `get_topological_skeleton`, "
+        "`compare_sweeps`, `get_experiment_history`.\n"
+        "- Interpret: `generate_cluster_dossier`, `get_cluster_profile`, "
+        "`get_feature_signal`, `get_cluster_signal_matrix`, "
+        "`compare_clusters_tool`, `export_html_report`, "
+        "`export_labeled_data`."
     ),
 )
 
@@ -795,6 +797,19 @@ async def get_experiment_history(ctx: Context) -> str:
         )
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_workflow_guide(ctx: Context = None) -> str:
+    """
+    Return the recommended end-to-end Pulsar analysis workflow as markdown.
+
+    Agents that want an opinionated phase-by-phase procedure (ingest →
+    calibrate → run → diagnose → interpret) should call this once at the
+    start of a session. Agents that drive Pulsar with their own workflow
+    can ignore it.
+    """
+    return WORKFLOW_PROMPT
 
 
 @mcp.tool()

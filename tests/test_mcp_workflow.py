@@ -438,6 +438,14 @@ def test_append_dataset_chunk_rejects_invalid_base64():
     assert report["error_code"] == "UPLOAD_DECODE_FAILED"
 
 
+def test_get_workflow_guide_returns_phase_prompt():
+    guide = asyncio.run(server.get_workflow_guide())
+    assert "PHASE I" in guide
+    assert "PHASE II" in guide
+    assert "PHASE III" in guide
+    assert "ingest_dataset" in guide
+
+
 def test_run_topological_sweep_missing_config_path_returns_structured_error():
     report = json.loads(
         asyncio.run(
