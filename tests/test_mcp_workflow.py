@@ -188,47 +188,29 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
     assert run_b in comparison
 
 
-def test_ingest_dataset_content_round_trip():
-    dataset = json.loads(
-        asyncio.run(
-            server.ingest_dataset_content(
-                "uploaded.csv",
-                _dataset_csv_content(),
-            )
-        )
+def _chunked_upload(filename: str, content: bytes) -> dict:
+    """Helper: drive the begin/append/finalize ingest path for a single-chunk upload."""
+    upload = json.loads(
+        asyncio.run(server.begin_dataset_upload(filename, media_type="text/csv"))
     )
-    config_yaml = _extract_config_yaml(
-        asyncio.run(server.create_config(dataset["dataset_id"], "content_sweep"))
-    )
-    report = json.loads(
-        asyncio.run(server.validate_config(config_yaml, dataset["dataset_id"]))
-    )
-
-    assert dataset["dataset_id"].startswith("ds_")
-    assert dataset["source"] == "content"
-    assert dataset["name"] == "uploaded.csv"
-    assert report["status"] == "ok"
+    chunk = base64.b64encode(content).decode("ascii")
+    asyncio.run(server.append_dataset_chunk(upload["upload_id"], chunk))
+    return json.loads(asyncio.run(server.finalize_dataset_upload(upload["upload_id"])))
 
 
-def test_ingest_dataset_base64_round_trip():
+def test_chunked_upload_single_chunk_round_trip():
     content = _dataset_csv_content().encode("utf-8")
-    dataset = json.loads(
-        asyncio.run(
-            server.ingest_dataset_base64(
-                "uploaded.csv",
-                base64.b64encode(content).decode("ascii"),
-            )
-        )
-    )
+    dataset = _chunked_upload("uploaded.csv", content)
     config_yaml = _extract_config_yaml(
-        asyncio.run(server.create_config(dataset["dataset_id"], "b64_sweep"))
+        asyncio.run(server.create_config(dataset["dataset_id"], "chunked_single"))
     )
     report = json.loads(
         asyncio.run(server.validate_config(config_yaml, dataset["dataset_id"]))
     )
 
     assert dataset["dataset_id"].startswith("ds_")
-    assert dataset["source"] == "base64"
+    assert dataset["source"] == "upload"
+    assert dataset["name"] == "uploaded.csv"
     assert report["status"] == "ok"
 
 
@@ -237,38 +219,18 @@ def test_ingest_modes_produce_equivalent_downstream_configs(tmp_path):
     content = _dataset_csv_content().encode("utf-8")
 
     by_path = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
-    by_base64 = json.loads(
-        asyncio.run(
-            server.ingest_dataset_base64(
-                "uploaded.csv",
-                base64.b64encode(content).decode("ascii"),
-            )
-        )
-    )
-    upload = json.loads(
-        asyncio.run(server.begin_dataset_upload("uploaded.csv", media_type="text/csv"))
-    )
-    chunk = base64.b64encode(content).decode("ascii")
-    asyncio.run(server.append_dataset_chunk(upload["upload_id"], chunk))
-    by_upload = json.loads(
-        asyncio.run(server.finalize_dataset_upload(upload["upload_id"]))
-    )
+    by_upload = _chunked_upload("uploaded.csv", content)
 
     path_cfg = _extract_config_yaml(
         asyncio.run(server.create_config(by_path["dataset_id"], "equiv"))
-    )
-    base64_cfg = _extract_config_yaml(
-        asyncio.run(server.create_config(by_base64["dataset_id"], "equiv"))
     )
     upload_cfg = _extract_config_yaml(
         asyncio.run(server.create_config(by_upload["dataset_id"], "equiv"))
     )
 
     assert "name: equiv" in path_cfg
-    assert (
-        _normalize_config_data_path(path_cfg)
-        == _normalize_config_data_path(base64_cfg)
-        == _normalize_config_data_path(upload_cfg)
+    assert _normalize_config_data_path(path_cfg) == _normalize_config_data_path(
+        upload_cfg
     )
 
 
@@ -370,11 +332,9 @@ def test_upload_lifecycle_misuse_returns_stable_codes():
     assert finalize_again["error_code"] == "UPLOAD_ID_UNKNOWN"
 
 
-def test_ingest_dataset_content_handles_bom_and_windows_newlines():
-    content = "\ufefff0,f1\r\n1.0,2.0\r\n3.0,4.0\r\n"
-    dataset = json.loads(
-        asyncio.run(server.ingest_dataset_content("windows.csv", content))
-    )
+def test_chunked_upload_handles_bom_and_windows_newlines():
+    content = "\ufefff0,f1\r\n1.0,2.0\r\n3.0,4.0\r\n".encode("utf-8")
+    dataset = _chunked_upload("windows.csv", content)
     result = json.loads(
         asyncio.run(server.characterize_dataset(dataset_id=dataset["dataset_id"]))
     )
@@ -393,33 +353,6 @@ def test_unknown_handles_return_stable_codes():
     assert dataset_report["error_code"] == "DATASET_ID_UNKNOWN"
     assert run_report["error_code"] == "RUN_ID_UNKNOWN"
     assert upload_report["error_code"] == "UPLOAD_ID_UNKNOWN"
-
-
-def test_ingest_dataset_base64_rejects_bad_media_type():
-    report = json.loads(
-        asyncio.run(
-            server.ingest_dataset_base64(
-                "uploaded.csv",
-                base64.b64encode(b"f0,f1\n1,2\n").decode("ascii"),
-                media_type="application/vnd.ms-excel",
-            )
-        )
-    )
-
-    assert report["error_code"] == "UPLOAD_MEDIA_TYPE_UNSUPPORTED"
-
-
-def test_ingest_dataset_base64_rejects_invalid_base64():
-    report = json.loads(
-        asyncio.run(
-            server.ingest_dataset_base64(
-                "uploaded.csv",
-                "%%%not-base64%%%",
-            )
-        )
-    )
-
-    assert report["error_code"] == "UPLOAD_DECODE_FAILED"
 
 
 def test_append_dataset_chunk_rejects_invalid_base64():

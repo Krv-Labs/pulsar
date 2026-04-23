@@ -877,49 +877,6 @@ async def ingest_dataset(path: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
-async def ingest_dataset_base64(
-    filename: str,
-    content_base64: str,
-    media_type: str = "text/csv",
-    ctx: Context = None,
-) -> str:
-    """
-    Persist a small or medium uploaded dataset sent as base64 and return dataset_id.
-    Prefer this over raw text content for one-shot uploads. Use staged upload for larger files.
-    """
-    try:
-        if media_type not in {"text/csv", "application/octet-stream"}:
-            return mcp_error(
-                "ingest_dataset_base64",
-                f"Unsupported media_type '{media_type}'.",
-                error_code="UPLOAD_MEDIA_TYPE_UNSUPPORTED",
-                agent_action=(
-                    "Use text/csv for CSV uploads, or application/octet-stream if the "
-                    "client cannot provide a specific text media type."
-                ),
-            )
-        try:
-            content_bytes = base64.b64decode(content_base64, validate=True)
-        except Exception:
-            return mcp_error(
-                "ingest_dataset_base64",
-                "Base64 payload could not be decoded.",
-                error_code="UPLOAD_DECODE_FAILED",
-                agent_action="Provide valid base64 content for one-shot upload, or use staged upload for large files.",
-            )
-        record = registry.register_dataset_bytes(
-            filename,
-            content_bytes,
-            source="base64",
-        )
-        session = _get_session(ctx)
-        session.dataset_id = record.dataset_id
-        return json.dumps(dataclasses.asdict(record), indent=2)
-    except Exception as e:
-        return mcp_error("ingest_dataset_base64", str(e))
-
-
-@mcp.tool()
 async def begin_dataset_upload(
     filename: str,
     media_type: str = "text/csv",
@@ -992,26 +949,6 @@ async def finalize_dataset_upload(upload_id: str, ctx: Context = None) -> str:
         return json.dumps(dataclasses.asdict(record), indent=2)
     except Exception as e:
         return mcp_error("finalize_dataset_upload", str(e))
-
-
-@mcp.tool()
-async def ingest_dataset_content(
-    filename: str,
-    content: str,
-    ctx: Context = None,
-) -> str:
-    """
-    Persist uploaded or sandbox-local dataset content into the MCP server cache and
-    return a stable dataset_id handle. This is a legacy text-only fallback.
-    Prefer ingest_dataset_base64 for one-shot uploads and staged upload for larger files.
-    """
-    try:
-        record = registry.register_dataset_content(filename, content)
-        session = _get_session(ctx)
-        session.dataset_id = record.dataset_id
-        return json.dumps(dataclasses.asdict(record), indent=2)
-    except Exception as e:
-        return mcp_error("ingest_dataset_content", str(e))
 
 
 def _calibrate_processed_space(

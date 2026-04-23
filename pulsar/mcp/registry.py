@@ -19,6 +19,16 @@ _UPLOADS_DIR = _CACHE_DIR / "uploads"
 _RUNS_DIR = _CACHE_DIR / "runs"
 _LOCK_PATH = _CACHE_DIR / ".registry.lock"
 _PROCESS_LOCK = threading.RLock()
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def _strip_utf8_bom_in_place(path: Path) -> None:
+    with path.open("rb") as handle:
+        prefix = handle.read(len(_UTF8_BOM))
+    if prefix != _UTF8_BOM:
+        return
+    contents = path.read_bytes()
+    path.write_bytes(contents[len(_UTF8_BOM):])
 
 
 @dataclass
@@ -83,42 +93,6 @@ class MCPRegistry:
         with self._locked_registry():
             self._store_dataset_record_unlocked(record)
         return record
-
-    def register_dataset_bytes(
-        self,
-        filename: str,
-        content: bytes,
-        *,
-        source: str,
-    ) -> DatasetRecord:
-        safe_name = Path(filename).name or "uploaded.csv"
-        normalized_content = (
-            content[3:] if content.startswith(b"\xef\xbb\xbf") else content
-        )
-        digest = hashlib.sha256(source.encode("utf-8") + b"\x00" + normalized_content)
-        dataset_id = f"ds_{digest.hexdigest()[:12]}"
-        stored_path = _DATASET_FILES_DIR / f"{dataset_id}_{safe_name}"
-        with self._locked_registry():
-            stored_path.write_bytes(normalized_content)
-            stat = stored_path.stat()
-            record = DatasetRecord(
-                dataset_id=dataset_id,
-                path=str(stored_path),
-                name=safe_name,
-                size_bytes=stat.st_size,
-                mtime_ns=stat.st_mtime_ns,
-                ingested_at=time.time(),
-                source=source,
-            )
-            self._store_dataset_record_unlocked(record)
-        return record
-
-    def register_dataset_content(self, filename: str, content: str) -> DatasetRecord:
-        return self.register_dataset_bytes(
-            filename,
-            content.encode("utf-8"),
-            source="content",
-        )
 
     def register_dataset_from_file(
         self,
@@ -249,6 +223,8 @@ class MCPRegistry:
         import shutil
 
         safe_name = Path(filename).name or "uploaded.csv"
+
+        _strip_utf8_bom_in_place(path)
 
         sha256_hash = hashlib.sha256(source.encode("utf-8") + b"\x00")
         with path.open("rb") as f:
