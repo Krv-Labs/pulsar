@@ -12,7 +12,7 @@ import math
 import warnings
 from dataclasses import dataclass, field
 from html import escape
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -401,80 +401,29 @@ def _strongest_neighbor(
     return int(neighbors[0]["cluster_id"])
 
 
-def _apply_numeric_scores(rows: list[dict[str, Any]]) -> None:
-    metric_names = [
-        ("effect_mean_std", lambda row: abs(float(row.get("effect_mean_std", 0.0)))),
-        (
-            "effect_median_mad",
-            lambda row: abs(float(row.get("effect_median_mad", 0.0))),
-        ),
-        ("ks_stat", lambda row: float(row.get("ks_stat", 0.0))),
-        ("wasserstein_norm", lambda row: float(row.get("wasserstein_norm", 0.0))),
-        (
-            "concentration_gain",
-            lambda row: max(float(row.get("concentration_gain", 0.0)), 0.0),
-        ),
-        ("specificity_score", lambda row: float(row.get("specificity_score", 0.0))),
-        (
-            "one_vs_rest_sig",
-            lambda row: -math.log10(float(row.get("one_vs_rest_q", 1.0)) + _EPS),
-        ),
-        ("global_sig", lambda row: -math.log10(float(row.get("global_q", 1.0)) + _EPS)),
-        (
-            "neighbor_effect",
-            lambda row: abs(float(row.get("neighbor_effect", 0.0))),
-        ),
-    ]
-    component_percentiles: dict[str, list[float]] = {}
-    for metric_name, getter in metric_names:
-        component_percentiles[metric_name] = _empirical_percentiles(
-            [getter(row) for row in rows]
-        )
-
-    aggregate_components: list[float] = []
-    for row_index, row in enumerate(rows):
-        evidence_vector = {
-            metric_name: component_percentiles[metric_name][row_index]
-            for metric_name, _getter in metric_names
-        }
-        positive = [max(value, 0.0) + 1e-6 for value in evidence_vector.values()]
-        aggregate = (
-            float(math.exp(np.mean(np.log(positive))) - 1e-6) if positive else 0.0
-        )
-        row["aggregate_score"] = max(aggregate, 0.0)
-        row["evidence_vector"] = evidence_vector
-        aggregate_components.append(row["aggregate_score"])
-
-    aggregate_percentiles = _empirical_percentiles(aggregate_components)
-    for row_index, row in enumerate(rows):
-        row["percentile_score"] = aggregate_percentiles[row_index]
+MetricExtractor = tuple[str, "Callable[[dict[str, Any]], float]"]
 
 
-def _apply_categorical_scores(rows: list[dict[str, Any]]) -> None:
-    metric_names = [
-        ("prevalence_cluster", lambda row: float(row.get("prevalence_cluster", 0.0))),
-        ("log_lift", lambda row: abs(float(row.get("log_lift", 0.0)))),
-        ("specificity", lambda row: abs(float(row.get("specificity", 0.0)))),
-        ("global_recall", lambda row: float(row.get("global_recall", 0.0))),
-        (
-            "neighbor_specificity",
-            lambda row: abs(float(row.get("neighbor_specificity", 0.0))),
-        ),
-        ("mi_contrib", lambda row: abs(float(row.get("mi_contrib", 0.0)))),
-        ("fisher_sig", lambda row: -math.log10(float(row.get("fisher_q", 1.0)) + _EPS)),
-        ("global_sig", lambda row: -math.log10(float(row.get("global_q", 1.0)) + _EPS)),
-    ]
-    component_percentiles: dict[str, list[float]] = {}
-    for metric_name, getter in metric_names:
-        component_percentiles[metric_name] = _empirical_percentiles(
-            [getter(row) for row in rows]
-        )
+def _apply_percentile_aggregate(
+    rows: list[dict[str, Any]],
+    extractors: list[MetricExtractor],
+) -> None:
+    """Populate aggregate_score, percentile_score, and evidence_vector on each row.
 
+    For each metric in *extractors*, compute empirical percentiles across rows.
+    The per-row aggregate is the geometric mean of the component percentiles
+    (with a small positivity offset). The per-row percentile_score is the
+    empirical percentile of that aggregate.
+    """
+    component_percentiles = {
+        name: _empirical_percentiles([extract(row) for row in rows])
+        for name, extract in extractors
+    }
+    names = [name for name, _ in extractors]
     aggregates: list[float] = []
     for row_index, row in enumerate(rows):
         evidence_vector = {
-            metric_name: component_percentiles[metric_name][row_index]
-            for metric_name, _getter in metric_names
+            name: component_percentiles[name][row_index] for name in names
         }
         positive = [max(value, 0.0) + 1e-6 for value in evidence_vector.values()]
         aggregate = (
@@ -484,9 +433,50 @@ def _apply_categorical_scores(rows: list[dict[str, Any]]) -> None:
         row["evidence_vector"] = evidence_vector
         aggregates.append(row["aggregate_score"])
 
-    aggregate_percentiles = _empirical_percentiles(aggregates)
-    for row_index, row in enumerate(rows):
-        row["percentile_score"] = aggregate_percentiles[row_index]
+    for row, percentile in zip(rows, _empirical_percentiles(aggregates)):
+        row["percentile_score"] = percentile
+
+
+_NUMERIC_METRIC_EXTRACTORS: list[MetricExtractor] = [
+    ("effect_mean_std", lambda row: abs(float(row.get("effect_mean_std", 0.0)))),
+    ("effect_median_mad", lambda row: abs(float(row.get("effect_median_mad", 0.0)))),
+    ("ks_stat", lambda row: float(row.get("ks_stat", 0.0))),
+    ("wasserstein_norm", lambda row: float(row.get("wasserstein_norm", 0.0))),
+    (
+        "concentration_gain",
+        lambda row: max(float(row.get("concentration_gain", 0.0)), 0.0),
+    ),
+    ("specificity_score", lambda row: float(row.get("specificity_score", 0.0))),
+    (
+        "one_vs_rest_sig",
+        lambda row: -math.log10(float(row.get("one_vs_rest_q", 1.0)) + _EPS),
+    ),
+    ("global_sig", lambda row: -math.log10(float(row.get("global_q", 1.0)) + _EPS)),
+    ("neighbor_effect", lambda row: abs(float(row.get("neighbor_effect", 0.0)))),
+]
+
+
+_CATEGORICAL_METRIC_EXTRACTORS: list[MetricExtractor] = [
+    ("prevalence_cluster", lambda row: float(row.get("prevalence_cluster", 0.0))),
+    ("log_lift", lambda row: abs(float(row.get("log_lift", 0.0)))),
+    ("specificity", lambda row: abs(float(row.get("specificity", 0.0)))),
+    ("global_recall", lambda row: float(row.get("global_recall", 0.0))),
+    (
+        "neighbor_specificity",
+        lambda row: abs(float(row.get("neighbor_specificity", 0.0))),
+    ),
+    ("mi_contrib", lambda row: abs(float(row.get("mi_contrib", 0.0)))),
+    ("fisher_sig", lambda row: -math.log10(float(row.get("fisher_q", 1.0)) + _EPS)),
+    ("global_sig", lambda row: -math.log10(float(row.get("global_q", 1.0)) + _EPS)),
+]
+
+
+def _apply_numeric_scores(rows: list[dict[str, Any]]) -> None:
+    _apply_percentile_aggregate(rows, _NUMERIC_METRIC_EXTRACTORS)
+
+
+def _apply_categorical_scores(rows: list[dict[str, Any]]) -> None:
+    _apply_percentile_aggregate(rows, _CATEGORICAL_METRIC_EXTRACTORS)
 
 
 def _assign_signal_tiers(rows: list[dict[str, Any]]) -> None:
@@ -573,32 +563,32 @@ def _compact_categorical_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _detail_numeric_rows(
-    rows: list[dict[str, Any]], detail: str
+def _tier_filter(
+    rows: list[dict[str, Any]],
+    detail: str,
+    compact_fn: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Filter rows by detail tier, compacting the low-priority subset."""
     core = [row for row in rows if row["signal_tier"] == "core"]
     supporting = [row for row in rows if row["signal_tier"] == "supporting"]
     context = [row for row in rows if row["signal_tier"] == "context"]
     if detail == "summary":
-        return [_compact_numeric_row(row) for row in core + supporting]
+        return [compact_fn(row) for row in core + supporting]
     if detail == "standard":
-        detailed = core + supporting
-        return detailed + [_compact_numeric_row(row) for row in context]
+        return core + supporting + [compact_fn(row) for row in context]
     return rows
+
+
+def _detail_numeric_rows(
+    rows: list[dict[str, Any]], detail: str
+) -> list[dict[str, Any]]:
+    return _tier_filter(rows, detail, _compact_numeric_row)
 
 
 def _detail_categorical_rows(
     rows: list[dict[str, Any]], detail: str
 ) -> list[dict[str, Any]]:
-    core = [row for row in rows if row["signal_tier"] == "core"]
-    supporting = [row for row in rows if row["signal_tier"] == "supporting"]
-    context = [row for row in rows if row["signal_tier"] == "context"]
-    if detail == "summary":
-        return [_compact_categorical_row(row) for row in core + supporting]
-    if detail == "standard":
-        detailed = core + supporting
-        return detailed + [_compact_categorical_row(row) for row in context]
-    return rows
+    return _tier_filter(rows, detail, _compact_categorical_row)
 
 
 def _categorical_ranking_payload(row: dict[str, Any]) -> dict[str, Any]:
