@@ -34,6 +34,18 @@ Reveal the dataset's topology; do not force convenient clusters.
    - GATE: component_count=1 is normal; do not force separation by
      narrowing epsilon.
 
+## THRESHOLD MECHANICS
+Two independent levers — do not confuse them:
+- **Accumulation threshold** (`cosmic_graph.threshold` in config): set BEFORE the
+  sweep. Controls how often two points must co-occur across ball maps to share an
+  edge. Too high → singletons. Too low → over-connected hairball. Default "auto"
+  is correct for most datasets; only override if `diagnose_cosmic_graph` shows
+  density < 0.1 (raise it) or > 0.8 (lower it), then re-run the sweep.
+- **Edge weight threshold** (`edge_weight_threshold` in `generate_cluster_dossier`):
+  applied AFTER the graph is built. Use `get_threshold_stability_curve` and
+  `diagnose_cosmic_graph` weight percentiles (weight_p25–p75) to choose a value.
+  This tunes cluster count and sharpness, not graph connectivity.
+
 ## PHASE III: CONTRASTIVE INTERPRETATION
 7. Cluster: `generate_cluster_dossier`.
 8. Contrast: Perform comparative analysis. Identify the 'Pivot Feature' —
