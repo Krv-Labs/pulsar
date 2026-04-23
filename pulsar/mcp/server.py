@@ -267,6 +267,7 @@ class _PulsarSession:
 _sessions: OrderedDict[str, _PulsarSession] = OrderedDict()
 _MAX_SESSIONS = int(os.environ.get("PULSAR_MAX_SESSIONS", "3"))
 _MAX_EDGES_IN_SUMMARY = 500
+_MAX_CLUSTER_SINGLETON_RATIO = 0.66
 
 
 def _session_key(ctx: Context | None) -> str:
@@ -489,9 +490,15 @@ def _pca_cache_status(
 
 
 def _cluster_result_payload(result: Any) -> dict[str, Any]:
+    sizes = result.labels.value_counts().sort_index()
+    total = len(result.labels)
     return {
         "method_used": result.method_used,
         "n_clusters": result.n_clusters,
+        "cluster_sizes": [
+            {"cluster_id": int(cid), "n": int(n), "pct": round(n / total * 100, 1)}
+            for cid, n in sizes.items()
+        ],
         "silhouette_score": result.silhouette_score,
         "edge_weight_threshold_applied": result.edge_weight_threshold_applied,
         "stability_plateaus": result.stability_plateaus,
@@ -1455,6 +1462,21 @@ async def generate_cluster_dossier(
         )
         session.clusters = result.labels
         session.report_exclude_columns = exclude_columns
+
+        sizes = result.labels.value_counts()
+        n_singleton_clusters = int((sizes == 1).sum())
+        if result.n_clusters > 1 and n_singleton_clusters / result.n_clusters > _MAX_CLUSTER_SINGLETON_RATIO:
+            return mcp_error(
+                "generate_cluster_dossier",
+                f"Degenerate clustering: {n_singleton_clusters} of {result.n_clusters} clusters are singletons "
+                f"(dominant cluster has {int(sizes.max())} members).",
+                error_code="DEGENERATE_CLUSTERING",
+                agent_action=(
+                    "Lower edge_weight_threshold to reconnect the graph, or call "
+                    "get_threshold_stability_curve and use method='components' to inspect natural structure."
+                ),
+            )
+
         session.feature_evidence_cluster_meta = _cluster_result_payload(result)
 
         evidence_index = _get_or_build_evidence_index(
