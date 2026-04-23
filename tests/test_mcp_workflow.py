@@ -242,7 +242,11 @@ def test_create_config_supports_parquet_dataset_id(tmp_path):
         asyncio.run(server.create_config(dataset["dataset_id"], "parquet_sweep"))
     )
     report = json.loads(
-        asyncio.run(server.validate_config(create_response["config_yaml"], dataset["dataset_id"]))
+        asyncio.run(
+            server.validate_config(
+                create_response["config_yaml"], dataset["dataset_id"]
+            )
+        )
     )
 
     assert create_response["status"] == "ok"
@@ -263,9 +267,7 @@ def test_probe_columns_reloads_for_requested_dataset_id(tmp_path):
 
     asyncio.run(server.characterize_dataset(dataset_id=dataset_a["dataset_id"]))
     payload = json.loads(
-        asyncio.run(
-            server.probe_columns(dataset_b["dataset_id"], ["b_only", "shared"])
-        )
+        asyncio.run(server.probe_columns(dataset_b["dataset_id"], ["b_only", "shared"]))
     )
 
     names = {profile["name"] for profile in payload["column_profiles"]}
