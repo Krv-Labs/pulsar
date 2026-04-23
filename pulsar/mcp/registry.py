@@ -28,7 +28,7 @@ def _strip_utf8_bom_in_place(path: Path) -> None:
     if prefix != _UTF8_BOM:
         return
     contents = path.read_bytes()
-    path.write_bytes(contents[len(_UTF8_BOM):])
+    path.write_bytes(contents[len(_UTF8_BOM) :])
 
 
 @dataclass

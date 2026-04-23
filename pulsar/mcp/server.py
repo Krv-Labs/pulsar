@@ -40,13 +40,13 @@ from pulsar.mcp.interpreter import (
     build_dossier,
     cluster_profile_payload,
     dossier_to_markdown,
-    dossier_to_html,
     compare_clusters,
     comparison_to_markdown,
     feature_signal_payload,
     signal_matrix_payload,
     FeatureEvidenceIndex,
 )
+from pulsar.mcp.report import dossier_to_html
 from pulsar.mcp.config_tools import (
     apply_overrides,
     render_validation_report,

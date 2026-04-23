@@ -7,8 +7,8 @@ from pulsar.mcp.interpreter import (
     ClusterProfile,
     TopologicalDossier,
     build_dossier,
-    dossier_to_html,
 )
+from pulsar.mcp.report import dossier_to_html
 
 
 def _sample_dossier() -> TopologicalDossier:
