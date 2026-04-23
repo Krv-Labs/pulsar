@@ -90,6 +90,7 @@ class FeatureEvidenceIndex:
     categorical_global_ranking: List[Dict[str, Any]]
     signal_matrix: Dict[str, Any]
     metadata: Dict[str, Any]
+    working_columns: List[str] = field(default_factory=list)
 
 
 def resolve_clusters(
@@ -616,7 +617,7 @@ def _compute_numeric_rows(
     clusters: pd.Series,
     adjacency: dict[int, list[dict[str, Any]]],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
-    global_numeric_stats: dict[str, dict[str, float]] = {}
+    global_numeric_stats: dict[str, dict[str, Any]] = {}
     cluster_values = sorted(int(cid) for cid in clusters.unique())
     for column in numeric_cols:
         grouped = [
@@ -625,11 +626,13 @@ def _compute_numeric_rows(
         ]
         grouped = [values for values in grouped if values.size > 0]
         p_value = 1.0
+        column_failures: list[str] = []
         if len(grouped) >= 2:
             try:
                 p_value = float(stats.kruskal(*grouped).pvalue)
-            except ValueError:
-                p_value = 1.0
+            except ValueError as exc:
+                column_failures.append(f"kruskal: {exc}")
+                logger.warning("kruskal failed for column %s: %s", column, exc)
         global_scale = np.std(_normalize_numeric(data[column]))
         mean_dispersion = (
             np.std([_safe_mean(values) for values in grouped]) if grouped else 0.0
@@ -637,6 +640,7 @@ def _compute_numeric_rows(
         global_numeric_stats[column] = {
             "p_value": p_value,
             "effect": float(mean_dispersion / max(global_scale, _EPS)),
+            "failure_reasons": column_failures,
         }
 
     global_qs = _bh_fdr(
@@ -663,6 +667,7 @@ def _compute_numeric_rows(
                 if neighbor_id is not None
                 else np.array([], dtype=float)
             )
+            row_failures: list[str] = []
             pooled = _pooled_std(cluster_values_arr, rest_values_arr)
             global_std = max(_safe_std(global_values_arr), _EPS)
             global_mad = max(_safe_mad(global_values_arr), _EPS)
@@ -681,8 +686,15 @@ def _compute_numeric_rows(
                 ks_stat = float(
                     stats.ks_2samp(cluster_values_arr, rest_values_arr).statistic
                 )
-            except ValueError:
+            except ValueError as exc:
                 ks_stat = 0.0
+                row_failures.append(f"ks_2samp: {exc}")
+                logger.warning(
+                    "ks_2samp failed for cluster=%s column=%s: %s",
+                    cluster_id,
+                    column,
+                    exc,
+                )
             wasserstein_norm = float(
                 stats.wasserstein_distance(cluster_values_arr, rest_values_arr)
                 / max(global_iqr, _EPS)
@@ -704,8 +716,15 @@ def _compute_numeric_rows(
                         alternative="two-sided",
                     ).pvalue
                 )
-            except ValueError:
+            except ValueError as exc:
                 one_vs_rest_p = 1.0
+                row_failures.append(f"mannwhitneyu(one_vs_rest): {exc}")
+                logger.warning(
+                    "mannwhitneyu(one_vs_rest) failed for cluster=%s column=%s: %s",
+                    cluster_id,
+                    column,
+                    exc,
+                )
 
             neighbor_effect = 0.0
             neighbor_p = 1.0
@@ -721,8 +740,15 @@ def _compute_numeric_rows(
                             alternative="two-sided",
                         ).pvalue
                     )
-                except ValueError:
+                except ValueError as exc:
                     neighbor_p = 1.0
+                    row_failures.append(f"mannwhitneyu(neighbor): {exc}")
+                    logger.warning(
+                        "mannwhitneyu(neighbor) failed for cluster=%s column=%s: %s",
+                        cluster_id,
+                        column,
+                        exc,
+                    )
 
             row = {
                 "column": column,
@@ -776,6 +802,7 @@ def _compute_numeric_rows(
                 "percentile_score": 0.0,
                 "signal_tier": "noise",
                 "sparkline": generate_distribution_sparkline(cluster_values_arr),
+                "failure_reasons": row_failures,
             }
             rows.append(row)
 
@@ -793,22 +820,27 @@ def _compute_categorical_rows(
     clusters: pd.Series,
     adjacency: dict[int, list[dict[str, Any]]],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
-    global_categorical_stats: dict[str, dict[str, float]] = {}
+    global_categorical_stats: dict[str, dict[str, Any]] = {}
     cluster_values = sorted(int(cid) for cid in clusters.unique())
     for column in categorical_cols:
         encoded = data[column].fillna("__MISSING__").astype(str)
         contingency = pd.crosstab(clusters, encoded)
         p_value = 1.0
         association = 0.0
+        column_failures: list[str] = []
         if contingency.shape[0] >= 2 and contingency.shape[1] >= 2:
             try:
                 chi2, p_value, _dof, _expected = stats.chi2_contingency(contingency)
                 association = float(chi2 / max(contingency.values.sum(), 1))
-            except ValueError:
-                p_value = 1.0
+            except ValueError as exc:
+                column_failures.append(f"chi2_contingency: {exc}")
+                logger.warning(
+                    "chi2_contingency failed for column %s: %s", column, exc
+                )
         global_categorical_stats[column] = {
             "p_value": float(p_value),
             "association": association,
+            "failure_reasons": column_failures,
         }
 
     global_qs = _bh_fdr(
@@ -855,6 +887,7 @@ def _compute_categorical_rows(
                     p_cv * math.log(max(p_cv, _EPS) / max(p_c * p_v, _EPS))
                 )
                 fisher_p = 1.0
+                row_failures: list[str] = []
                 try:
                     fisher_p = float(
                         stats.fisher_exact(
@@ -864,8 +897,15 @@ def _compute_categorical_rows(
                             ]
                         )[1]
                     )
-                except ValueError:
-                    fisher_p = 1.0
+                except ValueError as exc:
+                    row_failures.append(f"fisher_exact: {exc}")
+                    logger.warning(
+                        "fisher_exact failed for cluster=%s column=%s value=%s: %s",
+                        cluster_id,
+                        column,
+                        value,
+                        exc,
+                    )
 
                 rows.append(
                     {
@@ -899,6 +939,7 @@ def _compute_categorical_rows(
                         "signal_tier": "noise",
                         "in_cluster_prevalence": float(prevalence_cluster * 100.0),
                         "concentration": float(prevalence_cluster * 100.0),
+                        "failure_reasons": row_failures,
                     }
                 )
 
@@ -1033,6 +1074,51 @@ def _auto_semantic_name(bundle: dict[str, Any], cluster_id: int) -> str:
     return "[Auto] " + ", ".join(fragments[:3])
 
 
+def _collect_stats_failures(
+    *,
+    numeric_rows: list[dict[str, Any]],
+    categorical_rows: list[dict[str, Any]],
+    global_numeric_stats: dict[str, dict[str, Any]],
+    global_categorical_stats: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate statistical test failures for surfacing to the dossier."""
+    numeric_column_level = {
+        column: list(payload.get("failure_reasons", []))
+        for column, payload in global_numeric_stats.items()
+        if payload.get("failure_reasons")
+    }
+    categorical_column_level = {
+        column: list(payload.get("failure_reasons", []))
+        for column, payload in global_categorical_stats.items()
+        if payload.get("failure_reasons")
+    }
+    numeric_row_level = [
+        {
+            "cluster_id": int(row["cluster_id"]),
+            "column": row["column"],
+            "reasons": list(row["failure_reasons"]),
+        }
+        for row in numeric_rows
+        if row.get("failure_reasons")
+    ]
+    categorical_row_level = [
+        {
+            "cluster_id": int(row["cluster_id"]),
+            "column": row["column"],
+            "value": row["value"],
+            "reasons": list(row["failure_reasons"]),
+        }
+        for row in categorical_rows
+        if row.get("failure_reasons")
+    ]
+    return {
+        "numeric_column_level": numeric_column_level,
+        "categorical_column_level": categorical_column_level,
+        "numeric_row_level": numeric_row_level,
+        "categorical_row_level": categorical_row_level,
+    }
+
+
 def build_feature_evidence_index(
     model: ThemaRS,
     data: pd.DataFrame,
@@ -1085,6 +1171,13 @@ def build_feature_evidence_index(
         cluster_bundles[cluster_id] = bundle
 
     signal_matrix = _assemble_signal_matrix(cluster_bundles)
+    stats_failures = _collect_stats_failures(
+        numeric_rows=numeric_rows,
+        categorical_rows=categorical_rows,
+        global_numeric_stats=global_numeric_stats,
+        global_categorical_stats=global_categorical_stats,
+    )
+    working_columns = working.columns.tolist()
     return FeatureEvidenceIndex(
         cluster_bundles=cluster_bundles,
         numeric_global_ranking=_rank_numeric_columns(numeric_rows),
@@ -1093,7 +1186,7 @@ def build_feature_evidence_index(
         metadata={
             "n_total": len(working),
             "n_clusters": int(clusters.nunique()),
-            "columns": working.columns.tolist(),
+            "columns": working_columns,
             "excluded_columns": exclude_columns or [],
             "numeric_features_screened": len(numeric_cols),
             "categorical_columns_screened": len(categorical_cols),
@@ -1103,7 +1196,9 @@ def build_feature_evidence_index(
             "global_numeric_stats": global_numeric_stats,
             "global_categorical_stats": global_categorical_stats,
             "cluster_adjacency": adjacency,
+            "stats_failures": stats_failures,
         },
+        working_columns=working_columns,
     )
 
 
@@ -1119,7 +1214,6 @@ def build_dossier(
     model: ThemaRS,
     data: pd.DataFrame,
     clusters: pd.Series,
-    exclude_columns: list[str] | None = None,
     *,
     detail: str = "standard",
     evidence_index: FeatureEvidenceIndex | None = None,
@@ -1129,19 +1223,11 @@ def build_dossier(
         raise ValueError("detail must be 'summary', 'standard', or 'full'")
 
     if evidence_index is None:
-        evidence_index = build_feature_evidence_index(
-            model,
-            data,
-            clusters,
-            exclude_columns=exclude_columns,
-        )
+        evidence_index = build_feature_evidence_index(model, data, clusters)
 
-    working = data.copy()
-    excluded = evidence_index.metadata.get("excluded_columns", [])
-    if excluded:
-        to_drop = [column for column in excluded if column in working.columns]
-        if to_drop:
-            working = working.drop(columns=to_drop)
+    working_columns = evidence_index.working_columns or [
+        col for col in data.columns if col not in evidence_index.metadata.get("excluded_columns", [])
+    ]
 
     cluster_profiles = []
     for cluster_id in sorted(evidence_index.cluster_bundles):
@@ -1187,7 +1273,6 @@ def build_dossier(
         )
 
         cluster_mask = clusters == cluster_id
-        cluster_data = working.loc[cluster_mask]
         try:
             cluster_nodes = list(np.where(clusters.values == cluster_id)[0])
             sub_graph = model.cosmic_graph.subgraph(cluster_nodes)
@@ -1195,14 +1280,21 @@ def build_dossier(
                 pagerank = nx.pagerank(sub_graph, weight="weight")
                 central_ids = sorted(pagerank, key=pagerank.get, reverse=True)[:3]
                 top_cols = _select_top_columns(bundle["numeric"], bundle["categorical"])
-                top_cols = top_cols or working.columns[:10].tolist()
-                profile.central_rows = working.iloc[central_ids][top_cols].to_dict(
-                    "records"
+                top_cols = top_cols or working_columns[:10]
+                profile.central_rows = (
+                    data.iloc[central_ids][top_cols].to_dict("records")
                 )
-        except Exception:
+        except (KeyError, IndexError, nx.NetworkXError, nx.PowerIterationFailedConvergence) as exc:
+            logger.warning(
+                "central row selection via pagerank failed for cluster %s: %s",
+                cluster_id,
+                exc,
+            )
             top_cols = _select_top_columns(bundle["numeric"], bundle["categorical"])
-            top_cols = top_cols or working.columns[:10].tolist()
-            profile.central_rows = cluster_data[top_cols].head(3).to_dict("records")
+            top_cols = top_cols or working_columns[:10]
+            profile.central_rows = (
+                data.loc[cluster_mask, top_cols].head(3).to_dict("records")
+            )
 
         cluster_profiles.append(profile)
 
@@ -1210,7 +1302,8 @@ def build_dossier(
         from dataclasses import asdict
 
         graph_metrics = asdict(diagnose_model(model))
-    except Exception:
+    except (RuntimeError, AttributeError) as exc:
+        logger.warning("diagnose_model failed: %s", exc)
         graph_metrics = {}
 
     return TopologicalDossier(
@@ -1237,6 +1330,7 @@ def build_dossier(
                     "tiering_method",
                     "neighbor_contrast_enabled",
                     "excluded_columns",
+                    "stats_failures",
                 }
             },
             "cluster_adjacency": evidence_index.metadata["cluster_adjacency"],

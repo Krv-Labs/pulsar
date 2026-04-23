@@ -1515,7 +1515,6 @@ async def generate_cluster_dossier(
             session.model,
             session.data,
             result.labels,
-            exclude_columns=exclude_columns,
             detail=(
                 "standard"
                 if response_format == "markdown" and detail == "summary"
@@ -2175,18 +2174,23 @@ async def export_html_report(
     )
 
     try:
-        evidence_index = None
         if (
             session.feature_evidence_index is not None
             and cols_to_exclude == session.report_exclude_columns
         ):
             evidence_index = session.feature_evidence_index
+        else:
+            evidence_index = build_feature_evidence_index(
+                session.model,
+                session.data,
+                session.clusters,
+                exclude_columns=cols_to_exclude,
+            )
 
         dossier = build_dossier(
             session.model,
             session.data,
             session.clusters,
-            exclude_columns=cols_to_exclude,
             detail="full",
             evidence_index=evidence_index,
         )

@@ -117,3 +117,47 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert feature_payload["signals"]["feature_names"] == ["f1", "segment=alpha"]
     assert feature_payload["signals"]["clusters"]
     assert matrix_payload["signal_matrix"]["numeric_rows"]
+
+
+def test_evidence_index_surfaces_stats_failures_metadata():
+    """stats_failures metadata must always be present and structured."""
+    data, clusters = _make_multifactor_dataset()
+    model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    evidence = build_feature_evidence_index(model, data, clusters)
+
+    assert "stats_failures" in evidence.metadata
+    stats_failures = evidence.metadata["stats_failures"]
+    assert set(stats_failures.keys()) == {
+        "numeric_column_level",
+        "categorical_column_level",
+        "numeric_row_level",
+        "categorical_row_level",
+    }
+    assert stats_failures["numeric_column_level"] == {}
+    assert stats_failures["categorical_column_level"] == {}
+    assert stats_failures["numeric_row_level"] == []
+    assert stats_failures["categorical_row_level"] == []
+
+
+def test_evidence_index_captures_ks_failure_when_stats_call_raises(monkeypatch):
+    """When scipy.stats raises ValueError, the failure must be recorded on the row."""
+    from pulsar.mcp import interpreter
+
+    call_count = {"n": 0}
+    original_ks = interpreter.stats.ks_2samp
+
+    def flaky_ks_2samp(a, b, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ValueError("synthetic failure for test")
+        return original_ks(a, b, *args, **kwargs)
+
+    monkeypatch.setattr(interpreter.stats, "ks_2samp", flaky_ks_2samp)
+
+    data, clusters = _make_multifactor_dataset()
+    model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    evidence = build_feature_evidence_index(model, data, clusters)
+
+    row_failures = evidence.metadata["stats_failures"]["numeric_row_level"]
+    assert len(row_failures) == 1
+    assert row_failures[0]["reasons"] == ["ks_2samp: synthetic failure for test"]
