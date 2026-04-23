@@ -1465,7 +1465,10 @@ async def generate_cluster_dossier(
 
         sizes = result.labels.value_counts()
         n_singleton_clusters = int((sizes == 1).sum())
-        if result.n_clusters > 1 and n_singleton_clusters / result.n_clusters > _MAX_CLUSTER_SINGLETON_RATIO:
+        if (
+            result.n_clusters > 1
+            and n_singleton_clusters / result.n_clusters > _MAX_CLUSTER_SINGLETON_RATIO
+        ):
             return mcp_error(
                 "generate_cluster_dossier",
                 f"Degenerate clustering: {n_singleton_clusters} of {result.n_clusters} clusters are singletons "
