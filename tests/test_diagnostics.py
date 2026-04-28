@@ -253,9 +253,7 @@ def test_resolve_clusters_max_k(connected_spectral_model):
     """Assert max_k parameter is respected — higher max_k can find more clusters."""
     from pulsar.mcp.interpreter import resolve_clusters
 
-    result_low = resolve_clusters(
-        connected_spectral_model, method="spectral", max_k=3
-    )
+    result_low = resolve_clusters(connected_spectral_model, method="spectral", max_k=3)
     result_high = resolve_clusters(
         connected_spectral_model, method="spectral", max_k=15
     )

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "thema-pulsar"
-version = "0.2.2"
+version = "0.2.3"
 authors = [
     { name = "Krv Labs", email = "team@krv.ai" },
 ]
@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=2.0",
     "networkx>=3.4",
     "pandas>=2.0",
+    "pyarrow>=15.0",
     "scikit-learn>=1.5",
     "scipy>=1.10",
     "pyyaml>=6.0",
@@ -22,6 +23,9 @@ dependencies = [
 
 [project.scripts]
 pulsar-mcp = "pulsar.mcp.server:main"
+
+[project.optional-dependencies]
+mcp = ["fastmcp>=2.0"]
 
 [tool.maturin]
 features        = ["pyo3/extension-module"]

@@ -30,13 +30,15 @@ Don't overcomplicate this. Add the server to your Claude Desktop config (or Gemi
 {
   "mcpServers": {
     "pulsar": {
-      "command": "uv",
-      "args": ["run", "pulsar-mcp"],
+      "command": "uvx",
+      "args": ["--from", "thema-pulsar[mcp]", "pulsar-mcp"],
       "env": {}
     }
   }
 }
 ```
+
+This pulls `thema-pulsar` straight from PyPI — no clone, no `uv sync` required. If you prefer a persistent install, `pipx install "thema-pulsar[mcp]"` and use `"command": "pulsar-mcp"` instead.
 
 Restart your client. Done.
 
