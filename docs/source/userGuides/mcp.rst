@@ -55,7 +55,7 @@ Claude handles all the messy parts: imputation, categorical encoding, parameter 
 Setup
 -----
 
-Pulsar ships an MCP server entry point (``pulsar-mcp``) in the ``mcp`` dependency group. Wire it into your AI client of choice:
+Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of the published ``thema-pulsar`` package. You do **not** need to clone the repo — `uvx <https://docs.astral.sh/uv/guides/tools/>`_ (or ``pipx``) can launch it directly from PyPI.
 
 .. note::
   Pulsar works with any MCP-capable client, including Cursor and Gemini CLI, where you can add Pulsar as an MCP server/tool.
@@ -71,8 +71,8 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) in the ``mcp`` dependenc
          {
            "mcpServers": {
              "pulsar": {
-               "command": "uv",
-               "args": ["run", "--group", "mcp", "pulsar-mcp"]
+               "command": "uvx",
+               "args": ["--from", "thema-pulsar[mcp]", "pulsar-mcp"]
              }
            }
          }
@@ -80,19 +80,19 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) in the ``mcp`` dependenc
       Restart Claude Desktop. A hammer icon in new chats confirms the tools loaded.
 
       .. note::
-         If Claude can't find ``uv``, replace ``"command": "uv"`` with the absolute path (e.g. ``/Users/yourname/.local/bin/uv``).
+         GUI-launched apps on macOS often don't inherit your shell ``PATH``. If Claude can't find ``uvx``, replace ``"command": "uvx"`` with its absolute path (find it with ``which uvx``, e.g. ``/Users/yourname/.local/bin/uvx``).
 
    .. tab-item:: Gemini CLI
 
       .. code-block:: bash
 
-         gemini mcp add pulsar uv run --group mcp pulsar-mcp
+         gemini mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
 
    .. tab-item:: Claude Code
 
       .. code-block:: bash
 
-         claude mcp add pulsar -- uv run --group mcp pulsar-mcp
+         claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
 
    .. tab-item:: Cursor / Windsurf
 
@@ -100,7 +100,33 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) in the ``mcp`` dependenc
 
       - Name: ``pulsar``
       - Type: ``command``
-      - Command: ``uv run --group mcp pulsar-mcp``
+      - Command: ``uvx --from "thema-pulsar[mcp]" pulsar-mcp``
+
+Alternative install methods
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you prefer a persistent install over ephemeral ``uvx`` invocations:
+
+.. code-block:: bash
+
+   pipx install "thema-pulsar[mcp]"   # then use command: pulsar-mcp
+   # or
+   pip install "thema-pulsar[mcp]"    # in any venv
+
+Developing against a local clone
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Contributors working on the Pulsar source can launch the server from a checkout instead:
+
+.. code-block:: bash
+
+   uv sync --extra mcp
+   uv run pulsar-mcp
+
+   # or, equivalently, using the dev dependency-group:
+   uv run --group mcp pulsar-mcp
+
+Point your MCP client at ``uv run --group mcp pulsar-mcp`` (with ``cwd`` set to the clone) for live-edit development.
 
 Workflow
 --------
