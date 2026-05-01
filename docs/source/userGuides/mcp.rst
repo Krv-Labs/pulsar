@@ -71,7 +71,7 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of
          {
            "mcpServers": {
              "pulsar": {
-               "command": "uvx",
+               "command": "uv tool run",
                "args": ["--from", "thema-pulsar[mcp]", "pulsar-mcp"]
              }
            }
@@ -80,19 +80,19 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of
       Restart Claude Desktop. A hammer icon in new chats confirms the tools loaded.
 
       .. note::
-         GUI-launched apps on macOS often don't inherit your shell ``PATH``. If Claude can't find ``uvx``, replace ``"command": "uvx"`` with its absolute path (find it with ``which uvx``, e.g. ``/Users/yourname/.local/bin/uvx``).
+         GUI-launched apps on macOS often don't inherit your shell ``PATH``. If Claude can't find ``uvx``, replace ``"command": "uv tool run"`` with its absolute path (find it with ``which uvx``, e.g. ``/Users/yourname/.local/bin/uvx``).
 
    .. tab-item:: Gemini CLI
 
       .. code-block:: bash
 
-         gemini mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
+         gemini mcp add pulsar uv tool run --from "thema-pulsar[mcp]" pulsar-mcp
 
    .. tab-item:: Claude Code
 
       .. code-block:: bash
 
-         claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
+         claude mcp add pulsar -- uv tool run --from "thema-pulsar[mcp]" pulsar-mcp
 
    .. tab-item:: Cursor / Windsurf
 
@@ -100,12 +100,12 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of
 
       - Name: ``pulsar``
       - Type: ``command``
-      - Command: ``uvx --from "thema-pulsar[mcp]" pulsar-mcp``
+      - Command: ``uv tool run --from "thema-pulsar[mcp]" pulsar-mcp``
 
 Alternative install methods
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If you prefer a persistent install over ephemeral ``uvx`` invocations:
+If you prefer a persistent install over ephemeral ``uv`` invocations:
 
 .. code-block:: bash
 
