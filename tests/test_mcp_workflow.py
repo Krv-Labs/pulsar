@@ -362,7 +362,51 @@ def test_chunked_upload_handles_bom_and_windows_newlines():
 
     assert result["n_samples"] == 2
     assert result["n_features"] == 2
-    assert result["recommended_next_tool"] == "probe_columns"
+    assert result["recommended_next_tool"] == "create_config"
+
+
+def test_characterize_dataset_returns_compact_wide_schema_summary(tmp_path):
+    csv_path = _write_dataset(tmp_path, rows=40, cols=124)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+
+    result = json.loads(
+        asyncio.run(server.characterize_dataset(dataset_id=dataset["dataset_id"]))
+    )
+
+    assert result["status"] == "ok"
+    assert "column_profiles" not in result
+    assert result["n_columns_total"] == 124
+    assert result["schema_summary"]["numeric_columns"] == 124
+    assert result["schema_summary"]["previewed_column_profiles"] == 0
+    assert result["column_profile_preview"] == []
+    assert result["omitted_column_profiles"] == 124
+    assert "pca_cumulative_variance" in result["raw_numeric_geometry"]
+
+
+def test_characterize_dataset_previews_interesting_columns(tmp_path):
+    df = pd.DataFrame(
+        {
+            "complete_numeric": [1.0, 2.0, 3.0, 4.0],
+            "missing_numeric": [1.0, None, 3.0, None],
+            "category": ["a", "b", "a", "b"],
+            "all_missing": [None, None, None, None],
+            "identifier": ["id-1", "id-2", "id-3", "id-4"],
+        }
+    )
+    path = tmp_path / "interesting.csv"
+    df.to_csv(path, index=False)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(str(path))))
+
+    result = json.loads(
+        asyncio.run(server.characterize_dataset(dataset_id=dataset["dataset_id"]))
+    )
+    preview_names = {cp["name"] for cp in result["column_profile_preview"]}
+
+    assert "complete_numeric" not in preview_names
+    assert {"missing_numeric", "category", "all_missing", "identifier"} <= preview_names
+    assert result["schema_summary"]["columns_with_missing"] == 2
+    assert result["schema_summary"]["categorical_columns"] == 2
+    assert result["schema_summary"]["high_cardinality_columns"] == 1
 
 
 def test_unknown_handles_return_stable_codes():
@@ -773,6 +817,86 @@ def test_sweep_response_contains_stability_summary(tmp_path):
         first = summary["top_plateaus"][0]
         for key in ("start", "end", "midpoint", "length", "component_count"):
             assert key in first
+
+
+def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
+    server._sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(server.create_config(dataset["dataset_id"], "threshold_curve"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            server.refine_config(
+                config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+            )
+        )
+    )["config_yaml"]
+    asyncio.run(
+        server.run_topological_sweep(
+            config_yaml=refined, dataset_id=dataset["dataset_id"]
+        )
+    )
+
+    summary = json.loads(asyncio.run(server.get_threshold_stability_curve()))
+    full = json.loads(asyncio.run(server.get_threshold_stability_curve(detail="full")))
+
+    assert summary["status"] == "ok"
+    assert summary["detail"] == "summary"
+    assert "thresholds" not in summary
+    assert "component_counts" not in summary
+    assert "singleton_counts" not in summary
+    assert "curve_sample" in summary
+    assert len(summary["curve_sample"]) <= 25
+    assert summary["curve_point_count"] >= len(summary["curve_sample"])
+    if summary["curve_sample"]:
+        first = summary["curve_sample"][0]
+        assert {"threshold", "component_count", "singleton_count"} <= set(first)
+
+    assert full["detail"] == "full"
+    assert "thresholds" in full
+    assert "component_counts" in full
+    assert "singleton_counts" in full
+    assert len(full["thresholds"]) == full["curve_point_count"]
+
+
+def test_finalization_gate_blocks_early_dominant_component():
+    config_yaml = """
+sweep:
+  pca:
+    dimensions:
+      values: [10, 20]
+"""
+    gate = server._finalization_gate(
+        {
+            "giant_fraction": 0.9724,
+            "density": 0.77,
+            "n_ball_maps": 32,
+        },
+        sweep_count=2,
+        config_yaml=config_yaml,
+    )
+
+    assert gate["status"] == "blocked"
+    assert gate["code"] == "UNRESOLVED_DOMINANT_COMPONENT"
+    assert gate["suggested_refinement"]["pca_dims"] == [10, 12, 14, 16, 18, 20]
+    assert gate["suggested_refinement"]["pca_seeds"] == [42, 7, 13]
+    assert gate["suggested_refinement"]["epsilon_steps_min"] == 24
+
+
+def test_finalization_gate_allows_resolved_dominant_component():
+    gate = server._finalization_gate(
+        {
+            "giant_fraction": 0.96,
+            "density": 0.2,
+            "n_ball_maps": 72,
+        },
+        sweep_count=3,
+        config_yaml="sweep: {}",
+    )
+
+    assert gate["status"] == "ok"
 
 
 def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):

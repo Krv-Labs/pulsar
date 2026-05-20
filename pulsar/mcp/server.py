@@ -52,6 +52,7 @@ from pulsar.mcp.config_tools import (
     render_validation_report,
     validate_config_yaml,
 )
+from pulsar.mcp.characterization import compact_characterization_payload
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.history import summarize_history
 from pulsar.mcp.preprocessing import (
@@ -222,23 +223,19 @@ mcp = FastMCP(
         "`get_workflow_guide` for the recommended end-to-end phase-by-phase "
         "procedure.\n\n"
         "Tool map:\n"
-        "- Ingest: `ingest_dataset` (local path) or the chunked "
-        "`begin_dataset_upload` / `append_dataset_chunk` / "
-        "`finalize_dataset_upload` trio for remote transports. Returns a "
-        "`dataset_id` handle.\n"
-        "- Characterize: `characterize_dataset`, `probe_columns`, "
-        "`recommend_preprocessing`.\n"
-        "- Configure: `create_config`, `validate_config`, `refine_config`, "
-        "`get_active_config`, `refine_active_config`.\n"
-        "- Run: `run_topological_sweep`, `validate_preprocessing_config`, "
-        "`repair_preprocessing_config`.\n"
-        "- Diagnose: `diagnose_cosmic_graph`, "
-        "`get_threshold_stability_curve`, `get_topological_skeleton`, "
-        "`compare_sweeps`, `get_experiment_history`.\n"
-        "- Interpret: `generate_cluster_dossier`, `get_cluster_profile`, "
-        "`get_feature_signal`, `get_cluster_signal_matrix`, "
-        "`compare_clusters_tool`, `export_html_report`, "
-        "`export_labeled_data`."
+        "- Primary loop: `ingest_dataset` -> `characterize_dataset` -> "
+        "`create_config` -> `validate_config` -> `run_topological_sweep` -> "
+        "`diagnose_cosmic_graph` -> `summarize_sweep_history` -> "
+        "`generate_cluster_dossier`.\n"
+        "- Targeted interpretation: `get_cluster_profile`, "
+        "`get_feature_signal`, `compare_clusters_tool`, `export_html_report`.\n"
+        "- Advanced/debug: chunked upload trio, `probe_columns`, "
+        "`recommend_preprocessing`, `validate_preprocessing_config`, "
+        "`repair_preprocessing_config`, `refine_config`, `refine_active_config`, "
+        "`get_active_config`, `get_threshold_stability_curve`, "
+        "`get_topological_skeleton`, `compare_sweeps`, `get_experiment_history`, "
+        "`get_cluster_signal_matrix`, `export_labeled_data`, "
+        "`get_runtime_context`."
     ),
 )
 
@@ -455,6 +452,7 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
     density = float(metrics.get("density", 0.0))
     component_count = int(metrics.get("component_count", 0))
     singleton_fraction = float(metrics.get("singleton_fraction", 0.0))
+    giant_fraction = float(metrics.get("giant_fraction", 0.0))
     is_connected = component_count <= 1
     if density > 0.8:
         return (
@@ -470,6 +468,12 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
             is_connected,
             "Increase epsilon support or fall back to component-based clustering.",
         )
+    if giant_fraction > 0.95:
+        return (
+            "dominant_component",
+            is_connected,
+            "Run one targeted resolution sweep or justify the giant component before finalizing.",
+        )
     if density < 0.05:
         return (
             "sparse",
@@ -481,6 +485,69 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
         is_connected,
         "Proceed to clustering; graph structure is suitable for interpretive analysis.",
     )
+
+
+def _suggest_resolution_pca_dims(pca_dims: list[Any]) -> list[int]:
+    dims = sorted({int(dim) for dim in pca_dims if int(dim) > 1})
+    if not dims:
+        return [5, 8, 12, 16, 20]
+    if len(dims) == 1:
+        center = dims[0]
+        return sorted({max(2, center - 4), max(2, center - 2), center, center + 2})
+
+    low, high = dims[0], dims[-1]
+    if high <= low:
+        return dims
+    step = max(1, round((high - low) / 5))
+    if high - low >= 8:
+        step = max(2, step)
+    return list(range(low, high + 1, step))[:6]
+
+
+def _finalization_gate(
+    metrics: dict[str, Any],
+    *,
+    sweep_count: int,
+    config_yaml: str,
+) -> dict[str, Any]:
+    giant_fraction = float(metrics.get("giant_fraction", 0.0))
+    density = float(metrics.get("density", 0.0))
+    n_ball_maps = int(metrics.get("n_ball_maps", 0) or 0)
+    needs_resolution = giant_fraction > 0.95 and (
+        sweep_count < 3 or density > 0.35 or n_ball_maps < 40
+    )
+    if not needs_resolution:
+        return {
+            "status": "ok",
+            "reason": "No dominant-component resolution gate triggered.",
+        }
+
+    cfg = yaml.safe_load(config_yaml) or {}
+    pca_dims = (
+        cfg.get("sweep", {})
+        .get("pca", {})
+        .get("dimensions", {})
+        .get("values", [])
+    )
+    return {
+        "status": "blocked",
+        "code": "UNRESOLVED_DOMINANT_COMPONENT",
+        "message": (
+            f"giant_fraction={giant_fraction:.1%} after {sweep_count} sweep(s). "
+            "Do not finalize clusters until one targeted resolution sweep is run "
+            "or the dominant component is explicitly justified as clinically expected."
+        ),
+        "suggested_refinement": {
+            "pca_dims": _suggest_resolution_pca_dims(pca_dims),
+            "pca_seeds": [42, 7, 13],
+            "epsilon_steps_min": 24,
+            "strategy": (
+                "Zoom into the useful PCA band with multiple seeds. Shift/lower "
+                "epsilon if density remains high; avoid narrowing to a single "
+                "PCA dimension or single seed."
+            ),
+        },
+    }
 
 
 def _threshold_stability_summary(
@@ -1570,6 +1637,11 @@ async def run_topological_sweep(
         response["spectral_clustering_allowed"] = bool(is_connected)
         response["graph_health"] = graph_health
         response["recommended_next_action"] = recommended_next_action
+        response["finalization_gate"] = _finalization_gate(
+            current_metrics,
+            sweep_count=len(session.sweep_history),
+            config_yaml=current_yaml,
+        )
         response["construction_threshold"] = float(
             model.resolved_construction_threshold
         )
@@ -2006,13 +2078,7 @@ async def characterize_dataset(
             )
 
         result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
-        payload = dataclasses.asdict(result)
-        payload["recommended_next_tool"] = "probe_columns"
-        payload["agent_guidance"] = (
-            "Call characterize_dataset once per dataset for sparse schema and "
-            "geometry. For repeat inspection, use probe_columns on specific "
-            "columns instead of re-running characterization."
-        )
+        payload = compact_characterization_payload(dataclasses.asdict(result))
         return json.dumps(payload, indent=2)
     except FileNotFoundError:
         return path_access_error(
@@ -2051,16 +2117,64 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
         from pulsar.mcp.diagnostics import diagnose_model
 
         result = diagnose_model(session.model)
-        return json.dumps(dataclasses.asdict(result), indent=2)
+        payload = dataclasses.asdict(result)
+        if session.active_config_yaml:
+            gate = _finalization_gate(
+                payload,
+                sweep_count=len(session.sweep_history),
+                config_yaml=session.active_config_yaml,
+            )
+            payload["finalization_gate"] = gate
+            if gate["status"] == "blocked":
+                payload["advisories"].append(
+                    {
+                        "code": gate["code"],
+                        "severity": "warning",
+                        "message": gate["message"],
+                        "agent_action": gate["suggested_refinement"]["strategy"],
+                    }
+                )
+        return json.dumps(payload, indent=2)
     except Exception as e:
         logger.error(f"Error diagnosing graph: {e}")
         return mcp_error("diagnose_cosmic_graph", str(e))
 
 
+def _sparse_threshold_curve(
+    thresholds: list[float],
+    component_counts: list[int],
+    singleton_counts: list[int],
+    *,
+    max_points: int = 25,
+) -> list[dict[str, Any]]:
+    n_points = len(thresholds)
+    if n_points == 0:
+        return []
+
+    if n_points <= max_points:
+        indices = range(n_points)
+    else:
+        indices = sorted(
+            {int(i) for i in np.linspace(0, n_points - 1, num=max_points)}
+        )
+
+    return [
+        {
+            "threshold": thresholds[i],
+            "component_count": component_counts[i],
+            "singleton_count": singleton_counts[i],
+        }
+        for i in indices
+    ]
+
+
 @mcp.tool()
-async def get_threshold_stability_curve(ctx: Context) -> str:
+async def get_threshold_stability_curve(
+    detail: str = "summary",
+    ctx: Context = None,
+) -> str:
     """
-    Return the full component-count-vs-edge-weight-threshold curve.
+    Return component-count-vs-edge-weight-threshold stability.
 
     Uses H0 persistent homology on the cosmic graph's weighted adjacency
     to show how many connected components exist at each edge weight threshold.
@@ -2068,9 +2182,15 @@ async def get_threshold_stability_curve(ctx: Context) -> str:
     initial auto-clustering.
 
     Returns:
-        JSON with thresholds, component_counts, top plateaus, and the
-        auto-selected threshold (midpoint of longest valid plateau).
+        Summary JSON with top plateaus, sparse curve sample, and selected
+        threshold by default. Pass detail="full" for raw arrays.
     """
+    if detail not in {"summary", "full"}:
+        return mcp_error(
+            "get_threshold_stability_curve",
+            f"detail must be 'summary' or 'full', got '{detail}'",
+        )
+
     session = _get_session(ctx)
 
     if session.model is None:
@@ -2106,17 +2226,31 @@ async def get_threshold_stability_curve(ctx: Context) -> str:
             for p in stability.top_k_plateaus(10)
         ]
 
-        return json.dumps(
-            {
-                "status": "ok",
-                "optimal_threshold": float(stability.optimal_threshold),
-                "plateaus": plateaus,
-                "thresholds": thresholds,
-                "component_counts": [int(c) for c in stability.component_counts],
-                "singleton_counts": singleton_counts,
-            },
-            indent=2,
+        component_counts = [int(c) for c in stability.component_counts]
+        curve_sample = _sparse_threshold_curve(
+            thresholds,
+            component_counts,
+            singleton_counts,
         )
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "detail": detail,
+            "optimal_threshold": float(stability.optimal_threshold),
+            "plateaus": plateaus,
+            "curve_point_count": len(thresholds),
+            "curve_sample": curve_sample,
+            "curve_sample_omitted": max(len(thresholds) - len(curve_sample), 0),
+            "curve_sample_guidance": (
+                "curve_sample is an evenly spaced sketch of the full threshold "
+                "curve. Use detail='full' only when exact per-threshold arrays "
+                "are needed."
+            ),
+        }
+        if detail == "full":
+            payload["thresholds"] = thresholds
+            payload["component_counts"] = component_counts
+            payload["singleton_counts"] = singleton_counts
+        return json.dumps(payload, indent=2)
     except Exception as e:
         logger.error(f"Error computing stability curve: {e}")
         return mcp_error("get_threshold_stability_curve", str(e))
@@ -2233,7 +2367,7 @@ async def recommend_preprocessing(
     Prefer dataset_id after ingest; accepts dataset_geometry as fallback.
 
     Args:
-        dataset_geometry: The raw JSON string from characterize_dataset.
+        dataset_geometry: Legacy full geometry JSON with column_profiles.
         dataset_id: Preferred dataset handle. When provided, characterizes
             the dataset automatically (dataset_geometry is ignored).
 
@@ -2263,7 +2397,9 @@ async def recommend_preprocessing(
         if not column_profiles:
             return mcp_error(
                 "recommend_preprocessing",
-                "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.",
+                "No column_profiles found in dataset_geometry.",
+                error_code="MISSING_COLUMN_PROFILES",
+                agent_action="Pass dataset_id instead of compact characterize_dataset output.",
             )
 
         drop, impute, encode, rationale = _recommend_preprocessing_block(
@@ -2307,8 +2443,9 @@ async def recommend_preprocessing(
 async def repair_preprocessing_config(
     error_message: str,
     config_yaml: str,
-    dataset_geometry: str,
-    ctx: Context,
+    dataset_geometry: str = "",
+    dataset_id: str = "",
+    ctx: Context = None,
 ) -> str:
     """
     Given a preprocessing error from run_topological_sweep, produce a corrected
@@ -2320,19 +2457,38 @@ async def repair_preprocessing_config(
     Args:
         error_message: The full error text from the failed sweep.
         config_yaml: The config_yaml that caused the error.
-        dataset_geometry: The raw JSON string from characterize_dataset.
+        dataset_geometry: Full legacy geometry JSON with column_profiles.
+        dataset_id: Preferred dataset handle. When provided, characterizes
+            the dataset automatically (dataset_geometry is ignored).
 
     Returns:
         Markdown with error classification, change log table, and patched config_yaml.
     """
     try:
-        geo = json.loads(dataset_geometry)
+        if dataset_id:
+            from pulsar.analysis.characterization import characterize_dataset as _char
+
+            session = _get_session(ctx)
+            dataset_path = _resolve_dataset_path(dataset_id)
+            df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
+            result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
+            geo = dataclasses.asdict(result)
+        elif dataset_geometry:
+            geo = json.loads(dataset_geometry)
+        else:
+            return mcp_error(
+                "repair_preprocessing_config",
+                "Provide either dataset_id or legacy dataset_geometry with column_profiles.",
+                error_code="MISSING_INPUT",
+                agent_action="Pass dataset_id when available.",
+            )
+
         if not geo.get("column_profiles"):
             return mcp_error(
                 "repair_preprocessing_config",
-                "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.",
+                "No column_profiles found in dataset_geometry.",
                 error_code="MISSING_COLUMN_PROFILES",
-                agent_action="Call characterize_dataset first, then pass its full JSON output.",
+                agent_action="Pass dataset_id instead of compact characterize_dataset output.",
             )
         profiles_by_name: dict[str, Any] = {}
         for cp in geo.get("column_profiles", []):
@@ -2420,7 +2576,7 @@ async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
                 "error": str(e),
                 "agent_action": (
                     "Call repair_preprocessing_config(error_message=..., "
-                    "config_yaml=..., dataset_geometry=...) to fix this automatically."
+                    "config_yaml=..., dataset_id=...) to fix this automatically."
                 ),
             },
             indent=2,
@@ -2578,7 +2734,7 @@ async def probe_columns(
     """
     Generate rich, detailed profiles for specific columns (Magnifying Glass).
     Use this when you need sample values or distributions for specific columns
-    after seeing the global sparse schema from characterize_dataset.
+    after seeing the compact preview from characterize_dataset.
 
     Args:
         dataset_id: Handle for the ingested dataset.

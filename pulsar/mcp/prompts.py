@@ -16,13 +16,13 @@ Reveal the dataset's topology; do not force convenient clusters.
 
 ## PHASE I: INGEST & CALIBRATE
 1. Ingest: Use `ingest_dataset(path)` handles. Prefer `dataset_id` everywhere.
-2. Characterize: `characterize_dataset(dataset_id)` returns a SPARSE schema —
-   dtype, n_unique, missingness — for ALL columns. Numeric stats and
-   top_values are intentionally omitted to keep payload small for wide
-   datasets. Use `probe_columns(dataset_id, ['col_name'])` for deep
-   per-column inspection (sample values, distributions). Call
-   `characterize_dataset` once per dataset; do not repeat it casually on wide
-   tables. Max 20 columns per probe call.
+2. Characterize: `characterize_dataset(dataset_id)` returns a compact,
+   summary-first map: raw numeric geometry, schema counts, and a capped preview
+   of interesting columns. Full per-column profiles are intentionally omitted
+   to keep wide datasets out of agent context. Use
+   `probe_columns(dataset_id, ['col_name'])` for deep per-column inspection
+   (sample values, distributions). Call `characterize_dataset` once per dataset;
+   do not repeat it casually on wide tables. Max 20 columns per probe call.
 3. Calibrate: `create_config(dataset_id)` is mandatory. It returns the
    baseline config, processed-space distance percentiles, and a
    `sweep_strategy` block. Treat this as a broad first pass, not a final
@@ -36,8 +36,9 @@ Reveal the dataset's topology; do not force convenient clusters.
      widen the grid before interpreting clusters.
    - GATE: Inspect the `advisories` list. `EMPTY_GRAPH` and `HIGH_SINGLETONS`
      require lowering the construction threshold or shifting the PCA grid
-     before proceeding. `DOMINANT_COMPONENT` is an interpretation hint, not a
-     rebuild trigger — use `interpretation_edge_weight_threshold` instead.
+     before proceeding. If `finalization_gate.status` is `blocked`, run the
+     suggested targeted resolution sweep or explicitly justify why the dominant
+     component is clinically expected.
    - GATE: If density > 0.8 or < 0.1, STOP. Refine config (Step 2).
    - GATE: component_count=1 is normal; do not force separation by
      narrowing epsilon.

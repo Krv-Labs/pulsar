@@ -123,12 +123,14 @@ def _graph_advisories(
         out.append(
             {
                 "code": "DOMINANT_COMPONENT",
-                "severity": "info",
+                "severity": "warning",
                 "message": f"One component covers {giant_fraction:.0%} of nodes.",
                 "agent_action": (
-                    "Call generate_cluster_dossier with "
-                    "interpretation_edge_weight_threshold > construction_threshold "
-                    "to split the giant component before rebuilding the graph."
+                    "Do not treat this as final unless a targeted resolution "
+                    "sweep has already shown the giant component is stable. "
+                    "Use generate_cluster_dossier only after either refining "
+                    "the PCA/epsilon grid or explicitly justifying that the "
+                    "dominant component is clinically expected."
                 ),
             }
         )
