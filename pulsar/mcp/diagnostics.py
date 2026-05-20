@@ -69,7 +69,11 @@ def _grid_adequacy(n_ball_maps: int) -> tuple[str, str]:
 
 
 def _graph_advisories(
-    *, n_edges: int, singleton_fraction: float, giant_fraction: float
+    *,
+    n_edges: int,
+    singleton_fraction: float,
+    giant_fraction: float,
+    density: float,
 ) -> list[dict]:
     """Advisory codes for degenerate graph regimes.
 
@@ -78,6 +82,19 @@ def _graph_advisories(
     agents can react with a single decision rule.
     """
     out: list[dict] = []
+    if density > 0.8 and n_edges > 0:
+        out.append(
+            {
+                "code": "HAIRBALL_DENSITY",
+                "severity": "warning",
+                "message": f"Graph density is {density:.0%} — most node pairs share an edge.",
+                "agent_action": (
+                    "Raise construction_threshold or shift the PCA grid upward "
+                    "(drop low dims) before clustering. A near-fully-connected "
+                    "graph cannot express topological structure."
+                ),
+            }
+        )
     if n_edges == 0:
         out.append(
             {
@@ -164,6 +181,7 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
         n_edges=n_edges,
         singleton_fraction=singleton_fraction,
         giant_fraction=giant_fraction,
+        density=density,
     )
 
     logger.info(

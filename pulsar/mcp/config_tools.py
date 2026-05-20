@@ -181,14 +181,48 @@ _VALID_OVERRIDE_KEYS = frozenset(
 )
 
 
+_DOTTED_PATH_ROOTS = frozenset(
+    {"run", "sweep", "cosmic_graph", "output", "preprocessing"}
+)
+
+
+def _set_dotted_path(raw: dict[str, Any], path: str, value: Any) -> Any:
+    """Walk dotted ``path`` into ``raw``, set the leaf, return the old value."""
+    parts = path.split(".")
+    cursor = raw
+    for part in parts[:-1]:
+        existing = cursor.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            cursor[part] = existing
+        cursor = existing
+    old = cursor.get(parts[-1])
+    cursor[parts[-1]] = value
+    return old
+
+
 def apply_overrides(
     config_yaml: str, overrides: dict[str, Any]
 ) -> ConfigOverrideResult:
-    unknown_keys = set(overrides.keys()) - _VALID_OVERRIDE_KEYS
+    dotted_overrides = {key: value for key, value in overrides.items() if "." in key}
+    flat_overrides = {key: value for key, value in overrides.items() if "." not in key}
+
+    unknown_dotted_roots = {
+        key.split(".", 1)[0]
+        for key in dotted_overrides
+        if key.split(".", 1)[0] not in _DOTTED_PATH_ROOTS
+    }
+    if unknown_dotted_roots:
+        raise ValueError(
+            f"Unknown dotted override root(s): {sorted(unknown_dotted_roots)}. "
+            f"Valid roots: {sorted(_DOTTED_PATH_ROOTS)}"
+        )
+    unknown_keys = set(flat_overrides.keys()) - _VALID_OVERRIDE_KEYS
     if unknown_keys:
         raise ValueError(
             f"Unknown override key(s): {sorted(unknown_keys)}. "
-            f"Valid keys: {sorted(_VALID_OVERRIDE_KEYS)}"
+            f"Valid keys: {sorted(_VALID_OVERRIDE_KEYS)}, or use dotted "
+            f"YAML paths under {sorted(_DOTTED_PATH_ROOTS)}."
         )
 
     raw = parse_yaml_mapping(config_yaml)
@@ -198,6 +232,12 @@ def apply_overrides(
     def _track(path: str, old: Any, new: Any) -> None:
         applied.append(path)
         diff.append({"path": path, "old": old, "new": new})
+
+    for path, value in dotted_overrides.items():
+        old = _set_dotted_path(raw, path, value)
+        _track(path, old, value)
+
+    overrides = flat_overrides
 
     if "run_name" in overrides:
         old = raw.get("run", {}).get("name")

@@ -2082,6 +2082,19 @@ async def get_threshold_stability_curve(ctx: Context) -> str:
         adj = session.model.weighted_adjacency
         stability = await asyncio.to_thread(find_stable_thresholds, adj)
 
+        thresholds = [float(t) for t in stability.thresholds]
+
+        def _singleton_counts() -> list[int]:
+            # adj is symmetric; a singleton at threshold t has no row-wise
+            # neighbor above t. Vectorized: (n_thresholds, n) → bool.
+            row_max = adj.max(axis=1)
+            ts = np.asarray(thresholds, dtype=adj.dtype)
+            # singleton iff row_max <= t for that threshold
+            mask = row_max[None, :] <= ts[:, None]
+            return [int(c) for c in mask.sum(axis=1)]
+
+        singleton_counts = await asyncio.to_thread(_singleton_counts)
+
         plateaus = [
             {
                 "start": float(p.start_threshold),
@@ -2098,8 +2111,9 @@ async def get_threshold_stability_curve(ctx: Context) -> str:
                 "status": "ok",
                 "optimal_threshold": float(stability.optimal_threshold),
                 "plateaus": plateaus,
-                "thresholds": [float(t) for t in stability.thresholds],
+                "thresholds": thresholds,
                 "component_counts": [int(c) for c in stability.component_counts],
+                "singleton_counts": singleton_counts,
             },
             indent=2,
         )

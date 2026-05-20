@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from pulsar.mcp import server
 
@@ -549,6 +550,51 @@ def test_refine_config_rejects_unknown_keys(tmp_path):
     assert result["error_code"] == "UNKNOWN_OVERRIDE_KEY"
     assert "another_bad" in result["reason"]
     assert "bogus_key" in result["reason"]
+
+
+def test_refine_config_accepts_dotted_paths(tmp_path):
+    """refine_config should accept dotted YAML paths alongside flat shortcuts."""
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(server.create_config(dataset["dataset_id"]))
+    )
+
+    result = json.loads(
+        asyncio.run(
+            server.refine_config(
+                config_yaml,
+                {
+                    "sweep.pca.dimensions.values": [3, 5, 7],
+                    "output.n_reps": 4,
+                },
+            )
+        )
+    )
+
+    assert result["status"] == "ok"
+    diff_paths = {d["path"] for d in result["diff"]}
+    assert "sweep.pca.dimensions.values" in diff_paths
+    assert "output.n_reps" in diff_paths
+    refined_cfg = yaml.safe_load(result["config_yaml"])
+    assert refined_cfg["sweep"]["pca"]["dimensions"]["values"] == [3, 5, 7]
+    assert refined_cfg["output"]["n_reps"] == 4
+
+
+def test_refine_config_rejects_unknown_dotted_root(tmp_path):
+    """Dotted paths under unknown roots should error."""
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(server.create_config(dataset["dataset_id"]))
+    )
+
+    result = json.loads(
+        asyncio.run(server.refine_config(config_yaml, {"nonsense.path.here": True}))
+    )
+
+    assert result["status"] == "error"
+    assert "nonsense" in result["reason"]
 
 
 def test_refine_config_returns_diff(tmp_path):

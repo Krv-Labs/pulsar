@@ -330,7 +330,7 @@ def test_resolve_clusters_spectral_disconnected_raises(
 def test_graph_advisories_empty():
     """n_edges == 0 yields an EMPTY_GRAPH error advisory."""
     advisories = _graph_advisories(
-        n_edges=0, singleton_fraction=0.0, giant_fraction=0.0
+        n_edges=0, singleton_fraction=0.0, giant_fraction=0.0, density=0.0
     )
     codes = {a["code"] for a in advisories}
     assert "EMPTY_GRAPH" in codes
@@ -343,7 +343,7 @@ def test_graph_advisories_empty():
 def test_graph_advisories_high_singletons():
     """singleton_fraction > 0.8 yields a HIGH_SINGLETONS warning."""
     advisories = _graph_advisories(
-        n_edges=10, singleton_fraction=0.9, giant_fraction=0.1
+        n_edges=10, singleton_fraction=0.9, giant_fraction=0.1, density=0.05
     )
     codes = {a["code"] for a in advisories}
     assert "HIGH_SINGLETONS" in codes
@@ -355,7 +355,7 @@ def test_graph_advisories_high_singletons():
 def test_graph_advisories_dominant_component():
     """giant_fraction > 0.95 yields a DOMINANT_COMPONENT info advisory."""
     advisories = _graph_advisories(
-        n_edges=100, singleton_fraction=0.0, giant_fraction=0.99
+        n_edges=100, singleton_fraction=0.0, giant_fraction=0.99, density=0.5
     )
     codes = {a["code"] for a in advisories}
     assert "DOMINANT_COMPONENT" in codes
@@ -364,9 +364,21 @@ def test_graph_advisories_dominant_component():
     assert dom["agent_action"]
 
 
+def test_graph_advisories_hairball_density():
+    """density > 0.8 with edges yields a HAIRBALL_DENSITY warning."""
+    advisories = _graph_advisories(
+        n_edges=500, singleton_fraction=0.0, giant_fraction=1.0, density=0.95
+    )
+    codes = {a["code"] for a in advisories}
+    assert "HAIRBALL_DENSITY" in codes
+    hair = next(a for a in advisories if a["code"] == "HAIRBALL_DENSITY")
+    assert hair["severity"] == "warning"
+    assert hair["agent_action"]
+
+
 def test_graph_advisories_clean():
     """A well-formed graph yields no advisories."""
     advisories = _graph_advisories(
-        n_edges=50, singleton_fraction=0.1, giant_fraction=0.5
+        n_edges=50, singleton_fraction=0.1, giant_fraction=0.5, density=0.3
     )
     assert advisories == []
