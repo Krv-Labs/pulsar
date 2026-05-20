@@ -77,7 +77,7 @@ class ClusterResult:
     n_clusters: int
     silhouette_score: float | None
     failure_reason: str | None
-    edge_weight_threshold_applied: float = 0.0
+    interpretation_edge_weight_threshold_applied: float = 0.0
     stability_plateaus: list[dict] | None = None
 
 
@@ -97,15 +97,19 @@ def resolve_clusters(
     model: ThemaRS,
     method: str = "auto",
     max_k: int = 15,
-    edge_weight_threshold: float = 0.0,
+    interpretation_edge_weight_threshold: float = 0.0,
 ) -> ClusterResult:
     """Entry point for clustering. Supports auto-thresholding and spectral fallback."""
     W = model.weighted_adjacency
     n = W.shape[0]
 
     # 1. Component Strategy
-    if method == "components" or edge_weight_threshold > 0:
-        thresh = edge_weight_threshold if edge_weight_threshold > 0 else 0.0
+    if method == "components" or interpretation_edge_weight_threshold > 0:
+        thresh = (
+            interpretation_edge_weight_threshold
+            if interpretation_edge_weight_threshold > 0
+            else 0.0
+        )
         adj = (W > thresh).astype(np.int64)
         G = nx.from_numpy_array(adj)
         labels = np.zeros(n, dtype=int)
@@ -119,7 +123,7 @@ def resolve_clusters(
             n_clusters=len(comps),
             silhouette_score=None,
             failure_reason=None,
-            edge_weight_threshold_applied=thresh,
+            interpretation_edge_weight_threshold_applied=thresh,
         )
 
     # 2. Threshold Stability (PH-based)
@@ -136,7 +140,7 @@ def resolve_clusters(
                 model,
                 method="components",
                 max_k=max_k,
-                edge_weight_threshold=edge_weight_threshold,
+                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
             )
     if method in ("auto", "spectral"):
         return _cluster_spectral(W, n, max_k)
@@ -183,7 +187,7 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
             n_clusters=len(comps),
             silhouette_score=None,
             failure_reason=None,
-            edge_weight_threshold_applied=thresh,
+            interpretation_edge_weight_threshold_applied=thresh,
             stability_plateaus=plateau_dicts,
         )
     return None
@@ -589,6 +593,69 @@ def _detail_categorical_rows(
     rows: list[dict[str, Any]], detail: str
 ) -> list[dict[str, Any]]:
     return _tier_filter(rows, detail, _compact_categorical_row)
+
+
+def _feature_signal_sort_key(row: dict[str, Any], kind: str) -> tuple[Any, ...]:
+    aggregate = abs(float(row.get("aggregate_score", 0.0)))
+    if kind == "numeric":
+        secondary = (
+            abs(float(row.get("effect_mean_std", 0.0))),
+            abs(float(row.get("z_score", 0.0))),
+            abs(float(row.get("neighbor_effect", 0.0))),
+        )
+    else:
+        secondary = (
+            abs(float(row.get("log_lift", 0.0))),
+            abs(float(row.get("neighbor_specificity", 0.0))),
+            abs(float(row.get("lift", 1.0)) - 1.0),
+        )
+    return (
+        -aggregate,
+        *(-value for value in secondary),
+        str(row.get("column", "")),
+        str(row.get("value", "")),
+    )
+
+
+def _limit_cluster_feature_rows(
+    numeric_rows: list[dict[str, Any]],
+    categorical_rows: list[dict[str, Any]],
+    max_features: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    ranked = [
+        ("numeric", row)
+        for row in sorted(
+            numeric_rows, key=lambda row: _feature_signal_sort_key(row, "numeric")
+        )
+    ]
+    ranked.extend(
+        ("categorical", row)
+        for row in sorted(
+            categorical_rows,
+            key=lambda row: _feature_signal_sort_key(row, "categorical"),
+        )
+    )
+    ranked.sort(key=lambda item: _feature_signal_sort_key(item[1], item[0]))
+    selected = ranked[:max_features]
+
+    limited_numeric = [row for kind, row in selected if kind == "numeric"]
+    limited_categorical = [row for kind, row in selected if kind == "categorical"]
+    omitted_numeric = max(len(numeric_rows) - len(limited_numeric), 0)
+    omitted_categorical = max(len(categorical_rows) - len(limited_categorical), 0)
+    limit_metadata = {
+        "feature_limit": int(max_features),
+        "features_returned": {
+            "numeric": len(limited_numeric),
+            "categorical": len(limited_categorical),
+            "total": len(selected),
+        },
+        "features_omitted": {
+            "numeric": omitted_numeric,
+            "categorical": omitted_categorical,
+            "total": omitted_numeric + omitted_categorical,
+        },
+    }
+    return limited_numeric, limited_categorical, limit_metadata
 
 
 def _categorical_ranking_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -1343,18 +1410,29 @@ def cluster_profile_payload(
     cluster_id: int,
     *,
     detail: str = "standard",
+    max_features: int = 16,
 ) -> dict[str, Any]:
     bundle = evidence_index.cluster_bundles.get(int(cluster_id))
     if bundle is None:
         raise KeyError(cluster_id)
+    numeric_features = _detail_numeric_rows(bundle["numeric"], detail)
+    categorical_features = _detail_categorical_rows(bundle["categorical"], detail)
+    numeric_features, categorical_features, limit_metadata = (
+        _limit_cluster_feature_rows(
+            numeric_features,
+            categorical_features,
+            max_features,
+        )
+    )
     return {
         "cluster_id": int(cluster_id),
         "size": int(bundle["size"]),
         "size_pct": float(bundle["size_pct"]),
         "semantic_name": str(bundle["semantic_name"]),
         "topological_neighbors": list(bundle["topological_neighbors"]),
-        "numeric_features": _detail_numeric_rows(bundle["numeric"], detail),
-        "categorical_features": _detail_categorical_rows(bundle["categorical"], detail),
+        "numeric_features": numeric_features,
+        "categorical_features": categorical_features,
+        **limit_metadata,
         "tier_counts": {
             "numeric": {
                 tier: sum(1 for row in bundle["numeric"] if row["signal_tier"] == tier)

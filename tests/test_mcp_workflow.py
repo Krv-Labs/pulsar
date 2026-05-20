@@ -178,11 +178,29 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
     run_b = result_b["run_id"]
 
     skeleton = json.loads(asyncio.run(server.get_topological_skeleton(run_a)))
+    skeleton_edges = json.loads(
+        asyncio.run(server.get_topological_skeleton(run_a, detail="edges", max_edges=5))
+    )
+    skeleton_full = json.loads(
+        asyncio.run(server.get_topological_skeleton(run_a, detail="full"))
+    )
     comparison = asyncio.run(server.compare_sweeps(run_a, run_b))
 
     assert skeleton["run_id"] == run_a
     assert skeleton["dataset_id"] == dataset["dataset_id"]
     assert skeleton["graph"]["node_count"] > 0
+    assert skeleton["graph"]["detail"] == "summary"
+    assert "nodes" not in skeleton["graph"]
+    assert "edges" not in skeleton["graph"]
+    assert skeleton["graph"]["nodes_returned"] == 0
+    assert skeleton["graph"]["edges_returned"] == 0
+    assert skeleton["config_yaml_omitted"] is True
+    assert len(skeleton_edges["graph"]["edges"]) <= 5
+    assert skeleton_edges["graph"]["edges_returned"] <= 5
+    assert "nodes" not in skeleton_edges["graph"]
+    assert "config_yaml" in skeleton_full
+    assert "nodes" in skeleton_full["graph"]
+    assert "edges" in skeleton_full["graph"]
     assert "Sweep Comparison" in comparison
     assert run_a in comparison
     assert run_b in comparison
@@ -343,6 +361,7 @@ def test_chunked_upload_handles_bom_and_windows_newlines():
 
     assert result["n_samples"] == 2
     assert result["n_features"] == 2
+    assert result["recommended_next_tool"] == "probe_columns"
 
 
 def test_unknown_handles_return_stable_codes():
@@ -379,6 +398,8 @@ def test_get_workflow_guide_returns_phase_prompt():
     assert "PHASE II" in guide
     assert "PHASE III" in guide
     assert "ingest_dataset" in guide
+    assert 'generate_cluster_dossier(detail="summary")' in guide
+    assert 'get_topological_skeleton(detail="full")' in guide
 
 
 def test_run_topological_sweep_missing_config_path_returns_structured_error():
@@ -466,6 +487,26 @@ def test_create_config_generates_wide_grid(tmp_path):
     assert len(pca_seeds) >= 2
     # Should have enough epsilon steps
     assert eps["steps"] >= 20
+
+
+def test_create_config_high_dimensional_baseline_uses_broad_tail_grid(tmp_path):
+    """High-dimensional processed data should start broad before agents refine."""
+    import yaml
+
+    csv_path = _write_dataset(tmp_path, rows=80, cols=24)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    response = json.loads(asyncio.run(server.create_config(dataset["dataset_id"])))
+    cfg = yaml.safe_load(response["config_yaml"])
+
+    pca_dims = cfg["sweep"]["pca"]["dimensions"]["values"]
+    pca_seeds = cfg["sweep"]["pca"]["seed"]["values"]
+    eps_steps = cfg["sweep"]["ball_mapper"]["epsilon"]["range"]["steps"]
+
+    assert pca_dims == [2, 5, 10, 15, 20]
+    assert pca_seeds == [42, 7, 13]
+    assert eps_steps == 24
+    assert response["sweep_strategy"]["estimated_ball_maps"] == 360
+    assert "compare_sweeps" in response["sweep_strategy"]["agent_guidance"]
 
 
 def test_create_config_numeric_only_still_works(tmp_path):
@@ -608,6 +649,84 @@ def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
     assert result["status"] == "ok"
     assert result["dataset_id"] == dataset["dataset_id"]
     assert result["config_yaml_normalized"] == refined["config_yaml"]
+
+
+def test_dossier_inherits_construction_threshold(tmp_path):
+    """generate_cluster_dossier inherits construction_threshold when arg omitted."""
+    server._sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(server.create_config(dataset["dataset_id"], "dossier_inherit"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            server.refine_config(
+                config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+            )
+        )
+    )["config_yaml"]
+    asyncio.run(
+        server.run_topological_sweep(
+            config_yaml=refined, dataset_id=dataset["dataset_id"]
+        )
+    )
+
+    inherited = json.loads(asyncio.run(server.generate_cluster_dossier()))
+    assert "construction_threshold" in inherited
+    assert "interpretation_edge_weight_threshold" in inherited
+    assert inherited["threshold_inherited"] is True
+    assert (
+        inherited["interpretation_edge_weight_threshold"]
+        == inherited["construction_threshold"]
+    )
+
+    explicit = json.loads(
+        asyncio.run(
+            server.generate_cluster_dossier(interpretation_edge_weight_threshold=0.5)
+        )
+    )
+    assert explicit["threshold_inherited"] is False
+    assert explicit["interpretation_edge_weight_threshold"] == 0.5
+
+
+def test_sweep_response_contains_stability_summary(tmp_path):
+    """run_topological_sweep with auto threshold emits threshold_stability_summary."""
+    server._sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    # create_config defaults construction_threshold to "auto"
+    config_yaml = _extract_config_yaml(
+        asyncio.run(server.create_config(dataset["dataset_id"], "auto_threshold"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            server.refine_config(
+                config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+            )
+        )
+    )["config_yaml"]
+
+    result = json.loads(
+        asyncio.run(
+            server.run_topological_sweep(
+                config_yaml=refined, dataset_id=dataset["dataset_id"]
+            )
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert "construction_threshold" in result
+    assert isinstance(result["construction_threshold"], float)
+    assert "threshold_stability_summary" in result
+    summary = result["threshold_stability_summary"]
+    assert "selected_threshold" in summary
+    assert "top_plateaus" in summary
+    assert isinstance(summary["top_plateaus"], list)
+    if summary["top_plateaus"]:
+        first = summary["top_plateaus"][0]
+        for key in ("start", "end", "midpoint", "length", "component_count"):
+            assert key in first
 
 
 def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):

@@ -22,7 +22,7 @@ def _make_disconnected_model(size_per_cluster: int = 3) -> SimpleNamespace:
     return SimpleNamespace(
         cosmic_graph=graph,
         weighted_adjacency=weighted,
-        resolved_threshold=0.0,
+        resolved_construction_threshold=0.0,
     )
 
 
@@ -59,6 +59,23 @@ def _make_small_server_dataset() -> pd.DataFrame:
             "segment": ["alpha", "alpha", "alpha", "beta", "beta", "beta"],
         }
     )
+
+
+def _make_wide_server_dataset() -> pd.DataFrame:
+    rng = np.random.default_rng(7)
+    cluster_a = 32
+    cluster_b = 32
+    columns = {
+        f"signal_{idx:02d}": np.concatenate(
+            [
+                rng.normal(3.0 + (idx * 0.03), 0.25, cluster_a),
+                rng.normal(0.0, 0.25, cluster_b),
+            ]
+        )
+        for idx in range(36)
+    }
+    columns["segment"] = (["alpha"] * cluster_a) + (["beta"] * cluster_b)
+    return pd.DataFrame(columns)
 
 
 def test_build_feature_evidence_index_preserves_multifactor_signal():
@@ -112,11 +129,52 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert "markdown_summary" not in summary
     assert len(summary_text) < len(full_text)
     assert full["detail"] == "full"
+    assert summary["recommended_next_tools"][0] == "get_cluster_profile"
+    assert "summary is the default" in summary["payload_guidance"]
     assert cluster_profile["cluster"]["cluster_id"] == 0
+    assert cluster_profile["max_features"] == 16
+    assert cluster_profile["cluster"]["feature_limit"] == 16
     assert cluster_profile["cluster"]["numeric_features"]
     assert feature_payload["signals"]["feature_names"] == ["f1", "segment=alpha"]
     assert feature_payload["signals"]["clusters"]
     assert matrix_payload["signal_matrix"]["numeric_rows"]
+
+
+def test_get_cluster_profile_caps_wide_dataset_feature_output():
+    server._sessions.clear()
+    session = server._get_session(None)
+    data = _make_wide_server_dataset()
+    session.model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    session.data = data
+    session.latest_run_id = "run_wide_synthetic"
+
+    asyncio.run(server.generate_cluster_dossier(method="auto", detail="summary"))
+    default_capped = json.loads(asyncio.run(server.get_cluster_profile(0)))
+    capped = json.loads(asyncio.run(server.get_cluster_profile(0, max_features=7)))
+    uncapped = json.loads(asyncio.run(server.get_cluster_profile(0, max_features=200)))
+
+    cluster = capped["cluster"]
+    returned = cluster["numeric_features"] + cluster["categorical_features"]
+    all_rows = (
+        uncapped["cluster"]["numeric_features"]
+        + uncapped["cluster"]["categorical_features"]
+    )
+    returned_keys = {(row.get("column"), row.get("value")) for row in returned}
+    expected_keys = {
+        (row.get("column"), row.get("value"))
+        for row in sorted(
+            all_rows,
+            key=lambda row: -abs(float(row.get("aggregate_score", 0.0))),
+        )[:7]
+    }
+
+    assert capped["max_features"] == 7
+    assert default_capped["max_features"] == 16
+    assert default_capped["cluster"]["features_returned"]["total"] <= 16
+    assert cluster["feature_limit"] == 7
+    assert cluster["features_returned"]["total"] == 7
+    assert cluster["features_omitted"]["total"] > 0
+    assert returned_keys == expected_keys
 
 
 def test_evidence_index_surfaces_stats_failures_metadata():
