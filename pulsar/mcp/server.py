@@ -574,9 +574,16 @@ def _cluster_result_payload(result: Any) -> dict[str, Any]:
     }
 
 
-def _cluster_payload_from_dossier(dossier: Any) -> list[dict[str, Any]]:
-    return [
-        {
+def _tier_counts(tiers: dict[str, list]) -> dict[str, int]:
+    return {tier: len(rows) for tier, rows in (tiers or {}).items()}
+
+
+def _cluster_payload_from_dossier(
+    dossier: Any, *, detail: str = "standard"
+) -> list[dict[str, Any]]:
+    payloads = []
+    for profile in dossier.clusters:
+        entry: dict[str, Any] = {
             "cluster_id": profile.cluster_id,
             "size": profile.size,
             "size_pct": profile.size_pct,
@@ -584,12 +591,16 @@ def _cluster_payload_from_dossier(dossier: Any) -> list[dict[str, Any]]:
             "topological_neighbors": profile.topological_neighbors,
             "numeric_features": profile.numeric_features,
             "categorical_features": profile.categorical_features,
-            "numeric_tiers": profile.numeric_tiers,
-            "categorical_tiers": profile.categorical_tiers,
-            "central_rows": profile.central_rows,
         }
-        for profile in dossier.clusters
-    ]
+        if detail == "summary":
+            entry["numeric_tier_counts"] = _tier_counts(profile.numeric_tiers)
+            entry["categorical_tier_counts"] = _tier_counts(profile.categorical_tiers)
+        else:
+            entry["numeric_tiers"] = profile.numeric_tiers
+            entry["categorical_tiers"] = profile.categorical_tiers
+            entry["central_rows"] = profile.central_rows
+        payloads.append(entry)
+    return payloads
 
 
 def _resolve_response_format(
@@ -624,22 +635,43 @@ def _resolve_response_format(
 def _build_evidence_payload(
     dossier: Any,
     cluster_meta: dict[str, Any],
+    *,
+    detail: str = "standard",
+    max_clusters: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    clusters = _cluster_payload_from_dossier(dossier, detail=detail)
+    clusters.sort(key=lambda c: c["size"], reverse=True)
+    clusters_omitted = 0
+    if max_clusters is not None and len(clusters) > max_clusters:
+        clusters_omitted = len(clusters) - max_clusters
+        clusters = clusters[:max_clusters]
+    payload: dict[str, Any] = {
         "status": "ok",
         "cluster_result": cluster_meta,
         "detail": dossier.global_stats.get("detail", "standard"),
         "evidence_metadata": dossier.global_stats.get("evidence_metadata", {}),
         "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
-        "signal_matrix": dossier.global_stats.get("signal_matrix", {}),
         "numeric_global_ranking": dossier.global_stats.get(
             "numeric_global_ranking", []
         ),
         "categorical_global_ranking": dossier.global_stats.get(
             "categorical_global_ranking", []
         ),
-        "clusters": _cluster_payload_from_dossier(dossier),
+        "clusters_returned": len(clusters),
+        "clusters_omitted": clusters_omitted,
+        "clusters": clusters,
     }
+    if detail == "summary":
+        signal_matrix = dossier.global_stats.get("signal_matrix", {})
+        payload["signal_matrix_summary"] = {
+            "n_numeric_columns": len(signal_matrix.get("numeric_columns", [])),
+            "n_categorical_values": len(signal_matrix.get("categorical_values", [])),
+            "n_numeric_rows": len(signal_matrix.get("numeric_rows", [])),
+            "n_categorical_rows": len(signal_matrix.get("categorical_rows", [])),
+        }
+    else:
+        payload["signal_matrix"] = dossier.global_stats.get("signal_matrix", {})
+    return payload
 
 
 def _get_or_build_evidence_index(
@@ -1574,6 +1606,7 @@ async def generate_cluster_dossier(
     max_k: int = 15,
     interpretation_edge_weight_threshold: float | None = None,
     detail: str = "summary",
+    max_clusters: int = 8,
     response_format: str = "json",
     format: str = "",
     exclude_columns: list[str] | None = None,
@@ -1592,9 +1625,14 @@ async def generate_cluster_dossier(
             When omitted (default), inherits ``model.resolved_construction_threshold``
             so clustering operates on the same surface as the persisted cosmic
             graph.  Pass an explicit value (including ``0.0``) to override.
-        detail: Payload richness. Use "summary" for routine agent loops.
-            "standard" is a second-pass interpretation payload, and "full" is
-            intended for audit/debug/export-grade inspection.
+        detail: Payload richness. Use "summary" for routine agent loops —
+            drops per-cluster tier dumps and central_rows, replaces the
+            top-level signal_matrix with counts only, and projects each row
+            to ~16 fields. "standard" returns full tier rows and central
+            rows for the kept clusters. "full" returns every metric.
+        max_clusters: Cap on the number of clusters returned (top by size).
+            Use a larger value to inspect tail clusters; the response
+            reports ``clusters_omitted`` so you can see what was dropped.
         response_format: "json" for structured payloads or "markdown" for
             narrative output only.
         format: Legacy alias. "full" maps to detail="full"; "json" and
@@ -1612,6 +1650,8 @@ async def generate_cluster_dossier(
         raise ToolError(
             f"method must be 'auto', 'spectral', or 'components', got '{method}'"
         )
+    if max_clusters < 1:
+        raise ToolError(f"max_clusters must be >= 1, got '{max_clusters}'")
 
     try:
         detail, response_format = _resolve_response_format(
@@ -1675,7 +1715,12 @@ async def generate_cluster_dossier(
         if response_format == "markdown":
             return dossier_to_markdown(dossier)
 
-        payload = _build_evidence_payload(dossier, cluster_meta)
+        payload = _build_evidence_payload(
+            dossier,
+            cluster_meta,
+            detail=detail,
+            max_clusters=max_clusters,
+        )
         payload["construction_threshold"] = construction_threshold
         payload["interpretation_edge_weight_threshold"] = (
             resolved_interpretation_threshold

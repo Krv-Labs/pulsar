@@ -129,6 +129,22 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert "markdown_summary" not in summary
     assert len(summary_text) < len(full_text)
     assert full["detail"] == "full"
+    # Summary mode must NOT carry the full tier dumps or signal_matrix
+    assert "signal_matrix" not in summary, (
+        "summary should expose only signal_matrix_summary"
+    )
+    assert "signal_matrix_summary" in summary
+    assert "clusters_returned" in summary
+    for cluster in summary["clusters"]:
+        assert "numeric_tiers" not in cluster
+        assert "categorical_tiers" not in cluster
+        assert "central_rows" not in cluster
+        assert "numeric_tier_counts" in cluster
+    # Full mode still ships everything
+    assert "signal_matrix" in full
+    full_cluster = full["clusters"][0]
+    assert "numeric_tiers" in full_cluster
+    assert "central_rows" in full_cluster
     assert summary["recommended_next_tools"][0] == "get_cluster_profile"
     assert "summary is the default" in summary["payload_guidance"]
     assert cluster_profile["cluster"]["cluster_id"] == 0
