@@ -181,7 +181,7 @@ class TimedThemaRS(ThemaRS):
         self.timings["cosmic_graph_init"] = time.perf_counter() - t0
 
         # ── 8. Threshold stability analysis (if auto) ────────────────────────
-        threshold = cfg.cosmic_graph.threshold
+        threshold = cfg.cosmic_graph.construction_threshold
         if threshold == "auto":
             t0 = time.perf_counter()
             self._stability_result = find_stable_thresholds(self._weighted_adjacency)
@@ -189,12 +189,12 @@ class TimedThemaRS(ThemaRS):
             self.timings["stability_analysis"] = time.perf_counter() - t0
         else:
             self._stability_result = None
-        self._resolved_threshold = float(threshold)
+        self._resolved_construction_threshold = float(threshold)
 
         # ── 9. CosmicGraph (final, with resolved threshold) ───────────────────
         t0 = time.perf_counter()
         self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-            galactic_L, self._resolved_threshold
+            galactic_L, self._resolved_construction_threshold
         )
         self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
         self.timings["cosmic_graph_final"] = time.perf_counter() - t0
@@ -278,7 +278,7 @@ def main() -> None:
                 f"{best_plateau.end_threshold:.3f} ({best_plateau.component_count} components)"
             )
     else:
-        print(f"[threshold] using manual threshold: {model._resolved_threshold:.4f}")
+        print(f"[threshold] using manual threshold: {model._resolved_construction_threshold:.4f}")
 
     print(
         f"[run]    cosmic graph: {model.cosmic_graph.number_of_nodes()} nodes,"

@@ -368,7 +368,7 @@ class TestFromSnapshots:
                         "epsilon": {"values": [0.8]},
                     },
                 },
-                "cosmic_graph": {"threshold": 0.0},
+                "cosmic_graph": {"construction_threshold": 0.0},
                 "output": {"n_reps": 1},
             }
         )

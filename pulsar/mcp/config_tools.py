@@ -17,7 +17,7 @@ _ALLOWED_SWEEP = {"pca", "ball_mapper"}
 _ALLOWED_PCA = {"dimensions", "seed"}
 _ALLOWED_BALL_MAPPER = {"epsilon"}
 _ALLOWED_OUTPUT = {"n_reps"}
-_ALLOWED_COSMIC_GRAPH = {"threshold", "neighborhood"}
+_ALLOWED_COSMIC_GRAPH = {"construction_threshold", "neighborhood"}
 _SUPPORTED_IMPUTE_METHODS = {
     "sample_normal",
     "sample_categorical",
@@ -171,7 +171,7 @@ _VALID_OVERRIDE_KEYS = frozenset(
         "pca_seeds",
         "epsilon_values",
         "epsilon_range",
-        "threshold",
+        "construction_threshold",
         "n_reps",
         "drop_columns",
         "impute",
@@ -233,10 +233,16 @@ def apply_overrides(
             "range": dict(overrides["epsilon_range"])
         }
         _track("sweep.ball_mapper.epsilon.range", old, dict(overrides["epsilon_range"]))
-    if "threshold" in overrides:
-        old = raw.get("cosmic_graph", {}).get("threshold")
-        raw.setdefault("cosmic_graph", {})["threshold"] = overrides["threshold"]
-        _track("cosmic_graph.threshold", old, overrides["threshold"])
+    if "construction_threshold" in overrides:
+        old = raw.get("cosmic_graph", {}).get("construction_threshold")
+        raw.setdefault("cosmic_graph", {})["construction_threshold"] = overrides[
+            "construction_threshold"
+        ]
+        _track(
+            "cosmic_graph.construction_threshold",
+            old,
+            overrides["construction_threshold"],
+        )
     if "n_reps" in overrides:
         old = raw.get("output", {}).get("n_reps")
         raw.setdefault("output", {})["n_reps"] = overrides["n_reps"]

@@ -73,7 +73,7 @@ class BallMapperSpec:
 
 @dataclass
 class CosmicGraphSpec:
-    threshold: float | Literal["auto"] = "auto"
+    construction_threshold: float | Literal["auto"] = "auto"
     neighborhood: str = "node"
 
 
@@ -144,12 +144,12 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
 
     # cosmic_graph section
     cg_raw = raw.get("cosmic_graph", {})
-    threshold_raw = cg_raw.get("threshold", "auto")
-    threshold: float | Literal["auto"] = (
+    threshold_raw = cg_raw.get("construction_threshold", "auto")
+    construction_threshold: float | Literal["auto"] = (
         "auto" if threshold_raw == "auto" else float(threshold_raw)
     )
     cosmic_graph = CosmicGraphSpec(
-        threshold=threshold,
+        construction_threshold=construction_threshold,
         neighborhood=str(cg_raw.get("neighborhood", "node")),
     )
 
@@ -194,9 +194,13 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
                 parts += f", max_categories: {spec.max_categories}"
             encode_block += f"\n    {col}: {{{parts}}}"
 
-    # Threshold
-    threshold = cfg.cosmic_graph.threshold
-    threshold_str = f'"{threshold}"' if threshold == "auto" else str(threshold)
+    # Construction threshold
+    construction_threshold = cfg.cosmic_graph.construction_threshold
+    threshold_str = (
+        f'"{construction_threshold}"'
+        if construction_threshold == "auto"
+        else str(construction_threshold)
+    )
 
     return f"""run:
   name: {cfg.run_name or "experiment"}
@@ -216,7 +220,7 @@ sweep:
         max: {max(cfg.ball_mapper.epsilons):.4f}
         steps: {len(cfg.ball_mapper.epsilons)}
 cosmic_graph:
-  threshold: {threshold_str}
+  construction_threshold: {threshold_str}
 output:
   n_reps: {cfg.n_reps}
 """

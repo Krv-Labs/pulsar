@@ -221,7 +221,7 @@ The dataset is not bundled with Pulsar. Export it to CSV with either of these on
        epsilon:
          range: {min: 0.80, max: 1.50, steps: 15}
    cosmic_graph:
-     threshold: auto
+     construction_threshold: auto
 
 The resulting graph shattered into components along **island** and **sex** boundaries, not just species—revealing that habitat and morphological sex are geometrically dominant. Chinstraps on Dream Island were structurally indistinguishable from Adelies on the same island: the math reflected the biology.
 

@@ -48,7 +48,7 @@ class RunRecord:
     dataset_id: str | None
     config_yaml: str
     metrics: dict
-    resolved_threshold: float
+    resolved_construction_threshold: float
     graph_summary: dict
     created_at: float
 
@@ -168,7 +168,7 @@ class MCPRegistry:
         dataset_id: str | None,
         config_yaml: str,
         metrics: dict,
-        resolved_threshold: float,
+        resolved_construction_threshold: float,
         graph_summary: dict,
     ) -> RunRecord:
         record = RunRecord(
@@ -176,7 +176,7 @@ class MCPRegistry:
             dataset_id=dataset_id,
             config_yaml=config_yaml,
             metrics=metrics,
-            resolved_threshold=resolved_threshold,
+            resolved_construction_threshold=resolved_construction_threshold,
             graph_summary=graph_summary,
             created_at=time.time(),
         )
