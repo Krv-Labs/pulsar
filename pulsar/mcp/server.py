@@ -1784,9 +1784,32 @@ async def get_cluster_profile(
 async def get_feature_signal(
     feature_names: list[str],
     cluster_ids: list[int] | None = None,
+    detail: str = "summary",
+    max_clusters: int = 8,
     ctx: Context = None,
 ) -> str:
-    """Return cross-cluster evidence for specific feature columns."""
+    """Return cross-cluster evidence for specific feature columns.
+
+    Args:
+        feature_names: Numeric columns or ``column=value`` pairs for categoricals.
+        cluster_ids: Restrict to specific clusters. When omitted, the response is
+            capped by ``max_clusters`` (top by aggregate signal); pass an explicit
+            list to override.
+        detail: ``summary`` projects ~16 fields per row (default), ``standard``
+            adds context-tier rows in compact form, ``full`` returns every metric.
+        max_clusters: Cap on the number of clusters returned when ``cluster_ids``
+            is omitted. Ignored when ``cluster_ids`` is provided.
+    """
+    if detail not in {"summary", "standard", "full"}:
+        return mcp_error(
+            "get_feature_signal",
+            f"detail must be 'summary', 'standard', or 'full', got '{detail}'",
+        )
+    if max_clusters < 1:
+        return mcp_error(
+            "get_feature_signal",
+            f"max_clusters must be >= 1, got '{max_clusters}'",
+        )
     try:
         session = _get_session(ctx)
         evidence_index, cluster_meta = _require_cluster_state(session)
@@ -1797,6 +1820,8 @@ async def get_feature_signal(
                 evidence_index,
                 feature_names,
                 cluster_ids=cluster_ids,
+                detail=detail,
+                max_clusters=max_clusters,
             ),
         }
         return json.dumps(payload, indent=2)
@@ -1808,9 +1833,20 @@ async def get_feature_signal(
 async def get_cluster_signal_matrix(
     cluster_ids: list[int] | None = None,
     include_context: bool = False,
+    max_clusters: int = 8,
     ctx: Context = None,
 ) -> str:
-    """Return the cached cross-cluster signal matrix without regenerating the full dossier."""
+    """Return the cached cross-cluster signal matrix without regenerating the full dossier.
+
+    Defaults trim to core/supporting tiers and the top ``max_clusters`` clusters
+    by aggregate signal. Set ``include_context=True`` for all tiers, or pass an
+    explicit ``cluster_ids`` list to bypass the cap.
+    """
+    if max_clusters < 1:
+        return mcp_error(
+            "get_cluster_signal_matrix",
+            f"max_clusters must be >= 1, got '{max_clusters}'",
+        )
     try:
         session = _get_session(ctx)
         evidence_index, cluster_meta = _require_cluster_state(session)
@@ -1821,6 +1857,7 @@ async def get_cluster_signal_matrix(
                 evidence_index,
                 cluster_ids=cluster_ids,
                 include_context=include_context,
+                max_clusters=max_clusters,
             ),
         }
         return json.dumps(payload, indent=2)

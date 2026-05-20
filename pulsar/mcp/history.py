@@ -85,7 +85,10 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
         for dim in _extract_pca_dims(config_yaml):
             pca_dim_health.setdefault(dim, []).append(health)
 
-        if float(metrics.get("singleton_fraction", 0.0)) > _FRAGMENTED_SINGLETON_FRACTION:
+        if (
+            float(metrics.get("singleton_fraction", 0.0))
+            > _FRAGMENTED_SINGLETON_FRACTION
+        ):
             threshold = _extract_construction_threshold(config_yaml)
             if threshold is not None:
                 thresholds_with_singletons.append(threshold)

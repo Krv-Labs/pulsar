@@ -137,7 +137,41 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert cluster_profile["cluster"]["numeric_features"]
     assert feature_payload["signals"]["feature_names"] == ["f1", "segment=alpha"]
     assert feature_payload["signals"]["clusters"]
+    assert feature_payload["signals"]["detail"] == "summary"
+    assert "clusters_returned" in feature_payload["signals"]
+    assert "clusters_omitted" in feature_payload["signals"]
+    # Summary projection drops the heavyweight metrics
+    sample_numeric = next(
+        (
+            row
+            for cluster in feature_payload["signals"]["clusters"]
+            for row in cluster["numeric_features"]
+        ),
+        None,
+    )
+    if sample_numeric is not None:
+        assert "wasserstein_norm" not in sample_numeric
+        assert "evidence_vector" not in sample_numeric
+        assert "signal_tier" in sample_numeric
+    full_feature_payload = json.loads(
+        asyncio.run(
+            server.get_feature_signal(
+                ["f1", "segment=alpha"], detail="full", max_clusters=50
+            )
+        )
+    )
+    full_sample = next(
+        (
+            row
+            for cluster in full_feature_payload["signals"]["clusters"]
+            for row in cluster["numeric_features"]
+        ),
+        None,
+    )
+    if full_sample is not None:
+        assert "wasserstein_norm" in full_sample
     assert matrix_payload["signal_matrix"]["numeric_rows"]
+    assert "clusters_returned" in matrix_payload["signal_matrix"]
 
 
 def test_get_cluster_profile_caps_wide_dataset_feature_output():

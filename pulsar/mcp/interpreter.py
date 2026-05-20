@@ -1453,6 +1453,8 @@ def feature_signal_payload(
     feature_names: list[str],
     *,
     cluster_ids: list[int] | None = None,
+    detail: str = "summary",
+    max_clusters: int | None = 8,
 ) -> dict[str, Any]:
     requested_clusters = (
         {int(cluster_id) for cluster_id in cluster_ids}
@@ -1467,7 +1469,7 @@ def feature_signal_payload(
             column, value = feature.split("=", 1)
             categorical_pairs.add((column, value))
         bare_columns.add(feature.split("=", 1)[0])
-    cluster_payloads = []
+    raw_payloads: list[dict[str, Any]] = []
     for cluster_id in sorted(requested_clusters):
         bundle = evidence_index.cluster_bundles.get(cluster_id)
         if bundle is None:
@@ -1483,16 +1485,53 @@ def feature_signal_payload(
         ]
         if not numeric_rows and not categorical_rows:
             continue
-        cluster_payloads.append(
+        signal_score = max(
+            (
+                abs(float(row.get("aggregate_score", 0.0)))
+                for row in (*numeric_rows, *categorical_rows)
+            ),
+            default=0.0,
+        )
+        raw_payloads.append(
             {
                 "cluster_id": cluster_id,
                 "semantic_name": bundle["semantic_name"],
-                "numeric_features": numeric_rows,
-                "categorical_features": categorical_rows,
+                "cluster_size": int(bundle["size"]),
+                "_signal_score": signal_score,
+                "_numeric_rows": numeric_rows,
+                "_categorical_rows": categorical_rows,
+            }
+        )
+
+    if cluster_ids is None and max_clusters is not None:
+        raw_payloads.sort(key=lambda c: c["_signal_score"], reverse=True)
+        kept = raw_payloads[:max_clusters]
+        omitted = len(raw_payloads) - len(kept)
+        kept.sort(key=lambda c: c["cluster_id"])
+    else:
+        kept = raw_payloads
+        omitted = 0
+
+    cluster_payloads = []
+    for entry in kept:
+        cluster_payloads.append(
+            {
+                "cluster_id": entry["cluster_id"],
+                "semantic_name": entry["semantic_name"],
+                "cluster_size": entry["cluster_size"],
+                "numeric_features": _detail_numeric_rows(
+                    entry["_numeric_rows"], detail
+                ),
+                "categorical_features": _detail_categorical_rows(
+                    entry["_categorical_rows"], detail
+                ),
             }
         )
     return {
         "feature_names": features,
+        "detail": detail,
+        "clusters_returned": len(cluster_payloads),
+        "clusters_omitted": omitted,
         "clusters": cluster_payloads,
     }
 
@@ -1502,6 +1541,7 @@ def signal_matrix_payload(
     *,
     cluster_ids: list[int] | None = None,
     include_context: bool = False,
+    max_clusters: int | None = 8,
 ) -> dict[str, Any]:
     requested_clusters = (
         {int(cluster_id) for cluster_id in cluster_ids}
@@ -1509,21 +1549,36 @@ def signal_matrix_payload(
         else set(evidence_index.cluster_bundles.keys())
     )
     matrix = evidence_index.signal_matrix
+
+    if cluster_ids is None and max_clusters is not None:
+        ranked = sorted(
+            requested_clusters,
+            key=lambda cid: max(
+                (
+                    abs(float(row.get("aggregate_score", 0.0)))
+                    for row in evidence_index.cluster_bundles.get(cid, {}).get(
+                        "numeric", []
+                    )
+                ),
+                default=0.0,
+            ),
+            reverse=True,
+        )
+        kept = set(ranked[:max_clusters])
+        clusters_omitted = len(requested_clusters) - len(kept)
+    else:
+        kept = set(requested_clusters)
+        clusters_omitted = 0
+
     numeric_rows = [
-        {
-            **row,
-            "values": dict(row["values"]),
-        }
+        {**row, "values": dict(row["values"])}
         for row in matrix["numeric_rows"]
-        if row["cluster_id"] in requested_clusters
+        if row["cluster_id"] in kept
     ]
     categorical_rows = [
-        {
-            **row,
-            "values": dict(row["values"]),
-        }
+        {**row, "values": dict(row["values"])}
         for row in matrix["categorical_rows"]
-        if row["cluster_id"] in requested_clusters
+        if row["cluster_id"] in kept
     ]
     if not include_context:
         for row_set in (numeric_rows, categorical_rows):
@@ -1536,6 +1591,8 @@ def signal_matrix_payload(
     return {
         "numeric_columns": matrix["numeric_columns"],
         "categorical_values": matrix["categorical_values"],
+        "clusters_returned": len(kept),
+        "clusters_omitted": clusters_omitted,
         "numeric_rows": numeric_rows,
         "categorical_rows": categorical_rows,
     }
