@@ -528,10 +528,7 @@ def _finalization_gate(
 
     cfg = yaml.safe_load(config_yaml) or {}
     pca_dims = (
-        cfg.get("sweep", {})
-        .get("pca", {})
-        .get("dimensions", {})
-        .get("values", [])
+        cfg.get("sweep", {}).get("pca", {}).get("dimensions", {}).get("values", [])
     )
     return {
         "status": "blocked",
@@ -2084,9 +2081,7 @@ def _sparse_threshold_curve(
     if n_points <= max_points:
         indices = range(n_points)
     else:
-        indices = sorted(
-            {int(i) for i in np.linspace(0, n_points - 1, num=max_points)}
-        )
+        indices = sorted({int(i) for i in np.linspace(0, n_points - 1, num=max_points)})
 
     return [
         {

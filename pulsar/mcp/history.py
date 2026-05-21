@@ -86,7 +86,9 @@ def _component_profile(metrics: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "n_nodes": n_total,
-        "component_count": int(metrics.get("component_count", len(sizes)) or len(sizes)),
+        "component_count": int(
+            metrics.get("component_count", len(sizes)) or len(sizes)
+        ),
         "giant_fraction": float(giant_size / n_total),
         "non_giant_mass": float((n_total - giant_size) / n_total),
         "nontrivial_component_count": len(nontrivial),
@@ -244,9 +246,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     # observations agree with the per-run health field agents already saw.
 
     fragmentation_trend = _fragmentation_trend(history)
-    observations.append(
-        f"Fragmentation trend: {fragmentation_trend['status']}."
-    )
+    observations.append(f"Fragmentation trend: {fragmentation_trend['status']}.")
 
     rationale_parts: list[str] = []
     if hairball_dims:
