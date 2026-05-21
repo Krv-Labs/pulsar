@@ -77,10 +77,12 @@ cosmic_graph:
 
     assert result["n_runs"] == 2
     joined = " ".join(result["observations"])
-    # PCA dim 2 produced hairball
+    # PCA dim 2 appeared in a hairball run
     assert "2" in joined
-    # PCA dim 10 produced fragmented
+    # PCA dim 10 appeared in a fragmented run
     assert "10" in joined
-    # Threshold 0.5 coincided with high singletons
+    # Threshold 0.5 coincided with elevated singletons
     assert "0.5" in joined
+    assert "elevated singleton" in joined
     assert result["rationale"] != ""
+    assert "fragmentation_trend" in result

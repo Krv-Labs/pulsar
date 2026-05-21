@@ -353,14 +353,14 @@ def test_graph_advisories_high_singletons():
 
 
 def test_graph_advisories_dominant_component():
-    """giant_fraction > 0.95 yields a DOMINANT_COMPONENT info advisory."""
+    """giant_fraction > 0.95 yields a DOMINANT_COMPONENT warning advisory."""
     advisories = _graph_advisories(
         n_edges=100, singleton_fraction=0.0, giant_fraction=0.99, density=0.5
     )
     codes = {a["code"] for a in advisories}
     assert "DOMINANT_COMPONENT" in codes
     dom = next(a for a in advisories if a["code"] == "DOMINANT_COMPONENT")
-    assert dom["severity"] == "info"
+    assert dom["severity"] == "warning"
     assert dom["agent_action"]
 
 

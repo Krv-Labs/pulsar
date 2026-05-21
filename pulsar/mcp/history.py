@@ -101,6 +101,7 @@ def _fragmentation_trend(history: list[Any]) -> dict[str, Any]:
     if len(history) < 2:
         return {
             "status": "insufficient_history",
+            "next_decision": "run_one_more_sweep",
             "agent_action": "Run at least two sweeps before judging fragmentation trend.",
         }
 
@@ -118,6 +119,7 @@ def _fragmentation_trend(history: list[Any]) -> dict[str, Any]:
 
     if singleton_delta > _SINGLETON_SPIKE_DELTA:
         status = "over_fragmentation"
+        next_decision = "back_off_threshold"
         action = (
             "Back off the latest refinement: singleton mass increased faster than "
             "coherent non-giant structure."
@@ -127,12 +129,14 @@ def _fragmentation_trend(history: list[Any]) -> dict[str, Any]:
         or nontrivial_delta >= _MEANINGFUL_NONTRIVIAL_DELTA
     ):
         status = "meaningful_resolution"
+        next_decision = "inspect_features"
         action = (
             "Inspect the emerging non-giant component(s) with generate_cluster_dossier "
             "or get_cluster_profile before further tuning."
         )
     elif component_count_delta > 0 and nontrivial_delta < _ICE_CHIP_NONTRIVIAL_DELTA:
         status = "ice_chipping"
+        next_decision = "run_one_more_sweep_or_back_off"
         action = (
             "Do not treat higher component count as progress. The refinement mostly "
             "chipped off tiny components; shift the grid only if a non-trivial "
@@ -140,6 +144,7 @@ def _fragmentation_trend(history: list[Any]) -> dict[str, Any]:
         )
     else:
         status = "stable"
+        next_decision = "compare_feature_evidence"
         action = (
             "No strong fragmentation trend detected. Compare feature evidence before "
             "making another refinement."
@@ -154,6 +159,7 @@ def _fragmentation_trend(history: list[Any]) -> dict[str, Any]:
         "largest_non_giant_component_pct": round(largest_non_giant, 4),
         "component_count_delta": component_count_delta,
         "significant_component_threshold_pct": round(significant_pct, 4),
+        "next_decision": next_decision,
         "agent_action": action,
     }
 
@@ -172,6 +178,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
             "rationale": "",
             "fragmentation_trend": {
                 "status": "insufficient_history",
+                "next_decision": "run_one_more_sweep",
                 "agent_action": "Run at least two sweeps before judging fragmentation trend.",
             },
         }
@@ -207,8 +214,8 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     )
     if hairball_dims:
         observations.append(
-            f"PCA dimensions {hairball_dims} produced hairball regimes in "
-            f"the majority of runs they appeared in."
+            f"PCA dimensions {hairball_dims} appeared in hairball regimes in "
+            f"the majority of runs containing them."
         )
 
     fragmented_dims = sorted(
@@ -219,14 +226,14 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     )
     if fragmented_dims:
         observations.append(
-            f"PCA dimensions {fragmented_dims} produced fragmented or empty "
-            f"graphs in the majority of runs they appeared in."
+            f"PCA dimensions {fragmented_dims} appeared in fragmented or empty "
+            f"graphs in the majority of runs containing them."
         )
 
     if thresholds_with_singletons:
         observations.append(
             f"Construction thresholds {sorted(set(map(str, thresholds_with_singletons)))} "
-            f"coincided with >50% singletons."
+            f"coincided with elevated singleton fractions."
         )
 
     health_breakdown = ", ".join(

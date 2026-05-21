@@ -815,7 +815,15 @@ def test_sweep_response_contains_stability_summary(tmp_path):
     assert isinstance(summary["top_plateaus"], list)
     if summary["top_plateaus"]:
         first = summary["top_plateaus"][0]
-        for key in ("start", "end", "midpoint", "length", "component_count"):
+        for key in (
+            "start",
+            "end",
+            "midpoint",
+            "length",
+            "component_count",
+            "singleton_count",
+            "singleton_fraction",
+        ):
             assert key in first
 
 
@@ -859,6 +867,10 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
     assert "component_counts" in full
     assert "singleton_counts" in full
     assert len(full["thresholds"]) == full["curve_point_count"]
+    if full["plateaus"]:
+        first_plateau = full["plateaus"][0]
+        assert "singleton_count" in first_plateau
+        assert "singleton_fraction" in first_plateau
 
 
 def test_finalization_gate_blocks_early_dominant_component():

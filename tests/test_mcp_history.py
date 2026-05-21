@@ -31,6 +31,7 @@ def test_summarize_history_detects_ice_chipping():
     assert trend["status"] == "ice_chipping"
     assert trend["component_count_delta"] == 3
     assert trend["nontrivial_component_mass_delta"] == 0.0
+    assert trend["next_decision"] == "run_one_more_sweep_or_back_off"
     assert "higher component count" in trend["agent_action"]
 
 
@@ -44,6 +45,7 @@ def test_summarize_history_detects_meaningful_resolution():
 
     trend = summary["fragmentation_trend"]
     assert trend["status"] == "meaningful_resolution"
+    assert trend["next_decision"] == "inspect_features"
     assert trend["largest_non_giant_component_pct"] == 0.07
     assert trend["nontrivial_component_mass_delta"] == 0.08
 
@@ -58,4 +60,5 @@ def test_summarize_history_detects_over_fragmentation():
 
     trend = summary["fragmentation_trend"]
     assert trend["status"] == "over_fragmentation"
+    assert trend["next_decision"] == "back_off_threshold"
     assert trend["singleton_fraction_delta"] == 0.06

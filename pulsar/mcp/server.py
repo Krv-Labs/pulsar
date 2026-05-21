@@ -55,6 +55,11 @@ from pulsar.mcp.config_tools import (
 from pulsar.mcp.characterization import compact_characterization_payload
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.history import summarize_history
+from pulsar.mcp.payloads import (
+    build_evidence_payload,
+    cluster_result_payload,
+    singleton_count_at_threshold,
+)
 from pulsar.mcp.preprocessing import (
     _preprocessing_block_to_yaml,
     _rationale_table,
@@ -292,7 +297,6 @@ class _PulsarSession:
 _sessions: OrderedDict[str, _PulsarSession] = OrderedDict()
 _MAX_SESSIONS = int(os.environ.get("PULSAR_MAX_SESSIONS", "3"))
 _MAX_EDGES_IN_SUMMARY = 500
-_MAX_CLUSTER_SINGLETON_RATIO = 0.66
 
 
 def _session_key(ctx: Context | None) -> str:
@@ -561,17 +565,23 @@ def _threshold_stability_summary(
     stability = getattr(model, "_stability_result", None)
     if stability is None:
         return None
+    adj = model.weighted_adjacency
+    n_nodes = int(adj.shape[0])
     top = stability.top_k_plateaus(3)
-    plateaus = [
-        {
-            "start": float(p.start_threshold),
-            "end": float(p.end_threshold),
-            "midpoint": float(p.midpoint),
-            "length": float(p.length),
-            "component_count": int(p.component_count),
-        }
-        for p in top
-    ]
+    plateaus = []
+    for p in top:
+        singleton_count = singleton_count_at_threshold(adj, float(p.midpoint))
+        plateaus.append(
+            {
+                "start": float(p.start_threshold),
+                "end": float(p.end_threshold),
+                "midpoint": float(p.midpoint),
+                "length": float(p.length),
+                "component_count": int(p.component_count),
+                "singleton_count": singleton_count,
+                "singleton_fraction": round(singleton_count / max(n_nodes, 1), 4),
+            }
+        )
     warning: str | None = None
     if int(metrics.get("n_edges", 0)) == 0:
         warning = (
@@ -624,52 +634,6 @@ def _pca_cache_status(
     )
 
 
-def _cluster_result_payload(result: Any) -> dict[str, Any]:
-    sizes = result.labels.value_counts().sort_index()
-    total = len(result.labels)
-    return {
-        "method_used": result.method_used,
-        "n_clusters": result.n_clusters,
-        "cluster_sizes": [
-            {"cluster_id": int(cid), "n": int(n), "pct": round(n / total * 100, 1)}
-            for cid, n in sizes.items()
-        ],
-        "silhouette_score": result.silhouette_score,
-        "interpretation_edge_weight_threshold_applied": result.interpretation_edge_weight_threshold_applied,
-        "stability_plateaus": result.stability_plateaus,
-        "failure_reason": result.failure_reason,
-    }
-
-
-def _tier_counts(tiers: dict[str, list]) -> dict[str, int]:
-    return {tier: len(rows) for tier, rows in (tiers or {}).items()}
-
-
-def _cluster_payload_from_dossier(
-    dossier: Any, *, detail: str = "standard"
-) -> list[dict[str, Any]]:
-    payloads = []
-    for profile in dossier.clusters:
-        entry: dict[str, Any] = {
-            "cluster_id": profile.cluster_id,
-            "size": profile.size,
-            "size_pct": profile.size_pct,
-            "semantic_name": profile.semantic_name,
-            "topological_neighbors": profile.topological_neighbors,
-            "numeric_features": profile.numeric_features,
-            "categorical_features": profile.categorical_features,
-        }
-        if detail == "summary":
-            entry["numeric_tier_counts"] = _tier_counts(profile.numeric_tiers)
-            entry["categorical_tier_counts"] = _tier_counts(profile.categorical_tiers)
-        else:
-            entry["numeric_tiers"] = profile.numeric_tiers
-            entry["categorical_tiers"] = profile.categorical_tiers
-            entry["central_rows"] = profile.central_rows
-        payloads.append(entry)
-    return payloads
-
-
 def _resolve_response_format(
     *,
     response_format: str,
@@ -699,48 +663,6 @@ def _resolve_response_format(
     return resolved_detail, resolved_format
 
 
-def _build_evidence_payload(
-    dossier: Any,
-    cluster_meta: dict[str, Any],
-    *,
-    detail: str = "standard",
-    max_clusters: int | None = None,
-) -> dict[str, Any]:
-    clusters = _cluster_payload_from_dossier(dossier, detail=detail)
-    clusters.sort(key=lambda c: c["size"], reverse=True)
-    clusters_omitted = 0
-    if max_clusters is not None and len(clusters) > max_clusters:
-        clusters_omitted = len(clusters) - max_clusters
-        clusters = clusters[:max_clusters]
-    payload: dict[str, Any] = {
-        "status": "ok",
-        "cluster_result": cluster_meta,
-        "detail": dossier.global_stats.get("detail", "standard"),
-        "evidence_metadata": dossier.global_stats.get("evidence_metadata", {}),
-        "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
-        "numeric_global_ranking": dossier.global_stats.get(
-            "numeric_global_ranking", []
-        ),
-        "categorical_global_ranking": dossier.global_stats.get(
-            "categorical_global_ranking", []
-        ),
-        "clusters_returned": len(clusters),
-        "clusters_omitted": clusters_omitted,
-        "clusters": clusters,
-    }
-    if detail == "summary":
-        signal_matrix = dossier.global_stats.get("signal_matrix", {})
-        payload["signal_matrix_summary"] = {
-            "n_numeric_columns": len(signal_matrix.get("numeric_columns", [])),
-            "n_categorical_values": len(signal_matrix.get("categorical_values", [])),
-            "n_numeric_rows": len(signal_matrix.get("numeric_rows", [])),
-            "n_categorical_rows": len(signal_matrix.get("categorical_rows", [])),
-        }
-    else:
-        payload["signal_matrix"] = dossier.global_stats.get("signal_matrix", {})
-    return payload
-
-
 def _get_or_build_evidence_index(
     session: _PulsarSession,
     *,
@@ -768,7 +690,7 @@ def _get_or_build_evidence_index(
     )
     session.feature_evidence_index = evidence_index
     session.feature_evidence_fingerprint = fingerprint
-    session.feature_evidence_cluster_meta = _cluster_result_payload(cluster_result)
+    session.feature_evidence_cluster_meta = cluster_result_payload(cluster_result)
     return evidence_index
 
 
@@ -1679,6 +1601,7 @@ async def generate_cluster_dossier(
     interpretation_edge_weight_threshold: float | None = None,
     detail: str = "summary",
     max_clusters: int = 8,
+    feature_preview_limit: int = 5,
     response_format: str = "json",
     format: str = "",
     exclude_columns: list[str] | None = None,
@@ -1686,6 +1609,11 @@ async def generate_cluster_dossier(
 ) -> str:
     """
     Generate a statistical dossier of the topological clusters.
+
+    Default to detail="summary" for agent loops. It is the compact map for
+    deciding what to inspect next. Do not request detail="standard" or "full"
+    for initial interpretation; those modes are heavy drill-down/audit payloads
+    after specific clusters or features have already been chosen.
 
     Args:
         method: Clustering method ("auto", "spectral", "components").
@@ -1697,14 +1625,20 @@ async def generate_cluster_dossier(
             When omitted (default), inherits ``model.resolved_construction_threshold``
             so clustering operates on the same surface as the persisted cosmic
             graph.  Pass an explicit value (including ``0.0``) to override.
-        detail: Payload richness. Use "summary" for routine agent loops —
-            drops per-cluster tier dumps and central_rows, replaces the
-            top-level signal_matrix with counts only, and projects each row
-            to ~16 fields. "standard" returns full tier rows and central
-            rows for the kept clusters. "full" returns every metric.
+        detail: Payload richness. Omit this parameter for routine agent loops;
+            the default "summary" returns a compact cluster map with tier counts,
+            capped feature previews, signal-matrix counts, and no evidence rows.
+            Use targeted tools (get_cluster_profile, get_feature_signal,
+            get_cluster_signal_matrix) for follow-up evidence. Only set
+            "standard" after narrowing to specific clusters/features; it returns
+            feature/tier rows and central rows for kept clusters. Use "full" only
+            for statistical audit/debugging, not normal chat context.
         max_clusters: Cap on the number of clusters returned (top by size).
             Use a larger value to inspect tail clusters; the response
             reports ``clusters_omitted`` so you can see what was dropped.
+        feature_preview_limit: In summary mode, return at most this many mixed
+            numeric/categorical feature hints per cluster. Use get_cluster_profile
+            for detailed evidence rows.
         response_format: "json" for structured payloads or "markdown" for
             narrative output only.
         format: Legacy alias. "full" maps to detail="full"; "json" and
@@ -1724,6 +1658,10 @@ async def generate_cluster_dossier(
         )
     if max_clusters < 1:
         raise ToolError(f"max_clusters must be >= 1, got '{max_clusters}'")
+    if feature_preview_limit < 0:
+        raise ToolError(
+            f"feature_preview_limit must be >= 0, got '{feature_preview_limit}'"
+        )
 
     try:
         detail, response_format = _resolve_response_format(
@@ -1747,24 +1685,7 @@ async def generate_cluster_dossier(
         session.clusters = result.labels
         session.report_exclude_columns = exclude_columns
 
-        sizes = result.labels.value_counts()
-        n_singleton_clusters = int((sizes == 1).sum())
-        if (
-            result.n_clusters > 1
-            and n_singleton_clusters / result.n_clusters > _MAX_CLUSTER_SINGLETON_RATIO
-        ):
-            return mcp_error(
-                "generate_cluster_dossier",
-                f"Degenerate clustering: {n_singleton_clusters} of {result.n_clusters} clusters are singletons "
-                f"(dominant cluster has {int(sizes.max())} members).",
-                error_code="DEGENERATE_CLUSTERING",
-                agent_action=(
-                    "Lower interpretation_edge_weight_threshold to reconnect the graph, or call "
-                    "get_threshold_stability_curve and use method='components' to inspect natural structure."
-                ),
-            )
-
-        session.feature_evidence_cluster_meta = _cluster_result_payload(result)
+        session.feature_evidence_cluster_meta = cluster_result_payload(result)
 
         evidence_index = _get_or_build_evidence_index(
             session,
@@ -1783,15 +1704,16 @@ async def generate_cluster_dossier(
             ),
             evidence_index=evidence_index,
         )
-        cluster_meta = _cluster_result_payload(result)
+        cluster_meta = cluster_result_payload(result)
         if response_format == "markdown":
             return dossier_to_markdown(dossier)
 
-        payload = _build_evidence_payload(
+        payload = build_evidence_payload(
             dossier,
             cluster_meta,
             detail=detail,
             max_clusters=max_clusters,
+            feature_preview_limit=feature_preview_limit,
         )
         payload["construction_threshold"] = construction_threshold
         payload["interpretation_edge_weight_threshold"] = (
@@ -1799,13 +1721,21 @@ async def generate_cluster_dossier(
         )
         payload["threshold_inherited"] = threshold_inherited
         payload["recommended_next_tools"] = (
-            ["get_cluster_profile", "get_feature_signal", "compare_clusters_tool"]
+            [
+                "get_cluster_profile",
+                "get_feature_signal",
+                "get_cluster_signal_matrix",
+                "compare_clusters_tool",
+            ]
             if detail == "summary"
             else ["get_feature_signal", "compare_clusters_tool", "export_html_report"]
         )
         payload["payload_guidance"] = (
-            "summary is the default agent-loop payload; use standard/full only "
-            "after narrowing to specific clusters or features."
+            "For routine agent loops, omit detail or use detail='summary'. Summary "
+            "is a compact cluster map with capped feature previews and counts only. "
+            "Use get_cluster_profile, get_feature_signal, or get_cluster_signal_matrix "
+            "for targeted evidence. Set detail='standard' or 'full' only after "
+            "narrowing to specific clusters/features or for explicit audit/debugging."
         )
         return json.dumps(
             payload,
@@ -2215,16 +2145,23 @@ async def get_threshold_stability_curve(
 
         singleton_counts = await asyncio.to_thread(_singleton_counts)
 
-        plateaus = [
-            {
-                "start": float(p.start_threshold),
-                "end": float(p.end_threshold),
-                "component_count": int(p.component_count),
-                "length": float(p.length),
-                "midpoint": float(p.midpoint),
-            }
-            for p in stability.top_k_plateaus(10)
-        ]
+        plateaus = []
+        for p in stability.top_k_plateaus(10):
+            singleton_count = singleton_count_at_threshold(adj, float(p.midpoint))
+            plateaus.append(
+                {
+                    "start": float(p.start_threshold),
+                    "end": float(p.end_threshold),
+                    "component_count": int(p.component_count),
+                    "length": float(p.length),
+                    "midpoint": float(p.midpoint),
+                    "singleton_count": singleton_count,
+                    "singleton_fraction": round(
+                        singleton_count / max(int(adj.shape[0]), 1),
+                        4,
+                    ),
+                }
+            )
 
         component_counts = [int(c) for c in stability.component_counts]
         curve_sample = _sparse_threshold_curve(

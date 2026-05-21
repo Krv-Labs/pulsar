@@ -26,6 +26,20 @@ def _make_disconnected_model(size_per_cluster: int = 3) -> SimpleNamespace:
     )
 
 
+def _make_singleton_tail_model() -> SimpleNamespace:
+    total = 8
+    weighted = np.zeros((total, total), dtype=float)
+    for i in range(4):
+        for j in range(i + 1, 4):
+            weighted[i, j] = weighted[j, i] = 0.8
+    graph = nx.from_numpy_array((weighted > 0).astype(int))
+    return SimpleNamespace(
+        cosmic_graph=graph,
+        weighted_adjacency=weighted,
+        resolved_construction_threshold=0.0,
+    )
+
+
 def _make_multifactor_dataset() -> tuple[pd.DataFrame, pd.Series]:
     rng = np.random.default_rng(42)
     cluster_a = 48
@@ -57,6 +71,25 @@ def _make_small_server_dataset() -> pd.DataFrame:
             "f3": [0.0, 0.1, -0.1, 1.8, -1.6, 1.4],
             "noise": [0.3, -0.1, 0.2, -0.4, 0.5, -0.2],
             "segment": ["alpha", "alpha", "alpha", "beta", "beta", "beta"],
+        }
+    )
+
+
+def _make_singleton_tail_dataset() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "f1": [3.1, 3.4, 2.9, 3.2, -3.0, -2.0, 0.0, 2.0],
+            "f2": [-2.5, -2.1, -2.7, -2.3, 1.0, 2.0, 3.0, 4.0],
+            "segment": [
+                "major",
+                "major",
+                "major",
+                "major",
+                "rare_a",
+                "rare_b",
+                "rare_c",
+                "rare_d",
+            ],
         }
     )
 
@@ -135,18 +168,28 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     )
     assert "signal_matrix_summary" in summary
     assert "clusters_returned" in summary
+    assert "numeric_global_ranking" not in summary
+    assert "categorical_global_ranking" not in summary
+    assert "numeric_global_ranking_preview" in summary
+    assert "categorical_global_ranking_preview" in summary
     for cluster in summary["clusters"]:
+        assert "numeric_features" not in cluster
+        assert "categorical_features" not in cluster
         assert "numeric_tiers" not in cluster
         assert "categorical_tiers" not in cluster
         assert "central_rows" not in cluster
         assert "numeric_tier_counts" in cluster
+        assert "feature_preview" in cluster
+        assert cluster["features_previewed"] <= cluster["feature_preview_limit"]
     # Full mode still ships everything
     assert "signal_matrix" in full
     full_cluster = full["clusters"][0]
+    assert "numeric_features" in full_cluster
+    assert "categorical_features" in full_cluster
     assert "numeric_tiers" in full_cluster
     assert "central_rows" in full_cluster
     assert summary["recommended_next_tools"][0] == "get_cluster_profile"
-    assert "summary is the default" in summary["payload_guidance"]
+    assert "cluster map" in summary["payload_guidance"]
     assert cluster_profile["cluster"]["cluster_id"] == 0
     assert cluster_profile["max_features"] == 16
     assert cluster_profile["cluster"]["feature_limit"] == 16
@@ -225,6 +268,55 @@ def test_get_cluster_profile_caps_wide_dataset_feature_output():
     assert cluster["features_returned"]["total"] == 7
     assert cluster["features_omitted"]["total"] > 0
     assert returned_keys == expected_keys
+
+
+def test_generate_cluster_dossier_summary_caps_feature_preview():
+    server._sessions.clear()
+    session = server._get_session(None)
+    data = _make_wide_server_dataset()
+    session.model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    session.data = data
+    session.latest_run_id = "run_preview_cap"
+
+    summary = json.loads(
+        asyncio.run(
+            server.generate_cluster_dossier(
+                method="auto",
+                detail="summary",
+                feature_preview_limit=3,
+            )
+        )
+    )
+
+    assert summary["status"] == "ok"
+    for cluster in summary["clusters"]:
+        assert len(cluster["feature_preview"]) <= 3
+        assert cluster["feature_preview_limit"] == 3
+        assert "numeric_features" not in cluster
+        assert "categorical_features" not in cluster
+
+
+def test_generate_cluster_dossier_surfaces_singleton_heavy_readiness():
+    server._sessions.clear()
+    session = server._get_session(None)
+    session.model = _make_singleton_tail_model()
+    session.data = _make_singleton_tail_dataset()
+    session.latest_run_id = "run_singleton_tail"
+
+    summary = json.loads(
+        asyncio.run(server.generate_cluster_dossier(method="components"))
+    )
+
+    assert summary["status"] == "ok"
+    readiness = summary["cluster_result"]["interpretation_readiness"]
+    fragmentation = summary["cluster_result"]["cluster_fragmentation"]
+    assert readiness["status"] == "review_required"
+    assert "SINGLETON_TAIL_DOMINATES_NON_GIANT_STRUCTURE" in readiness["reason_codes"]
+    assert readiness["basis"].startswith("advisory")
+    assert fragmentation["singleton_cluster_count"] == 4
+    assert fragmentation["singleton_cluster_ratio"] == 0.8
+    assert fragmentation["singleton_point_fraction"] == 0.5
+    assert summary["clusters"]
 
 
 def test_evidence_index_surfaces_stats_failures_metadata():
