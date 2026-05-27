@@ -79,27 +79,29 @@ Two independent levers operate on the same underlying weighted matrix at
 different stages. Do not confuse them.
 
 - **Construction threshold** (`cosmic_graph.construction_threshold` in config):
-  set BEFORE the sweep. Gates the persisted binary cosmic graph — the surface
-  every visualization, diagnostic, and stability analysis sees. Too high →
-  singletons. Too low → over-connected hairball. Default `"auto"` runs
-  persistent homology stability analysis (`threshold_stability_summary` in the
-  sweep response) and picks the longest stable plateau. Override only if
-  `diagnose_cosmic_graph` returns an `EMPTY_GRAPH` / `HIGH_SINGLETONS` advisory
-  (lower it) or density > 0.8 (raise it), then re-run the sweep.
+  set BEFORE the sweep. Gates the persisted binary cosmic graph used for
+  graph-connectivity diagnostics and visualization. The full weighted matrix
+  is still retained. Too high → singletons. Too low → over-connected hairball.
+  Default `"auto"` runs persistent homology stability analysis
+  (`threshold_stability_summary` in the sweep response) and picks the longest
+  stable plateau. Override only if `diagnose_cosmic_graph` returns an
+  `EMPTY_GRAPH` / `HIGH_SINGLETONS` advisory (lower it) or density > 0.8
+  (raise it), then re-run the sweep.
 
 - **Interpretation threshold** (`interpretation_edge_weight_threshold` in
-  `generate_cluster_dossier`): applied AFTER the graph is built. Re-binarizes
-  the unfiltered weighted matrix for clustering. **Defaults to inheriting the
-  construction threshold** so clustering operates on the same surface you see
-  in diagnostics — no silent divergence. Pass an explicit value (including
-  `0.0` for the full weighted graph) to deliberately diverge. Use
-  `diagnose_cosmic_graph` weight percentiles (weight_p25–p95) to pick a value
-  when overriding. This tunes cluster count and sharpness, not graph
-  connectivity.
+  `generate_cluster_dossier`): applied AFTER the graph is built. Slices the
+  retained weighted matrix for clustering and reporting. **Defaults to
+  inheriting the construction threshold** so clustering operates on the same
+  surface you diagnosed — no silent divergence. Pass an explicit value to
+  deliberately diverge. Use `diagnose_cosmic_graph` weight percentiles
+  (weight_p25–p95) to pick a value when overriding. This changes
+  interpretation-time connectivity and cluster fragmentation; it does not
+  rebuild the persisted cosmic graph.
 
-When divergence is intentional, the dossier response carries
+When divergence is intentional, the JSON dossier response carries
 `construction_threshold`, `interpretation_edge_weight_threshold`, and
-`threshold_inherited` so you can see exactly which surface clustering used.
+`threshold_inherited`, plus `threshold_surface` guidance so you can see exactly
+which surface clustering used.
 
 ## PHASE III: CONTRASTIVE INTERPRETATION
 7. Cluster: `generate_cluster_dossier`.

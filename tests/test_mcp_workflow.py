@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 import yaml
@@ -852,6 +854,66 @@ def test_dossier_inherits_construction_threshold(tmp_path):
     )
     assert explicit["threshold_inherited"] is False
     assert explicit["interpretation_edge_weight_threshold"] == 0.5
+    assert explicit["threshold_surface"]["status"] == "stricter_than_construction"
+
+
+def test_dossier_rejects_invalid_interpretation_threshold(tmp_path):
+    server._sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(server.create_config(dataset["dataset_id"], "bad_threshold"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            server.refine_config(
+                config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+            )
+        )
+    )["config_yaml"]
+    asyncio.run(
+        server.run_topological_sweep(
+            config_yaml=refined, dataset_id=dataset["dataset_id"]
+        )
+    )
+
+    payload = json.loads(
+        asyncio.run(
+            server.generate_cluster_dossier(
+                interpretation_edge_weight_threshold=-0.1
+            )
+        )
+    )
+
+    assert payload["status"] == "error"
+    assert "between 0.0 and 1.0" in payload["reason"]
+
+
+def test_dossier_explicit_spectral_method_is_not_overridden():
+    server._sessions.clear()
+    session = server._get_session(None)
+    weighted = np.full((30, 30), 0.4, dtype=float)
+    np.fill_diagonal(weighted, 0.0)
+    weighted[:15, :15] = 0.9
+    weighted[15:, 15:] = 0.9
+    np.fill_diagonal(weighted, 0.0)
+    session.model = SimpleNamespace(
+        weighted_adjacency=weighted,
+        cosmic_graph=nx.from_numpy_array((weighted > 0.2).astype(int)),
+        resolved_construction_threshold=0.2,
+    )
+    session.data = pd.DataFrame(
+        {
+            "x": np.r_[np.ones(15), np.zeros(15)],
+            "y": np.r_[np.zeros(15), np.ones(15)],
+        }
+    )
+
+    payload = json.loads(asyncio.run(server.generate_cluster_dossier(method="spectral")))
+
+    assert payload["status"] == "ok"
+    assert payload["cluster_result"]["method_used"] == "spectral"
+    assert payload["threshold_surface"]["status"] == "matched"
 
 
 def test_sweep_response_contains_stability_summary(tmp_path):
@@ -929,6 +991,10 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
     assert "thresholds" not in summary
     assert "component_counts" not in summary
     assert "singleton_counts" not in summary
+    assert "resolved_construction_threshold" in summary
+    assert "optimal_threshold" in summary
+    assert "matches_current_threshold" in summary
+    assert "threshold_guidance" in summary
     assert "curve_sample" in summary
     assert len(summary["curve_sample"]) <= 25
     assert summary["curve_point_count"] >= len(summary["curve_sample"])
@@ -937,6 +1003,7 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
         assert {"threshold", "component_count", "singleton_count"} <= set(first)
 
     assert full["detail"] == "full"
+    assert "resolved_construction_threshold" in full
     assert "thresholds" in full
     assert "component_counts" in full
     assert "singleton_counts" in full

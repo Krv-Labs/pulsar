@@ -104,13 +104,12 @@ def resolve_clusters(
     n = W.shape[0]
 
     # 1. Component Strategy
-    if method == "components" or interpretation_edge_weight_threshold > 0:
-        thresh = (
-            interpretation_edge_weight_threshold
-            if interpretation_edge_weight_threshold > 0
-            else 0.0
-        )
-        adj = (W > thresh).astype(np.int64)
+    if method == "components" or (
+        method == "auto" and interpretation_edge_weight_threshold > 0
+    ):
+        thresh = max(float(interpretation_edge_weight_threshold), 0.0)
+        binary = (W > thresh).astype(np.int64)
+        adj = W * binary
         G = nx.from_numpy_array(adj)
         labels = np.zeros(n, dtype=int)
         comps = list(nx.connected_components(G))
@@ -143,7 +142,14 @@ def resolve_clusters(
                 interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
             )
     if method in ("auto", "spectral"):
-        return _cluster_spectral(W, n, max_k)
+        thresh = max(float(interpretation_edge_weight_threshold), 0.0)
+        spectral_W = W * (W > thresh)
+        return _cluster_spectral(
+            spectral_W,
+            n,
+            max_k,
+            interpretation_edge_weight_threshold=thresh,
+        )
 
     raise ValueError(f"Unknown clustering method: {method}")
 
@@ -193,7 +199,12 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
     return None
 
 
-def _cluster_spectral(adj: np.ndarray, n: int, max_k: int) -> ClusterResult:
+def _cluster_spectral(
+    adj: np.ndarray,
+    n: int,
+    max_k: int,
+    interpretation_edge_weight_threshold: float = 0.0,
+) -> ClusterResult:
     """Fall back to spectral clustering if no stable threshold split exists."""
     G = nx.from_numpy_array((adj > 0).astype(np.int64))
     if not nx.is_connected(G):
@@ -242,6 +253,9 @@ def _cluster_spectral(adj: np.ndarray, n: int, max_k: int) -> ClusterResult:
             n_clusters=best_k,
             silhouette_score=best_score,
             failure_reason=None,
+            interpretation_edge_weight_threshold_applied=(
+                interpretation_edge_weight_threshold
+            ),
         )
 
     raise ValueError("No stable cluster cut found.")

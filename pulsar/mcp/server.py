@@ -30,7 +30,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler as SkScaler
 
 from pulsar.analysis.characterization import NumericProfile, profile_numeric_matrix
-from pulsar.config import config_to_yaml, load_config
+from pulsar.config import THRESHOLD_RANGE_MESSAGE, config_to_yaml, load_config
 from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
@@ -595,6 +595,62 @@ def _threshold_stability_summary(
         "top_plateaus": plateaus,
         "warning": warning,
     }
+
+
+def _validate_unit_threshold(value: float, *, name: str) -> float:
+    threshold = float(value)
+    if not np.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
+        raise ToolError(f"{name}: {THRESHOLD_RANGE_MESSAGE}")
+    return threshold
+
+
+def _threshold_surface_payload(
+    *,
+    construction_threshold: float,
+    interpretation_threshold: float,
+    threshold_inherited: bool,
+) -> dict[str, Any]:
+    if threshold_inherited:
+        status = "matched"
+        guidance = "Interpretation inherited the constructed graph surface."
+    elif np.isclose(interpretation_threshold, construction_threshold):
+        status = "matched_explicit"
+        guidance = "Interpretation explicitly matches the constructed graph surface."
+    elif interpretation_threshold < construction_threshold:
+        status = "looser_than_construction"
+        guidance = (
+            "Interpretation uses a looser slice of the retained weighted matrix "
+            "than the persisted diagnostic graph."
+        )
+    else:
+        status = "stricter_than_construction"
+        guidance = (
+            "Interpretation uses a stricter slice of the retained weighted matrix "
+            "than the persisted diagnostic graph."
+        )
+    return {
+        "status": status,
+        "construction_threshold": construction_threshold,
+        "interpretation_edge_weight_threshold": interpretation_threshold,
+        "threshold_inherited": threshold_inherited,
+        "guidance": guidance,
+    }
+
+
+def _prepend_threshold_markdown(markdown: str, surface: dict[str, Any]) -> str:
+    header = "\n".join(
+        [
+            "# Threshold Surface",
+            "",
+            f"- Construction threshold: {surface['construction_threshold']:.4f}",
+            "- Interpretation edge weight threshold: "
+            f"{surface['interpretation_edge_weight_threshold']:.4f}",
+            f"- Status: {surface['status']}",
+            f"- Guidance: {surface['guidance']}",
+            "",
+        ]
+    )
+    return f"{header}{markdown}"
 
 
 def _pca_cache_status(
@@ -1666,12 +1722,23 @@ async def generate_cluster_dossier(
             legacy_format=format,
             detail=detail,
         )
-        construction_threshold = float(session.model.resolved_construction_threshold)
+        construction_threshold = _validate_unit_threshold(
+            session.model.resolved_construction_threshold,
+            name="resolved_construction_threshold",
+        )
         threshold_inherited = interpretation_edge_weight_threshold is None
         resolved_interpretation_threshold = (
             construction_threshold
             if threshold_inherited
-            else float(interpretation_edge_weight_threshold)
+            else _validate_unit_threshold(
+                interpretation_edge_weight_threshold,
+                name="interpretation_edge_weight_threshold",
+            )
+        )
+        threshold_surface = _threshold_surface_payload(
+            construction_threshold=construction_threshold,
+            interpretation_threshold=resolved_interpretation_threshold,
+            threshold_inherited=threshold_inherited,
         )
         result = resolve_clusters(
             session.model,
@@ -1703,7 +1770,10 @@ async def generate_cluster_dossier(
         )
         cluster_meta = cluster_result_payload(result)
         if response_format == "markdown":
-            return dossier_to_markdown(dossier)
+            return _prepend_threshold_markdown(
+                dossier_to_markdown(dossier),
+                threshold_surface,
+            )
 
         payload = build_evidence_payload(
             dossier,
@@ -1717,6 +1787,7 @@ async def generate_cluster_dossier(
             resolved_interpretation_threshold
         )
         payload["threshold_inherited"] = threshold_inherited
+        payload["threshold_surface"] = threshold_surface
         payload["recommended_next_tools"] = (
             [
                 "get_cluster_profile",
@@ -2128,6 +2199,14 @@ async def get_threshold_stability_curve(
         stability = await asyncio.to_thread(find_stable_thresholds, adj)
 
         thresholds = [float(t) for t in stability.thresholds]
+        resolved_construction_threshold = _validate_unit_threshold(
+            session.model.resolved_construction_threshold,
+            name="resolved_construction_threshold",
+        )
+        optimal_threshold = float(stability.optimal_threshold)
+        matches_current = bool(
+            np.isclose(resolved_construction_threshold, optimal_threshold)
+        )
 
         def _singleton_counts() -> list[int]:
             # adj is symmetric; a singleton at threshold t has no row-wise
@@ -2167,7 +2246,15 @@ async def get_threshold_stability_curve(
         payload: dict[str, Any] = {
             "status": "ok",
             "detail": detail,
-            "optimal_threshold": float(stability.optimal_threshold),
+            "resolved_construction_threshold": resolved_construction_threshold,
+            "optimal_threshold": optimal_threshold,
+            "matches_current_threshold": matches_current,
+            "threshold_guidance": (
+                "Current graph construction matches the stability optimum."
+                if matches_current
+                else "Stability optimum differs from the current constructed graph; "
+                "treat it as a rerun candidate, not a change to the fitted graph."
+            ),
             "plateaus": plateaus,
             "curve_point_count": len(thresholds),
             "curve_sample": curve_sample,

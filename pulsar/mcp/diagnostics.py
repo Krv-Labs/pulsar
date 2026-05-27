@@ -36,6 +36,7 @@ class GraphMetrics:
     component_count: int
     resolved_construction_threshold: float
     nonzero_fraction: float
+    weight_p25: float
     weight_p50: float
     weight_p95: float
     weight_distribution_sparkline: str
@@ -174,6 +175,7 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
     upper = W[np.triu_indices(n, k=1)]
     nonzero = upper[upper > 0]
     nonzero_fraction = float(len(nonzero) / len(upper)) if len(upper) > 0 else 0.0
+    weight_p25 = float(np.percentile(upper, 25)) if len(upper) > 0 else 0.0
     weight_p50 = float(np.percentile(upper, 50)) if len(upper) > 0 else 0.0
     weight_p95 = float(np.percentile(upper, 95)) if len(upper) > 0 else 0.0
     weight_dist_spark = generate_distribution_sparkline(upper) if len(upper) > 0 else ""
@@ -205,6 +207,7 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
         component_count=component_count,
         resolved_construction_threshold=model.resolved_construction_threshold,
         nonzero_fraction=nonzero_fraction,
+        weight_p25=weight_p25,
         weight_p50=weight_p50,
         weight_p95=weight_p95,
         weight_distribution_sparkline=weight_dist_spark,

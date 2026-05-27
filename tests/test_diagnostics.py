@@ -169,6 +169,12 @@ def test_nonzero_fraction_range(fitted_model):
     assert 0.0 <= result.nonzero_fraction <= 1.0
 
 
+def test_weight_percentiles_are_ordered(fitted_model):
+    """Assert diagnostics expose lower, middle, and upper weight percentiles."""
+    result = diagnose_model(fitted_model)
+    assert result.weight_p25 <= result.weight_p50 <= result.weight_p95
+
+
 def test_component_count_positive(fitted_model):
     """Assert component_count is positive."""
     result = diagnose_model(fitted_model)
@@ -339,6 +345,29 @@ def test_resolve_clusters_spectral_method(connected_spectral_model):
     assert result.method_used == "spectral"
     assert len(result.labels) == connected_spectral_model.weighted_adjacency.shape[0]
     assert len(result.labels.unique()) >= 2
+
+
+def test_resolve_clusters_spectral_honors_explicit_method_with_threshold():
+    """A positive interpretation threshold must not force component clustering."""
+    from types import SimpleNamespace
+
+    from pulsar.mcp.interpreter import resolve_clusters
+
+    weighted = np.full((30, 30), 0.4, dtype=float)
+    np.fill_diagonal(weighted, 0.0)
+    weighted[:15, :15] = 0.9
+    weighted[15:, 15:] = 0.9
+    np.fill_diagonal(weighted, 0.0)
+    model = SimpleNamespace(weighted_adjacency=weighted)
+
+    result = resolve_clusters(
+        model,
+        method="spectral",
+        interpretation_edge_weight_threshold=0.2,
+    )
+
+    assert result.method_used == "spectral"
+    assert result.interpretation_edge_weight_threshold_applied == 0.2
 
 
 def test_resolve_clusters_max_k(connected_spectral_model):
