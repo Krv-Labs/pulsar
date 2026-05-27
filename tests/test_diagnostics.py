@@ -267,6 +267,31 @@ def test_config_to_yaml_roundtrip(basic_config):
     assert roundtripped.n_reps == cfg.n_reps
 
 
+def test_load_config_defaults_construction_threshold_to_auto(basic_config):
+    """Missing construction_threshold should remain an auto-selected graph cut."""
+    basic_config.pop("cosmic_graph")
+
+    cfg = load_config(basic_config)
+
+    assert cfg.cosmic_graph.construction_threshold == "auto"
+
+
+def test_load_config_preserves_explicit_zero_construction_threshold(basic_config):
+    """A no-cutoff graph is only selected when explicitly requested."""
+    basic_config["cosmic_graph"] = {"construction_threshold": 0.0}
+
+    cfg = load_config(basic_config)
+
+    assert cfg.cosmic_graph.construction_threshold == 0.0
+
+
+def test_load_config_rejects_out_of_range_construction_threshold(basic_config):
+    basic_config["cosmic_graph"] = {"construction_threshold": 1.5}
+
+    with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+        load_config(basic_config)
+
+
 def test_load_config_rejects_legacy_cosmic_graph_threshold(basic_config):
     """Legacy threshold key must fail loudly instead of falling back to auto."""
     basic_config["cosmic_graph"] = {"threshold": 0.0}

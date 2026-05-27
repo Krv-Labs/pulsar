@@ -10,6 +10,7 @@ Sweep parameters support three specification styles:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Literal
 import numpy as np
 import yaml
@@ -21,6 +22,7 @@ LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE = (
     "Unsupported legacy key cosmic_graph.threshold. "
     "Use cosmic_graph.construction_threshold instead."
 )
+THRESHOLD_RANGE_MESSAGE = "Threshold must be finite and between 0.0 and 1.0."
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +64,15 @@ def _validate_cosmic_graph_keys(cosmic_graph: Any) -> None:
             f"Unsupported cosmic_graph key(s): {unknown}. "
             f"Valid keys: {sorted(ALLOWED_COSMIC_GRAPH_KEYS)}"
         )
+
+
+def normalize_construction_threshold(value: Any) -> float | Literal["auto"]:
+    if value == "auto":
+        return "auto"
+    threshold = float(value)
+    if not math.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
+        raise ValueError(THRESHOLD_RANGE_MESSAGE)
+    return threshold
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +180,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     cg_raw = raw.get("cosmic_graph", {})
     _validate_cosmic_graph_keys(cg_raw)
     threshold_raw = cg_raw.get("construction_threshold", "auto")
-    construction_threshold: float | Literal["auto"] = (
-        "auto" if threshold_raw == "auto" else float(threshold_raw)
-    )
+    construction_threshold = normalize_construction_threshold(threshold_raw)
     cosmic_graph = CosmicGraphSpec(
         construction_threshold=construction_threshold,
         neighborhood=str(cg_raw.get("neighborhood", "node")),

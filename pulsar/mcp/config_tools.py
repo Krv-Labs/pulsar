@@ -11,8 +11,10 @@ from pulsar.config import (
     ALLOWED_COSMIC_GRAPH_KEYS,
     LEGACY_COSMIC_GRAPH_THRESHOLD_KEY,
     LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE,
+    THRESHOLD_RANGE_MESSAGE,
     config_to_yaml,
     load_config,
+    normalize_construction_threshold,
 )
 from pulsar.mcp.errors import classify_path, mcp_error
 
@@ -575,6 +577,20 @@ def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> 
                     path=f"cosmic_graph.{key}",
                     message=f"Unsupported cosmic_graph key '{key}'",
                     expected=f"One of {sorted(_ALLOWED_COSMIC_GRAPH)}",
+                )
+            )
+    if "construction_threshold" in cosmic_graph:
+        try:
+            normalize_construction_threshold(cosmic_graph["construction_threshold"])
+        except (TypeError, ValueError):
+            issues.append(
+                ValidationIssue(
+                    path="cosmic_graph.construction_threshold",
+                    message=THRESHOLD_RANGE_MESSAGE,
+                    expected='"auto" or a finite number in [0.0, 1.0]',
+                    received=cosmic_graph["construction_threshold"],
+                    suggestion="Use 'auto' unless you have a deliberate fixed graph cutoff.",
+                    example_fix='cosmic_graph:\n  construction_threshold: "auto"',
                 )
             )
 

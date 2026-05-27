@@ -113,6 +113,60 @@ cosmic_graph:
     assert "construction_threshold" in issue["example_fix"]
 
 
+def test_validate_config_normalizes_missing_construction_threshold_to_auto(tmp_path):
+    csv_path = _write_dataset(tmp_path)
+    config_yaml = f"""run:
+  data: {csv_path}
+output:
+  n_reps: 1
+"""
+
+    payload = asyncio.run(server.validate_config(config_yaml))
+    report = json.loads(payload)
+
+    assert report["status"] == "ok"
+    normalized = yaml.safe_load(report["normalized_config_yaml"])
+    assert normalized["cosmic_graph"]["construction_threshold"] == "auto"
+
+
+def test_validate_config_preserves_explicit_zero_construction_threshold(tmp_path):
+    csv_path = _write_dataset(tmp_path)
+    config_yaml = f"""run:
+  data: {csv_path}
+cosmic_graph:
+  construction_threshold: 0.0
+output:
+  n_reps: 1
+"""
+
+    payload = asyncio.run(server.validate_config(config_yaml))
+    report = json.loads(payload)
+
+    assert report["status"] == "ok"
+    normalized = yaml.safe_load(report["normalized_config_yaml"])
+    assert normalized["cosmic_graph"]["construction_threshold"] == 0.0
+
+
+def test_validate_config_rejects_out_of_range_construction_threshold(tmp_path):
+    csv_path = _write_dataset(tmp_path)
+    config_yaml = f"""run:
+  data: {csv_path}
+cosmic_graph:
+  construction_threshold: 1.5
+output:
+  n_reps: 1
+"""
+
+    payload = asyncio.run(server.validate_config(config_yaml))
+    report = json.loads(payload)
+
+    assert report["status"] == "error"
+    assert report["error_code"] == "YAML_SCHEMA_MISMATCH"
+    issue = report["details"]["issues"][0]
+    assert issue["path"] == "cosmic_graph.construction_threshold"
+    assert "between 0.0 and 1.0" in issue["message"]
+
+
 def test_ingest_dataset_and_create_config_round_trip(tmp_path):
     csv_path = _write_dataset(tmp_path)
 
