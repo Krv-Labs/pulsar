@@ -46,24 +46,38 @@ from pulsar.mcp.interpreter import (
     signal_matrix_payload,
     FeatureEvidenceIndex,
 )
+from pulsar.mcp.diagnostics import diagnose_model
 from pulsar.mcp.report import dossier_to_html
 from pulsar.mcp.config_tools import (
     apply_overrides,
     render_validation_report,
     validate_config_yaml,
 )
-from pulsar.mcp.characterization import compact_characterization_payload
+from pulsar.mcp.characterization import (
+    characterization_payload_to_markdown,
+    compact_characterization_payload,
+    probe_columns_payload,
+    probe_columns_payload_to_markdown,
+)
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.history import summarize_history
 from pulsar.mcp.payloads import (
     build_evidence_payload,
+    build_summary_evidence_payload,
+    build_sweep_summary_payload,
+    cluster_profile_payload_to_markdown,
     cluster_result_payload,
+    feature_signal_payload_to_markdown,
     singleton_count_at_threshold,
+    summary_evidence_payload_to_markdown,
+    sweep_payload_to_markdown,
 )
 from pulsar.mcp.preprocessing import (
     _preprocessing_block_to_yaml,
-    _rationale_table,
     _recommend_preprocessing_block,
+    build_preprocessing_recommendation_payload,
+    enrich_dirty_numeric_samples,
+    preprocessing_recommendation_to_markdown,
     repair_config,
 )
 from pulsar.mcp.prompts import WORKFLOW_PROMPT
@@ -660,7 +674,7 @@ def _prepend_threshold_markdown(markdown: str, surface: dict[str, Any]) -> str:
             "",
         ]
     )
-    return f"{header}{markdown}"
+    return f"{header}\n{markdown}"
 
 
 def _pca_cache_status(
@@ -755,6 +769,14 @@ def _get_or_build_evidence_index(
     session.feature_evidence_fingerprint = fingerprint
     session.feature_evidence_cluster_meta = cluster_result_payload(cluster_result)
     return evidence_index
+
+
+def _graph_metrics_payload(model: Any) -> dict[str, Any]:
+    try:
+        return dataclasses.asdict(diagnose_model(model))
+    except (RuntimeError, AttributeError) as exc:
+        logger.warning("diagnose_model failed: %s", exc)
+        return {}
 
 
 def _require_cluster_state(
@@ -1445,20 +1467,43 @@ async def run_topological_sweep(
     config_yaml: str = "",
     dataset_id: str = "",
     save_config: bool = False,
+    detail: str = "summary",
+    response_format: str = "json",
+    include_config_yaml: bool = False,
+    component_limit: int = 20,
     ctx: Context = None,
 ) -> str:
     """
     Run the Pulsar topological sweep pipeline on a dataset.
 
-    Returns a markdown diff of parameter and metric changes compared to your previous run,
-    followed by the full execution summary.
+    Returns a compact structured execution summary by default.
 
     Args:
         config_path: Path to a params.yaml file on disk.
         config_yaml: Inline YAML string (preferred).
         dataset_id: Preferred dataset handle when data has already been ingested.
         save_config: If True, persist the resolved config YAML to disk.
+        detail: "summary" for bounded agent loops, or "full" for audit/debug.
+        response_format: "json" by default for machine-safe run IDs and metrics,
+            or "markdown" for a compact operator log.
+        include_config_yaml: Include normalized config YAML in summary output.
+        component_limit: Number of component sizes to include in summary output.
     """
+    if detail not in {"summary", "full"}:
+        return mcp_error(
+            "run_topological_sweep",
+            f"detail must be 'summary' or 'full', got '{detail}'",
+        )
+    if response_format not in {"json", "markdown"}:
+        return mcp_error(
+            "run_topological_sweep",
+            f"response_format must be 'json' or 'markdown', got '{response_format}'",
+        )
+    if component_limit < 1:
+        return mcp_error(
+            "run_topological_sweep",
+            f"component_limit must be >= 1, got '{component_limit}'",
+        )
     try:
         session = _get_session(ctx)
         if config_yaml:
@@ -1643,7 +1688,25 @@ async def run_topological_sweep(
         if persisted_dataset_id:
             response["dataset_id"] = persisted_dataset_id
 
-        return json.dumps(response, indent=2)
+        if detail == "full":
+            response["detail"] = "full"
+            if response_format == "markdown":
+                summary_payload = build_sweep_summary_payload(
+                    response,
+                    component_limit=component_limit,
+                    include_config_yaml=include_config_yaml,
+                )
+                return sweep_payload_to_markdown(summary_payload)
+            return json.dumps(response, indent=2)
+
+        summary_payload = build_sweep_summary_payload(
+            response,
+            component_limit=component_limit,
+            include_config_yaml=include_config_yaml,
+        )
+        if response_format == "markdown":
+            return sweep_payload_to_markdown(summary_payload)
+        return json.dumps(summary_payload, indent=2)
 
     except FileNotFoundError:
         return path_access_error(
@@ -1670,7 +1733,7 @@ async def generate_cluster_dossier(
     detail: str = "summary",
     max_clusters: int = 8,
     feature_preview_limit: int = 5,
-    response_format: str = "json",
+    response_format: str = "markdown",
     format: str = "",
     exclude_columns: list[str] | None = None,
     ctx: Context = None,
@@ -1706,8 +1769,8 @@ async def generate_cluster_dossier(
         feature_preview_limit: In summary mode, return at most this many mixed
             numeric/categorical feature hints per cluster. Use get_cluster_profile
             for detailed evidence rows.
-        response_format: "json" for structured payloads or "markdown" for
-            narrative output only.
+        response_format: "markdown" for the default compact narrative report,
+            or "json" for structured payloads.
         format: Legacy alias. "full" maps to detail="full"; "json" and
             "markdown" map to response_format.
         exclude_columns: Optional list of columns to exclude from the report.
@@ -1777,18 +1840,53 @@ async def generate_cluster_dossier(
             exclude_columns=exclude_columns,
         )
 
+        cluster_meta = cluster_result_payload(result)
+        if detail == "summary":
+            payload = build_summary_evidence_payload(
+                evidence_index,
+                cluster_meta,
+                _graph_metrics_payload(session.model),
+                max_clusters=max_clusters,
+                feature_preview_limit=feature_preview_limit,
+            )
+            payload["construction_threshold"] = construction_threshold
+            payload["interpretation_edge_weight_threshold"] = (
+                resolved_interpretation_threshold
+            )
+            payload["threshold_inherited"] = threshold_inherited
+            payload["threshold_source"] = threshold_source
+            payload["threshold_surface"] = threshold_surface
+            payload["recommended_next_tools"] = [
+                "get_cluster_profile",
+                "get_feature_signal",
+                "get_cluster_signal_matrix",
+                "compare_clusters_tool",
+            ]
+            payload["payload_guidance"] = (
+                "Default summary output is a compact cluster map. Use "
+                "response_format='json' for structured fields, or targeted tools "
+                "for cluster/feature evidence. Set detail='standard' or 'full' "
+                "only after narrowing to specific clusters/features or for "
+                "explicit audit/debugging."
+            )
+            if response_format == "markdown":
+                return _prepend_threshold_markdown(
+                    summary_evidence_payload_to_markdown(payload),
+                    threshold_surface,
+                )
+            return json.dumps(
+                payload,
+                separators=(",", ":") if len(payload["clusters"]) > 10 else None,
+                indent=None if len(payload["clusters"]) > 10 else 2,
+            )
+
         dossier = build_dossier(
             session.model,
             session.data,
             result.labels,
-            detail=(
-                "standard"
-                if response_format == "markdown" and detail == "summary"
-                else detail
-            ),
+            detail=detail,
             evidence_index=evidence_index,
         )
-        cluster_meta = cluster_result_payload(result)
         if response_format == "markdown":
             return _prepend_threshold_markdown(
                 dossier_to_markdown(dossier),
@@ -1852,7 +1950,7 @@ async def get_cluster_profile(
     cluster_id: int,
     detail: str = "standard",
     max_features: int = 16,
-    response_format: str = "json",
+    response_format: str = "markdown",
     ctx: Context = None,
 ) -> str:
     """Return targeted evidence for one cluster from the cached dossier state."""
@@ -1883,27 +1981,7 @@ async def get_cluster_profile(
             ),
         }
         if response_format == "markdown":
-            cluster = payload["cluster"]
-            lines = [
-                f"## Cluster {cluster['cluster_id']}: {cluster['semantic_name']}",
-                "",
-                f"- Size: {cluster['size']} ({cluster['size_pct']:.1f}%)",
-                f"- Topological neighbors: {', '.join(str(neighbor['cluster_id']) for neighbor in cluster['topological_neighbors']) or 'None'}",
-                f"- Feature rows: {cluster['features_returned']['total']} returned, {cluster['features_omitted']['total']} omitted",
-                "",
-                "### Numeric signals",
-            ]
-            for row in cluster["numeric_features"]:
-                lines.append(
-                    f"- {row['column']}: {row.get('direction', 'mixed')} signal ({row['signal_tier']}, score={row['aggregate_score']:.3f})"
-                )
-            lines.append("")
-            lines.append("### Categorical signals")
-            for row in cluster["categorical_features"]:
-                lines.append(
-                    f"- {row['column']}={row['value']}: {row['signal_tier']} signal (lift={row.get('lift', 0.0):.2f}, score={row['aggregate_score']:.3f})"
-                )
-            return "\n".join(lines)
+            return cluster_profile_payload_to_markdown(payload)
         return json.dumps(payload, indent=2)
     except KeyError:
         return mcp_error(
@@ -1915,13 +1993,13 @@ async def get_cluster_profile(
     except Exception as e:
         return mcp_error("get_cluster_profile", str(e))
 
-
 @mcp.tool()
 async def get_feature_signal(
     feature_names: list[str],
     cluster_ids: list[int] | None = None,
     detail: str = "summary",
     max_clusters: int = 8,
+    response_format: str = "markdown",
     ctx: Context = None,
 ) -> str:
     """Return cross-cluster evidence for specific feature columns.
@@ -1935,11 +2013,18 @@ async def get_feature_signal(
             adds context-tier rows in compact form, ``full`` returns every metric.
         max_clusters: Cap on the number of clusters returned when ``cluster_ids``
             is omitted. Ignored when ``cluster_ids`` is provided.
+        response_format: "markdown" for the default compact report, or "json"
+            for structured payloads.
     """
     if detail not in {"summary", "standard", "full"}:
         return mcp_error(
             "get_feature_signal",
             f"detail must be 'summary', 'standard', or 'full', got '{detail}'",
+        )
+    if response_format not in {"json", "markdown"}:
+        return mcp_error(
+            "get_feature_signal",
+            f"response_format must be 'json' or 'markdown', got '{response_format}'",
         )
     if max_clusters < 1:
         return mcp_error(
@@ -1960,6 +2045,8 @@ async def get_feature_signal(
                 max_clusters=max_clusters,
             ),
         }
+        if response_format == "markdown":
+            return feature_signal_payload_to_markdown(payload["signals"])
         return json.dumps(payload, indent=2)
     except Exception as e:
         return mcp_error("get_feature_signal", str(e))
@@ -2002,6 +2089,8 @@ async def get_cluster_signal_matrix(
                 return_markdown=return_markdown,
             ),
         }
+        if return_markdown:
+            return payload["signal_matrix"]["markdown_report"]
         return json.dumps(payload, indent=2)
     except Exception as e:
         return mcp_error("get_cluster_signal_matrix", str(e))
@@ -2076,12 +2165,18 @@ async def export_labeled_data(
 async def characterize_dataset(
     csv_path: str = "",
     dataset_id: str = "",
+    response_format: str = "markdown",
     ctx: Context = None,
 ) -> str:
     """
     Probes dataset geometry to return raw facts (N, features, variance curve, k-NN mean).
     Prefer dataset_id after ingest. Use csv_path only for host-visible CSV or Parquet files.
     """
+    if response_format not in {"json", "markdown"}:
+        return mcp_error(
+            "characterize_dataset",
+            f"response_format must be 'json' or 'markdown', got '{response_format}'",
+        )
     try:
         from pulsar.analysis.characterization import characterize_dataset as _char
 
@@ -2104,6 +2199,8 @@ async def characterize_dataset(
 
         result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
         payload = compact_characterization_payload(dataclasses.asdict(result))
+        if response_format == "markdown":
+            return characterization_payload_to_markdown(payload)
         return json.dumps(payload, indent=2)
     except FileNotFoundError:
         return path_access_error(
@@ -2406,6 +2503,9 @@ async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
 async def recommend_preprocessing(
     dataset_geometry: str = "",
     dataset_id: str = "",
+    detail: str = "summary",
+    response_format: str = "markdown",
+    rationale_limit: int = 20,
     ctx: Context = None,
 ) -> str:
     """
@@ -2416,16 +2516,39 @@ async def recommend_preprocessing(
         dataset_geometry: Legacy full geometry JSON with column_profiles.
         dataset_id: Preferred dataset handle. When provided, characterizes
             the dataset automatically (dataset_geometry is ignored).
+        detail: "summary" for capped rationale, or "full" for complete audit.
+        response_format: "markdown" for default agent review, or "json".
+        rationale_limit: Max rationale rows in summary mode.
 
     Returns:
-        JSON with preprocessing_yaml, per-column rationale, and expansion estimate.
+        Markdown or JSON with preprocessing_yaml, rationale summary, and expansion estimate.
     """
+    if detail not in {"summary", "full"}:
+        return mcp_error(
+            "recommend_preprocessing",
+            f"detail must be 'summary' or 'full', got '{detail}'",
+        )
+    if response_format not in {"json", "markdown"}:
+        return mcp_error(
+            "recommend_preprocessing",
+            f"response_format must be 'json' or 'markdown', got '{response_format}'",
+        )
+    if rationale_limit < 1:
+        return mcp_error(
+            "recommend_preprocessing",
+            f"rationale_limit must be >= 1, got '{rationale_limit}'",
+        )
     try:
+        df = None
         if dataset_id:
             from pulsar.analysis.characterization import characterize_dataset as _char
 
-            dataset_path = _resolve_dataset_path(dataset_id)
-            result = await asyncio.to_thread(_char, dataset_path)
+            session = _get_session(ctx)
+            df, normalized_path = await _load_session_dataframe(
+                session,
+                dataset_id=dataset_id,
+            )
+            result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
             geo = dataclasses.asdict(result)
         elif dataset_geometry:
             geo = json.loads(dataset_geometry)
@@ -2448,6 +2571,9 @@ async def recommend_preprocessing(
                 agent_action="Pass dataset_id instead of compact characterize_dataset output.",
             )
 
+        column_profiles, dirty_numeric_detection = enrich_dirty_numeric_samples(
+            column_profiles, df
+        )
         drop, impute, encode, rationale = _recommend_preprocessing_block(
             column_profiles, n_samples
         )
@@ -2466,19 +2592,21 @@ async def recommend_preprocessing(
             if name in encode:
                 expansion_estimate += cp.get("n_unique", 2)
 
-        return json.dumps(
-            {
-                "status": "ok",
-                "preprocessing_yaml": preprocessing_yaml,
-                "rationale": [
-                    {"column": col, "decision": dec, "reason": reason}
-                    for col, dec, reason in rationale
-                ],
-                "expansion_estimate": expansion_estimate,
-                "markdown_summary": _rationale_table(rationale),
-            },
-            indent=2,
+        payload = build_preprocessing_recommendation_payload(
+            drop=drop,
+            impute=impute,
+            encode=encode,
+            rationale=rationale,
+            column_profiles=column_profiles,
+            preprocessing_yaml=preprocessing_yaml,
+            expansion_estimate=expansion_estimate,
+            dirty_numeric_detection=dirty_numeric_detection,
+            detail=detail,
+            rationale_limit=rationale_limit,
         )
+        if response_format == "markdown":
+            return preprocessing_recommendation_to_markdown(payload)
+        return json.dumps(payload, indent=2)
 
     except Exception as e:
         logger.error(f"Error in recommend_preprocessing: {e}")
@@ -2775,6 +2903,7 @@ async def export_html_report(
 async def probe_columns(
     dataset_id: str,
     columns: list[str],
+    response_format: str = "markdown",
     ctx: Context = None,
 ) -> str:
     """
@@ -2788,6 +2917,11 @@ async def probe_columns(
     """
     from pulsar.analysis.characterization import profile_column_details
 
+    if response_format not in {"json", "markdown"}:
+        return mcp_error(
+            "probe_columns",
+            f"response_format must be 'json' or 'markdown', got '{response_format}'",
+        )
     if len(columns) > 20:
         return mcp_error(
             "probe_columns", "Too many columns requested. Max 20 at a time."
@@ -2803,12 +2937,17 @@ async def probe_columns(
 
     try:
         profiles = []
+        missing_columns = []
         for col in columns:
             if col not in df.columns:
+                missing_columns.append(col)
                 continue
             profiles.append(dataclasses.asdict(profile_column_details(df, col)))
 
-        return json.dumps({"status": "ok", "column_profiles": profiles}, indent=2)
+        payload = probe_columns_payload(profiles, columns, missing_columns)
+        if response_format == "markdown":
+            return probe_columns_payload_to_markdown(payload)
+        return json.dumps(payload, indent=2)
     except Exception as e:
         return mcp_error("probe_columns", str(e))
 

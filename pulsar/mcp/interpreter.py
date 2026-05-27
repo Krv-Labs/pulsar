@@ -1080,6 +1080,7 @@ def _assemble_signal_matrix(
                 "cluster_id": cluster_id,
                 "values": {
                     column: {
+                        "value": numeric_map[column]["z_score"],
                         "z_score": numeric_map[column]["z_score"],
                         "aggregate_score": numeric_map[column]["aggregate_score"],
                         "signal_tier": numeric_map[column]["signal_tier"],
@@ -1094,6 +1095,9 @@ def _assemble_signal_matrix(
                 "cluster_id": cluster_id,
                 "values": {
                     f"{column}={value}": {
+                        "value": categorical_map[(column, value)][
+                            "in_cluster_prevalence"
+                        ],
                         "prevalence": categorical_map[(column, value)][
                             "in_cluster_prevalence"
                         ],
@@ -1637,6 +1641,49 @@ def signal_matrix_payload(
 
     numeric_rows = []
     categorical_rows = []
+    numeric_feature_scores: dict[str, float] = {}
+    categorical_feature_scores: dict[str, float] = {}
+
+    for cid in kept:
+        for row in numeric_by_cluster.get(cid, []):
+            for key, value in (row.get("values", {}) or {}).items():
+                if isinstance(value, dict) and value.get("signal_tier") not in allowed_tiers:
+                    continue
+                score = (
+                    safe_float(value.get("aggregate_score"))
+                    if isinstance(value, dict)
+                    else safe_float(value)
+                )
+                numeric_feature_scores[key] = max(
+                    numeric_feature_scores.get(key, 0.0), abs(score)
+                )
+        for row in categorical_by_cluster.get(cid, []):
+            for key, value in (row.get("values", {}) or {}).items():
+                if isinstance(value, dict) and value.get("signal_tier") not in allowed_tiers:
+                    continue
+                score = (
+                    safe_float(value.get("aggregate_score"))
+                    if isinstance(value, dict)
+                    else safe_float(value)
+                )
+                categorical_feature_scores[key] = max(
+                    categorical_feature_scores.get(key, 0.0), abs(score)
+                )
+
+    selected_numeric_features = _rank_matrix_features(
+        numeric_feature_scores, _MAX_SIGNAL_MATRIX_NUMERIC
+    )
+    selected_categorical_features = _rank_matrix_features(
+        categorical_feature_scores, _MAX_SIGNAL_MATRIX_CATEGORICAL
+    )
+    selected_numeric_set = set(selected_numeric_features)
+    selected_categorical_set = set(selected_categorical_features)
+    numeric_features_omitted = max(
+        len(numeric_feature_scores) - len(selected_numeric_features), 0
+    )
+    categorical_features_omitted = max(
+        len(categorical_feature_scores) - len(selected_categorical_features), 0
+    )
 
     for cid in kept:
         for row in numeric_by_cluster.get(cid, []):
@@ -1644,7 +1691,8 @@ def signal_matrix_payload(
             filtered_vals = {
                 k: safe_float(v.get("value")) if isinstance(v, dict) else safe_float(v)
                 for k, v in raw_vals.items()
-                if not isinstance(v, dict) or v.get("signal_tier") in allowed_tiers
+                if k in selected_numeric_set
+                and (not isinstance(v, dict) or v.get("signal_tier") in allowed_tiers)
             }
             if filtered_vals:
                 numeric_rows.append({"cluster_id": cid, "values": filtered_vals})
@@ -1654,7 +1702,8 @@ def signal_matrix_payload(
             filtered_vals = {
                 k: v.get("value") if isinstance(v, dict) else v
                 for k, v in raw_vals.items()
-                if not isinstance(v, dict) or v.get("signal_tier") in allowed_tiers
+                if k in selected_categorical_set
+                and (not isinstance(v, dict) or v.get("signal_tier") in allowed_tiers)
             }
             if filtered_vals:
                 categorical_rows.append({"cluster_id": cid, "values": filtered_vals})
@@ -1666,11 +1715,22 @@ def signal_matrix_payload(
         report = io.StringIO()
         report.write("## Topological Signal Matrix\n\n")
         report.write("### Telemetry\n")
-        report.write(f"- **Clusters Returned**: {len(kept)}\n")
-        report.write(f"- **Clusters Omitted**: {len(omitted_ids)}\n")
+        report.write(f"- Clusters returned: {len(kept)}\n")
+        report.write(f"- Clusters omitted: {len(omitted_ids)}\n")
+        report.write(
+            f"- Numeric columns shown: {len(selected_numeric_features)}"
+            f" ({numeric_features_omitted} omitted)\n"
+        )
+        report.write(
+            f"- Categorical values shown: {len(selected_categorical_features)}"
+            f" ({categorical_features_omitted} omitted)\n"
+        )
+        report.write(
+            "- Cell meanings: numeric = z-score; categorical = in-cluster prevalence percent.\n"
+        )
 
         if omitted_telemetry:
-            report.write("#### Omitted Clusters Detail:\n")
+            report.write("\n#### Omitted Clusters\n")
             for item in omitted_telemetry:
                 score = item["max_signal"]
                 rec = (
@@ -1679,40 +1739,75 @@ def signal_matrix_payload(
                     else "Low Signal: Ignorable"
                 )
                 report.write(
-                    f"  - **Cluster ID {item['cluster_id']}** (Max Signal: {score}) — *{rec}*\n"
+                    f"- Cluster {item['cluster_id']}: max signal {score}; {rec}\n"
                 )
         report.write("\n")
 
         report.write("### Numeric Feature Matrix\n")
-        report.write(_render_markdown_table(numeric_rows) + "\n\n")
+        report.write(
+            _render_markdown_table(
+                numeric_rows, feature_order=selected_numeric_features
+            )
+            + "\n\n"
+        )
 
         report.write("### Categorical Feature Matrix\n")
-        report.write(_render_markdown_table(categorical_rows) + "\n")
+        report.write(
+            _render_markdown_table(
+                categorical_rows, feature_order=selected_categorical_features
+            )
+            + "\n"
+        )
 
         return {
             "clusters_returned": len(kept),
             "clusters_omitted": len(omitted_ids),
             "omitted_clusters": omitted_telemetry,
+            "numeric_features_returned": len(selected_numeric_features),
+            "numeric_features_omitted": numeric_features_omitted,
+            "categorical_features_returned": len(selected_categorical_features),
+            "categorical_features_omitted": categorical_features_omitted,
             "markdown_report": report.getvalue(),
         }
 
     return {
-        "numeric_columns": matrix.get("numeric_columns", []),
-        "categorical_values": matrix.get("categorical_values", {}),
+        "numeric_columns": selected_numeric_features,
+        "categorical_values": [
+            item
+            for item in matrix.get("categorical_values", [])
+            if f"{item.get('column')}={item.get('value')}" in selected_categorical_set
+        ],
         "clusters_returned": len(kept),
         "clusters_omitted": len(omitted_ids),
         "omitted_clusters": omitted_telemetry,
+        "numeric_features_omitted": numeric_features_omitted,
+        "categorical_features_omitted": categorical_features_omitted,
         "numeric_rows": numeric_rows,
         "categorical_rows": categorical_rows,
     }
 
 
-def _render_markdown_table(rows: list[dict[str, Any]]) -> str:
+def _rank_matrix_features(scores: dict[str, float], limit: int) -> list[str]:
+    return [
+        feature
+        for feature, _score in sorted(
+            scores.items(), key=lambda item: (-item[1], item[0])
+        )[:limit]
+    ]
+
+
+def _render_markdown_table(
+    rows: list[dict[str, Any]], *, feature_order: list[str] | None = None
+) -> str:
     if not rows:
         return "*No signals found in the selected tiers.*"
 
-    # Gather all unique feature keys across rows to build column headers
-    all_features = sorted(list({k for r in rows for k in r["values"].keys()}))
+    available = {k for r in rows for k in r["values"].keys()}
+    all_features = (
+        [feature for feature in feature_order if feature in available]
+        if feature_order is not None
+        else sorted(available)
+    )
     if not all_features:
         return "*No features available in selected tiers.*"
 
