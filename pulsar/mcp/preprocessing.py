@@ -18,6 +18,9 @@ from pulsar.mcp.errors import mcp_error
 
 logger = logging.getLogger(__name__)
 
+_DIRTY_NUMERIC_SAMPLE_SIZE = 10
+_PREPROCESSING_EXPANSION_WARNING_THRESHOLD = 50
+
 
 # ---------------------------------------------------------------------------
 # Column profile normalisation
@@ -27,7 +30,9 @@ logger = logging.getLogger(__name__)
 def _normalize_profile(cp: Any) -> dict[str, Any]:
     """Return cp as a plain dict regardless of whether it is a dict or dataclass."""
     if isinstance(cp, dict):
-        return cp
+        out = dict(cp)
+        out.setdefault("sample_values", [])
+        return out
     return {
         "name": cp.name,
         "is_numeric": cp.is_numeric,
@@ -35,6 +40,41 @@ def _normalize_profile(cp: Any) -> dict[str, Any]:
         "n_missing": cp.n_missing,
         "missing_pct": cp.missing_pct,
         "sample_values": cp.sample_values,
+    }
+
+
+def enrich_dirty_numeric_samples(
+    column_profiles: list[Any],
+    dataframe: Any | None,
+    *,
+    sample_size: int = _DIRTY_NUMERIC_SAMPLE_SIZE,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Add bounded object-column samples so dirty-numeric rules can run."""
+    profiles = [_normalize_profile(cp) for cp in column_profiles]
+    object_columns = [
+        str(cp["name"])
+        for cp in profiles
+        if not cp.get("is_numeric") and not cp.get("sample_values")
+    ]
+    if dataframe is None:
+        return profiles, {
+            "status": "not_available" if object_columns else "enabled",
+            "object_columns_sampled": 0,
+            "sample_size_per_column": sample_size,
+        }
+
+    sampled = 0
+    for cp in profiles:
+        name = cp["name"]
+        if cp.get("is_numeric") or cp.get("sample_values") or name not in dataframe:
+            continue
+        values = dataframe[name].dropna().head(sample_size * 1000).unique()[:sample_size]
+        cp["sample_values"] = [str(value) for value in values]
+        sampled += 1
+    return profiles, {
+        "status": "enabled",
+        "object_columns_sampled": sampled,
+        "sample_size_per_column": sample_size,
     }
 
 
@@ -288,12 +328,211 @@ def _preprocessing_block_to_yaml(
     return "\n".join(lines)
 
 
-def _rationale_table(rows: list[tuple[str, str, str]]) -> str:
-    """Render rationale rows as a markdown table."""
-    lines = ["| Column | Decision | Rationale |", "|---|---|---|"]
-    for col, decision, reason in rows:
-        lines.append(f"| `{col}` | {decision} | {reason} |")
-    return "\n".join(lines)
+def build_preprocessing_recommendation_payload(
+    *,
+    drop: list[str],
+    impute: dict[str, Any],
+    encode: dict[str, Any],
+    rationale: list[tuple[str, str, str]],
+    column_profiles: list[Any],
+    preprocessing_yaml: str,
+    expansion_estimate: int,
+    dirty_numeric_detection: dict[str, Any],
+    detail: str = "summary",
+    rationale_limit: int = 20,
+) -> dict[str, Any]:
+    rows = [
+        {"column": col, "decision": decision, "reason": reason}
+        for col, decision, reason in rationale
+    ]
+    counts = _decision_counts(rows)
+    rationale_preview = rows[:rationale_limit]
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "detail": detail,
+        "preprocessing_yaml": preprocessing_yaml,
+        "decision_counts": counts,
+        "expansion_estimate": expansion_estimate,
+        "warnings": _preprocessing_warnings(
+            drop=drop,
+            rationale_rows=rows,
+            expansion_estimate=expansion_estimate,
+            dirty_numeric_detection=dirty_numeric_detection,
+        ),
+        "dirty_numeric_detection": dirty_numeric_detection,
+        "actioned_columns_preview": {
+            "drop": drop[:rationale_limit],
+            "impute": list(impute)[:rationale_limit],
+            "encode": list(encode)[:rationale_limit],
+        },
+        "rationale_preview": rationale_preview,
+        "rationale_omitted": max(len(rows) - len(rationale_preview), 0),
+        "recommended_next_tools": [
+            "create_config",
+            "validate_config",
+            "probe_columns",
+        ],
+    }
+    if detail == "full":
+        payload["rationale"] = rows
+        payload["column_decisions"] = _column_decisions(rows)
+        payload["profile_source"] = {
+            "columns_profiled": len(column_profiles),
+            "dirty_numeric_detection": dirty_numeric_detection,
+        }
+    return payload
+
+
+def preprocessing_recommendation_to_markdown(payload: dict[str, Any]) -> str:
+    counts = payload.get("decision_counts", {})
+    lines = [
+        "# Preprocessing Recommendation",
+        "",
+        f"- Detail: {payload.get('detail', 'summary')}",
+        f"- Drop: {counts.get('drop', 0)}",
+        f"- Impute: {counts.get('impute', 0)}",
+        f"- Encode: {counts.get('encode', 0)}",
+        f"- No action: {counts.get('no_action', 0)}",
+        f"- Expansion estimate: {payload.get('expansion_estimate', 0)}",
+        "",
+    ]
+    warnings = payload.get("warnings", [])
+    if warnings:
+        lines.extend(["## Warnings", ""])
+        for warning in warnings:
+            lines.append(f"- `{warning['code']}`: {warning['message']}")
+        lines.append("")
+    dirty = payload.get("dirty_numeric_detection", {})
+    lines.extend(
+        [
+            "## Dirty Numeric Detection",
+            "",
+            f"- Status: {dirty.get('status', 'unknown')}",
+            f"- Object columns sampled: {dirty.get('object_columns_sampled', 0)}",
+            f"- Sample size per column: {dirty.get('sample_size_per_column', 0)}",
+            "",
+            "## Recommended YAML",
+            "",
+            "```yaml",
+            payload.get("preprocessing_yaml", ""),
+            "```",
+            "",
+            "## Rationale Preview",
+            "",
+        ]
+    )
+    rows = payload.get("rationale_preview", [])
+    if rows:
+        lines.extend(["| Column | Decision | Rationale |", "|---|---|---|"])
+        for row in rows:
+            lines.append(
+                f"| `{row['column']}` | {row['decision']} | {row['reason']} |"
+            )
+    else:
+        lines.append("- No rationale rows.")
+    omitted = payload.get("rationale_omitted", 0)
+    if omitted:
+        lines.append(f"\n{omitted} rationale rows omitted. Use `detail='full'` for audit.")
+    lines.extend(
+        [
+            "",
+            "## Next Tools",
+            "",
+            "- `create_config` to build a calibrated config with these preprocessing choices.",
+            "- `validate_config` to check schema and preprocessing compatibility.",
+            "- `probe_columns` to inspect suspicious columns before accepting drops/encodings.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def _decision_counts(rows: list[dict[str, str]]) -> dict[str, int]:
+    return {
+        "drop": sum(1 for row in rows if row["decision"] == "drop"),
+        "impute": sum(1 for row in rows if row["decision"].startswith("impute")),
+        "encode": sum(1 for row in rows if row["decision"].startswith("encode")),
+        "no_action": sum(1 for row in rows if row["decision"] == "no action"),
+    }
+
+
+def _column_decisions(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
+    return {
+        row["column"]: {"decision": row["decision"], "reason": row["reason"]}
+        for row in rows
+    }
+
+
+def _preprocessing_warnings(
+    *,
+    drop: list[str],
+    rationale_rows: list[dict[str, str]],
+    expansion_estimate: int,
+    dirty_numeric_detection: dict[str, Any],
+) -> list[dict[str, str]]:
+    warnings: list[dict[str, str]] = []
+    if expansion_estimate > _PREPROCESSING_EXPANSION_WARNING_THRESHOLD:
+        warnings.append(
+            {
+                "code": "HIGH_DIMENSION_EXPANSION",
+                "severity": "warning",
+                "message": (
+                    f"One-hot encoding may add {expansion_estimate} dimensions; "
+                    "high expansion can distort Euclidean topology."
+                ),
+            }
+        )
+    high_cardinality_drops = [
+        row["column"]
+        for row in rationale_rows
+        if row["column"] in drop
+        and ("ID-like" in row["reason"] or "categories would add" in row["reason"])
+    ]
+    if high_cardinality_drops:
+        warnings.append(
+            {
+                "code": "DROPPED_HIGH_CARDINALITY_COLUMNS",
+                "severity": "info",
+                "message": (
+                    f"Dropped {len(high_cardinality_drops)} high-cardinality column(s): "
+                    + ", ".join(high_cardinality_drops[:5])
+                ),
+            }
+        )
+    all_missing = [
+        row["column"]
+        for row in rationale_rows
+        if row["column"] in drop and "All values are missing" in row["reason"]
+    ]
+    if all_missing:
+        warnings.append(
+            {
+                "code": "ALL_MISSING_COLUMNS_DROPPED",
+                "severity": "info",
+                "message": f"Dropped {len(all_missing)} all-missing column(s).",
+            }
+        )
+    dirty_numeric = [
+        row["column"] for row in rationale_rows if "Dirty numeric" in row["reason"]
+    ]
+    if dirty_numeric:
+        warnings.append(
+            {
+                "code": "DIRTY_NUMERIC_DETECTED",
+                "severity": "warning",
+                "message": (
+                    f"Detected {len(dirty_numeric)} object column(s) with numeric-like values."
+                ),
+            }
+        )
+    if dirty_numeric_detection.get("status") == "not_available":
+        warnings.append(
+            {
+                "code": "DIRTY_NUMERIC_SAMPLING_UNAVAILABLE",
+                "severity": "warning",
+                "message": "Object-column samples were unavailable; dirty numeric detection may be incomplete.",
+            }
+        )
+    return warnings
 
 
 # ---------------------------------------------------------------------------
