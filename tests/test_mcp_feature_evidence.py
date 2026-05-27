@@ -140,18 +140,30 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     session.latest_run_id = "run_synthetic"
 
     summary_text = asyncio.run(
-        server.generate_cluster_dossier(method="auto", detail="summary")
+        server.generate_cluster_dossier(
+            method="auto", detail="summary", response_format="json"
+        )
     )
     summary = json.loads(summary_text)
     full_text = asyncio.run(
-        server.generate_cluster_dossier(method="auto", detail="full")
+        server.generate_cluster_dossier(
+            method="auto", detail="full", response_format="json"
+        )
     )
     full = json.loads(full_text)
-    cluster_profile = json.loads(asyncio.run(server.get_cluster_profile(0)))
-    feature_payload = json.loads(
-        asyncio.run(server.get_feature_signal(["f1", "segment=alpha"]))
+    cluster_profile = json.loads(
+        asyncio.run(server.get_cluster_profile(0, response_format="json"))
     )
-    matrix_payload = json.loads(asyncio.run(server.get_cluster_signal_matrix(return_markdown=False)))
+    feature_payload = json.loads(
+        asyncio.run(
+            server.get_feature_signal(
+                ["f1", "segment=alpha"], response_format="json"
+            )
+        )
+    )
+    matrix_payload = json.loads(
+        asyncio.run(server.get_cluster_signal_matrix(return_markdown=False))
+    )
 
     assert summary["status"] == "ok"
     assert summary["cluster_result"]["method_used"] in {
@@ -216,7 +228,10 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     full_feature_payload = json.loads(
         asyncio.run(
             server.get_feature_signal(
-                ["f1", "segment=alpha"], detail="full", max_clusters=50
+                ["f1", "segment=alpha"],
+                detail="full",
+                max_clusters=50,
+                response_format="json",
             )
         )
     )
@@ -234,6 +249,87 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert "clusters_returned" in matrix_payload["signal_matrix"]
 
 
+def test_generate_cluster_dossier_defaults_to_compact_markdown_summary():
+    server._sessions.clear()
+    session = server._get_session(None)
+    session.model = _make_disconnected_model()
+    session.data = _make_small_server_dataset()
+    session.latest_run_id = "run_markdown_default"
+
+    markdown = asyncio.run(server.generate_cluster_dossier(method="auto"))
+
+    assert "# Threshold Surface" in markdown
+    assert "# Cluster Dossier Summary" in markdown
+    assert "## Next Tools" in markdown
+    assert "Central Representative Rows" not in markdown
+    assert "Top Defining Numeric Features" not in markdown
+
+
+def test_cluster_signal_matrix_tool_defaults_to_markdown():
+    server._sessions.clear()
+    session = server._get_session(None)
+    session.model = _make_disconnected_model()
+    session.data = _make_small_server_dataset()
+    session.latest_run_id = "run_matrix_markdown_default"
+
+    asyncio.run(
+        server.generate_cluster_dossier(
+            method="auto", detail="summary", response_format="json"
+        )
+    )
+    markdown = asyncio.run(server.get_cluster_signal_matrix())
+
+    assert "## Topological Signal Matrix" in markdown
+    assert "### Numeric Feature Matrix" in markdown
+    assert not markdown.lstrip().startswith("{")
+
+
+def test_profile_and_feature_signal_tools_default_to_markdown():
+    server._sessions.clear()
+    session = server._get_session(None)
+    session.model = _make_disconnected_model()
+    session.data = _make_small_server_dataset()
+    session.latest_run_id = "run_followup_markdown_defaults"
+
+    asyncio.run(
+        server.generate_cluster_dossier(
+            method="auto", detail="summary", response_format="json"
+        )
+    )
+
+    profile_markdown = asyncio.run(server.get_cluster_profile(0))
+    feature_markdown = asyncio.run(server.get_feature_signal(["f1"]))
+
+    assert "# Cluster Profile" in profile_markdown
+    assert "### Next Tools" in profile_markdown
+    assert not profile_markdown.lstrip().startswith("{")
+    assert "# Feature Signal Summary" in feature_markdown
+    assert "## Cluster" in feature_markdown
+    assert not feature_markdown.lstrip().startswith("{")
+
+
+def test_signal_matrix_caps_wide_feature_columns():
+    server._sessions.clear()
+    session = server._get_session(None)
+    data = _make_wide_server_dataset()
+    session.model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    session.data = data
+    session.latest_run_id = "run_matrix_feature_cap"
+
+    asyncio.run(
+        server.generate_cluster_dossier(
+            method="auto", detail="summary", response_format="json"
+        )
+    )
+    payload = json.loads(
+        asyncio.run(server.get_cluster_signal_matrix(return_markdown=False))
+    )
+    matrix = payload["signal_matrix"]
+
+    assert len(matrix["numeric_columns"]) <= 10
+    assert matrix["numeric_features_omitted"] > 0
+
+
 def test_get_cluster_profile_caps_wide_dataset_feature_output():
     server._sessions.clear()
     session = server._get_session(None)
@@ -242,10 +338,24 @@ def test_get_cluster_profile_caps_wide_dataset_feature_output():
     session.data = data
     session.latest_run_id = "run_wide_synthetic"
 
-    asyncio.run(server.generate_cluster_dossier(method="auto", detail="summary"))
-    default_capped = json.loads(asyncio.run(server.get_cluster_profile(0)))
-    capped = json.loads(asyncio.run(server.get_cluster_profile(0, max_features=7)))
-    uncapped = json.loads(asyncio.run(server.get_cluster_profile(0, max_features=200)))
+    asyncio.run(
+        server.generate_cluster_dossier(
+            method="auto", detail="summary", response_format="json"
+        )
+    )
+    default_capped = json.loads(
+        asyncio.run(server.get_cluster_profile(0, response_format="json"))
+    )
+    capped = json.loads(
+        asyncio.run(
+            server.get_cluster_profile(0, max_features=7, response_format="json")
+        )
+    )
+    uncapped = json.loads(
+        asyncio.run(
+            server.get_cluster_profile(0, max_features=200, response_format="json")
+        )
+    )
 
     cluster = capped["cluster"]
     returned = cluster["numeric_features"] + cluster["categorical_features"]
@@ -269,6 +379,29 @@ def test_get_cluster_profile_caps_wide_dataset_feature_output():
     assert cluster["features_returned"]["total"] == 7
     assert cluster["features_omitted"]["total"] > 0
     assert returned_keys == expected_keys
+
+
+def test_signal_matrix_payload_uses_real_assembled_cell_values():
+    data, clusters = _make_multifactor_dataset()
+    model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    evidence = build_feature_evidence_index(model, data, clusters)
+
+    payload = signal_matrix_payload(evidence, max_clusters=2, return_markdown=False)
+
+    numeric_values = [
+        value
+        for row in payload["numeric_rows"]
+        for value in row["values"].values()
+    ]
+    categorical_values = [
+        value
+        for row in payload["categorical_rows"]
+        for value in row["values"].values()
+    ]
+
+    assert any(abs(value) > 0 for value in numeric_values)
+    assert categorical_values
+    assert all(value is not None for value in categorical_values)
 
 
 def test_signal_matrix_cluster_cap_ranks_categorical_signal():
@@ -346,6 +479,7 @@ def test_generate_cluster_dossier_summary_caps_feature_preview():
                 method="auto",
                 detail="summary",
                 feature_preview_limit=3,
+                response_format="json",
             )
         )
     )
@@ -366,7 +500,11 @@ def test_generate_cluster_dossier_surfaces_singleton_heavy_readiness():
     session.latest_run_id = "run_singleton_tail"
 
     summary = json.loads(
-        asyncio.run(server.generate_cluster_dossier(method="components"))
+        asyncio.run(
+            server.generate_cluster_dossier(
+                method="components", response_format="json"
+            )
+        )
     )
 
     assert summary["status"] == "ok"
@@ -492,7 +630,7 @@ def test_signal_matrix_software3_markdown_and_telemetry():
     assert "### Categorical Feature Matrix" in report
     assert "| Cluster ID | f1 |" in report
     assert "| Cluster ID | cat1=v1 |" in report
-    assert "Cluster ID 2" in report
+    assert "Cluster 2" in report
 
 
 def test_signal_matrix_defensive_safe_casting():
