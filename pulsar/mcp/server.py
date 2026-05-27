@@ -1968,15 +1968,20 @@ async def get_feature_signal(
 @mcp.tool()
 async def get_cluster_signal_matrix(
     cluster_ids: list[int] | None = None,
-    include_context: bool = False,
+    include_context_tier: bool = False,
     max_clusters: int = 8,
+    return_markdown: bool = True,
     ctx: Context = None,
 ) -> str:
-    """Return the cached cross-cluster signal matrix without regenerating the full dossier.
+    """Return the cross-cluster signal matrix in a highly compressed Markdown or raw JSON layout.
 
-    Defaults trim to core/supporting tiers and the top ``max_clusters`` clusters
-    by aggregate signal. Set ``include_context=True`` for all tiers, or pass an
-    explicit ``cluster_ids`` list to bypass the cap.
+    The underlying topology of the data dictates the exact clusters. The parameter
+    ``max_clusters`` serves strictly as a presentation-layer truncation limit to rank 
+    and slice the top clusters by signal to prevent context window bloat.
+
+    Set ``include_context_tier=True`` to include context-tier feature signals in addition
+    to core and supporting tiers. Set ``return_markdown=False`` explicitly to obtain 
+    the programmatic, flattened JSON dictionary layout.
     """
     if max_clusters < 1:
         return mcp_error(
@@ -1992,8 +1997,9 @@ async def get_cluster_signal_matrix(
             "signal_matrix": signal_matrix_payload(
                 evidence_index,
                 cluster_ids=cluster_ids,
-                include_context=include_context,
+                include_context_tier=include_context_tier,
                 max_clusters=max_clusters,
+                return_markdown=return_markdown,
             ),
         }
         return json.dumps(payload, indent=2)
