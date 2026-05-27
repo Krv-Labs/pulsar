@@ -1596,7 +1596,9 @@ def signal_matrix_payload(
         cluster_scores[cid] = max_score
 
     # 3. Handle sorting and truncation
-    ranked_ids = sorted(parsed_requested_ids, key=lambda x: cluster_scores.get(x, 0.0), reverse=True)
+    ranked_ids = sorted(
+        parsed_requested_ids, key=lambda x: cluster_scores.get(x, 0.0), reverse=True
+    )
     if max_clusters is not None and len(ranked_ids) > max_clusters:
         kept = set(ranked_ids[:max_clusters])
         omitted_ids = ranked_ids[max_clusters:]
@@ -1606,35 +1608,36 @@ def signal_matrix_payload(
 
     # Map omitted cluster IDs to their maximum aggregate signal score
     omitted_telemetry = [
-        {
-            "cluster_id": cid,
-            "max_signal": round(cluster_scores.get(cid, 0.0), 3)
-        }
+        {"cluster_id": cid, "max_signal": round(cluster_scores.get(cid, 0.0), 3)}
         for cid in omitted_ids
     ]
 
     matrix = getattr(evidence_index, "signal_matrix", {}) or {}
-    
+
     # 4. Group rows by cluster_id to avoid O(R) global scans
     numeric_by_cluster: dict[int, list[dict[str, Any]]] = {}
     categorical_by_cluster: dict[int, list[dict[str, Any]]] = {}
-    
+
     for row in matrix.get("numeric_rows", []):
         cid = row.get("cluster_id")
         if cid is not None:
             numeric_by_cluster.setdefault(cid, []).append(row)
-            
+
     for row in matrix.get("categorical_rows", []):
         cid = row.get("cluster_id")
         if cid is not None:
             categorical_by_cluster.setdefault(cid, []).append(row)
 
     # 5. Extract only kept rows and filter tiers on-the-fly
-    allowed_tiers = {"core", "supporting"} if not include_context_tier else {"core", "supporting", "context"}
-    
+    allowed_tiers = (
+        {"core", "supporting"}
+        if not include_context_tier
+        else {"core", "supporting", "context"}
+    )
+
     numeric_rows = []
     categorical_rows = []
-    
+
     for cid in kept:
         for row in numeric_by_cluster.get(cid, []):
             raw_vals = row.get("values", {}) or {}
@@ -1645,7 +1648,7 @@ def signal_matrix_payload(
             }
             if filtered_vals:
                 numeric_rows.append({"cluster_id": cid, "values": filtered_vals})
-                
+
         for row in categorical_by_cluster.get(cid, []):
             raw_vals = row.get("values", {}) or {}
             filtered_vals = {
@@ -1659,27 +1662,33 @@ def signal_matrix_payload(
     # 6. Return high-density Markdown representation for the LLM
     if return_markdown:
         import io
-        
+
         report = io.StringIO()
         report.write("## Topological Signal Matrix\n\n")
         report.write("### Telemetry\n")
         report.write(f"- **Clusters Returned**: {len(kept)}\n")
         report.write(f"- **Clusters Omitted**: {len(omitted_ids)}\n")
-        
+
         if omitted_telemetry:
             report.write("#### Omitted Clusters Detail:\n")
             for item in omitted_telemetry:
                 score = item["max_signal"]
-                rec = "Recommended for targeted inspection" if score >= 2.0 else "Low Signal: Ignorable"
-                report.write(f"  - **Cluster ID {item['cluster_id']}** (Max Signal: {score}) — *{rec}*\n")
+                rec = (
+                    "Recommended for targeted inspection"
+                    if score >= 2.0
+                    else "Low Signal: Ignorable"
+                )
+                report.write(
+                    f"  - **Cluster ID {item['cluster_id']}** (Max Signal: {score}) — *{rec}*\n"
+                )
         report.write("\n")
-        
+
         report.write("### Numeric Feature Matrix\n")
         report.write(_render_markdown_table(numeric_rows) + "\n\n")
-        
+
         report.write("### Categorical Feature Matrix\n")
         report.write(_render_markdown_table(categorical_rows) + "\n")
-        
+
         return {
             "clusters_returned": len(kept),
             "clusters_omitted": len(omitted_ids),
@@ -1701,24 +1710,25 @@ def signal_matrix_payload(
 def _render_markdown_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "*No signals found in the selected tiers.*"
-    
+
     # Gather all unique feature keys across rows to build column headers
     all_features = sorted(list({k for r in rows for k in r["values"].keys()}))
     if not all_features:
         return "*No features available in selected tiers.*"
-    
+
     import io
+
     output = io.StringIO()
     output.write("| Cluster ID | " + " | ".join(all_features) + " |\n")
     output.write("| --- |" + " | ".join(["---"] * len(all_features)) + " |\n")
-    
+
     for row in rows:
         vals = []
         for feat in all_features:
             val = row["values"].get(feat, "-")
             vals.append(f"{val:.3f}" if isinstance(val, float) else str(val))
         output.write(f"| {row['cluster_id']} | " + " | ".join(vals) + " |\n")
-        
+
     return output.getvalue()
 
 

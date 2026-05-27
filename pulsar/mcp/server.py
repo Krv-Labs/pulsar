@@ -1976,11 +1976,11 @@ async def get_cluster_signal_matrix(
     """Return the cross-cluster signal matrix in a highly compressed Markdown or raw JSON layout.
 
     The underlying topology of the data dictates the exact clusters. The parameter
-    ``max_clusters`` serves strictly as a presentation-layer truncation limit to rank 
+    ``max_clusters`` serves strictly as a presentation-layer truncation limit to rank
     and slice the top clusters by signal to prevent context window bloat.
 
     Set ``include_context_tier=True`` to include context-tier feature signals in addition
-    to core and supporting tiers. Set ``return_markdown=False`` explicitly to obtain 
+    to core and supporting tiers. Set ``return_markdown=False`` explicitly to obtain
     the programmatic, flattened JSON dictionary layout.
     """
     if max_clusters < 1:

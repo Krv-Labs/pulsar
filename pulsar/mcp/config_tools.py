@@ -254,8 +254,12 @@ def apply_overrides(
             normalized_overrides[k] = v
             original_keys[k] = k
 
-    dotted_overrides = {key: value for key, value in normalized_overrides.items() if "." in key}
-    flat_overrides = {key: value for key, value in normalized_overrides.items() if "." not in key}
+    dotted_overrides = {
+        key: value for key, value in normalized_overrides.items() if "." in key
+    }
+    flat_overrides = {
+        key: value for key, value in normalized_overrides.items() if "." not in key
+    }
 
     unknown_dotted_roots = {
         key.split(".", 1)[0]
@@ -308,7 +312,6 @@ def apply_overrides(
         _track(path, old, value)
 
     overrides = flat_overrides
-
 
     if "run_name" in overrides:
         old = raw.get("run", {}).get("name")
