@@ -151,7 +151,7 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     feature_payload = json.loads(
         asyncio.run(server.get_feature_signal(["f1", "segment=alpha"]))
     )
-    matrix_payload = json.loads(asyncio.run(server.get_cluster_signal_matrix()))
+    matrix_payload = json.loads(asyncio.run(server.get_cluster_signal_matrix(return_markdown=False)))
 
     assert summary["status"] == "ok"
     assert summary["cluster_result"]["method_used"] in {
@@ -324,7 +324,7 @@ def test_signal_matrix_cluster_cap_ranks_categorical_signal():
         metadata={},
     )
 
-    payload = signal_matrix_payload(evidence, max_clusters=1)
+    payload = signal_matrix_payload(evidence, max_clusters=1, return_markdown=False)
 
     assert payload["clusters_returned"] == 1
     assert payload["clusters_omitted"] == 1
@@ -423,3 +423,110 @@ def test_evidence_index_captures_ks_failure_when_stats_call_raises(monkeypatch):
     row_failures = evidence.metadata["stats_failures"]["numeric_row_level"]
     assert len(row_failures) == 1
     assert row_failures[0]["reasons"] == ["ks_2samp: synthetic failure for test"]
+
+
+def test_signal_matrix_software3_markdown_and_telemetry():
+    """Verify that signal_matrix_payload produces beautiful Markdown and rich omitted telemetry."""
+    evidence = FeatureEvidenceIndex(
+        cluster_bundles={
+            0: {
+                "numeric": [{"column": "f1", "aggregate_score": 1.2}],
+                "categorical": [],
+            },
+            1: {
+                "numeric": [],
+                "categorical": [{"column": "cat1", "value": "v1", "aggregate_score": 3.4}],
+            },
+            2: {
+                "numeric": [{"column": "f1", "aggregate_score": 0.5}],
+                "categorical": [],
+            },
+        },
+        numeric_global_ranking=[],
+        categorical_global_ranking=[],
+        signal_matrix={
+            "numeric_columns": ["f1"],
+            "categorical_values": [{"column": "cat1", "value": "v1"}],
+            "numeric_rows": [
+                {
+                    "cluster_id": 0,
+                    "values": {
+                        "f1": {"value": 1.2, "signal_tier": "core"}
+                    }
+                },
+                {
+                    "cluster_id": 2,
+                    "values": {
+                        "f1": {"value": 0.5, "signal_tier": "core"}
+                    }
+                }
+            ],
+            "categorical_rows": [
+                {
+                    "cluster_id": 1,
+                    "values": {
+                        "cat1=v1": {"value": "v1", "signal_tier": "core"}
+                    }
+                }
+            ],
+        },
+        metadata={},
+    )
+
+    payload = signal_matrix_payload(evidence, max_clusters=2, return_markdown=True)
+
+    assert payload["clusters_returned"] == 2
+    assert payload["clusters_omitted"] == 1
+    
+    # Assert omitted telemetry has maximum aggregate signal scores
+    omitted = payload["omitted_clusters"]
+    assert len(omitted) == 1
+    assert omitted[0]["cluster_id"] == 2
+    assert omitted[0]["max_signal"] == 0.5
+
+    # Assert Markdown report starts and includes expected markdown markers and tables
+    report = payload["markdown_report"]
+    assert "## Topological Signal Matrix" in report
+    assert "### Telemetry" in report
+    assert "### Numeric Feature Matrix" in report
+    assert "### Categorical Feature Matrix" in report
+    assert "| Cluster ID | f1 |" in report
+    assert "| Cluster ID | cat1=v1 |" in report
+    assert "Cluster ID 2" in report
+
+
+def test_signal_matrix_defensive_safe_casting():
+    """Verify that signal_matrix_payload handles malformed or missing aggregate scores without crashing."""
+    evidence = FeatureEvidenceIndex(
+        cluster_bundles={
+            0: {
+                "numeric": [
+                    {"column": "f1", "aggregate_score": "N/A"},  # invalid string float
+                    {"column": "f2", "aggregate_score": None},   # None float
+                ],
+                "categorical": [],
+            }
+        },
+        numeric_global_ranking=[],
+        categorical_global_ranking=[],
+        signal_matrix={
+            "numeric_columns": ["f1", "f2"],
+            "categorical_values": [],
+            "numeric_rows": [
+                {
+                    "cluster_id": 0,
+                    "values": {
+                        "f1": {"value": 1.0, "signal_tier": "core"},
+                        "f2": {"value": 2.0, "signal_tier": "core"}
+                    }
+                }
+            ],
+            "categorical_rows": [],
+        },
+        metadata={},
+    )
+
+    # Should run successfully and default invalid scores to 0.0 without throwing ValueError
+    payload = signal_matrix_payload(evidence, max_clusters=1, return_markdown=False)
+    assert payload["clusters_returned"] == 1
+    assert payload["clusters_omitted"] == 0
