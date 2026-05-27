@@ -817,6 +817,41 @@ def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
     assert result["config_yaml_normalized"] == refined["config_yaml"]
 
 
+def test_refine_active_config_supports_nested_and_mixed_overrides(tmp_path):
+    """Verify that refine_active_config successfully flattens nested, mixed, and flat dictionary structures."""
+    server._sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(server.ingest_dataset(csv_path)))
+    asyncio.run(server.create_config(dataset["dataset_id"], "active_config"))
+
+    # Pass a mixture of nested (sweep.pca_dims as dict) and flat keys (n_reps)
+    refined = json.loads(
+        asyncio.run(
+            server.refine_active_config(
+                {
+                    "sweep": {
+                        "pca_dims": [3],
+                        "epsilon_values": [0.6]
+                    },
+                    "n_reps": 2
+                }
+            )
+        )
+    )
+
+    assert refined["status"] == "ok"
+    assert "sweep.pca_dims" in refined["applied_overrides"]
+    assert "sweep.epsilon_values" in refined["applied_overrides"]
+    assert "output.n_reps" in refined["applied_overrides"]
+    
+    # Assert values were applied correctly
+    active_after = json.loads(asyncio.run(server.get_active_config()))
+    assert "dimensions:" in active_after["config_yaml"]
+    assert "epsilon:" in active_after["config_yaml"]
+    assert "n_reps: 2" in active_after["config_yaml"]
+
+
+
 def test_dossier_inherits_construction_threshold(tmp_path):
     """generate_cluster_dossier inherits construction_threshold when arg omitted."""
     server._sessions.clear()

@@ -209,11 +209,53 @@ def _set_dotted_path(raw: dict[str, Any], path: str, value: Any) -> Any:
     return old
 
 
+def flatten_overrides(nested: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    flat = {}
+    for k, v in nested.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            flat.update(flatten_overrides(v, f"{key}."))
+        else:
+            flat[key] = v
+    return flat
+
+
 def apply_overrides(
     config_yaml: str, overrides: dict[str, Any]
 ) -> ConfigOverrideResult:
-    dotted_overrides = {key: value for key, value in overrides.items() if "." in key}
-    flat_overrides = {key: value for key, value in overrides.items() if "." not in key}
+    flat = flatten_overrides(overrides)
+
+    prefix_map = {
+        "sweep.pca_dims": "pca_dims",
+        "sweep.pca_seeds": "pca_seeds",
+        "sweep.epsilon_values": "epsilon_values",
+        "sweep.epsilon_range": "epsilon_range",
+        "cosmic_graph.construction_threshold": "construction_threshold",
+        "output.n_reps": "n_reps",
+        "preprocessing.drop_columns": "drop_columns",
+        "preprocessing.impute": "impute",
+        "preprocessing.encode": "encode",
+        "run.run_name": "run_name",
+        "run.dataset_path": "dataset_path",
+    }
+
+    normalized_overrides = {}
+    original_keys = {}
+
+    for k, v in flat.items():
+        if k in prefix_map:
+            flat_key = prefix_map[k]
+            normalized_overrides[flat_key] = v
+            original_keys[flat_key] = k
+        elif k in _VALID_OVERRIDE_KEYS:
+            normalized_overrides[k] = v
+            original_keys[k] = k
+        else:
+            normalized_overrides[k] = v
+            original_keys[k] = k
+
+    dotted_overrides = {key: value for key, value in normalized_overrides.items() if "." in key}
+    flat_overrides = {key: value for key, value in normalized_overrides.items() if "." not in key}
 
     unknown_dotted_roots = {
         key.split(".", 1)[0]
@@ -237,15 +279,36 @@ def apply_overrides(
     applied: list[str] = []
     diff: list[dict[str, Any]] = []
 
+    flat_key_to_canonical = {
+        "pca_dims": "sweep.pca.dimensions.values",
+        "pca_seeds": "sweep.pca.seed.values",
+        "epsilon_values": "sweep.ball_mapper.epsilon.values",
+        "epsilon_range": "sweep.ball_mapper.epsilon.range",
+        "construction_threshold": "cosmic_graph.construction_threshold",
+        "n_reps": "output.n_reps",
+        "drop_columns": "preprocessing.drop_columns",
+        "impute": "preprocessing.impute",
+        "encode": "preprocessing.encode",
+        "run_name": "run.name",
+        "dataset_path": "run.data",
+    }
+
     def _track(path: str, old: Any, new: Any) -> None:
         applied.append(path)
         diff.append({"path": path, "old": old, "new": new})
+        for f_key, can_path in flat_key_to_canonical.items():
+            if path == can_path:
+                orig = original_keys.get(f_key)
+                if orig and orig != path and orig not in applied:
+                    applied.append(orig)
+                break
 
     for path, value in dotted_overrides.items():
         old = _set_dotted_path(raw, path, value)
         _track(path, old, value)
 
     overrides = flat_overrides
+
 
     if "run_name" in overrides:
         old = raw.get("run", {}).get("name")
