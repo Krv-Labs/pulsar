@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 
 from pulsar.mcp import server
-from pulsar.mcp.interpreter import build_feature_evidence_index
+from pulsar.mcp.interpreter import FeatureEvidenceIndex, build_feature_evidence_index
+from pulsar.mcp.interpreter import signal_matrix_payload
 
 
 def _make_disconnected_model(size_per_cluster: int = 3) -> SimpleNamespace:
@@ -268,6 +269,67 @@ def test_get_cluster_profile_caps_wide_dataset_feature_output():
     assert cluster["features_returned"]["total"] == 7
     assert cluster["features_omitted"]["total"] > 0
     assert returned_keys == expected_keys
+
+
+def test_signal_matrix_cluster_cap_ranks_categorical_signal():
+    evidence = FeatureEvidenceIndex(
+        cluster_bundles={
+            0: {
+                "numeric": [{"column": "weak_numeric", "aggregate_score": 0.1}],
+                "categorical": [],
+            },
+            1: {
+                "numeric": [],
+                "categorical": [
+                    {
+                        "column": "segment",
+                        "value": "high_signal",
+                        "aggregate_score": 10.0,
+                    }
+                ],
+            },
+        },
+        numeric_global_ranking=[],
+        categorical_global_ranking=[],
+        signal_matrix={
+            "numeric_columns": ["weak_numeric"],
+            "categorical_values": [
+                {"column": "segment", "value": "high_signal"},
+            ],
+            "numeric_rows": [
+                {
+                    "cluster_id": 0,
+                    "size": 10,
+                    "values": {
+                        "weak_numeric": {
+                            "aggregate_score": 0.1,
+                            "signal_tier": "core",
+                        }
+                    },
+                }
+            ],
+            "categorical_rows": [
+                {
+                    "cluster_id": 1,
+                    "size": 10,
+                    "values": {
+                        "segment=high_signal": {
+                            "aggregate_score": 10.0,
+                            "signal_tier": "core",
+                        }
+                    },
+                }
+            ],
+        },
+        metadata={},
+    )
+
+    payload = signal_matrix_payload(evidence, max_clusters=1)
+
+    assert payload["clusters_returned"] == 1
+    assert payload["clusters_omitted"] == 1
+    assert [row["cluster_id"] for row in payload["categorical_rows"]] == [1]
+    assert payload["numeric_rows"] == []
 
 
 def test_generate_cluster_dossier_summary_caps_feature_preview():

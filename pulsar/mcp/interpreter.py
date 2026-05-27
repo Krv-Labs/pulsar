@@ -1543,6 +1543,17 @@ def signal_matrix_payload(
     include_context: bool = False,
     max_clusters: int | None = 8,
 ) -> dict[str, Any]:
+    def cluster_signal_score(cluster_id: int) -> float:
+        bundle = evidence_index.cluster_bundles.get(cluster_id, {})
+        rows = [
+            *bundle.get("numeric", []),
+            *bundle.get("categorical", []),
+        ]
+        return max(
+            (abs(float(row.get("aggregate_score", 0.0))) for row in rows),
+            default=0.0,
+        )
+
     requested_clusters = (
         {int(cluster_id) for cluster_id in cluster_ids}
         if cluster_ids is not None
@@ -1553,15 +1564,7 @@ def signal_matrix_payload(
     if cluster_ids is None and max_clusters is not None:
         ranked = sorted(
             requested_clusters,
-            key=lambda cid: max(
-                (
-                    abs(float(row.get("aggregate_score", 0.0)))
-                    for row in evidence_index.cluster_bundles.get(cid, {}).get(
-                        "numeric", []
-                    )
-                ),
-                default=0.0,
-            ),
+            key=cluster_signal_score,
             reverse=True,
         )
         kept = set(ranked[:max_clusters])
