@@ -15,6 +15,14 @@ import numpy as np
 import yaml
 
 
+ALLOWED_COSMIC_GRAPH_KEYS = frozenset({"construction_threshold", "neighborhood"})
+LEGACY_COSMIC_GRAPH_THRESHOLD_KEY = "threshold"
+LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE = (
+    "Unsupported legacy key cosmic_graph.threshold. "
+    "Use cosmic_graph.construction_threshold instead."
+)
+
+
 # ---------------------------------------------------------------------------
 # Parameter grid helpers
 # ---------------------------------------------------------------------------
@@ -39,6 +47,21 @@ def _expand_param(spec: Any) -> list:
             return [d["min"], d["max"]]
         raise ValueError(f"Unsupported distribution type: {dist_type!r}")
     raise ValueError(f"Cannot expand parameter spec: {spec!r}")
+
+
+def _validate_cosmic_graph_keys(cosmic_graph: Any) -> None:
+    if cosmic_graph is None:
+        return
+    if not isinstance(cosmic_graph, dict):
+        raise ValueError("cosmic_graph must be a mapping")
+    if LEGACY_COSMIC_GRAPH_THRESHOLD_KEY in cosmic_graph:
+        raise ValueError(LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE)
+    unknown = sorted(set(cosmic_graph) - ALLOWED_COSMIC_GRAPH_KEYS)
+    if unknown:
+        raise ValueError(
+            f"Unsupported cosmic_graph key(s): {unknown}. "
+            f"Valid keys: {sorted(ALLOWED_COSMIC_GRAPH_KEYS)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +167,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
 
     # cosmic_graph section
     cg_raw = raw.get("cosmic_graph", {})
+    _validate_cosmic_graph_keys(cg_raw)
     threshold_raw = cg_raw.get("construction_threshold", "auto")
     construction_threshold: float | Literal["auto"] = (
         "auto" if threshold_raw == "auto" else float(threshold_raw)

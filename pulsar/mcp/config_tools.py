@@ -7,7 +7,13 @@ from typing import Any
 
 import yaml
 
-from pulsar.config import config_to_yaml, load_config
+from pulsar.config import (
+    ALLOWED_COSMIC_GRAPH_KEYS,
+    LEGACY_COSMIC_GRAPH_THRESHOLD_KEY,
+    LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE,
+    config_to_yaml,
+    load_config,
+)
 from pulsar.mcp.errors import classify_path, mcp_error
 
 
@@ -17,7 +23,7 @@ _ALLOWED_SWEEP = {"pca", "ball_mapper"}
 _ALLOWED_PCA = {"dimensions", "seed"}
 _ALLOWED_BALL_MAPPER = {"epsilon"}
 _ALLOWED_OUTPUT = {"n_reps"}
-_ALLOWED_COSMIC_GRAPH = {"construction_threshold", "neighborhood"}
+_ALLOWED_COSMIC_GRAPH = ALLOWED_COSMIC_GRAPH_KEYS
 _SUPPORTED_IMPUTE_METHODS = {
     "sample_normal",
     "sample_categorical",
@@ -545,6 +551,24 @@ def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> 
         )
         return
     for key in cosmic_graph.keys():
+        if key == LEGACY_COSMIC_GRAPH_THRESHOLD_KEY:
+            issues.append(
+                ValidationIssue(
+                    path="cosmic_graph.threshold",
+                    message=LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE,
+                    expected="cosmic_graph.construction_threshold",
+                    received=cosmic_graph[key],
+                    suggestion=(
+                        "Rename cosmic_graph.threshold to "
+                        "cosmic_graph.construction_threshold."
+                    ),
+                    example_fix=(
+                        "cosmic_graph:\n"
+                        f"  construction_threshold: {cosmic_graph[key]!r}"
+                    ),
+                )
+            )
+            continue
         if key not in _ALLOWED_COSMIC_GRAPH:
             issues.append(
                 ValidationIssue(

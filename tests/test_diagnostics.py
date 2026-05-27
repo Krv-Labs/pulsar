@@ -267,6 +267,22 @@ def test_config_to_yaml_roundtrip(basic_config):
     assert roundtripped.n_reps == cfg.n_reps
 
 
+def test_load_config_rejects_legacy_cosmic_graph_threshold(basic_config):
+    """Legacy threshold key must fail loudly instead of falling back to auto."""
+    basic_config["cosmic_graph"] = {"threshold": 0.0}
+
+    with pytest.raises(ValueError, match="cosmic_graph.construction_threshold"):
+        load_config(basic_config)
+
+
+def test_load_config_rejects_unknown_cosmic_graph_key(basic_config):
+    """Unknown cosmic_graph fields must not be silently ignored."""
+    basic_config["cosmic_graph"]["stale_field"] = 0.0
+
+    with pytest.raises(ValueError, match="Unsupported cosmic_graph key"):
+        load_config(basic_config)
+
+
 def test_config_to_yaml_has_explicit_seeds(basic_config):
     """Assert seeds appear explicitly in YAML output."""
     cfg = load_config(basic_config)

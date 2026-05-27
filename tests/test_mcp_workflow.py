@@ -93,6 +93,26 @@ def test_validate_config_rejects_fenced_yaml(tmp_path):
     assert report["error_code"] == "YAML_NOT_RAW"
 
 
+def test_validate_config_rejects_legacy_cosmic_graph_threshold(tmp_path):
+    csv_path = _write_dataset(tmp_path)
+    legacy_yaml = f"""run:
+  data: {csv_path}
+cosmic_graph:
+  threshold: 0.0
+"""
+
+    payload = asyncio.run(server.validate_config(legacy_yaml))
+    report = json.loads(payload)
+
+    assert report["status"] == "error"
+    assert report["error_code"] == "YAML_SCHEMA_MISMATCH"
+    issue = report["details"]["issues"][0]
+    assert issue["path"] == "cosmic_graph.threshold"
+    assert "cosmic_graph.construction_threshold" in issue["message"]
+    assert issue["expected"] == "cosmic_graph.construction_threshold"
+    assert "construction_threshold" in issue["example_fix"]
+
+
 def test_ingest_dataset_and_create_config_round_trip(tmp_path):
     csv_path = _write_dataset(tmp_path)
 

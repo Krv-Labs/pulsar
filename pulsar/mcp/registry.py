@@ -53,6 +53,13 @@ class RunRecord:
     created_at: float
 
 
+STALE_RUN_RECORD_MESSAGE = (
+    "Run record uses removed field 'resolved_threshold'. "
+    "Rerun the sweep to create a record with "
+    "'resolved_construction_threshold'."
+)
+
+
 @dataclass
 class UploadRecord:
     upload_id: str
@@ -188,7 +195,10 @@ class MCPRegistry:
         path = self._run_path(run_id)
         if not path.exists():
             return None
-        return RunRecord(**json.loads(path.read_text()))
+        raw = json.loads(path.read_text())
+        if "resolved_threshold" in raw:
+            raise ValueError(STALE_RUN_RECORD_MESSAGE)
+        return RunRecord(**raw)
 
     def _load_datasets(self) -> dict[str, dict]:
         with self._locked_registry():
