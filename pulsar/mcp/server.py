@@ -30,7 +30,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler as SkScaler
 
 from pulsar.analysis.characterization import NumericProfile, profile_numeric_matrix
-from pulsar.config import config_to_yaml, load_config
+from pulsar.config import THRESHOLD_RANGE_MESSAGE, config_to_yaml, load_config
 from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.fingerprint import pca_fingerprint
 from pulsar.pipeline import ThemaRS
@@ -52,7 +52,14 @@ from pulsar.mcp.config_tools import (
     render_validation_report,
     validate_config_yaml,
 )
+from pulsar.mcp.characterization import compact_characterization_payload
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
+from pulsar.mcp.history import summarize_history
+from pulsar.mcp.payloads import (
+    build_evidence_payload,
+    cluster_result_payload,
+    singleton_count_at_threshold,
+)
 from pulsar.mcp.preprocessing import (
     _preprocessing_block_to_yaml,
     _rationale_table,
@@ -101,6 +108,44 @@ async def _lenient_function_tool_run(self, arguments):
 FunctionTool.run = _lenient_function_tool_run
 
 
+def _variance_elbow_dimension(
+    pca_cum_var: list[tuple[int, float]], n_features: int
+) -> int:
+    if not pca_cum_var:
+        if n_features <= 4:
+            return max(2, n_features)
+        if n_features <= 12:
+            return 5
+        return min(max(10, int(np.log2(max(1, n_features)) * 3)), n_features)
+
+    points = sorted((int(dim), float(var)) for dim, var in pca_cum_var)
+    for dim, var in points:
+        if var >= 0.90:
+            return dim
+    return points[-1][0]
+
+
+def _initial_pca_grid(n_features: int, pca_knee: int) -> list[int]:
+    if n_features <= 0:
+        return [2]
+    upper = max(2, int(n_features))
+    if upper <= 4:
+        candidates = [2, 3, 4]
+    elif pca_knee <= 4:
+        candidates = [2, 3, 4, 5, 6]
+    elif pca_knee <= 8:
+        candidates = [4, 5, 6, 8, 10]
+    elif upper <= 12:
+        candidates = [2, 4, 6, 8, 10]
+    else:
+        # Start broad in high-dimensional processed spaces, then let agents
+        # compare sweeps and concentrate around the informative tail.
+        candidates = [2, 5, 10, 15, 20]
+
+    clipped = [min(dim, upper) for dim in candidates if min(dim, upper) >= 2]
+    return sorted(dict.fromkeys(clipped))
+
+
 def _build_initial_config_yaml(
     geo: dict[str, Any],
     *,
@@ -129,30 +174,19 @@ def _build_initial_config_yaml(
         pca_cum_var = geo.get("pca_cumulative_variance", [])
         knn_p25 = knn_p75 = 0.0
 
-    pca_knee = 3
-    if pca_cum_var:
-        for dim, var in pca_cum_var:
-            if var >= 0.90:
-                pca_knee = dim
-                break
-
-    # PCA dims: wider array for multi-scale aggregation.
-    # More dimensions = more topological evidence fused into the cosmic graph.
-    pca_dims = sorted(
-        {
-            max(2, pca_knee - 2),
-            max(2, pca_knee - 1),
-            pca_knee,
-            pca_knee + 1,
-            pca_knee + 2,
-        }
+    n_features = (
+        processed_profile.n_features
+        if processed_profile is not None
+        else geo.get("n_features", 0)
     )
+    pca_knee = _variance_elbow_dimension(pca_cum_var, n_features)
+    pca_dims = _initial_pca_grid(n_features, pca_knee)
 
     # Epsilon range: use percentile bounds when available, fall back to
     # knn_mean multipliers.  Wider range = better multi-scale fusion.
     if knn_p25 > 0 and knn_p75 > 0:
-        eps_min = knn_p25 * 0.8
-        eps_max = knn_p75 * 1.3
+        eps_min = knn_p25 * 0.75
+        eps_max = knn_p75 * 1.35
     else:
         eps_min = knn_mean * 0.8
         eps_max = knn_mean * 1.5
@@ -171,15 +205,15 @@ sweep:
     dimensions:
       values: {pca_dims}
     seed:
-      values: [42, 7]
+      values: [42, 7, 13]
   ball_mapper:
     epsilon:
       range:
         min: {eps_min:.4f}
         max: {eps_max:.4f}
-        steps: 20
+        steps: 24
 cosmic_graph:
-  threshold: auto
+  construction_threshold: auto
 output:
   n_reps: 4
 """
@@ -194,23 +228,19 @@ mcp = FastMCP(
         "`get_workflow_guide` for the recommended end-to-end phase-by-phase "
         "procedure.\n\n"
         "Tool map:\n"
-        "- Ingest: `ingest_dataset` (local path) or the chunked "
-        "`begin_dataset_upload` / `append_dataset_chunk` / "
-        "`finalize_dataset_upload` trio for remote transports. Returns a "
-        "`dataset_id` handle.\n"
-        "- Characterize: `characterize_dataset`, `probe_columns`, "
-        "`recommend_preprocessing`.\n"
-        "- Configure: `create_config`, `validate_config`, `refine_config`, "
-        "`get_active_config`, `refine_active_config`.\n"
-        "- Run: `run_topological_sweep`, `validate_preprocessing_config`, "
-        "`repair_preprocessing_config`.\n"
-        "- Diagnose: `diagnose_cosmic_graph`, "
-        "`get_threshold_stability_curve`, `get_topological_skeleton`, "
-        "`compare_sweeps`, `get_experiment_history`.\n"
-        "- Interpret: `generate_cluster_dossier`, `get_cluster_profile`, "
-        "`get_feature_signal`, `get_cluster_signal_matrix`, "
-        "`compare_clusters_tool`, `export_html_report`, "
-        "`export_labeled_data`."
+        "- Primary loop: `ingest_dataset` -> `characterize_dataset` -> "
+        "`create_config` -> `validate_config` -> `run_topological_sweep` -> "
+        "`diagnose_cosmic_graph` -> `summarize_sweep_history` -> "
+        "`generate_cluster_dossier`.\n"
+        "- Targeted interpretation: `get_cluster_profile`, "
+        "`get_feature_signal`, `compare_clusters_tool`, `export_html_report`.\n"
+        "- Advanced/debug: chunked upload trio, `probe_columns`, "
+        "`recommend_preprocessing`, `validate_preprocessing_config`, "
+        "`repair_preprocessing_config`, `refine_config`, `refine_active_config`, "
+        "`get_active_config`, `get_threshold_stability_curve`, "
+        "`get_topological_skeleton`, `compare_sweeps`, `get_experiment_history`, "
+        "`get_cluster_signal_matrix`, `export_labeled_data`, "
+        "`get_runtime_context`."
     ),
 )
 
@@ -267,7 +297,6 @@ class _PulsarSession:
 _sessions: OrderedDict[str, _PulsarSession] = OrderedDict()
 _MAX_SESSIONS = int(os.environ.get("PULSAR_MAX_SESSIONS", "3"))
 _MAX_EDGES_IN_SUMMARY = 500
-_MAX_CLUSTER_SINGLETON_RATIO = 0.66
 
 
 def _session_key(ctx: Context | None) -> str:
@@ -408,14 +437,14 @@ def _feature_evidence_fingerprint(
     run_id: str | None,
     labels: pd.Series,
     method: str,
-    edge_weight_threshold: float,
+    interpretation_edge_weight_threshold: float,
     exclude_columns: list[str] | None,
 ) -> str:
     payload = {
         "run_id": run_id,
         "labels": labels.astype(int).tolist(),
         "method": method,
-        "edge_weight_threshold": edge_weight_threshold,
+        "interpretation_edge_weight_threshold": interpretation_edge_weight_threshold,
         "exclude_columns": sorted(exclude_columns or []),
     }
     return hashlib.sha256(
@@ -427,6 +456,7 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
     density = float(metrics.get("density", 0.0))
     component_count = int(metrics.get("component_count", 0))
     singleton_fraction = float(metrics.get("singleton_fraction", 0.0))
+    giant_fraction = float(metrics.get("giant_fraction", 0.0))
     is_connected = component_count <= 1
     if density > 0.8:
         return (
@@ -442,6 +472,12 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
             is_connected,
             "Increase epsilon support or fall back to component-based clustering.",
         )
+    if giant_fraction > 0.95:
+        return (
+            "dominant_component",
+            is_connected,
+            "Run one targeted resolution sweep or justify the giant component before finalizing.",
+        )
     if density < 0.05:
         return (
             "sparse",
@@ -453,6 +489,178 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
         is_connected,
         "Proceed to clustering; graph structure is suitable for interpretive analysis.",
     )
+
+
+def _suggest_resolution_pca_dims(pca_dims: list[Any]) -> list[int]:
+    dims = sorted({int(dim) for dim in pca_dims if int(dim) > 1})
+    if not dims:
+        return [5, 8, 12, 16, 20]
+    if len(dims) == 1:
+        center = dims[0]
+        return sorted({max(2, center - 4), max(2, center - 2), center, center + 2})
+
+    low, high = dims[0], dims[-1]
+    if high <= low:
+        return dims
+    step = max(1, round((high - low) / 5))
+    if high - low >= 8:
+        step = max(2, step)
+    return list(range(low, high + 1, step))[:6]
+
+
+def _finalization_gate(
+    metrics: dict[str, Any],
+    *,
+    sweep_count: int,
+    config_yaml: str,
+) -> dict[str, Any]:
+    giant_fraction = float(metrics.get("giant_fraction", 0.0))
+    density = float(metrics.get("density", 0.0))
+    n_ball_maps = int(metrics.get("n_ball_maps", 0) or 0)
+    needs_resolution = giant_fraction > 0.95 and (
+        sweep_count < 3 or density > 0.35 or n_ball_maps < 40
+    )
+    if not needs_resolution:
+        return {
+            "status": "ok",
+            "reason": "No dominant-component resolution gate triggered.",
+        }
+
+    cfg = yaml.safe_load(config_yaml) or {}
+    pca_dims = (
+        cfg.get("sweep", {}).get("pca", {}).get("dimensions", {}).get("values", [])
+    )
+    return {
+        "status": "blocked",
+        "code": "UNRESOLVED_DOMINANT_COMPONENT",
+        "message": (
+            f"giant_fraction={giant_fraction:.1%} after {sweep_count} sweep(s). "
+            "Do not finalize clusters until one targeted resolution sweep is run "
+            "or the dominant component is explicitly justified as clinically expected."
+        ),
+        "suggested_refinement": {
+            "pca_dims": _suggest_resolution_pca_dims(pca_dims),
+            "pca_seeds": [42, 7, 13],
+            "epsilon_steps_min": 24,
+            "strategy": (
+                "Zoom into the useful PCA band with multiple seeds. Shift/lower "
+                "epsilon if density remains high; avoid narrowing to a single "
+                "PCA dimension or single seed."
+            ),
+        },
+    }
+
+
+def _threshold_stability_summary(
+    model: Any, metrics: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Compact stability block for run_topological_sweep when auto threshold ran.
+
+    Returns ``None`` when the run used a fixed construction_threshold (no
+    stability analysis was performed).
+    """
+    stability = getattr(model, "_stability_result", None)
+    if stability is None:
+        return None
+    adj = model.weighted_adjacency
+    n_nodes = int(adj.shape[0])
+    top = stability.top_k_plateaus(3)
+    plateaus = []
+    for p in top:
+        singleton_count = singleton_count_at_threshold(adj, float(p.midpoint))
+        plateaus.append(
+            {
+                "start": float(p.start_threshold),
+                "end": float(p.end_threshold),
+                "midpoint": float(p.midpoint),
+                "length": float(p.length),
+                "component_count": int(p.component_count),
+                "singleton_count": singleton_count,
+                "singleton_fraction": round(singleton_count / max(n_nodes, 1), 4),
+            }
+        )
+    warning: str | None = None
+    if int(metrics.get("n_edges", 0)) == 0:
+        warning = (
+            "Auto threshold landed in an empty-graph regime. Pick a lower "
+            "plateau midpoint and re-run, or fix construction_threshold."
+        )
+    elif float(metrics.get("singleton_fraction", 0.0)) > 0.8:
+        warning = (
+            "Auto threshold left >80% of nodes as singletons. Try a lower "
+            "plateau midpoint to retain more edges."
+        )
+    return {
+        "selected_threshold": float(stability.optimal_threshold),
+        "top_plateaus": plateaus,
+        "warning": warning,
+    }
+
+
+def _validate_unit_threshold(value: float, *, name: str) -> float:
+    threshold = float(value)
+    if not np.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
+        raise ToolError(f"{name}: {THRESHOLD_RANGE_MESSAGE}")
+    return threshold
+
+
+def _threshold_surface_payload(
+    *,
+    construction_threshold: float,
+    interpretation_threshold: float,
+    threshold_inherited: bool,
+    threshold_source: str,
+) -> dict[str, Any]:
+    if threshold_source == "spectral_default_full_affinity":
+        status = "full_affinity_spectral"
+        guidance = (
+            "Spectral clustering used the full retained weighted affinity matrix. "
+            "The persisted diagnostic graph was not rebuilt."
+        )
+    elif threshold_inherited:
+        status = "matched"
+        guidance = "Interpretation inherited the constructed graph surface."
+    elif np.isclose(interpretation_threshold, construction_threshold):
+        status = "matched_explicit"
+        guidance = "Interpretation explicitly matches the constructed graph surface."
+    elif interpretation_threshold < construction_threshold:
+        status = "looser_than_construction"
+        guidance = (
+            "Interpretation uses a looser slice of the retained weighted matrix "
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
+        )
+    else:
+        status = "stricter_than_construction"
+        guidance = (
+            "Interpretation uses a stricter slice of the retained weighted matrix "
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
+        )
+    return {
+        "status": status,
+        "construction_threshold": construction_threshold,
+        "interpretation_edge_weight_threshold": interpretation_threshold,
+        "threshold_inherited": threshold_inherited,
+        "threshold_source": threshold_source,
+        "guidance": guidance,
+    }
+
+
+def _prepend_threshold_markdown(markdown: str, surface: dict[str, Any]) -> str:
+    header = "\n".join(
+        [
+            "# Threshold Surface",
+            "",
+            f"- Construction threshold: {surface['construction_threshold']:.4f}",
+            "- Interpretation edge weight threshold: "
+            f"{surface['interpretation_edge_weight_threshold']:.4f}",
+            f"- Status: {surface['status']}",
+            f"- Guidance: {surface['guidance']}",
+            "",
+        ]
+    )
+    return f"{header}{markdown}"
 
 
 def _pca_cache_status(
@@ -489,41 +697,6 @@ def _pca_cache_status(
     )
 
 
-def _cluster_result_payload(result: Any) -> dict[str, Any]:
-    sizes = result.labels.value_counts().sort_index()
-    total = len(result.labels)
-    return {
-        "method_used": result.method_used,
-        "n_clusters": result.n_clusters,
-        "cluster_sizes": [
-            {"cluster_id": int(cid), "n": int(n), "pct": round(n / total * 100, 1)}
-            for cid, n in sizes.items()
-        ],
-        "silhouette_score": result.silhouette_score,
-        "edge_weight_threshold_applied": result.edge_weight_threshold_applied,
-        "stability_plateaus": result.stability_plateaus,
-        "failure_reason": result.failure_reason,
-    }
-
-
-def _cluster_payload_from_dossier(dossier: Any) -> list[dict[str, Any]]:
-    return [
-        {
-            "cluster_id": profile.cluster_id,
-            "size": profile.size,
-            "size_pct": profile.size_pct,
-            "semantic_name": profile.semantic_name,
-            "topological_neighbors": profile.topological_neighbors,
-            "numeric_features": profile.numeric_features,
-            "categorical_features": profile.categorical_features,
-            "numeric_tiers": profile.numeric_tiers,
-            "categorical_tiers": profile.categorical_tiers,
-            "central_rows": profile.central_rows,
-        }
-        for profile in dossier.clusters
-    ]
-
-
 def _resolve_response_format(
     *,
     response_format: str,
@@ -553,27 +726,6 @@ def _resolve_response_format(
     return resolved_detail, resolved_format
 
 
-def _build_evidence_payload(
-    dossier: Any,
-    cluster_meta: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "cluster_result": cluster_meta,
-        "detail": dossier.global_stats.get("detail", "standard"),
-        "evidence_metadata": dossier.global_stats.get("evidence_metadata", {}),
-        "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
-        "signal_matrix": dossier.global_stats.get("signal_matrix", {}),
-        "numeric_global_ranking": dossier.global_stats.get(
-            "numeric_global_ranking", []
-        ),
-        "categorical_global_ranking": dossier.global_stats.get(
-            "categorical_global_ranking", []
-        ),
-        "clusters": _cluster_payload_from_dossier(dossier),
-    }
-
-
 def _get_or_build_evidence_index(
     session: _PulsarSession,
     *,
@@ -584,7 +736,7 @@ def _get_or_build_evidence_index(
         run_id=session.latest_run_id,
         labels=cluster_result.labels,
         method=cluster_result.method_used,
-        edge_weight_threshold=cluster_result.edge_weight_threshold_applied,
+        interpretation_edge_weight_threshold=cluster_result.interpretation_edge_weight_threshold_applied,
         exclude_columns=exclude_columns,
     )
     if (
@@ -601,7 +753,7 @@ def _get_or_build_evidence_index(
     )
     session.feature_evidence_index = evidence_index
     session.feature_evidence_fingerprint = fingerprint
-    session.feature_evidence_cluster_meta = _cluster_result_payload(cluster_result)
+    session.feature_evidence_cluster_meta = cluster_result_payload(cluster_result)
     return evidence_index
 
 
@@ -659,7 +811,7 @@ def _build_graph_summary(model: ThemaRS) -> dict[str, Any]:
     return {
         "node_count": graph.number_of_nodes(),
         "edge_count": total_edges,
-        "resolved_threshold": float(model.resolved_threshold),
+        "resolved_construction_threshold": float(model.resolved_construction_threshold),
         "component_count": len(components),
         "component_sizes": component_sizes,
         "nodes": nodes,
@@ -667,6 +819,42 @@ def _build_graph_summary(model: ThemaRS) -> dict[str, Any]:
         "edges_truncated": truncated,
         "edges_shown": len(edges),
     }
+
+
+def _skeleton_graph_payload(
+    graph: dict[str, Any],
+    *,
+    detail: str,
+    max_edges: int,
+    max_nodes: int,
+) -> dict[str, Any]:
+    all_nodes = list(graph.get("nodes", []))
+    all_edges = list(graph.get("edges", []))
+    node_count = int(graph.get("node_count", len(all_nodes)))
+    edge_count = int(graph.get("edge_count", len(all_edges)))
+    include_nodes = detail in {"nodes", "full"}
+    include_edges = detail in {"edges", "full"}
+    nodes = all_nodes[:max_nodes] if include_nodes else []
+    edges = all_edges[:max_edges] if include_edges else []
+
+    payload = {
+        "node_count": node_count,
+        "edge_count": edge_count,
+        "resolved_construction_threshold": graph.get("resolved_construction_threshold"),
+        "component_count": graph.get("component_count"),
+        "component_sizes": graph.get("component_sizes", []),
+        "detail": detail,
+        "nodes_returned": len(nodes),
+        "nodes_omitted": max(node_count - len(nodes), 0),
+        "edges_returned": len(edges),
+        "edges_omitted": max(edge_count - len(edges), 0),
+        "source_edges_truncated": bool(graph.get("edges_truncated", False)),
+    }
+    if include_nodes:
+        payload["nodes"] = nodes
+    if include_edges:
+        payload["edges"] = edges
+    return payload
 
 
 def _format_epsilon(cfg: dict) -> str:
@@ -804,6 +992,26 @@ async def get_experiment_history(ctx: Context) -> str:
         )
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def summarize_sweep_history(ctx: Context = None) -> str:
+    """
+    Synthesize patterns across the session's sweep history.
+
+    Returns a JSON payload with:
+        - ``n_runs``: number of sweeps recorded in this session
+        - ``observations``: rule-based descriptive findings (e.g., which PCA
+          dimensions produced hairballs, which construction thresholds
+          coincided with singleton collapse)
+        - ``rationale``: short qualitative summary tying observations together
+
+    No recommended-config field is produced — the agent owns the next
+    decision. Use ``get_experiment_history`` for the raw per-run table.
+    """
+    session = _get_session(ctx)
+    summary = summarize_history(list(session.sweep_history))
+    return json.dumps(summary, indent=2)
 
 
 @mcp.tool()
@@ -1059,10 +1267,43 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
 
         # Build response with calibration provenance
         calibration_space = "processed" if processed is not None else "raw"
+        resolved_cfg = yaml.safe_load(config_yaml)
+        pca_dims = (
+            resolved_cfg.get("sweep", {})
+            .get("pca", {})
+            .get("dimensions", {})
+            .get("values", [])
+        )
+        pca_seeds = (
+            resolved_cfg.get("sweep", {})
+            .get("pca", {})
+            .get("seed", {})
+            .get("values", [])
+        )
+        epsilon_steps = (
+            resolved_cfg.get("sweep", {})
+            .get("ball_mapper", {})
+            .get("epsilon", {})
+            .get("range", {})
+            .get("steps", 0)
+        )
         response: dict[str, Any] = {
             "status": "ok",
             "config_yaml": config_yaml,
             "calibration_space": calibration_space,
+            "sweep_strategy": {
+                "pca_dimensions": pca_dims,
+                "pca_seeds": pca_seeds,
+                "epsilon_steps": epsilon_steps,
+                "estimated_ball_maps": len(pca_dims)
+                * max(len(pca_seeds), 1)
+                * max(int(epsilon_steps or 0), 1),
+                "agent_guidance": (
+                    "Run this broad baseline first, inspect diagnose_cosmic_graph, "
+                    "then use refine_config/refine_active_config plus compare_sweeps "
+                    "to shift or concentrate the grid around the informative region."
+                ),
+            },
         }
         if processed is not None:
             response["processed_feature_count"] = processed.n_features
@@ -1358,7 +1599,7 @@ async def run_topological_sweep(
             dataset_id=persisted_dataset_id,
             config_yaml=current_yaml,
             metrics=current_metrics,
-            resolved_threshold=model.resolved_threshold,
+            resolved_construction_threshold=model.resolved_construction_threshold,
             graph_summary=graph_summary,
         )
         session.latest_run_id = run_record.run_id
@@ -1376,11 +1617,27 @@ async def run_topological_sweep(
         graph_health, is_connected, recommended_next_action = _graph_health_summary(
             current_metrics
         )
+        full_affinity_connected = bool(
+            nx.is_connected(nx.from_numpy_array((model.weighted_adjacency > 0)))
+        )
         response["is_connected"] = is_connected
+        response["constructed_graph_connected"] = is_connected
+        response["full_affinity_connected"] = full_affinity_connected
         response["singleton_fraction"] = current_metrics.get("singleton_fraction", 0.0)
-        response["spectral_clustering_allowed"] = bool(is_connected)
+        response["spectral_clustering_allowed"] = full_affinity_connected
         response["graph_health"] = graph_health
         response["recommended_next_action"] = recommended_next_action
+        response["finalization_gate"] = _finalization_gate(
+            current_metrics,
+            sweep_count=len(session.sweep_history),
+            config_yaml=current_yaml,
+        )
+        response["construction_threshold"] = float(
+            model.resolved_construction_threshold
+        )
+        stability_summary = _threshold_stability_summary(model, current_metrics)
+        if stability_summary is not None:
+            response["threshold_stability_summary"] = stability_summary
         if saved_path:
             response["saved_config_path"] = saved_path
         if persisted_dataset_id:
@@ -1409,8 +1666,10 @@ async def run_topological_sweep(
 async def generate_cluster_dossier(
     method: str = "auto",
     max_k: int = 15,
-    edge_weight_threshold: float = 0.0,
+    interpretation_edge_weight_threshold: float | None = None,
     detail: str = "summary",
+    max_clusters: int = 8,
+    feature_preview_limit: int = 5,
     response_format: str = "json",
     format: str = "",
     exclude_columns: list[str] | None = None,
@@ -1419,17 +1678,34 @@ async def generate_cluster_dossier(
     """
     Generate a statistical dossier of the topological clusters.
 
+    Default to detail="summary" for agent loops. It is the compact map for
+    deciding what to inspect next. Do not request detail="standard" or "full"
+    for initial interpretation; those modes are heavy drill-down/audit payloads
+    after specific clusters or features have already been chosen.
+
     Args:
         method: Clustering method ("auto", "spectral", "components").
         max_k: Maximum k for spectral clustering search.
-        edge_weight_threshold: Drop edges with weight <= this value before
-            clustering.  Edge weights are the fraction of ball maps that
-            placed two points together.  Use weight percentiles from
-            diagnose_cosmic_graph to choose a value (e.g. weight_p50 to
-            keep only the stronger half of edges).
-        detail: Payload richness. "summary" is compact, "standard" retains
-            full evidence for core/supporting signals, and "full" returns the
-            full evidence matrix.
+        interpretation_edge_weight_threshold: Drop edges with weight <= this
+            value before clustering.  Edge weights are the fraction of ball
+            maps that placed two points together. When omitted, auto/components
+            inherit ``model.resolved_construction_threshold``. Explicit spectral
+            clustering defaults to ``0.0`` to use the full weighted affinity
+            matrix unless a threshold is supplied.
+        detail: Payload richness. Omit this parameter for routine agent loops;
+            the default "summary" returns a compact cluster map with tier counts,
+            capped feature previews, signal-matrix counts, and no evidence rows.
+            Use targeted tools (get_cluster_profile, get_feature_signal,
+            get_cluster_signal_matrix) for follow-up evidence. Only set
+            "standard" after narrowing to specific clusters/features; it returns
+            feature/tier rows and central rows for kept clusters. Use "full" only
+            for statistical audit/debugging, not normal chat context.
+        max_clusters: Cap on the number of clusters returned (top by size).
+            Use a larger value to inspect tail clusters; the response
+            reports ``clusters_omitted`` so you can see what was dropped.
+        feature_preview_limit: In summary mode, return at most this many mixed
+            numeric/categorical feature hints per cluster. Use get_cluster_profile
+            for detailed evidence rows.
         response_format: "json" for structured payloads or "markdown" for
             narrative output only.
         format: Legacy alias. "full" maps to detail="full"; "json" and
@@ -1447,6 +1723,12 @@ async def generate_cluster_dossier(
         raise ToolError(
             f"method must be 'auto', 'spectral', or 'components', got '{method}'"
         )
+    if max_clusters < 1:
+        raise ToolError(f"max_clusters must be >= 1, got '{max_clusters}'")
+    if feature_preview_limit < 0:
+        raise ToolError(
+            f"feature_preview_limit must be >= 0, got '{feature_preview_limit}'"
+        )
 
     try:
         detail, response_format = _resolve_response_format(
@@ -1454,33 +1736,40 @@ async def generate_cluster_dossier(
             legacy_format=format,
             detail=detail,
         )
+        construction_threshold = _validate_unit_threshold(
+            session.model.resolved_construction_threshold,
+            name="resolved_construction_threshold",
+        )
+        threshold_inherited = interpretation_edge_weight_threshold is None
+        if interpretation_edge_weight_threshold is None and method == "spectral":
+            resolved_interpretation_threshold = 0.0
+            threshold_source = "spectral_default_full_affinity"
+            threshold_inherited = False
+        elif interpretation_edge_weight_threshold is None:
+            resolved_interpretation_threshold = construction_threshold
+            threshold_source = "inherited_construction"
+        else:
+            resolved_interpretation_threshold = _validate_unit_threshold(
+                interpretation_edge_weight_threshold,
+                name="interpretation_edge_weight_threshold",
+            )
+            threshold_source = "explicit"
+        threshold_surface = _threshold_surface_payload(
+            construction_threshold=construction_threshold,
+            interpretation_threshold=resolved_interpretation_threshold,
+            threshold_inherited=threshold_inherited,
+            threshold_source=threshold_source,
+        )
         result = resolve_clusters(
             session.model,
             method=method,
             max_k=max_k,
-            edge_weight_threshold=edge_weight_threshold,
+            interpretation_edge_weight_threshold=resolved_interpretation_threshold,
         )
         session.clusters = result.labels
         session.report_exclude_columns = exclude_columns
 
-        sizes = result.labels.value_counts()
-        n_singleton_clusters = int((sizes == 1).sum())
-        if (
-            result.n_clusters > 1
-            and n_singleton_clusters / result.n_clusters > _MAX_CLUSTER_SINGLETON_RATIO
-        ):
-            return mcp_error(
-                "generate_cluster_dossier",
-                f"Degenerate clustering: {n_singleton_clusters} of {result.n_clusters} clusters are singletons "
-                f"(dominant cluster has {int(sizes.max())} members).",
-                error_code="DEGENERATE_CLUSTERING",
-                agent_action=(
-                    "Lower edge_weight_threshold to reconnect the graph, or call "
-                    "get_threshold_stability_curve and use method='components' to inspect natural structure."
-                ),
-            )
-
-        session.feature_evidence_cluster_meta = _cluster_result_payload(result)
+        session.feature_evidence_cluster_meta = cluster_result_payload(result)
 
         evidence_index = _get_or_build_evidence_index(
             session,
@@ -1499,11 +1788,44 @@ async def generate_cluster_dossier(
             ),
             evidence_index=evidence_index,
         )
-        cluster_meta = _cluster_result_payload(result)
+        cluster_meta = cluster_result_payload(result)
         if response_format == "markdown":
-            return dossier_to_markdown(dossier)
+            return _prepend_threshold_markdown(
+                dossier_to_markdown(dossier),
+                threshold_surface,
+            )
 
-        payload = _build_evidence_payload(dossier, cluster_meta)
+        payload = build_evidence_payload(
+            dossier,
+            cluster_meta,
+            detail=detail,
+            max_clusters=max_clusters,
+            feature_preview_limit=feature_preview_limit,
+        )
+        payload["construction_threshold"] = construction_threshold
+        payload["interpretation_edge_weight_threshold"] = (
+            resolved_interpretation_threshold
+        )
+        payload["threshold_inherited"] = threshold_inherited
+        payload["threshold_source"] = threshold_source
+        payload["threshold_surface"] = threshold_surface
+        payload["recommended_next_tools"] = (
+            [
+                "get_cluster_profile",
+                "get_feature_signal",
+                "get_cluster_signal_matrix",
+                "compare_clusters_tool",
+            ]
+            if detail == "summary"
+            else ["get_feature_signal", "compare_clusters_tool", "export_html_report"]
+        )
+        payload["payload_guidance"] = (
+            "For routine agent loops, omit detail or use detail='summary'. Summary "
+            "is a compact cluster map with capped feature previews and counts only. "
+            "Use get_cluster_profile, get_feature_signal, or get_cluster_signal_matrix "
+            "for targeted evidence. Set detail='standard' or 'full' only after "
+            "narrowing to specific clusters/features or for explicit audit/debugging."
+        )
         return json.dumps(
             payload,
             separators=(",", ":") if len(dossier.clusters) > 10 else None,
@@ -1516,7 +1838,7 @@ async def generate_cluster_dossier(
                 "generate_cluster_dossier",
                 "Spectral clustering requires a connected affinity graph. Your current threshold has disconnected the manifold.",
                 error_code="GRAPH_DISCONNECTED",
-                agent_action="Decrease edge_weight_threshold or increase epsilon sweep range to connect the graph.",
+                agent_action="Decrease interpretation_edge_weight_threshold or increase epsilon sweep range to connect the graph.",
             )
         logger.error(f"Error generating dossier: {e}")
         return mcp_error("generate_cluster_dossier", str(e))
@@ -1529,6 +1851,7 @@ async def generate_cluster_dossier(
 async def get_cluster_profile(
     cluster_id: int,
     detail: str = "standard",
+    max_features: int = 16,
     response_format: str = "json",
     ctx: Context = None,
 ) -> str:
@@ -1542,6 +1865,8 @@ async def get_cluster_profile(
             raise ToolError(
                 f"response_format must be 'json' or 'markdown', got '{response_format}'"
             )
+        if max_features < 1:
+            raise ToolError(f"max_features must be >= 1, got '{max_features}'")
 
         session = _get_session(ctx)
         evidence_index, cluster_meta = _require_cluster_state(session)
@@ -1549,10 +1874,12 @@ async def get_cluster_profile(
             "status": "ok",
             "cluster_result": cluster_meta,
             "detail": detail,
+            "max_features": max_features,
             "cluster": cluster_profile_payload(
                 evidence_index,
                 cluster_id,
                 detail=detail,
+                max_features=max_features,
             ),
         }
         if response_format == "markdown":
@@ -1562,6 +1889,7 @@ async def get_cluster_profile(
                 "",
                 f"- Size: {cluster['size']} ({cluster['size_pct']:.1f}%)",
                 f"- Topological neighbors: {', '.join(str(neighbor['cluster_id']) for neighbor in cluster['topological_neighbors']) or 'None'}",
+                f"- Feature rows: {cluster['features_returned']['total']} returned, {cluster['features_omitted']['total']} omitted",
                 "",
                 "### Numeric signals",
             ]
@@ -1592,9 +1920,32 @@ async def get_cluster_profile(
 async def get_feature_signal(
     feature_names: list[str],
     cluster_ids: list[int] | None = None,
+    detail: str = "summary",
+    max_clusters: int = 8,
     ctx: Context = None,
 ) -> str:
-    """Return cross-cluster evidence for specific feature columns."""
+    """Return cross-cluster evidence for specific feature columns.
+
+    Args:
+        feature_names: Numeric columns or ``column=value`` pairs for categoricals.
+        cluster_ids: Restrict to specific clusters. When omitted, the response is
+            capped by ``max_clusters`` (top by aggregate signal); pass an explicit
+            list to override.
+        detail: ``summary`` projects ~16 fields per row (default), ``standard``
+            adds context-tier rows in compact form, ``full`` returns every metric.
+        max_clusters: Cap on the number of clusters returned when ``cluster_ids``
+            is omitted. Ignored when ``cluster_ids`` is provided.
+    """
+    if detail not in {"summary", "standard", "full"}:
+        return mcp_error(
+            "get_feature_signal",
+            f"detail must be 'summary', 'standard', or 'full', got '{detail}'",
+        )
+    if max_clusters < 1:
+        return mcp_error(
+            "get_feature_signal",
+            f"max_clusters must be >= 1, got '{max_clusters}'",
+        )
     try:
         session = _get_session(ctx)
         evidence_index, cluster_meta = _require_cluster_state(session)
@@ -1605,6 +1956,8 @@ async def get_feature_signal(
                 evidence_index,
                 feature_names,
                 cluster_ids=cluster_ids,
+                detail=detail,
+                max_clusters=max_clusters,
             ),
         }
         return json.dumps(payload, indent=2)
@@ -1615,10 +1968,26 @@ async def get_feature_signal(
 @mcp.tool()
 async def get_cluster_signal_matrix(
     cluster_ids: list[int] | None = None,
-    include_context: bool = False,
+    include_context_tier: bool = False,
+    max_clusters: int = 8,
+    return_markdown: bool = True,
     ctx: Context = None,
 ) -> str:
-    """Return the cached cross-cluster signal matrix without regenerating the full dossier."""
+    """Return the cross-cluster signal matrix in a highly compressed Markdown or raw JSON layout.
+
+    The underlying topology of the data dictates the exact clusters. The parameter
+    ``max_clusters`` serves strictly as a presentation-layer truncation limit to rank
+    and slice the top clusters by signal to prevent context window bloat.
+
+    Set ``include_context_tier=True`` to include context-tier feature signals in addition
+    to core and supporting tiers. Set ``return_markdown=False`` explicitly to obtain
+    the programmatic, flattened JSON dictionary layout.
+    """
+    if max_clusters < 1:
+        return mcp_error(
+            "get_cluster_signal_matrix",
+            f"max_clusters must be >= 1, got '{max_clusters}'",
+        )
     try:
         session = _get_session(ctx)
         evidence_index, cluster_meta = _require_cluster_state(session)
@@ -1628,7 +1997,9 @@ async def get_cluster_signal_matrix(
             "signal_matrix": signal_matrix_payload(
                 evidence_index,
                 cluster_ids=cluster_ids,
-                include_context=include_context,
+                include_context_tier=include_context_tier,
+                max_clusters=max_clusters,
+                return_markdown=return_markdown,
             ),
         }
         return json.dumps(payload, indent=2)
@@ -1732,7 +2103,8 @@ async def characterize_dataset(
             )
 
         result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
-        return json.dumps(dataclasses.asdict(result), indent=2)
+        payload = compact_characterization_payload(dataclasses.asdict(result))
+        return json.dumps(payload, indent=2)
     except FileNotFoundError:
         return path_access_error(
             "characterize_dataset",
@@ -1770,16 +2142,62 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
         from pulsar.mcp.diagnostics import diagnose_model
 
         result = diagnose_model(session.model)
-        return json.dumps(dataclasses.asdict(result), indent=2)
+        payload = dataclasses.asdict(result)
+        if session.active_config_yaml:
+            gate = _finalization_gate(
+                payload,
+                sweep_count=len(session.sweep_history),
+                config_yaml=session.active_config_yaml,
+            )
+            payload["finalization_gate"] = gate
+            if gate["status"] == "blocked":
+                payload["advisories"].append(
+                    {
+                        "code": gate["code"],
+                        "severity": "warning",
+                        "message": gate["message"],
+                        "agent_action": gate["suggested_refinement"]["strategy"],
+                    }
+                )
+        return json.dumps(payload, indent=2)
     except Exception as e:
         logger.error(f"Error diagnosing graph: {e}")
         return mcp_error("diagnose_cosmic_graph", str(e))
 
 
+def _sparse_threshold_curve(
+    thresholds: list[float],
+    component_counts: list[int],
+    singleton_counts: list[int],
+    *,
+    max_points: int = 25,
+) -> list[dict[str, Any]]:
+    n_points = len(thresholds)
+    if n_points == 0:
+        return []
+
+    if n_points <= max_points:
+        indices = range(n_points)
+    else:
+        indices = sorted({int(i) for i in np.linspace(0, n_points - 1, num=max_points)})
+
+    return [
+        {
+            "threshold": thresholds[i],
+            "component_count": component_counts[i],
+            "singleton_count": singleton_counts[i],
+        }
+        for i in indices
+    ]
+
+
 @mcp.tool()
-async def get_threshold_stability_curve(ctx: Context) -> str:
+async def get_threshold_stability_curve(
+    detail: str = "summary",
+    ctx: Context = None,
+) -> str:
     """
-    Return the full component-count-vs-edge-weight-threshold curve.
+    Return component-count-vs-edge-weight-threshold stability.
 
     Uses H0 persistent homology on the cosmic graph's weighted adjacency
     to show how many connected components exist at each edge weight threshold.
@@ -1787,9 +2205,15 @@ async def get_threshold_stability_curve(ctx: Context) -> str:
     initial auto-clustering.
 
     Returns:
-        JSON with thresholds, component_counts, top plateaus, and the
-        auto-selected threshold (midpoint of longest valid plateau).
+        Summary JSON with top plateaus, sparse curve sample, and selected
+        threshold by default. Pass detail="full" for raw arrays.
     """
+    if detail not in {"summary", "full"}:
+        return mcp_error(
+            "get_threshold_stability_curve",
+            f"detail must be 'summary' or 'full', got '{detail}'",
+        )
+
     session = _get_session(ctx)
 
     if session.model is None:
@@ -1801,43 +2225,108 @@ async def get_threshold_stability_curve(ctx: Context) -> str:
         adj = session.model.weighted_adjacency
         stability = await asyncio.to_thread(find_stable_thresholds, adj)
 
-        plateaus = [
-            {
-                "start": float(p.start_threshold),
-                "end": float(p.end_threshold),
-                "component_count": int(p.component_count),
-                "length": float(p.length),
-                "midpoint": float(p.midpoint),
-            }
-            for p in stability.top_k_plateaus(10)
-        ]
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "optimal_threshold": float(stability.optimal_threshold),
-                "plateaus": plateaus,
-                "thresholds": [float(t) for t in stability.thresholds],
-                "component_counts": [int(c) for c in stability.component_counts],
-            },
-            indent=2,
+        thresholds = [float(t) for t in stability.thresholds]
+        resolved_construction_threshold = _validate_unit_threshold(
+            session.model.resolved_construction_threshold,
+            name="resolved_construction_threshold",
         )
+        optimal_threshold = float(stability.optimal_threshold)
+        matches_current = bool(
+            np.isclose(resolved_construction_threshold, optimal_threshold)
+        )
+
+        def _singleton_counts() -> list[int]:
+            # adj is symmetric; a singleton at threshold t has no row-wise
+            # neighbor above t. Vectorized: (n_thresholds, n) → bool.
+            row_max = adj.max(axis=1)
+            ts = np.asarray(thresholds, dtype=adj.dtype)
+            # singleton iff row_max <= t for that threshold
+            mask = row_max[None, :] <= ts[:, None]
+            return [int(c) for c in mask.sum(axis=1)]
+
+        singleton_counts = await asyncio.to_thread(_singleton_counts)
+
+        plateaus = []
+        for p in stability.top_k_plateaus(10):
+            singleton_count = singleton_count_at_threshold(adj, float(p.midpoint))
+            plateaus.append(
+                {
+                    "start": float(p.start_threshold),
+                    "end": float(p.end_threshold),
+                    "component_count": int(p.component_count),
+                    "length": float(p.length),
+                    "midpoint": float(p.midpoint),
+                    "singleton_count": singleton_count,
+                    "singleton_fraction": round(
+                        singleton_count / max(int(adj.shape[0]), 1),
+                        4,
+                    ),
+                }
+            )
+
+        component_counts = [int(c) for c in stability.component_counts]
+        curve_sample = _sparse_threshold_curve(
+            thresholds,
+            component_counts,
+            singleton_counts,
+        )
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "detail": detail,
+            "resolved_construction_threshold": resolved_construction_threshold,
+            "optimal_threshold": optimal_threshold,
+            "matches_current_threshold": matches_current,
+            "threshold_guidance": (
+                "Current graph construction matches the stability optimum."
+                if matches_current
+                else "Stability optimum differs from the current constructed graph; "
+                "treat it as a rerun candidate, not a change to the fitted graph."
+            ),
+            "plateaus": plateaus,
+            "curve_point_count": len(thresholds),
+            "curve_sample": curve_sample,
+            "curve_sample_omitted": max(len(thresholds) - len(curve_sample), 0),
+            "curve_sample_guidance": (
+                "curve_sample is an evenly spaced sketch of the full threshold "
+                "curve. Use detail='full' only when exact per-threshold arrays "
+                "are needed."
+            ),
+        }
+        if detail == "full":
+            payload["thresholds"] = thresholds
+            payload["component_counts"] = component_counts
+            payload["singleton_counts"] = singleton_counts
+        return json.dumps(payload, indent=2)
     except Exception as e:
         logger.error(f"Error computing stability curve: {e}")
         return mcp_error("get_threshold_stability_curve", str(e))
 
 
 @mcp.tool()
-async def get_topological_skeleton(run_id: str = "", ctx: Context = None) -> str:
+async def get_topological_skeleton(
+    run_id: str = "",
+    detail: str = "summary",
+    max_edges: int = 100,
+    max_nodes: int = 100,
+    ctx: Context = None,
+) -> str:
     """
     Return structured graph connectivity for the latest run or an explicit run_id.
 
-    The edge list is capped at 500 entries (top edges by weight). If the graph
-    has more edges, edges_truncated=true and edge_count shows the true total.
-    Use edge_count and component_sizes for density reasoning — do not rely on
-    len(edges) when edges_truncated is true.
+    Defaults to summary-only output for chat-first agent loops. Use
+    detail="edges", "nodes", or "full" with explicit caps for late-stage graph
+    inspection.
     """
     try:
+        if detail not in {"summary", "nodes", "edges", "full"}:
+            raise ToolError(
+                f"detail must be 'summary', 'nodes', 'edges', or 'full', got '{detail}'"
+            )
+        if max_edges < 1:
+            raise ToolError(f"max_edges must be >= 1, got '{max_edges}'")
+        if max_nodes < 1:
+            raise ToolError(f"max_nodes must be >= 1, got '{max_nodes}'")
+
         session = _get_session(ctx)
         target_run_id = run_id or session.latest_run_id
         if not target_run_id:
@@ -1850,10 +2339,22 @@ async def get_topological_skeleton(run_id: str = "", ctx: Context = None) -> str
         payload = {
             "run_id": record.run_id,
             "dataset_id": record.dataset_id,
-            "config_yaml": record.config_yaml,
-            "resolved_threshold": record.resolved_threshold,
-            "graph": record.graph_summary,
+            "config_yaml_omitted": detail != "full",
+            "resolved_construction_threshold": record.resolved_construction_threshold,
+            "graph": _skeleton_graph_payload(
+                record.graph_summary,
+                detail=detail,
+                max_edges=max_edges,
+                max_nodes=max_nodes,
+            ),
+            "recommended_next_tools": [
+                "diagnose_cosmic_graph",
+                "get_threshold_stability_curve",
+                "compare_sweeps",
+            ],
         }
+        if detail == "full":
+            payload["config_yaml"] = record.config_yaml
         return json.dumps(payload, indent=2)
     except Exception as e:
         return mcp_error("get_topological_skeleton", str(e))
@@ -1889,7 +2390,7 @@ async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
             "|---|---|---|",
             f"| pca_dims | {cfg_a.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} | {cfg_b.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} |",
             f"| epsilon | {_format_epsilon(cfg_a)} | {_format_epsilon(cfg_b)} |",
-            f"| threshold | {cfg_a.get('cosmic_graph', {}).get('threshold', 'auto')} | {cfg_b.get('cosmic_graph', {}).get('threshold', 'auto')} |",
+            f"| threshold | {cfg_a.get('cosmic_graph', {}).get('construction_threshold', 'auto')} | {cfg_b.get('cosmic_graph', {}).get('construction_threshold', 'auto')} |",
             f"| nodes | {metrics_a.get('n_nodes')} | {metrics_b.get('n_nodes')} |",
             f"| edges | {metrics_a.get('n_edges')} | {metrics_b.get('n_edges')} |",
             f"| components | {metrics_a.get('component_count')} | {metrics_b.get('component_count')} |",
@@ -1912,7 +2413,7 @@ async def recommend_preprocessing(
     Prefer dataset_id after ingest; accepts dataset_geometry as fallback.
 
     Args:
-        dataset_geometry: The raw JSON string from characterize_dataset.
+        dataset_geometry: Legacy full geometry JSON with column_profiles.
         dataset_id: Preferred dataset handle. When provided, characterizes
             the dataset automatically (dataset_geometry is ignored).
 
@@ -1942,7 +2443,9 @@ async def recommend_preprocessing(
         if not column_profiles:
             return mcp_error(
                 "recommend_preprocessing",
-                "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.",
+                "No column_profiles found in dataset_geometry.",
+                error_code="MISSING_COLUMN_PROFILES",
+                agent_action="Pass dataset_id instead of compact characterize_dataset output.",
             )
 
         drop, impute, encode, rationale = _recommend_preprocessing_block(
@@ -1986,8 +2489,9 @@ async def recommend_preprocessing(
 async def repair_preprocessing_config(
     error_message: str,
     config_yaml: str,
-    dataset_geometry: str,
-    ctx: Context,
+    dataset_geometry: str = "",
+    dataset_id: str = "",
+    ctx: Context = None,
 ) -> str:
     """
     Given a preprocessing error from run_topological_sweep, produce a corrected
@@ -1999,19 +2503,38 @@ async def repair_preprocessing_config(
     Args:
         error_message: The full error text from the failed sweep.
         config_yaml: The config_yaml that caused the error.
-        dataset_geometry: The raw JSON string from characterize_dataset.
+        dataset_geometry: Full legacy geometry JSON with column_profiles.
+        dataset_id: Preferred dataset handle. When provided, characterizes
+            the dataset automatically (dataset_geometry is ignored).
 
     Returns:
         Markdown with error classification, change log table, and patched config_yaml.
     """
     try:
-        geo = json.loads(dataset_geometry)
+        if dataset_id:
+            from pulsar.analysis.characterization import characterize_dataset as _char
+
+            session = _get_session(ctx)
+            dataset_path = _resolve_dataset_path(dataset_id)
+            df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
+            result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
+            geo = dataclasses.asdict(result)
+        elif dataset_geometry:
+            geo = json.loads(dataset_geometry)
+        else:
+            return mcp_error(
+                "repair_preprocessing_config",
+                "Provide either dataset_id or legacy dataset_geometry with column_profiles.",
+                error_code="MISSING_INPUT",
+                agent_action="Pass dataset_id when available.",
+            )
+
         if not geo.get("column_profiles"):
             return mcp_error(
                 "repair_preprocessing_config",
-                "No column_profiles found in dataset_geometry. Pass the full JSON from characterize_dataset.",
+                "No column_profiles found in dataset_geometry.",
                 error_code="MISSING_COLUMN_PROFILES",
-                agent_action="Call characterize_dataset first, then pass its full JSON output.",
+                agent_action="Pass dataset_id instead of compact characterize_dataset output.",
             )
         profiles_by_name: dict[str, Any] = {}
         for cp in geo.get("column_profiles", []):
@@ -2099,7 +2622,7 @@ async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
                 "error": str(e),
                 "agent_action": (
                     "Call repair_preprocessing_config(error_message=..., "
-                    "config_yaml=..., dataset_geometry=...) to fix this automatically."
+                    "config_yaml=..., dataset_id=...) to fix this automatically."
                 ),
             },
             indent=2,
@@ -2257,7 +2780,7 @@ async def probe_columns(
     """
     Generate rich, detailed profiles for specific columns (Magnifying Glass).
     Use this when you need sample values or distributions for specific columns
-    after seeing the global sparse schema from characterize_dataset.
+    after seeing the compact preview from characterize_dataset.
 
     Args:
         dataset_id: Handle for the ingested dataset.

@@ -16,35 +16,94 @@ Reveal the dataset's topology; do not force convenient clusters.
 
 ## PHASE I: INGEST & CALIBRATE
 1. Ingest: Use `ingest_dataset(path)` handles. Prefer `dataset_id` everywhere.
-2. Characterize: `characterize_dataset(dataset_id)` returns a SPARSE schema —
-   dtype, n_unique, missingness — for ALL columns. Numeric stats and
-   top_values are intentionally omitted to keep payload small for wide
-   datasets. Use `probe_columns(dataset_id, ['col_name'])` for deep
-   per-column inspection (sample values, distributions). Max 20 columns
-   per probe call.
+2. Characterize: `characterize_dataset(dataset_id)` returns a compact,
+   summary-first map: raw numeric geometry, schema counts, and a capped preview
+   of interesting columns. Full per-column profiles are intentionally omitted
+   to keep wide datasets out of agent context. Use
+   `probe_columns(dataset_id, ['col_name'])` for deep per-column inspection
+   (sample values, distributions). Call `characterize_dataset` once per dataset;
+   do not repeat it casually on wide tables. Max 20 columns per probe call.
 3. Calibrate: `create_config(dataset_id)` is mandatory. It returns the
-   [p5, p95] epsilon domain. EPSILON OUTSIDE THIS RANGE PRODUCES
-   DEGENERATE GRAPHS.
+   baseline config, processed-space distance percentiles, and a
+   `sweep_strategy` block. Treat this as a broad first pass, not a final
+   answer.
 4. Validate Config: `validate_config(config_yaml, dataset_id)`.
 
 ## PHASE II: EXECUTE & VALIDATE
 5. Run: `run_topological_sweep`.
 6. Validate: `diagnose_cosmic_graph`.
+   - GATE: If `grid_adequacy_status` is `under_sampled` or `thin_grid`,
+     widen the grid before interpreting clusters.
+   - GATE: Inspect the `advisories` list. `EMPTY_GRAPH` and `HIGH_SINGLETONS`
+     require lowering the construction threshold or shifting the PCA grid
+     before proceeding. If `finalization_gate.status` is `blocked`, run the
+     suggested targeted resolution sweep or explicitly justify why the dominant
+     component is clinically expected.
    - GATE: If density > 0.8 or < 0.1, STOP. Refine config (Step 2).
    - GATE: component_count=1 is normal; do not force separation by
      narrowing epsilon.
+7. Compare: Use `get_experiment_history`, `compare_sweeps`, and
+   `summarize_sweep_history` after each refinement. `summarize_sweep_history`
+   distills patterns (e.g., which PCA dims caused hairballs) across the
+   session; you still own the next-config decision. Prefer 2-3 deliberate
+   sweeps over one brittle perfect-looking run.
+8. Inspect payloads summary-first. Use `generate_cluster_dossier(detail="summary")`
+   for routine exploration. Treat `detail="standard"`, `detail="full"`, and
+   `get_topological_skeleton(detail="full")` as late-stage inspection modes.
+
+## GRID GEOMETRY & EXPERT AGENT AUTONOMY
+The default config returned by `create_config` is ONLY a baseline starting guess. As the expert in the room, you have full autonomy—and the duty—to actively override, widen, and shift these parameters based on diagnostic feedback.
+
+- **Broad First, Then Concentrate**: Start with the broad baseline grid from
+  `create_config`. On high-dimensional processed data this may include a wide
+  PCA tail such as `[2, 5, 10, 15, 20]`. After the first run, compare sweeps and
+  concentrate around the stable region rather than keeping every tail value
+  forever.
+- **"Widen and Shift" over "Narrow Down"**: Do not optimize by narrowing down to a single PCA dimension. To find stable structures, maintain a wide multi-scale grid, but *shift* it away from degenerate areas. For example, if a baseline sweep of `[2, 3, 4, 5]` results in a dense hairball, do not narrow to `[5]`. Instead, shift the grid upwards (e.g., to `[4, 6, 8, 10]` or `[5, 8, 12]`) to drop low-dimensional flat noise while preserving multi-scale consensus.
+- **The PCA Floor**: Never include PCA dimensions below the elbow of the cumulative variance curve. 1D, 2D, or 3D projections of complex, high-dimensional datasets collapse structures and inject spurious consensus edges that create false "hairballs." If the variance elbow is at 5D, your grid floor must be at least 4D or 5D (e.g., sweep `[5, 8, 12]`).
+- **The Epsilon Gates**: Keep epsilon inside the returned k-NN distance
+  domain unless you have a diagnostic reason to test a boundary. If the graph is
+  shattered, raise the upper epsilon bound. If it is a dense hairball, lower the
+  upper bound or shift the PCA grid upward.
+- **Use the Tools**: `refine_active_config` supports quick PCA/epsilon edits,
+  `run_topological_sweep` reports metric diffs, and `compare_sweeps` compares
+  run IDs. Use them to iteratively find a representative grid.
+
+## NO HILL-CLIMBING OPTIMIZATION
+The cosmic graph is a stable representation, not a score to maximize.
+- **Do Not Optimize Graph Metrics**: Do not treat density, component count, or singleton fraction as quality metrics to optimize. They are descriptive indicators of scale, not success scores. 
+- **Seek Structural Persistence**: A topological pattern is "real" if it persists across many combinations of epsilon, PCA dimensions, and seeds. Look for structural invariants across sweeps rather than "tuning" for a single perfect-looking graph.
 
 ## THRESHOLD MECHANICS
-Two independent levers — do not confuse them:
-- **Accumulation threshold** (`cosmic_graph.threshold` in config): set BEFORE the
-  sweep. Controls how often two points must co-occur across ball maps to share an
-  edge. Too high → singletons. Too low → over-connected hairball. Default "auto"
-  is correct for most datasets; only override if `diagnose_cosmic_graph` shows
-  density < 0.1 (raise it) or > 0.8 (lower it), then re-run the sweep.
-- **Edge weight threshold** (`edge_weight_threshold` in `generate_cluster_dossier`):
-  applied AFTER the graph is built. Use `get_threshold_stability_curve` and
-  `diagnose_cosmic_graph` weight percentiles (weight_p25–p75) to choose a value.
-  This tunes cluster count and sharpness, not graph connectivity.
+Two independent levers operate on the same underlying weighted matrix at
+different stages. Do not confuse them.
+
+- **Construction threshold** (`cosmic_graph.construction_threshold` in config):
+  set BEFORE the sweep. Gates the persisted binary cosmic graph used for
+  graph-connectivity diagnostics and visualization. The full weighted matrix
+  is still retained. Too high → singletons. Too low → over-connected hairball.
+  Default `"auto"` runs persistent homology stability analysis
+  (`threshold_stability_summary` in the sweep response) and picks the longest
+  stable plateau. Override only if `diagnose_cosmic_graph` returns an
+  `EMPTY_GRAPH` / `HIGH_SINGLETONS` advisory (lower it) or density > 0.8
+  (raise it), then re-run the sweep.
+
+- **Interpretation threshold** (`interpretation_edge_weight_threshold` in
+  `generate_cluster_dossier`): applied AFTER the graph is built. Slices the
+  retained weighted matrix for clustering and reporting. For `method="auto"`
+  and `method="components"`, the default inherits the construction threshold
+  so clustering operates on the same surface you diagnosed. For explicit
+  `method="spectral"`, the default is `0.0` so spectral uses the full weighted
+  affinity matrix unless you deliberately sparsify it. Pass an explicit value
+  to deliberately diverge. Use `diagnose_cosmic_graph` weight percentiles
+  (weight_p25–p95) to pick a value when overriding. This changes
+  interpretation-time connectivity and cluster fragmentation; it does not
+  rebuild the persisted cosmic graph.
+
+When divergence is intentional, the JSON dossier response carries
+`construction_threshold`, `interpretation_edge_weight_threshold`, and
+`threshold_inherited`, plus `threshold_surface` guidance so you can see exactly
+which surface clustering used.
 
 ## PHASE III: CONTRASTIVE INTERPRETATION
 7. Cluster: `generate_cluster_dossier`.

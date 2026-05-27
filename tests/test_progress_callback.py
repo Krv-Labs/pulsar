@@ -19,7 +19,7 @@ def basic_config():
             "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
             "ball_mapper": {"epsilon": {"values": [0.5, 1.0]}},
         },
-        "cosmic_graph": {"threshold": "0.0"},
+        "cosmic_graph": {"construction_threshold": "0.0"},
         "output": {"n_reps": 1},
     }
 
@@ -33,7 +33,7 @@ def auto_config():
             "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
             "ball_mapper": {"epsilon": {"values": [0.5, 1.0]}},
         },
-        "cosmic_graph": {"threshold": "auto"},
+        "cosmic_graph": {"construction_threshold": "auto"},
         "output": {"n_reps": 1},
     }
 

@@ -77,7 +77,7 @@ class ClusterResult:
     n_clusters: int
     silhouette_score: float | None
     failure_reason: str | None
-    edge_weight_threshold_applied: float = 0.0
+    interpretation_edge_weight_threshold_applied: float = 0.0
     stability_plateaus: list[dict] | None = None
 
 
@@ -97,16 +97,19 @@ def resolve_clusters(
     model: ThemaRS,
     method: str = "auto",
     max_k: int = 15,
-    edge_weight_threshold: float = 0.0,
+    interpretation_edge_weight_threshold: float = 0.0,
 ) -> ClusterResult:
-    """Entry point for clustering. Supports auto-thresholding and spectral fallback."""
+    """Entry point for clustering. Respects explicit method selection."""
     W = model.weighted_adjacency
     n = W.shape[0]
 
     # 1. Component Strategy
-    if method == "components" or edge_weight_threshold > 0:
-        thresh = edge_weight_threshold if edge_weight_threshold > 0 else 0.0
-        adj = (W > thresh).astype(np.int64)
+    if method == "components" or (
+        method == "auto" and interpretation_edge_weight_threshold > 0
+    ):
+        thresh = max(float(interpretation_edge_weight_threshold), 0.0)
+        binary = (W > thresh).astype(np.int64)
+        adj = W * binary
         G = nx.from_numpy_array(adj)
         labels = np.zeros(n, dtype=int)
         comps = list(nx.connected_components(G))
@@ -119,7 +122,7 @@ def resolve_clusters(
             n_clusters=len(comps),
             silhouette_score=None,
             failure_reason=None,
-            edge_weight_threshold_applied=thresh,
+            interpretation_edge_weight_threshold_applied=thresh,
         )
 
     # 2. Threshold Stability (PH-based)
@@ -136,10 +139,17 @@ def resolve_clusters(
                 model,
                 method="components",
                 max_k=max_k,
-                edge_weight_threshold=edge_weight_threshold,
+                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
             )
     if method in ("auto", "spectral"):
-        return _cluster_spectral(W, n, max_k)
+        thresh = max(float(interpretation_edge_weight_threshold), 0.0)
+        spectral_W = W * (W > thresh)
+        return _cluster_spectral(
+            spectral_W,
+            n,
+            max_k,
+            interpretation_edge_weight_threshold=thresh,
+        )
 
     raise ValueError(f"Unknown clustering method: {method}")
 
@@ -183,14 +193,19 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
             n_clusters=len(comps),
             silhouette_score=None,
             failure_reason=None,
-            edge_weight_threshold_applied=thresh,
+            interpretation_edge_weight_threshold_applied=thresh,
             stability_plateaus=plateau_dicts,
         )
     return None
 
 
-def _cluster_spectral(adj: np.ndarray, n: int, max_k: int) -> ClusterResult:
-    """Fall back to spectral clustering if no stable threshold split exists."""
+def _cluster_spectral(
+    adj: np.ndarray,
+    n: int,
+    max_k: int,
+    interpretation_edge_weight_threshold: float = 0.0,
+) -> ClusterResult:
+    """Run spectral clustering on a weighted affinity matrix."""
     G = nx.from_numpy_array((adj > 0).astype(np.int64))
     if not nx.is_connected(G):
         raise ValueError(
@@ -238,6 +253,9 @@ def _cluster_spectral(adj: np.ndarray, n: int, max_k: int) -> ClusterResult:
             n_clusters=best_k,
             silhouette_score=best_score,
             failure_reason=None,
+            interpretation_edge_weight_threshold_applied=(
+                interpretation_edge_weight_threshold
+            ),
         )
 
     raise ValueError("No stable cluster cut found.")
@@ -589,6 +607,69 @@ def _detail_categorical_rows(
     rows: list[dict[str, Any]], detail: str
 ) -> list[dict[str, Any]]:
     return _tier_filter(rows, detail, _compact_categorical_row)
+
+
+def _feature_signal_sort_key(row: dict[str, Any], kind: str) -> tuple[Any, ...]:
+    aggregate = abs(float(row.get("aggregate_score", 0.0)))
+    if kind == "numeric":
+        secondary = (
+            abs(float(row.get("effect_mean_std", 0.0))),
+            abs(float(row.get("z_score", 0.0))),
+            abs(float(row.get("neighbor_effect", 0.0))),
+        )
+    else:
+        secondary = (
+            abs(float(row.get("log_lift", 0.0))),
+            abs(float(row.get("neighbor_specificity", 0.0))),
+            abs(float(row.get("lift", 1.0)) - 1.0),
+        )
+    return (
+        -aggregate,
+        *(-value for value in secondary),
+        str(row.get("column", "")),
+        str(row.get("value", "")),
+    )
+
+
+def _limit_cluster_feature_rows(
+    numeric_rows: list[dict[str, Any]],
+    categorical_rows: list[dict[str, Any]],
+    max_features: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    ranked = [
+        ("numeric", row)
+        for row in sorted(
+            numeric_rows, key=lambda row: _feature_signal_sort_key(row, "numeric")
+        )
+    ]
+    ranked.extend(
+        ("categorical", row)
+        for row in sorted(
+            categorical_rows,
+            key=lambda row: _feature_signal_sort_key(row, "categorical"),
+        )
+    )
+    ranked.sort(key=lambda item: _feature_signal_sort_key(item[1], item[0]))
+    selected = ranked[:max_features]
+
+    limited_numeric = [row for kind, row in selected if kind == "numeric"]
+    limited_categorical = [row for kind, row in selected if kind == "categorical"]
+    omitted_numeric = max(len(numeric_rows) - len(limited_numeric), 0)
+    omitted_categorical = max(len(categorical_rows) - len(limited_categorical), 0)
+    limit_metadata = {
+        "feature_limit": int(max_features),
+        "features_returned": {
+            "numeric": len(limited_numeric),
+            "categorical": len(limited_categorical),
+            "total": len(selected),
+        },
+        "features_omitted": {
+            "numeric": omitted_numeric,
+            "categorical": omitted_categorical,
+            "total": omitted_numeric + omitted_categorical,
+        },
+    }
+    return limited_numeric, limited_categorical, limit_metadata
 
 
 def _categorical_ranking_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -1343,18 +1424,29 @@ def cluster_profile_payload(
     cluster_id: int,
     *,
     detail: str = "standard",
+    max_features: int = 16,
 ) -> dict[str, Any]:
     bundle = evidence_index.cluster_bundles.get(int(cluster_id))
     if bundle is None:
         raise KeyError(cluster_id)
+    numeric_features = _detail_numeric_rows(bundle["numeric"], detail)
+    categorical_features = _detail_categorical_rows(bundle["categorical"], detail)
+    numeric_features, categorical_features, limit_metadata = (
+        _limit_cluster_feature_rows(
+            numeric_features,
+            categorical_features,
+            max_features,
+        )
+    )
     return {
         "cluster_id": int(cluster_id),
         "size": int(bundle["size"]),
         "size_pct": float(bundle["size_pct"]),
         "semantic_name": str(bundle["semantic_name"]),
         "topological_neighbors": list(bundle["topological_neighbors"]),
-        "numeric_features": _detail_numeric_rows(bundle["numeric"], detail),
-        "categorical_features": _detail_categorical_rows(bundle["categorical"], detail),
+        "numeric_features": numeric_features,
+        "categorical_features": categorical_features,
+        **limit_metadata,
         "tier_counts": {
             "numeric": {
                 tier: sum(1 for row in bundle["numeric"] if row["signal_tier"] == tier)
@@ -1375,6 +1467,8 @@ def feature_signal_payload(
     feature_names: list[str],
     *,
     cluster_ids: list[int] | None = None,
+    detail: str = "summary",
+    max_clusters: int | None = 8,
 ) -> dict[str, Any]:
     requested_clusters = (
         {int(cluster_id) for cluster_id in cluster_ids}
@@ -1389,7 +1483,7 @@ def feature_signal_payload(
             column, value = feature.split("=", 1)
             categorical_pairs.add((column, value))
         bare_columns.add(feature.split("=", 1)[0])
-    cluster_payloads = []
+    raw_payloads: list[dict[str, Any]] = []
     for cluster_id in sorted(requested_clusters):
         bundle = evidence_index.cluster_bundles.get(cluster_id)
         if bundle is None:
@@ -1405,62 +1499,237 @@ def feature_signal_payload(
         ]
         if not numeric_rows and not categorical_rows:
             continue
-        cluster_payloads.append(
+        signal_score = max(
+            (
+                abs(float(row.get("aggregate_score", 0.0)))
+                for row in (*numeric_rows, *categorical_rows)
+            ),
+            default=0.0,
+        )
+        raw_payloads.append(
             {
                 "cluster_id": cluster_id,
                 "semantic_name": bundle["semantic_name"],
-                "numeric_features": numeric_rows,
-                "categorical_features": categorical_rows,
+                "cluster_size": int(bundle["size"]),
+                "_signal_score": signal_score,
+                "_numeric_rows": numeric_rows,
+                "_categorical_rows": categorical_rows,
+            }
+        )
+
+    if cluster_ids is None and max_clusters is not None:
+        raw_payloads.sort(key=lambda c: c["_signal_score"], reverse=True)
+        kept = raw_payloads[:max_clusters]
+        omitted = len(raw_payloads) - len(kept)
+        kept.sort(key=lambda c: c["cluster_id"])
+    else:
+        kept = raw_payloads
+        omitted = 0
+
+    cluster_payloads = []
+    for entry in kept:
+        cluster_payloads.append(
+            {
+                "cluster_id": entry["cluster_id"],
+                "semantic_name": entry["semantic_name"],
+                "cluster_size": entry["cluster_size"],
+                "numeric_features": _detail_numeric_rows(
+                    entry["_numeric_rows"], detail
+                ),
+                "categorical_features": _detail_categorical_rows(
+                    entry["_categorical_rows"], detail
+                ),
             }
         )
     return {
         "feature_names": features,
+        "detail": detail,
+        "clusters_returned": len(cluster_payloads),
+        "clusters_omitted": omitted,
         "clusters": cluster_payloads,
     }
+
+
+def safe_float(val: Any) -> float:
+    try:
+        return float(val) if val is not None else 0.0
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def signal_matrix_payload(
     evidence_index: FeatureEvidenceIndex,
     *,
     cluster_ids: list[int] | None = None,
-    include_context: bool = False,
-) -> dict[str, Any]:
-    requested_clusters = (
-        {int(cluster_id) for cluster_id in cluster_ids}
-        if cluster_ids is not None
-        else set(evidence_index.cluster_bundles.keys())
+    include_context_tier: bool = False,
+    max_clusters: int | None = 8,
+    return_markdown: bool = True,
+) -> dict[str, Any] | str:
+    # 1. Parse and sanitize cluster IDs
+    parsed_requested_ids: set[int] = set()
+    if cluster_ids is not None:
+        for cid in cluster_ids:
+            try:
+                parsed_requested_ids.add(int(cid))
+            except (ValueError, TypeError):
+                logger.warning(f"Skipping unparseable cluster_id: {cid}")
+    else:
+        bundles = getattr(evidence_index, "cluster_bundles", {}) or {}
+        parsed_requested_ids = set(bundles.keys())
+
+    # 2. Pre-calculate cluster signal scores to avoid duplicate sorting loops
+    cluster_scores: dict[int, float] = {}
+    for cid in parsed_requested_ids:
+        bundle = evidence_index.cluster_bundles.get(cid, {})
+        rows = [
+            *bundle.get("numeric", []),
+            *bundle.get("categorical", []),
+        ]
+        max_score = 0.0
+        for row in rows:
+            try:
+                score_val = abs(safe_float(row.get("aggregate_score", 0.0)))
+                if score_val > max_score:
+                    max_score = score_val
+            except Exception:
+                continue
+        cluster_scores[cid] = max_score
+
+    # 3. Handle sorting and truncation
+    ranked_ids = sorted(
+        parsed_requested_ids, key=lambda x: cluster_scores.get(x, 0.0), reverse=True
     )
-    matrix = evidence_index.signal_matrix
-    numeric_rows = [
-        {
-            **row,
-            "values": dict(row["values"]),
-        }
-        for row in matrix["numeric_rows"]
-        if row["cluster_id"] in requested_clusters
+    if max_clusters is not None and len(ranked_ids) > max_clusters:
+        kept = set(ranked_ids[:max_clusters])
+        omitted_ids = ranked_ids[max_clusters:]
+    else:
+        kept = set(ranked_ids)
+        omitted_ids = []
+
+    # Map omitted cluster IDs to their maximum aggregate signal score
+    omitted_telemetry = [
+        {"cluster_id": cid, "max_signal": round(cluster_scores.get(cid, 0.0), 3)}
+        for cid in omitted_ids
     ]
-    categorical_rows = [
-        {
-            **row,
-            "values": dict(row["values"]),
+
+    matrix = getattr(evidence_index, "signal_matrix", {}) or {}
+
+    # 4. Group rows by cluster_id to avoid O(R) global scans
+    numeric_by_cluster: dict[int, list[dict[str, Any]]] = {}
+    categorical_by_cluster: dict[int, list[dict[str, Any]]] = {}
+
+    for row in matrix.get("numeric_rows", []):
+        cid = row.get("cluster_id")
+        if cid is not None:
+            numeric_by_cluster.setdefault(cid, []).append(row)
+
+    for row in matrix.get("categorical_rows", []):
+        cid = row.get("cluster_id")
+        if cid is not None:
+            categorical_by_cluster.setdefault(cid, []).append(row)
+
+    # 5. Extract only kept rows and filter tiers on-the-fly
+    allowed_tiers = (
+        {"core", "supporting"}
+        if not include_context_tier
+        else {"core", "supporting", "context"}
+    )
+
+    numeric_rows = []
+    categorical_rows = []
+
+    for cid in kept:
+        for row in numeric_by_cluster.get(cid, []):
+            raw_vals = row.get("values", {}) or {}
+            filtered_vals = {
+                k: safe_float(v.get("value")) if isinstance(v, dict) else safe_float(v)
+                for k, v in raw_vals.items()
+                if not isinstance(v, dict) or v.get("signal_tier") in allowed_tiers
+            }
+            if filtered_vals:
+                numeric_rows.append({"cluster_id": cid, "values": filtered_vals})
+
+        for row in categorical_by_cluster.get(cid, []):
+            raw_vals = row.get("values", {}) or {}
+            filtered_vals = {
+                k: v.get("value") if isinstance(v, dict) else v
+                for k, v in raw_vals.items()
+                if not isinstance(v, dict) or v.get("signal_tier") in allowed_tiers
+            }
+            if filtered_vals:
+                categorical_rows.append({"cluster_id": cid, "values": filtered_vals})
+
+    # 6. Return high-density Markdown representation for the LLM
+    if return_markdown:
+        import io
+
+        report = io.StringIO()
+        report.write("## Topological Signal Matrix\n\n")
+        report.write("### Telemetry\n")
+        report.write(f"- **Clusters Returned**: {len(kept)}\n")
+        report.write(f"- **Clusters Omitted**: {len(omitted_ids)}\n")
+
+        if omitted_telemetry:
+            report.write("#### Omitted Clusters Detail:\n")
+            for item in omitted_telemetry:
+                score = item["max_signal"]
+                rec = (
+                    "Recommended for targeted inspection"
+                    if score >= 2.0
+                    else "Low Signal: Ignorable"
+                )
+                report.write(
+                    f"  - **Cluster ID {item['cluster_id']}** (Max Signal: {score}) — *{rec}*\n"
+                )
+        report.write("\n")
+
+        report.write("### Numeric Feature Matrix\n")
+        report.write(_render_markdown_table(numeric_rows) + "\n\n")
+
+        report.write("### Categorical Feature Matrix\n")
+        report.write(_render_markdown_table(categorical_rows) + "\n")
+
+        return {
+            "clusters_returned": len(kept),
+            "clusters_omitted": len(omitted_ids),
+            "omitted_clusters": omitted_telemetry,
+            "markdown_report": report.getvalue(),
         }
-        for row in matrix["categorical_rows"]
-        if row["cluster_id"] in requested_clusters
-    ]
-    if not include_context:
-        for row_set in (numeric_rows, categorical_rows):
-            for row in row_set:
-                row["values"] = {
-                    key: value
-                    for key, value in row["values"].items()
-                    if value.get("signal_tier") in {"core", "supporting"}
-                }
+
     return {
-        "numeric_columns": matrix["numeric_columns"],
-        "categorical_values": matrix["categorical_values"],
+        "numeric_columns": matrix.get("numeric_columns", []),
+        "categorical_values": matrix.get("categorical_values", {}),
+        "clusters_returned": len(kept),
+        "clusters_omitted": len(omitted_ids),
+        "omitted_clusters": omitted_telemetry,
         "numeric_rows": numeric_rows,
         "categorical_rows": categorical_rows,
     }
+
+
+def _render_markdown_table(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "*No signals found in the selected tiers.*"
+
+    # Gather all unique feature keys across rows to build column headers
+    all_features = sorted(list({k for r in rows for k in r["values"].keys()}))
+    if not all_features:
+        return "*No features available in selected tiers.*"
+
+    import io
+
+    output = io.StringIO()
+    output.write("| Cluster ID | " + " | ".join(all_features) + " |\n")
+    output.write("| --- |" + " | ".join(["---"] * len(all_features)) + " |\n")
+
+    for row in rows:
+        vals = []
+        for feat in all_features:
+            val = row["values"].get(feat, "-")
+            vals.append(f"{val:.3f}" if isinstance(val, float) else str(val))
+        output.write(f"| {row['cluster_id']} | " + " | ".join(vals) + " |\n")
+
+    return output.getvalue()
 
 
 def dossier_to_markdown(dossier: TopologicalDossier) -> str:

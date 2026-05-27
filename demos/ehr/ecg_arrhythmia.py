@@ -417,7 +417,7 @@ def main() -> None:
                     "epsilon": {"range": {"min": 0.5, "max": 3.0, "steps": 30}},
                 },
             },
-            "cosmic_graph": {"threshold": 0.0},
+            "cosmic_graph": {"construction_threshold": 0.0},
             "output": {"n_reps": 5},
         }
     )

@@ -48,9 +48,16 @@ class RunRecord:
     dataset_id: str | None
     config_yaml: str
     metrics: dict
-    resolved_threshold: float
+    resolved_construction_threshold: float
     graph_summary: dict
     created_at: float
+
+
+STALE_RUN_RECORD_MESSAGE = (
+    "Run record uses removed field 'resolved_threshold'. "
+    "Rerun the sweep to create a record with "
+    "'resolved_construction_threshold'."
+)
 
 
 @dataclass
@@ -168,7 +175,7 @@ class MCPRegistry:
         dataset_id: str | None,
         config_yaml: str,
         metrics: dict,
-        resolved_threshold: float,
+        resolved_construction_threshold: float,
         graph_summary: dict,
     ) -> RunRecord:
         record = RunRecord(
@@ -176,7 +183,7 @@ class MCPRegistry:
             dataset_id=dataset_id,
             config_yaml=config_yaml,
             metrics=metrics,
-            resolved_threshold=resolved_threshold,
+            resolved_construction_threshold=resolved_construction_threshold,
             graph_summary=graph_summary,
             created_at=time.time(),
         )
@@ -188,7 +195,10 @@ class MCPRegistry:
         path = self._run_path(run_id)
         if not path.exists():
             return None
-        return RunRecord(**json.loads(path.read_text()))
+        raw = json.loads(path.read_text())
+        if "resolved_threshold" in raw:
+            raise ValueError(STALE_RUN_RECORD_MESSAGE)
+        return RunRecord(**raw)
 
     def _load_datasets(self) -> dict[str, dict]:
         with self._locked_registry():

@@ -56,7 +56,7 @@ class ThemaRS:
         self._data: pd.DataFrame | None = None
         self._preprocessed_data: pd.DataFrame | None = None
         self._stability_result: StabilityResult | None = None
-        self._resolved_threshold: float | None = None
+        self._resolved_construction_threshold: float | None = None
 
     # ------------------------------------------------------------------
     # Main pipeline
@@ -160,19 +160,21 @@ class ThemaRS:
         _notify()  # laplacian
 
         # 8. CosmicGraph (+ optional stability analysis)
-        threshold = cfg.cosmic_graph.threshold
+        threshold = cfg.cosmic_graph.construction_threshold
         if threshold == "auto":
             cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
             weighted_adj = np.array(cg_temp.weighted_adj)
             self._stability_result = find_stable_thresholds(weighted_adj)
-            self._resolved_threshold = float(self._stability_result.optimal_threshold)
+            self._resolved_construction_threshold = float(
+                self._stability_result.optimal_threshold
+            )
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_threshold
+                galactic_L, self._resolved_construction_threshold
             )
         else:
-            self._resolved_threshold = float(threshold)
+            self._resolved_construction_threshold = float(threshold)
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_threshold
+                galactic_L, self._resolved_construction_threshold
             )
             weighted_adj = np.array(self._cosmic_rust.weighted_adj)
         self._weighted_adjacency = weighted_adj
@@ -340,19 +342,21 @@ class ThemaRS:
         galactic_L = galactic_L_accum
         _notify()  # laplacian
 
-        threshold = cfg.cosmic_graph.threshold
+        threshold = cfg.cosmic_graph.construction_threshold
         if threshold == "auto":
             cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
             weighted_adj = np.array(cg_temp.weighted_adj)
             self._stability_result = find_stable_thresholds(weighted_adj)
-            self._resolved_threshold = float(self._stability_result.optimal_threshold)
+            self._resolved_construction_threshold = float(
+                self._stability_result.optimal_threshold
+            )
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_threshold
+                galactic_L, self._resolved_construction_threshold
             )
         else:
-            self._resolved_threshold = float(threshold)
+            self._resolved_construction_threshold = float(threshold)
             self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_threshold
+                galactic_L, self._resolved_construction_threshold
             )
             weighted_adj = np.array(self._cosmic_rust.weighted_adj)
 
@@ -391,11 +395,11 @@ class ThemaRS:
         return self._stability_result
 
     @property
-    def resolved_threshold(self) -> float:
-        """The actual threshold used (resolved from 'auto' or the manual value)."""
-        if self._resolved_threshold is None:
+    def resolved_construction_threshold(self) -> float:
+        """The actual construction threshold used (resolved from 'auto' or the manual value)."""
+        if self._resolved_construction_threshold is None:
             raise RuntimeError("Call fit() first")
-        return self._resolved_threshold
+        return self._resolved_construction_threshold
 
     @property
     def data(self) -> pd.DataFrame:

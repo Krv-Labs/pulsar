@@ -82,7 +82,7 @@ Create ``params.yaml``:
        epsilon: {range: {min: 0.1, max: 0.5, steps: 5}}
 
    cosmic_graph:
-     threshold: "auto"
+     construction_threshold: "auto"
 
 **Step 2: Run the pipeline**
 

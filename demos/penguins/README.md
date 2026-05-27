@@ -156,7 +156,7 @@ sweep:
         max: 1.50
         steps: 15
 cosmic_graph:
-  threshold: auto
+  construction_threshold: auto
 ```
 
 </details>

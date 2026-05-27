@@ -7,7 +7,15 @@ from typing import Any
 
 import yaml
 
-from pulsar.config import config_to_yaml, load_config
+from pulsar.config import (
+    ALLOWED_COSMIC_GRAPH_KEYS,
+    LEGACY_COSMIC_GRAPH_THRESHOLD_KEY,
+    LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE,
+    THRESHOLD_RANGE_MESSAGE,
+    config_to_yaml,
+    load_config,
+    normalize_construction_threshold,
+)
 from pulsar.mcp.errors import classify_path, mcp_error
 
 
@@ -17,7 +25,7 @@ _ALLOWED_SWEEP = {"pca", "ball_mapper"}
 _ALLOWED_PCA = {"dimensions", "seed"}
 _ALLOWED_BALL_MAPPER = {"epsilon"}
 _ALLOWED_OUTPUT = {"n_reps"}
-_ALLOWED_COSMIC_GRAPH = {"threshold", "neighborhood"}
+_ALLOWED_COSMIC_GRAPH = ALLOWED_COSMIC_GRAPH_KEYS
 _SUPPORTED_IMPUTE_METHODS = {
     "sample_normal",
     "sample_categorical",
@@ -171,7 +179,7 @@ _VALID_OVERRIDE_KEYS = frozenset(
         "pca_seeds",
         "epsilon_values",
         "epsilon_range",
-        "threshold",
+        "construction_threshold",
         "n_reps",
         "drop_columns",
         "impute",
@@ -181,23 +189,129 @@ _VALID_OVERRIDE_KEYS = frozenset(
 )
 
 
+_DOTTED_PATH_ROOTS = frozenset(
+    {"run", "sweep", "cosmic_graph", "output", "preprocessing"}
+)
+
+
+def _set_dotted_path(raw: dict[str, Any], path: str, value: Any) -> Any:
+    """Walk dotted ``path`` into ``raw``, set the leaf, return the old value."""
+    parts = path.split(".")
+    cursor = raw
+    for part in parts[:-1]:
+        existing = cursor.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            cursor[part] = existing
+        cursor = existing
+    old = cursor.get(parts[-1])
+    cursor[parts[-1]] = value
+    return old
+
+
+def flatten_overrides(nested: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    flat = {}
+    for k, v in nested.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            flat.update(flatten_overrides(v, f"{key}."))
+        else:
+            flat[key] = v
+    return flat
+
+
 def apply_overrides(
     config_yaml: str, overrides: dict[str, Any]
 ) -> ConfigOverrideResult:
-    unknown_keys = set(overrides.keys()) - _VALID_OVERRIDE_KEYS
+    flat = flatten_overrides(overrides)
+
+    prefix_map = {
+        "sweep.pca_dims": "pca_dims",
+        "sweep.pca_seeds": "pca_seeds",
+        "sweep.epsilon_values": "epsilon_values",
+        "sweep.epsilon_range": "epsilon_range",
+        "cosmic_graph.construction_threshold": "construction_threshold",
+        "output.n_reps": "n_reps",
+        "preprocessing.drop_columns": "drop_columns",
+        "preprocessing.impute": "impute",
+        "preprocessing.encode": "encode",
+        "run.run_name": "run_name",
+        "run.dataset_path": "dataset_path",
+    }
+
+    normalized_overrides = {}
+    original_keys = {}
+
+    for k, v in flat.items():
+        if k in prefix_map:
+            flat_key = prefix_map[k]
+            normalized_overrides[flat_key] = v
+            original_keys[flat_key] = k
+        elif k in _VALID_OVERRIDE_KEYS:
+            normalized_overrides[k] = v
+            original_keys[k] = k
+        else:
+            normalized_overrides[k] = v
+            original_keys[k] = k
+
+    dotted_overrides = {
+        key: value for key, value in normalized_overrides.items() if "." in key
+    }
+    flat_overrides = {
+        key: value for key, value in normalized_overrides.items() if "." not in key
+    }
+
+    unknown_dotted_roots = {
+        key.split(".", 1)[0]
+        for key in dotted_overrides
+        if key.split(".", 1)[0] not in _DOTTED_PATH_ROOTS
+    }
+    if unknown_dotted_roots:
+        raise ValueError(
+            f"Unknown dotted override root(s): {sorted(unknown_dotted_roots)}. "
+            f"Valid roots: {sorted(_DOTTED_PATH_ROOTS)}"
+        )
+    unknown_keys = set(flat_overrides.keys()) - _VALID_OVERRIDE_KEYS
     if unknown_keys:
         raise ValueError(
             f"Unknown override key(s): {sorted(unknown_keys)}. "
-            f"Valid keys: {sorted(_VALID_OVERRIDE_KEYS)}"
+            f"Valid keys: {sorted(_VALID_OVERRIDE_KEYS)}, or use dotted "
+            f"YAML paths under {sorted(_DOTTED_PATH_ROOTS)}."
         )
 
     raw = parse_yaml_mapping(config_yaml)
     applied: list[str] = []
     diff: list[dict[str, Any]] = []
 
+    flat_key_to_canonical = {
+        "pca_dims": "sweep.pca.dimensions.values",
+        "pca_seeds": "sweep.pca.seed.values",
+        "epsilon_values": "sweep.ball_mapper.epsilon.values",
+        "epsilon_range": "sweep.ball_mapper.epsilon.range",
+        "construction_threshold": "cosmic_graph.construction_threshold",
+        "n_reps": "output.n_reps",
+        "drop_columns": "preprocessing.drop_columns",
+        "impute": "preprocessing.impute",
+        "encode": "preprocessing.encode",
+        "run_name": "run.name",
+        "dataset_path": "run.data",
+    }
+
     def _track(path: str, old: Any, new: Any) -> None:
         applied.append(path)
         diff.append({"path": path, "old": old, "new": new})
+        for f_key, can_path in flat_key_to_canonical.items():
+            if path == can_path:
+                orig = original_keys.get(f_key)
+                if orig and orig != path and orig not in applied:
+                    applied.append(orig)
+                break
+
+    for path, value in dotted_overrides.items():
+        old = _set_dotted_path(raw, path, value)
+        _track(path, old, value)
+
+    overrides = flat_overrides
 
     if "run_name" in overrides:
         old = raw.get("run", {}).get("name")
@@ -233,10 +347,16 @@ def apply_overrides(
             "range": dict(overrides["epsilon_range"])
         }
         _track("sweep.ball_mapper.epsilon.range", old, dict(overrides["epsilon_range"]))
-    if "threshold" in overrides:
-        old = raw.get("cosmic_graph", {}).get("threshold")
-        raw.setdefault("cosmic_graph", {})["threshold"] = overrides["threshold"]
-        _track("cosmic_graph.threshold", old, overrides["threshold"])
+    if "construction_threshold" in overrides:
+        old = raw.get("cosmic_graph", {}).get("construction_threshold")
+        raw.setdefault("cosmic_graph", {})["construction_threshold"] = overrides[
+            "construction_threshold"
+        ]
+        _track(
+            "cosmic_graph.construction_threshold",
+            old,
+            overrides["construction_threshold"],
+        )
     if "n_reps" in overrides:
         old = raw.get("output", {}).get("n_reps")
         raw.setdefault("output", {})["n_reps"] = overrides["n_reps"]
@@ -499,12 +619,44 @@ def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> 
         )
         return
     for key in cosmic_graph.keys():
+        if key == LEGACY_COSMIC_GRAPH_THRESHOLD_KEY:
+            issues.append(
+                ValidationIssue(
+                    path="cosmic_graph.threshold",
+                    message=LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE,
+                    expected="cosmic_graph.construction_threshold",
+                    received=cosmic_graph[key],
+                    suggestion=(
+                        "Rename cosmic_graph.threshold to "
+                        "cosmic_graph.construction_threshold."
+                    ),
+                    example_fix=(
+                        "cosmic_graph:\n"
+                        f"  construction_threshold: {cosmic_graph[key]!r}"
+                    ),
+                )
+            )
+            continue
         if key not in _ALLOWED_COSMIC_GRAPH:
             issues.append(
                 ValidationIssue(
                     path=f"cosmic_graph.{key}",
                     message=f"Unsupported cosmic_graph key '{key}'",
                     expected=f"One of {sorted(_ALLOWED_COSMIC_GRAPH)}",
+                )
+            )
+    if "construction_threshold" in cosmic_graph:
+        try:
+            normalize_construction_threshold(cosmic_graph["construction_threshold"])
+        except (TypeError, ValueError):
+            issues.append(
+                ValidationIssue(
+                    path="cosmic_graph.construction_threshold",
+                    message=THRESHOLD_RANGE_MESSAGE,
+                    expected='"auto" or a finite number in [0.0, 1.0]',
+                    received=cosmic_graph["construction_threshold"],
+                    suggestion="Use 'auto' unless you have a deliberate fixed graph cutoff.",
+                    example_fix='cosmic_graph:\n  construction_threshold: "auto"',
                 )
             )
 

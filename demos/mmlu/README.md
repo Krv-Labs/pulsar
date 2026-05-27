@@ -64,13 +64,13 @@ Rather than picking an arbitrary k, we sweep k=2..15 and measure **silhouette sc
 
 The silhouette curve peaks at **k=12** (score=0.0349), confirming 12 structurally distinct regions.
 
-### Why `threshold: 0.0` Instead of `auto`
+### Why `construction_threshold: 0.0` Instead of `auto`
 
 Pulsar's auto-threshold uses persistent homology to find stable edge-weight cutoffs. It works beautifully for data with **clear geometric separations** — clinical datasets, geographic data, sensor readings — where the weight distribution has natural gaps.
 
 **MMLU's embedding space is unusually smooth.** The weight distribution is concentrated in a narrow band (median ~0.16, P95 ~0.21) with no natural breakpoints. This is typical of dense text embeddings from modern transformers, where every question has *some* similarity to every other question. The auto-threshold picks a value in the empty upper range (~0.66), killing 99.9% of edges and leaving only singletons.
 
-Instead, we set `threshold: 0.0` (keep all edges) and use **spectral clustering** on the full weighted adjacency matrix. Spectral clustering operates on the eigenvectors of the graph Laplacian, which naturally captures community structure without needing a hard threshold.
+Instead, we set `construction_threshold: 0.0` (keep all edges) and use **spectral clustering** on the full weighted adjacency matrix. Spectral clustering operates on the eigenvectors of the graph Laplacian, which naturally captures community structure without needing a hard threshold.
 
 ### Why This Matters Beyond MMLU
 
@@ -93,7 +93,7 @@ sweep:
   ball_mapper:
     epsilon: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0]
 cosmic_graph:
-  threshold: 0.0
+  construction_threshold: 0.0
 ```
 
 264 ball maps. Runs in ~50 seconds on a 5,000-point subsample.

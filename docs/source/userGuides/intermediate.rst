@@ -165,9 +165,9 @@ The right epsilon captures natural cluster density without merging distinct grou
 **How to choose**:
 
 - Start with a range spanning roughly one order of magnitude: ``{range: {min: 0.1, max: 1.5, steps: 8}}``.
-- After a first run, inspect ``model.resolved_threshold`` and the node/edge count of ``model.cosmic_graph``. If the graph has a single giant component, epsilon is too large. If it is entirely disconnected, epsilon is too small.
+- After a first run, inspect ``model.resolved_construction_threshold`` and the node/edge count of ``model.cosmic_graph``. If the graph has a single giant component, epsilon is too large. If it is entirely disconnected, epsilon is too small.
 - For normalized data (post-StandardScaler), values between 0.2 and 2.0 are typical.
-- Use ``threshold: "auto"`` (see below) — it is designed to work with a wide epsilon range.
+- Use ``construction_threshold: "auto"`` (see below) — it is designed to work with a wide epsilon range.
 
 .. code-block:: yaml
 
@@ -180,7 +180,7 @@ The right epsilon captures natural cluster density without merging distinct grou
 Cosmic Graph Parameters
 ------------------------
 
-``cosmic_graph.threshold``
+``cosmic_graph.construction_threshold``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **What it is**: A minimum edge-weight cutoff applied to the weighted adjacency matrix before converting to a NetworkX graph. Edges below the threshold are removed.
@@ -193,20 +193,20 @@ Cosmic Graph Parameters
 
 **How to choose**:
 
-Always use ``threshold: "auto"`` unless you have a specific reason not to. It is the correct default for high-dimensional data. A fixed threshold of ``0.0`` will almost always produce a single, structureless component.
+Always use ``construction_threshold: "auto"`` unless you have a specific reason not to. It is the correct default for high-dimensional data. A fixed threshold of ``0.0`` will almost always produce a single, structureless component.
 
 If you need a manual threshold (e.g. for reproducibility after exploration), read it from the fitted model:
 
 .. code-block:: python
 
    model.fit()
-   print(model.resolved_threshold)  # use this value in your YAML
+   print(model.resolved_construction_threshold)  # use this value in your YAML
 
 .. code-block:: yaml
 
    cosmic_graph:
-     threshold: "auto"      # recommended
-     # threshold: 0.42      # manual override after inspection
+     construction_threshold: "auto"      # recommended
+     # construction_threshold: 0.42      # manual override after inspection
 
 ``cosmic_graph.neighborhood``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -265,7 +265,7 @@ Example: Full Tuned Config
        epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 
    cosmic_graph:
-     threshold: "auto"
+     construction_threshold: "auto"
 
    output:
      n_reps: 4

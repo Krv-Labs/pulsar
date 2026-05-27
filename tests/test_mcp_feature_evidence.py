@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 
 from pulsar.mcp import server
-from pulsar.mcp.interpreter import build_feature_evidence_index
+from pulsar.mcp.interpreter import FeatureEvidenceIndex, build_feature_evidence_index
+from pulsar.mcp.interpreter import signal_matrix_payload
 
 
 def _make_disconnected_model(size_per_cluster: int = 3) -> SimpleNamespace:
@@ -22,7 +23,21 @@ def _make_disconnected_model(size_per_cluster: int = 3) -> SimpleNamespace:
     return SimpleNamespace(
         cosmic_graph=graph,
         weighted_adjacency=weighted,
-        resolved_threshold=0.0,
+        resolved_construction_threshold=0.0,
+    )
+
+
+def _make_singleton_tail_model() -> SimpleNamespace:
+    total = 8
+    weighted = np.zeros((total, total), dtype=float)
+    for i in range(4):
+        for j in range(i + 1, 4):
+            weighted[i, j] = weighted[j, i] = 0.8
+    graph = nx.from_numpy_array((weighted > 0).astype(int))
+    return SimpleNamespace(
+        cosmic_graph=graph,
+        weighted_adjacency=weighted,
+        resolved_construction_threshold=0.0,
     )
 
 
@@ -59,6 +74,42 @@ def _make_small_server_dataset() -> pd.DataFrame:
             "segment": ["alpha", "alpha", "alpha", "beta", "beta", "beta"],
         }
     )
+
+
+def _make_singleton_tail_dataset() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "f1": [3.1, 3.4, 2.9, 3.2, -3.0, -2.0, 0.0, 2.0],
+            "f2": [-2.5, -2.1, -2.7, -2.3, 1.0, 2.0, 3.0, 4.0],
+            "segment": [
+                "major",
+                "major",
+                "major",
+                "major",
+                "rare_a",
+                "rare_b",
+                "rare_c",
+                "rare_d",
+            ],
+        }
+    )
+
+
+def _make_wide_server_dataset() -> pd.DataFrame:
+    rng = np.random.default_rng(7)
+    cluster_a = 32
+    cluster_b = 32
+    columns = {
+        f"signal_{idx:02d}": np.concatenate(
+            [
+                rng.normal(3.0 + (idx * 0.03), 0.25, cluster_a),
+                rng.normal(0.0, 0.25, cluster_b),
+            ]
+        )
+        for idx in range(36)
+    }
+    columns["segment"] = (["alpha"] * cluster_a) + (["beta"] * cluster_b)
+    return pd.DataFrame(columns)
 
 
 def test_build_feature_evidence_index_preserves_multifactor_signal():
@@ -100,7 +151,7 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     feature_payload = json.loads(
         asyncio.run(server.get_feature_signal(["f1", "segment=alpha"]))
     )
-    matrix_payload = json.loads(asyncio.run(server.get_cluster_signal_matrix()))
+    matrix_payload = json.loads(asyncio.run(server.get_cluster_signal_matrix(return_markdown=False)))
 
     assert summary["status"] == "ok"
     assert summary["cluster_result"]["method_used"] in {
@@ -112,11 +163,222 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert "markdown_summary" not in summary
     assert len(summary_text) < len(full_text)
     assert full["detail"] == "full"
+    # Summary mode must NOT carry the full tier dumps or signal_matrix
+    assert "signal_matrix" not in summary, (
+        "summary should expose only signal_matrix_summary"
+    )
+    assert "signal_matrix_summary" in summary
+    assert "clusters_returned" in summary
+    assert "numeric_global_ranking" not in summary
+    assert "categorical_global_ranking" not in summary
+    assert "numeric_global_ranking_preview" in summary
+    assert "categorical_global_ranking_preview" in summary
+    for cluster in summary["clusters"]:
+        assert "numeric_features" not in cluster
+        assert "categorical_features" not in cluster
+        assert "numeric_tiers" not in cluster
+        assert "categorical_tiers" not in cluster
+        assert "central_rows" not in cluster
+        assert "numeric_tier_counts" in cluster
+        assert "feature_preview" in cluster
+        assert cluster["features_previewed"] <= cluster["feature_preview_limit"]
+    # Full mode still ships everything
+    assert "signal_matrix" in full
+    full_cluster = full["clusters"][0]
+    assert "numeric_features" in full_cluster
+    assert "categorical_features" in full_cluster
+    assert "numeric_tiers" in full_cluster
+    assert "central_rows" in full_cluster
+    assert summary["recommended_next_tools"][0] == "get_cluster_profile"
+    assert "cluster map" in summary["payload_guidance"]
     assert cluster_profile["cluster"]["cluster_id"] == 0
+    assert cluster_profile["max_features"] == 16
+    assert cluster_profile["cluster"]["feature_limit"] == 16
     assert cluster_profile["cluster"]["numeric_features"]
     assert feature_payload["signals"]["feature_names"] == ["f1", "segment=alpha"]
     assert feature_payload["signals"]["clusters"]
+    assert feature_payload["signals"]["detail"] == "summary"
+    assert "clusters_returned" in feature_payload["signals"]
+    assert "clusters_omitted" in feature_payload["signals"]
+    # Summary projection drops the heavyweight metrics
+    sample_numeric = next(
+        (
+            row
+            for cluster in feature_payload["signals"]["clusters"]
+            for row in cluster["numeric_features"]
+        ),
+        None,
+    )
+    if sample_numeric is not None:
+        assert "wasserstein_norm" not in sample_numeric
+        assert "evidence_vector" not in sample_numeric
+        assert "signal_tier" in sample_numeric
+    full_feature_payload = json.loads(
+        asyncio.run(
+            server.get_feature_signal(
+                ["f1", "segment=alpha"], detail="full", max_clusters=50
+            )
+        )
+    )
+    full_sample = next(
+        (
+            row
+            for cluster in full_feature_payload["signals"]["clusters"]
+            for row in cluster["numeric_features"]
+        ),
+        None,
+    )
+    if full_sample is not None:
+        assert "wasserstein_norm" in full_sample
     assert matrix_payload["signal_matrix"]["numeric_rows"]
+    assert "clusters_returned" in matrix_payload["signal_matrix"]
+
+
+def test_get_cluster_profile_caps_wide_dataset_feature_output():
+    server._sessions.clear()
+    session = server._get_session(None)
+    data = _make_wide_server_dataset()
+    session.model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    session.data = data
+    session.latest_run_id = "run_wide_synthetic"
+
+    asyncio.run(server.generate_cluster_dossier(method="auto", detail="summary"))
+    default_capped = json.loads(asyncio.run(server.get_cluster_profile(0)))
+    capped = json.loads(asyncio.run(server.get_cluster_profile(0, max_features=7)))
+    uncapped = json.loads(asyncio.run(server.get_cluster_profile(0, max_features=200)))
+
+    cluster = capped["cluster"]
+    returned = cluster["numeric_features"] + cluster["categorical_features"]
+    all_rows = (
+        uncapped["cluster"]["numeric_features"]
+        + uncapped["cluster"]["categorical_features"]
+    )
+    returned_keys = {(row.get("column"), row.get("value")) for row in returned}
+    expected_keys = {
+        (row.get("column"), row.get("value"))
+        for row in sorted(
+            all_rows,
+            key=lambda row: -abs(float(row.get("aggregate_score", 0.0))),
+        )[:7]
+    }
+
+    assert capped["max_features"] == 7
+    assert default_capped["max_features"] == 16
+    assert default_capped["cluster"]["features_returned"]["total"] <= 16
+    assert cluster["feature_limit"] == 7
+    assert cluster["features_returned"]["total"] == 7
+    assert cluster["features_omitted"]["total"] > 0
+    assert returned_keys == expected_keys
+
+
+def test_signal_matrix_cluster_cap_ranks_categorical_signal():
+    evidence = FeatureEvidenceIndex(
+        cluster_bundles={
+            0: {
+                "numeric": [{"column": "weak_numeric", "aggregate_score": 0.1}],
+                "categorical": [],
+            },
+            1: {
+                "numeric": [],
+                "categorical": [
+                    {
+                        "column": "segment",
+                        "value": "high_signal",
+                        "aggregate_score": 10.0,
+                    }
+                ],
+            },
+        },
+        numeric_global_ranking=[],
+        categorical_global_ranking=[],
+        signal_matrix={
+            "numeric_columns": ["weak_numeric"],
+            "categorical_values": [
+                {"column": "segment", "value": "high_signal"},
+            ],
+            "numeric_rows": [
+                {
+                    "cluster_id": 0,
+                    "size": 10,
+                    "values": {
+                        "weak_numeric": {
+                            "aggregate_score": 0.1,
+                            "signal_tier": "core",
+                        }
+                    },
+                }
+            ],
+            "categorical_rows": [
+                {
+                    "cluster_id": 1,
+                    "size": 10,
+                    "values": {
+                        "segment=high_signal": {
+                            "aggregate_score": 10.0,
+                            "signal_tier": "core",
+                        }
+                    },
+                }
+            ],
+        },
+        metadata={},
+    )
+
+    payload = signal_matrix_payload(evidence, max_clusters=1, return_markdown=False)
+
+    assert payload["clusters_returned"] == 1
+    assert payload["clusters_omitted"] == 1
+    assert [row["cluster_id"] for row in payload["categorical_rows"]] == [1]
+    assert payload["numeric_rows"] == []
+
+
+def test_generate_cluster_dossier_summary_caps_feature_preview():
+    server._sessions.clear()
+    session = server._get_session(None)
+    data = _make_wide_server_dataset()
+    session.model = _make_disconnected_model(size_per_cluster=len(data) // 2)
+    session.data = data
+    session.latest_run_id = "run_preview_cap"
+
+    summary = json.loads(
+        asyncio.run(
+            server.generate_cluster_dossier(
+                method="auto",
+                detail="summary",
+                feature_preview_limit=3,
+            )
+        )
+    )
+
+    assert summary["status"] == "ok"
+    for cluster in summary["clusters"]:
+        assert len(cluster["feature_preview"]) <= 3
+        assert cluster["feature_preview_limit"] == 3
+        assert "numeric_features" not in cluster
+        assert "categorical_features" not in cluster
+
+
+def test_generate_cluster_dossier_surfaces_singleton_heavy_readiness():
+    server._sessions.clear()
+    session = server._get_session(None)
+    session.model = _make_singleton_tail_model()
+    session.data = _make_singleton_tail_dataset()
+    session.latest_run_id = "run_singleton_tail"
+
+    summary = json.loads(
+        asyncio.run(server.generate_cluster_dossier(method="components"))
+    )
+
+    assert summary["status"] == "ok"
+    readiness = summary["cluster_result"]["interpretation_readiness"]
+    fragmentation = summary["cluster_result"]["cluster_fragmentation"]
+    assert readiness["status"] == "review_required"
+    assert "SINGLETON_TAIL_DOMINATES_NON_GIANT_STRUCTURE" in readiness["reason_codes"]
+    assert readiness["basis"].startswith("advisory")
+    assert fragmentation["singleton_cluster_count"] == 4
+    assert fragmentation["singleton_cluster_ratio"] == 0.8
+    assert fragmentation["singleton_point_fraction"] == 0.5
+    assert summary["clusters"]
 
 
 def test_evidence_index_surfaces_stats_failures_metadata():
@@ -161,3 +423,110 @@ def test_evidence_index_captures_ks_failure_when_stats_call_raises(monkeypatch):
     row_failures = evidence.metadata["stats_failures"]["numeric_row_level"]
     assert len(row_failures) == 1
     assert row_failures[0]["reasons"] == ["ks_2samp: synthetic failure for test"]
+
+
+def test_signal_matrix_software3_markdown_and_telemetry():
+    """Verify that signal_matrix_payload produces beautiful Markdown and rich omitted telemetry."""
+    evidence = FeatureEvidenceIndex(
+        cluster_bundles={
+            0: {
+                "numeric": [{"column": "f1", "aggregate_score": 1.2}],
+                "categorical": [],
+            },
+            1: {
+                "numeric": [],
+                "categorical": [{"column": "cat1", "value": "v1", "aggregate_score": 3.4}],
+            },
+            2: {
+                "numeric": [{"column": "f1", "aggregate_score": 0.5}],
+                "categorical": [],
+            },
+        },
+        numeric_global_ranking=[],
+        categorical_global_ranking=[],
+        signal_matrix={
+            "numeric_columns": ["f1"],
+            "categorical_values": [{"column": "cat1", "value": "v1"}],
+            "numeric_rows": [
+                {
+                    "cluster_id": 0,
+                    "values": {
+                        "f1": {"value": 1.2, "signal_tier": "core"}
+                    }
+                },
+                {
+                    "cluster_id": 2,
+                    "values": {
+                        "f1": {"value": 0.5, "signal_tier": "core"}
+                    }
+                }
+            ],
+            "categorical_rows": [
+                {
+                    "cluster_id": 1,
+                    "values": {
+                        "cat1=v1": {"value": "v1", "signal_tier": "core"}
+                    }
+                }
+            ],
+        },
+        metadata={},
+    )
+
+    payload = signal_matrix_payload(evidence, max_clusters=2, return_markdown=True)
+
+    assert payload["clusters_returned"] == 2
+    assert payload["clusters_omitted"] == 1
+    
+    # Assert omitted telemetry has maximum aggregate signal scores
+    omitted = payload["omitted_clusters"]
+    assert len(omitted) == 1
+    assert omitted[0]["cluster_id"] == 2
+    assert omitted[0]["max_signal"] == 0.5
+
+    # Assert Markdown report starts and includes expected markdown markers and tables
+    report = payload["markdown_report"]
+    assert "## Topological Signal Matrix" in report
+    assert "### Telemetry" in report
+    assert "### Numeric Feature Matrix" in report
+    assert "### Categorical Feature Matrix" in report
+    assert "| Cluster ID | f1 |" in report
+    assert "| Cluster ID | cat1=v1 |" in report
+    assert "Cluster ID 2" in report
+
+
+def test_signal_matrix_defensive_safe_casting():
+    """Verify that signal_matrix_payload handles malformed or missing aggregate scores without crashing."""
+    evidence = FeatureEvidenceIndex(
+        cluster_bundles={
+            0: {
+                "numeric": [
+                    {"column": "f1", "aggregate_score": "N/A"},  # invalid string float
+                    {"column": "f2", "aggregate_score": None},   # None float
+                ],
+                "categorical": [],
+            }
+        },
+        numeric_global_ranking=[],
+        categorical_global_ranking=[],
+        signal_matrix={
+            "numeric_columns": ["f1", "f2"],
+            "categorical_values": [],
+            "numeric_rows": [
+                {
+                    "cluster_id": 0,
+                    "values": {
+                        "f1": {"value": 1.0, "signal_tier": "core"},
+                        "f2": {"value": 2.0, "signal_tier": "core"}
+                    }
+                }
+            ],
+            "categorical_rows": [],
+        },
+        metadata={},
+    )
+
+    # Should run successfully and default invalid scores to 0.0 without throwing ValueError
+    payload = signal_matrix_payload(evidence, max_clusters=1, return_markdown=False)
+    assert payload["clusters_returned"] == 1
+    assert payload["clusters_omitted"] == 0

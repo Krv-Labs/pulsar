@@ -79,7 +79,7 @@ class GraphSummary:
     n_nodes: int
     n_edges: int
     density: float
-    resolved_threshold: float
+    resolved_construction_threshold: float
     total_pairs: int
     nonzero_pairs: int
     nonzero_fraction: float
@@ -132,7 +132,7 @@ def load_cfg(config_path: str) -> tuple[ConfigSummary, object]:
         dimensions=list(cfg.pca.dimensions),
         seeds=list(cfg.pca.seeds),
         epsilons=list(cfg.ball_mapper.epsilons),
-        threshold=cfg.cosmic_graph.threshold,
+        threshold=cfg.cosmic_graph.construction_threshold,
         n_maps=len(cfg.pca.dimensions)
         * len(cfg.pca.seeds)
         * len(cfg.ball_mapper.epsilons),
@@ -247,7 +247,7 @@ def diagnose_graph(model: ThemaRS) -> GraphSummary:
         n_nodes=G.number_of_nodes(),
         n_edges=G.number_of_edges(),
         density=(G.number_of_edges() / max_edges) if max_edges else 0.0,
-        resolved_threshold=float(model.resolved_threshold),
+        resolved_construction_threshold=float(model.resolved_construction_threshold),
         total_pairs=len(upper),
         nonzero_pairs=len(nonzero),
         nonzero_fraction=(len(nonzero) / len(upper)) if len(upper) else 0.0,
@@ -322,7 +322,7 @@ def render_graph_summary(summary: GraphSummary) -> None:
     table.add_column("Value")
     table.add_row("Nodes", f"{summary.n_nodes:,}")
     table.add_row("Edges", f"{summary.n_edges:,} ({summary.density:.2%} density)")
-    table.add_row("Resolved threshold", f"{summary.resolved_threshold:.6f}")
+    table.add_row("Resolved threshold", f"{summary.resolved_construction_threshold:.6f}")
     table.add_row(
         "Non-zero pairs",
         f"{summary.nonzero_pairs:,} / {summary.total_pairs:,} ({summary.nonzero_fraction:.2%})",
@@ -413,7 +413,7 @@ def build_suggestions(
 
     if (
         cfg_summary.threshold == "auto"
-        and graph_summary.resolved_threshold > p95_weight
+        and graph_summary.resolved_construction_threshold > p95_weight
         and p95_weight > 0
     ):
         suggestions.append(
@@ -447,10 +447,10 @@ def plot_diagnostics(model: ThemaRS, save_dir: Path, show_plot: bool) -> Path:
     if len(nonzero) > 0:
         ax.hist(nonzero, bins=100, alpha=0.75, color="#4C72B0", edgecolor="white")
         ax.axvline(
-            model.resolved_threshold,
+            model.resolved_construction_threshold,
             color="#C44E52",
             linestyle="--",
-            label=f"threshold={model.resolved_threshold:.4f}",
+            label=f"threshold={model.resolved_construction_threshold:.4f}",
         )
         ax.set_title("Non-zero Edge Weights")
         ax.legend()
@@ -461,10 +461,10 @@ def plot_diagnostics(model: ThemaRS, save_dir: Path, show_plot: bool) -> Path:
     ax = axes[0, 1]
     ax.hist(upper, bins=100, alpha=0.75, color="#55A868", edgecolor="white")
     ax.axvline(
-        model.resolved_threshold,
+        model.resolved_construction_threshold,
         color="#C44E52",
         linestyle="--",
-        label=f"threshold={model.resolved_threshold:.4f}",
+        label=f"threshold={model.resolved_construction_threshold:.4f}",
     )
     ax.set_title("All Pair Weights")
     ax.legend()

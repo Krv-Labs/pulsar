@@ -113,7 +113,7 @@ Pulsar uses a hierarchical configuration:
        epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 
    cosmic_graph:
-     threshold: "auto"
+     construction_threshold: "auto"
 
 Key Outputs
 -----------

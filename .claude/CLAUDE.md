@@ -46,7 +46,7 @@ The entry point is `ThemaRS("params.yaml").fit()` (in `pulsar/pipeline.py`). It 
 ### Advanced Orchestration
 
 - **`fit_multi(datasets: list[pd.DataFrame])`**: Fuses multiple representations (e.g., different embedding models) of the same points. All resulting ball maps are accumulated into a single "Galactic" Pseudo-Laplacian.
-- **Threshold Stability**: If `threshold: "auto"`, Pulsar uses approximate H₀ persistent homology (`src/ph.rs`) to find stable plateaus in the component-vs-threshold curve.
+- **Threshold Stability**: If `construction_threshold: "auto"`, Pulsar uses approximate H₀ persistent homology (`src/ph.rs`) to find stable plateaus in the component-vs-threshold curve.
 - **Representative Selection**: `model.select_representatives(n_reps)` clusters the thousands of generated ball maps (using node/edge/epsilon features) to find a diverse subset of the most descriptive maps.
 
 ### Layer Separation
@@ -86,7 +86,7 @@ sweep:
   ball_mapper:
     epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 cosmic_graph:
-  threshold: "auto"   # uses persistent homology stability analysis
+  construction_threshold: "auto"   # uses persistent homology stability analysis
 output:
   n_reps: 4
 ```
@@ -163,6 +163,6 @@ await asyncio.to_thread(model.fit, progress_callback=progress_callback)
 ## Key Architectural Decisions
 
 - **`CosmicGraph.from_pseudo_laplacian` requires `int64`**: The pseudo-Laplacian accumulator expects integer counts. If constructing test inputs in Python, use `np.ascontiguousarray(L, dtype=np.int64)`.
-- **`threshold: "auto"` is always correct for EHR/high-dim data**: Do not default to `"0.0"` or a fixed value for high-dimensional data — it produces a maximally connected, structureless graph. The H₀ persistent homology stability analysis exists precisely for this case.
+- **`construction_threshold: "auto"` is always correct for EHR/high-dim data**: Do not default to `"0.0"` or a fixed value for high-dimensional data — it produces a maximally connected, structureless graph. The H₀ persistent homology stability analysis exists precisely for this case.
 - **Randomized SVD introduces small variance approximation error**: PCA via Halko et al. 2011 gives approximate, not exact, singular values. Document this in characterization code; do not treat approximate variance ratios as ground truth.
 - **MCP session state lives in `_PulsarSession`**: Embeddings, fingerprint, and model are stored per-session. Read/write session state in the `async` context (before/after `to_thread`), not inside the thread.

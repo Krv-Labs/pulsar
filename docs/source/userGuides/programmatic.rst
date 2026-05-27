@@ -23,9 +23,9 @@ feeding a dataframe.
            "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
            "ball_mapper": {"epsilon": {"values": [0.5]}}
        },
-       "cosmic_graph": {"threshold": "auto"},
+       "cosmic_graph": {"construction_threshold": "auto"},
        "output": {"n_reps": 3}
    })
    model.fit(data=df)
    matrix = model.weighted_adjacency
-   threshold = model.resolved_threshold
+   threshold = model.resolved_construction_threshold
