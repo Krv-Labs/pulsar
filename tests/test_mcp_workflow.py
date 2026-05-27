@@ -913,7 +913,24 @@ def test_dossier_explicit_spectral_method_is_not_overridden():
 
     assert payload["status"] == "ok"
     assert payload["cluster_result"]["method_used"] == "spectral"
-    assert payload["threshold_surface"]["status"] == "matched"
+    assert payload["interpretation_edge_weight_threshold"] == 0.0
+    assert payload["threshold_inherited"] is False
+    assert payload["threshold_source"] == "spectral_default_full_affinity"
+    assert payload["threshold_surface"]["status"] == "full_affinity_spectral"
+
+    sparse_payload = json.loads(
+        asyncio.run(
+            server.generate_cluster_dossier(
+                method="spectral",
+                interpretation_edge_weight_threshold=0.2,
+            )
+        )
+    )
+
+    assert sparse_payload["status"] == "ok"
+    assert sparse_payload["cluster_result"]["method_used"] == "spectral"
+    assert sparse_payload["interpretation_edge_weight_threshold"] == 0.2
+    assert sparse_payload["threshold_surface"]["status"] == "matched_explicit"
 
 
 def test_sweep_response_contains_stability_summary(tmp_path):
@@ -942,6 +959,9 @@ def test_sweep_response_contains_stability_summary(tmp_path):
     )
 
     assert result["status"] == "ok"
+    assert "constructed_graph_connected" in result
+    assert "full_affinity_connected" in result
+    assert result["spectral_clustering_allowed"] == result["full_affinity_connected"]
     assert "construction_threshold" in result
     assert isinstance(result["construction_threshold"], float)
     assert "threshold_stability_summary" in result

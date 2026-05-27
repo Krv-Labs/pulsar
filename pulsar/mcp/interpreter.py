@@ -99,7 +99,7 @@ def resolve_clusters(
     max_k: int = 15,
     interpretation_edge_weight_threshold: float = 0.0,
 ) -> ClusterResult:
-    """Entry point for clustering. Supports auto-thresholding and spectral fallback."""
+    """Entry point for clustering. Respects explicit method selection."""
     W = model.weighted_adjacency
     n = W.shape[0]
 
@@ -205,7 +205,7 @@ def _cluster_spectral(
     max_k: int,
     interpretation_edge_weight_threshold: float = 0.0,
 ) -> ClusterResult:
-    """Fall back to spectral clustering if no stable threshold split exists."""
+    """Run spectral clustering on a weighted affinity matrix."""
     G = nx.from_numpy_array((adj > 0).astype(np.int64))
     if not nx.is_connected(G):
         raise ValueError(

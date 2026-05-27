@@ -609,8 +609,15 @@ def _threshold_surface_payload(
     construction_threshold: float,
     interpretation_threshold: float,
     threshold_inherited: bool,
+    threshold_source: str,
 ) -> dict[str, Any]:
-    if threshold_inherited:
+    if threshold_source == "spectral_default_full_affinity":
+        status = "full_affinity_spectral"
+        guidance = (
+            "Spectral clustering used the full retained weighted affinity matrix. "
+            "The persisted diagnostic graph was not rebuilt."
+        )
+    elif threshold_inherited:
         status = "matched"
         guidance = "Interpretation inherited the constructed graph surface."
     elif np.isclose(interpretation_threshold, construction_threshold):
@@ -620,19 +627,22 @@ def _threshold_surface_payload(
         status = "looser_than_construction"
         guidance = (
             "Interpretation uses a looser slice of the retained weighted matrix "
-            "than the persisted diagnostic graph."
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
         )
     else:
         status = "stricter_than_construction"
         guidance = (
             "Interpretation uses a stricter slice of the retained weighted matrix "
-            "than the persisted diagnostic graph."
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
         )
     return {
         "status": status,
         "construction_threshold": construction_threshold,
         "interpretation_edge_weight_threshold": interpretation_threshold,
         "threshold_inherited": threshold_inherited,
+        "threshold_source": threshold_source,
         "guidance": guidance,
     }
 
@@ -1607,9 +1617,14 @@ async def run_topological_sweep(
         graph_health, is_connected, recommended_next_action = _graph_health_summary(
             current_metrics
         )
+        full_affinity_connected = bool(
+            nx.is_connected(nx.from_numpy_array((model.weighted_adjacency > 0)))
+        )
         response["is_connected"] = is_connected
+        response["constructed_graph_connected"] = is_connected
+        response["full_affinity_connected"] = full_affinity_connected
         response["singleton_fraction"] = current_metrics.get("singleton_fraction", 0.0)
-        response["spectral_clustering_allowed"] = bool(is_connected)
+        response["spectral_clustering_allowed"] = full_affinity_connected
         response["graph_health"] = graph_health
         response["recommended_next_action"] = recommended_next_action
         response["finalization_gate"] = _finalization_gate(
@@ -1673,11 +1688,10 @@ async def generate_cluster_dossier(
         max_k: Maximum k for spectral clustering search.
         interpretation_edge_weight_threshold: Drop edges with weight <= this
             value before clustering.  Edge weights are the fraction of ball
-            maps that placed two points together.
-
-            When omitted (default), inherits ``model.resolved_construction_threshold``
-            so clustering operates on the same surface as the persisted cosmic
-            graph.  Pass an explicit value (including ``0.0``) to override.
+            maps that placed two points together. When omitted, auto/components
+            inherit ``model.resolved_construction_threshold``. Explicit spectral
+            clustering defaults to ``0.0`` to use the full weighted affinity
+            matrix unless a threshold is supplied.
         detail: Payload richness. Omit this parameter for routine agent loops;
             the default "summary" returns a compact cluster map with tier counts,
             capped feature previews, signal-matrix counts, and no evidence rows.
@@ -1727,18 +1741,24 @@ async def generate_cluster_dossier(
             name="resolved_construction_threshold",
         )
         threshold_inherited = interpretation_edge_weight_threshold is None
-        resolved_interpretation_threshold = (
-            construction_threshold
-            if threshold_inherited
-            else _validate_unit_threshold(
+        if interpretation_edge_weight_threshold is None and method == "spectral":
+            resolved_interpretation_threshold = 0.0
+            threshold_source = "spectral_default_full_affinity"
+            threshold_inherited = False
+        elif interpretation_edge_weight_threshold is None:
+            resolved_interpretation_threshold = construction_threshold
+            threshold_source = "inherited_construction"
+        else:
+            resolved_interpretation_threshold = _validate_unit_threshold(
                 interpretation_edge_weight_threshold,
                 name="interpretation_edge_weight_threshold",
             )
-        )
+            threshold_source = "explicit"
         threshold_surface = _threshold_surface_payload(
             construction_threshold=construction_threshold,
             interpretation_threshold=resolved_interpretation_threshold,
             threshold_inherited=threshold_inherited,
+            threshold_source=threshold_source,
         )
         result = resolve_clusters(
             session.model,
@@ -1787,6 +1807,7 @@ async def generate_cluster_dossier(
             resolved_interpretation_threshold
         )
         payload["threshold_inherited"] = threshold_inherited
+        payload["threshold_source"] = threshold_source
         payload["threshold_surface"] = threshold_surface
         payload["recommended_next_tools"] = (
             [

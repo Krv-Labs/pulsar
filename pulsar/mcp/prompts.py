@@ -90,10 +90,12 @@ different stages. Do not confuse them.
 
 - **Interpretation threshold** (`interpretation_edge_weight_threshold` in
   `generate_cluster_dossier`): applied AFTER the graph is built. Slices the
-  retained weighted matrix for clustering and reporting. **Defaults to
-  inheriting the construction threshold** so clustering operates on the same
-  surface you diagnosed — no silent divergence. Pass an explicit value to
-  deliberately diverge. Use `diagnose_cosmic_graph` weight percentiles
+  retained weighted matrix for clustering and reporting. For `method="auto"`
+  and `method="components"`, the default inherits the construction threshold
+  so clustering operates on the same surface you diagnosed. For explicit
+  `method="spectral"`, the default is `0.0` so spectral uses the full weighted
+  affinity matrix unless you deliberately sparsify it. Pass an explicit value
+  to deliberately diverge. Use `diagnose_cosmic_graph` weight percentiles
   (weight_p25–p95) to pick a value when overriding. This changes
   interpretation-time connectivity and cluster fragmentation; it does not
   rebuild the persisted cosmic graph.
