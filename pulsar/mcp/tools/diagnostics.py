@@ -231,7 +231,11 @@ async def get_threshold_stability_curve(
         if detail == "summary":
             for p in plateaus:
                 p.pop("component_mass_profile", None)
-            for list_key in ["stable_plateau_candidates", "transition_adjacent_candidates", "candidates"]:
+            for list_key in [
+                "stable_plateau_candidates",
+                "transition_adjacent_candidates",
+                "candidates",
+            ]:
                 if list_key in threshold_options:
                     for cand in threshold_options[list_key]:
                         cand.pop("component_mass_profile", None)
