@@ -170,9 +170,7 @@ def _mass_shape_metrics(profile: dict[str, Any]) -> dict[str, float | int]:
     floor = useful_component_size_floor(n_nodes)
     nontrivial_sizes = [size for size in top_sizes if size >= floor]
     nontrivial_mass = sum(nontrivial_sizes)
-    multi_component_mass = (
-        sum(nontrivial_sizes[1:]) if len(nontrivial_sizes) > 1 else 0
-    )
+    multi_component_mass = sum(nontrivial_sizes[1:]) if len(nontrivial_sizes) > 1 else 0
 
     if top_sizes:
         probs = np.asarray(top_sizes, dtype=float) / max(sum(top_sizes), 1)
@@ -373,17 +371,16 @@ def _rank_transition_candidate(
 
     if policy == "outlier_mining":
         score = (
-            0.3 * entropy
-            + 0.25 * absorbed
-            + 0.25 * multi_coverage
-            + 0.2 * singletons
+            0.3 * entropy + 0.25 * absorbed + 0.25 * multi_coverage + 0.2 * singletons
         )
         penalty = 0.05 * float(profile["small_component_mass_fraction"])
     elif policy == "detail_seeking":
         score = 0.3 * multi_coverage + 0.25 * balance + 0.25 * absorbed + 0.2 * entropy
         penalty = 0.12 * singletons
     else:
-        score = 0.35 * multi_coverage + 0.25 * balance + 0.25 * absorbed + 0.15 * entropy
+        score = (
+            0.35 * multi_coverage + 0.25 * balance + 0.25 * absorbed + 0.15 * entropy
+        )
         penalty = 0.35 * singletons
 
     return round(max(score - penalty, 0.0), 4)
@@ -409,7 +406,10 @@ def transition_adjacent_candidates(
     )
     candidates: list[dict[str, Any]] = []
     for event in events:
-        if event["event"] == "small_component_absorption" and policy != "outlier_mining":
+        if (
+            event["event"] == "small_component_absorption"
+            and policy != "outlier_mining"
+        ):
             continue
         threshold = float(event["threshold"])
         profile = component_mass_profile(adj, threshold, top_k=5)

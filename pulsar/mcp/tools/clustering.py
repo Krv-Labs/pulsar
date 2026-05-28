@@ -47,8 +47,6 @@ def _validate_unit_threshold(value: float, *, name: str) -> float:
     return threshold
 
 
-
-
 def _feature_evidence_fingerprint(
     *,
     run_id: str | None,

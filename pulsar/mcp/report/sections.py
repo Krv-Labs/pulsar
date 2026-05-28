@@ -415,12 +415,11 @@ def _render_threshold_section(model: ThemaRS | None) -> str:
     if payload["candidate_options"]:
         parts.append("<div class='threshold-breakpoints'>")
         for candidate in payload["candidate_options"]:
-            top_sizes = (
-                candidate.get("top_component_sizes")
-                or candidate.get("component_mass_profile", {}).get(
-                    "top_component_sizes",
-                    [],
-                )
+            top_sizes = candidate.get("top_component_sizes") or candidate.get(
+                "component_mass_profile", {}
+            ).get(
+                "top_component_sizes",
+                [],
             )
             tier = str(candidate["interpretability_tier"]).replace("_", " ")
             card_class = "threshold-breakpoint-card"

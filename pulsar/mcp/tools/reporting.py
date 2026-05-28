@@ -77,16 +77,16 @@ def _normalize_cluster_names(
                 f"strings; got {raw_id!r}."
             ) from exc
         if cluster_id in normalized:
-            raise ToolError(f"cluster_names contains duplicate cluster ID {cluster_id}.")
+            raise ToolError(
+                f"cluster_names contains duplicate cluster ID {cluster_id}."
+            )
         if cluster_id not in valid_cluster_ids:
             raise ToolError(
                 f"cluster_names contains unknown cluster ID {cluster_id}. "
                 f"Available IDs: {sorted(valid_cluster_ids)}."
             )
         if not isinstance(raw_name, str) or not raw_name.strip():
-            raise ToolError(
-                f"cluster_names[{key!r}] must be a non-empty string name."
-            )
+            raise ToolError(f"cluster_names[{key!r}] must be a non-empty string name.")
         normalized[cluster_id] = raw_name.strip()
 
     if require_all:

@@ -1034,7 +1034,10 @@ def test_refine_config_active_supports_nested_and_mixed_overrides(tmp_path):
     refined = json.loads(
         asyncio.run(
             refine_config(
-                overrides={"sweep": {"pca_dims": [3], "epsilon_values": [0.6]}, "n_reps": 2}
+                overrides={
+                    "sweep": {"pca_dims": [3], "epsilon_values": [0.6]},
+                    "n_reps": 2,
+                }
             )
         )
     )

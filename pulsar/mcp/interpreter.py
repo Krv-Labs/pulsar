@@ -367,7 +367,9 @@ class _NumericPrecompute:
     col_iqr: np.ndarray  # (K,) float64 — q75 - q25
     sort_idx: np.ndarray  # (N, K) int — np.argsort per column; NaN entries trail
     ranks: np.ndarray  # (N, K) float64 — scipy.rankdata(omit); NaN at NaN rows
-    tie_correction: np.ndarray  # (K,) float64 — Kruskal 1 - Σ(t³-t)/(N³-N); 1.0 when ties absent or undefined
+    tie_correction: (
+        np.ndarray
+    )  # (K,) float64 — Kruskal 1 - Σ(t³-t)/(N³-N); 1.0 when ties absent or undefined
 
 
 def _column_tie_correction(sorted_col: np.ndarray, n_valid: int) -> float:
@@ -571,7 +573,9 @@ def _mwu_pair_pvalue(x: np.ndarray, y: np.ndarray) -> float:
     has_ties = bool(np.any(group_sizes > 1))
     if (n1 > 8 and n2 > 8) or has_ties:
         # Average ranks per tie group (1-based).
-        avg_ranks_per_group = boundaries[:-1].astype(np.float64) + (group_sizes - 1) / 2.0 + 1.0
+        avg_ranks_per_group = (
+            boundaries[:-1].astype(np.float64) + (group_sizes - 1) / 2.0 + 1.0
+        )
         sorted_ranks = np.repeat(avg_ranks_per_group, group_sizes.astype(np.int64))
         ranks = np.empty(n, dtype=np.float64)
         ranks[order] = sorted_ranks
@@ -1056,9 +1060,7 @@ def _compute_numeric_rows(
     for j, column in enumerate(numeric_cols):
         valid_j = pre.valid[:, j]
         group_masks = [(clusters_array == cid) & valid_j for cid in cluster_values]
-        grouped: list[np.ndarray] = [
-            pre.X[m, j] for m in group_masks if m.any()
-        ]
+        grouped: list[np.ndarray] = [pre.X[m, j] for m in group_masks if m.any()]
         p_value = 1.0
         column_failures: list[str] = []
         if len(grouped) >= 2:
@@ -1105,9 +1107,7 @@ def _compute_numeric_rows(
         max(float(stats.iqr(values)), _EPS) if values.size else _EPS
         for values in column_values
     ]
-    global_mean_per_col: list[float] = [
-        _safe_mean(values) for values in column_values
-    ]
+    global_mean_per_col: list[float] = [_safe_mean(values) for values in column_values]
 
     # ------------------------------------------------------------------
     # Per-cluster row generation
@@ -1158,10 +1158,9 @@ def _compute_numeric_rows(
                     exc,
                 )
             try:
-                wasserstein_norm = (
-                    _wasserstein_distance_1d(cluster_values_arr, rest_values_arr)
-                    / max(global_iqr, _EPS)
-                )
+                wasserstein_norm = _wasserstein_distance_1d(
+                    cluster_values_arr, rest_values_arr
+                ) / max(global_iqr, _EPS)
             except ValueError as exc:
                 wasserstein_norm = 0.0
                 row_failures.append(f"wasserstein: {exc}")
@@ -1230,9 +1229,7 @@ def _compute_numeric_rows(
                 "mad_rest": mad_rest,
                 "global_mean": global_mean_per_col[j],
                 "global_mean_rest": _safe_mean(rest_values_arr),
-                "z_score": (
-                    _safe_mean(cluster_values_arr) - global_mean_per_col[j]
-                )
+                "z_score": (_safe_mean(cluster_values_arr) - global_mean_per_col[j])
                 / max(global_std, _EPS),
                 "homogeneity": std_cluster / max(global_std, _EPS),
                 "effect_mean_std": float(effect_mean_std),

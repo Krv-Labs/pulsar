@@ -91,7 +91,9 @@ _EXACT_FIELDS = frozenset(
 @dataclass(frozen=True)
 class Case:
     name: str
-    build: Callable[[], tuple[pd.DataFrame, list[str], pd.Series, dict[int, list[dict]]]]
+    build: Callable[
+        [], tuple[pd.DataFrame, list[str], pd.Series, dict[int, list[dict]]]
+    ]
 
 
 def _adjacency_from_cluster_pairs(
@@ -224,7 +226,9 @@ def _build_imbalanced() -> tuple[pd.DataFrame, list[str], pd.Series, dict]:
     rng = np.random.default_rng(6)
     n = 200
     # Cluster 0: 2 rows (1% minority). Cluster 1: 198 rows.
-    clusters = pd.Series(np.concatenate([np.zeros(2, dtype=int), np.ones(198, dtype=int)]))
+    clusters = pd.Series(
+        np.concatenate([np.zeros(2, dtype=int), np.ones(198, dtype=int)])
+    )
     data = pd.DataFrame(
         {
             "f1": rng.standard_normal(n),
@@ -377,7 +381,9 @@ def _assert_rows_equal(actual: list[dict], expected: list[dict]) -> None:
                 )
                 continue
             exp_f = float(value) if not isinstance(value, dict) else float("nan")
-            act_f = float(act[field]) if not isinstance(act[field], dict) else float("nan")
+            act_f = (
+                float(act[field]) if not isinstance(act[field], dict) else float("nan")
+            )
             if math.isnan(exp_f) and math.isnan(act_f):
                 continue
             assert abs(exp_f - act_f) <= tol, (

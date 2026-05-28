@@ -28,9 +28,7 @@ from pulsar.mcp.interpreter import (
 
 def test_precompute_shapes_for_basic_data():
     rng = np.random.default_rng(0)
-    df = pd.DataFrame(
-        {"a": rng.standard_normal(50), "b": rng.standard_normal(50)}
-    )
+    df = pd.DataFrame({"a": rng.standard_normal(50), "b": rng.standard_normal(50)})
     pre = _build_numeric_precompute(df, ["a", "b"])
     assert pre.X.shape == (50, 2)
     assert pre.valid.shape == (50, 2)
@@ -59,7 +57,9 @@ def test_precompute_matches_safe_helpers_on_clean_data():
         vals = _normalize_numeric(df[col])
         assert pre.n_total_j[j] == vals.size
         assert math.isclose(float(pre.col_mean[j]), _safe_mean(vals), abs_tol=1e-12)
-        assert math.isclose(float(pre.col_std_sample[j]), _safe_std(vals), abs_tol=1e-12)
+        assert math.isclose(
+            float(pre.col_std_sample[j]), _safe_std(vals), abs_tol=1e-12
+        )
         assert math.isclose(
             float(pre.col_std_pop[j]),
             float(np.std(vals, ddof=0)),
@@ -68,9 +68,7 @@ def test_precompute_matches_safe_helpers_on_clean_data():
         assert math.isclose(
             float(pre.col_var_sample[j]), _safe_var(vals), abs_tol=1e-12
         )
-        assert math.isclose(
-            float(pre.col_median[j]), _safe_median(vals), abs_tol=1e-12
-        )
+        assert math.isclose(float(pre.col_median[j]), _safe_median(vals), abs_tol=1e-12)
         assert math.isclose(float(pre.col_mad[j]), _safe_mad(vals), abs_tol=1e-12)
         assert math.isclose(
             float(pre.col_iqr[j]),

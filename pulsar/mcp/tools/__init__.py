@@ -54,8 +54,11 @@ _ENABLE_UPLOAD = os.environ.get("PULSAR_MCP_ENABLE_UPLOAD") == "1"
 ALL_TOOLS_LIST = [
     # Ingestion
     ingest_dataset,
-    *([begin_dataset_upload, append_dataset_chunk, finalize_dataset_upload]
-      if _ENABLE_UPLOAD else []),
+    *(
+        [begin_dataset_upload, append_dataset_chunk, finalize_dataset_upload]
+        if _ENABLE_UPLOAD
+        else []
+    ),
     # Config
     explain_suggestion,
     create_config,
