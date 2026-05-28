@@ -54,6 +54,7 @@ def _feature_evidence_fingerprint(
     method: str,
     interpretation_edge_weight_threshold: float,
     exclude_columns: list[str] | None,
+    max_clusters_to_characterize: int | None = None,
 ) -> str:
     import hashlib
 
@@ -63,6 +64,7 @@ def _feature_evidence_fingerprint(
         "method": method,
         "interpretation_edge_weight_threshold": interpretation_edge_weight_threshold,
         "exclude_columns": sorted(exclude_columns or []),
+        "max_clusters_to_characterize": max_clusters_to_characterize,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -74,6 +76,7 @@ def _get_or_build_evidence_index(
     *,
     cluster_result: Any,
     exclude_columns: list[str] | None,
+    max_clusters_to_characterize: int | None = None,
 ) -> FeatureEvidenceIndex:
     fingerprint = _feature_evidence_fingerprint(
         run_id=session.latest_run_id,
@@ -81,6 +84,7 @@ def _get_or_build_evidence_index(
         method=cluster_result.method_used,
         interpretation_edge_weight_threshold=cluster_result.interpretation_edge_weight_threshold_applied,
         exclude_columns=exclude_columns,
+        max_clusters_to_characterize=max_clusters_to_characterize,
     )
     if (
         session.feature_evidence_index is not None
@@ -93,6 +97,7 @@ def _get_or_build_evidence_index(
         session.data,
         cluster_result.labels,
         exclude_columns=exclude_columns,
+        max_clusters_to_characterize=max_clusters_to_characterize,
     )
     session.feature_evidence_index = evidence_index
     session.feature_evidence_fingerprint = fingerprint
@@ -186,7 +191,8 @@ async def generate_cluster_dossier(
             threshold_inherited=threshold_inherited,
             threshold_source=threshold_source,
         )
-        result = resolve_clusters(
+        result = await asyncio.to_thread(
+            resolve_clusters,
             session.model,
             method=method,
             max_k=max_k,
@@ -197,10 +203,16 @@ async def generate_cluster_dossier(
 
         session.feature_evidence_cluster_meta = cluster_result_payload(result)
 
-        evidence_index = _get_or_build_evidence_index(
+        # Safety cap: only characterize top N clusters to prevent O(K*F) hang
+        # on shattered graphs. Small singletons/noise are omitted from profiling.
+        max_char_cap = max(50, max_clusters * 2)
+
+        evidence_index = await asyncio.to_thread(
+            _get_or_build_evidence_index,
             session,
             cluster_result=result,
             exclude_columns=exclude_columns,
+            max_clusters_to_characterize=max_char_cap,
         )
 
         cluster_meta = cluster_result_payload(result)
@@ -243,7 +255,8 @@ async def generate_cluster_dossier(
                 indent=None if len(payload["clusters"]) > 10 else 2,
             )
 
-        dossier = build_dossier(
+        dossier = await asyncio.to_thread(
+            build_dossier,
             session.model,
             session.data,
             result.labels,
