@@ -337,6 +337,350 @@ def _normalize_numeric(values: pd.Series) -> np.ndarray:
     return pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float)
 
 
+@dataclass(frozen=True)
+class _NumericPrecompute:
+    """Batched per-column statistics for ``_compute_numeric_rows``.
+
+    Every field is shape ``(K,)`` (per column) or ``(N, K)`` (per row × column).
+    All NaN-aware: ``valid`` masks the rows that survived numeric coercion in
+    each column independently. Anything that takes an ``N`` in a formula
+    (Kruskal denominator, MWU variance) must use the per-column ``n_total_j``
+    rather than the raw row count.
+
+    Two std flavors are stored deliberately. The existing implementation uses
+    ``ddof=0`` for the column-level "global_scale" feeding ``mean_dispersion /
+    global_scale`` (interpreter.py:707) and ``ddof=1`` everywhere else via
+    ``_safe_std``. The precompute mirrors that split so the vectorized rewrite
+    can pick the right one at each call site.
+    """
+
+    column_names: list[str]
+    X: np.ndarray  # (N, K) float64
+    valid: np.ndarray  # (N, K) bool
+    n_total_j: np.ndarray  # (K,) int — per-column valid count
+    col_mean: np.ndarray  # (K,) float64 — np.nanmean
+    col_std_pop: np.ndarray  # (K,) float64 — np.nanstd(ddof=0); for global_scale
+    col_std_sample: np.ndarray  # (K,) float64 — np.nanstd(ddof=1); for row-level
+    col_var_sample: np.ndarray  # (K,) float64 — np.nanvar(ddof=1)
+    col_median: np.ndarray  # (K,) float64
+    col_mad: np.ndarray  # (K,) float64 — median(|x - col_median|)
+    col_iqr: np.ndarray  # (K,) float64 — q75 - q25
+    sort_idx: np.ndarray  # (N, K) int — np.argsort per column; NaN entries trail
+    ranks: np.ndarray  # (N, K) float64 — scipy.rankdata(omit); NaN at NaN rows
+    tie_correction: np.ndarray  # (K,) float64 — Kruskal 1 - Σ(t³-t)/(N³-N); 1.0 when ties absent or undefined
+
+
+def _column_tie_correction(sorted_col: np.ndarray, n_valid: int) -> float:
+    """Kruskal-Wallis tie correction factor.
+
+    Matches scipy.stats.kruskal: ``1 - sum(t**3 - t) / (N**3 - N)`` where ``t``
+    is the size of each tie group across valid (non-NaN) values, and ``N`` is
+    the per-column valid count. Returns 1.0 when undefined (``N <= 1`` or all
+    values identical), preserving scipy's "no correction" baseline.
+    """
+    if n_valid <= 1:
+        return 1.0
+    finite = sorted_col[:n_valid]
+    # Count consecutive runs of equal values in the sorted vector.
+    if finite.size == 0:
+        return 1.0
+    diffs = np.diff(finite)
+    # Run lengths via boundary detection.
+    run_starts = np.concatenate(([0], np.where(diffs != 0)[0] + 1, [finite.size]))
+    run_lengths = np.diff(run_starts)
+    tie_groups = run_lengths[run_lengths > 1].astype(np.float64)
+    denom = float(n_valid) ** 3 - float(n_valid)
+    if denom == 0.0:
+        return 1.0
+    correction = 1.0 - float(np.sum(tie_groups**3 - tie_groups)) / denom
+    if correction <= 0.0:
+        # Matches scipy behavior: when every value is identical the correction
+        # collapses to 0; downstream consumers must propagate NaN, not divide.
+        return 0.0
+    return correction
+
+
+def _build_numeric_precompute(
+    data: pd.DataFrame, numeric_cols: list[str]
+) -> _NumericPrecompute:
+    """Build ``_NumericPrecompute`` from a raw DataFrame slice.
+
+    Coerces each requested column via ``pd.to_numeric(errors='coerce')``, so
+    non-numeric strings become NaN — matching ``_normalize_numeric``'s
+    behavior — but rows are preserved (not dropped) so cluster alignment by
+    position remains valid.
+    """
+    if not numeric_cols:
+        empty = np.empty((len(data), 0), dtype=np.float64)
+        empty_int = np.empty((len(data), 0), dtype=np.int64)
+        empty_k = np.empty(0, dtype=np.float64)
+        empty_k_int = np.empty(0, dtype=np.int64)
+        return _NumericPrecompute(
+            column_names=[],
+            X=empty,
+            valid=empty.astype(bool),
+            n_total_j=empty_k_int,
+            col_mean=empty_k,
+            col_std_pop=empty_k,
+            col_std_sample=empty_k,
+            col_var_sample=empty_k,
+            col_median=empty_k,
+            col_mad=empty_k,
+            col_iqr=empty_k,
+            sort_idx=empty_int,
+            ranks=empty,
+            tie_correction=empty_k,
+        )
+
+    coerced = data[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    X = np.ascontiguousarray(coerced.to_numpy(dtype=np.float64))
+    valid = ~np.isnan(X)
+    n_total_j = valid.sum(axis=0).astype(np.int64)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", r"All-NaN slice encountered")
+        warnings.filterwarnings("ignore", r"Mean of empty slice")
+        warnings.filterwarnings("ignore", r"Degrees of freedom <= 0 for slice")
+        col_mean = np.nanmean(X, axis=0)
+        col_std_pop = np.nanstd(X, axis=0, ddof=0)
+        col_std_sample = np.nanstd(X, axis=0, ddof=1)
+        col_var_sample = np.nanvar(X, axis=0, ddof=1)
+        col_median = np.nanmedian(X, axis=0)
+        abs_dev = np.abs(X - col_median[np.newaxis, :])
+        col_mad = np.nanmedian(abs_dev, axis=0)
+        col_q25 = np.nanquantile(X, 0.25, axis=0)
+        col_q75 = np.nanquantile(X, 0.75, axis=0)
+        col_iqr = col_q75 - col_q25
+
+    # Per-column ranks. scipy preserves NaN in-place when nan_policy="omit".
+    ranks = stats.rankdata(X, axis=0, nan_policy="omit")
+
+    # Sort each column; NaN values sort to the end with np.argsort.
+    sort_idx = np.argsort(X, axis=0)
+
+    # Tie correction: walk each sorted column over its non-NaN prefix.
+    tie_correction = np.empty(X.shape[1], dtype=np.float64)
+    for j in range(X.shape[1]):
+        sorted_col = X[sort_idx[:, j], j]
+        tie_correction[j] = _column_tie_correction(sorted_col, int(n_total_j[j]))
+
+    return _NumericPrecompute(
+        column_names=list(numeric_cols),
+        X=X,
+        valid=valid,
+        n_total_j=n_total_j,
+        col_mean=col_mean,
+        col_std_pop=col_std_pop,
+        col_std_sample=col_std_sample,
+        col_var_sample=col_var_sample,
+        col_median=col_median,
+        col_mad=col_mad,
+        col_iqr=col_iqr,
+        sort_idx=sort_idx,
+        ranks=ranks,
+        tie_correction=tie_correction,
+    )
+
+
+def _mwu_asymptotic_two_sided_pvalue(
+    u1: float, n1: int, n2: int, tie_sum: float
+) -> float:
+    """Asymptotic two-sided Mann-Whitney U p-value with continuity correction.
+
+    Matches ``scipy.stats.mannwhitneyu(..., alternative='two-sided',
+    method='asymptotic').pvalue`` bit-for-bit. ``tie_sum`` is
+    ``Σ(tᵢ³ − tᵢ)`` over tie-group sizes in the combined sample.
+    """
+    from scipy.special import ndtr  # local import keeps top-level surface clean
+
+    n = n1 + n2
+    u2 = n1 * n2 - u1
+    u = max(u1, u2)
+    mu = n1 * n2 / 2.0
+    if n <= 1 or n1 == 0 or n2 == 0:
+        return 1.0
+    variance = n1 * n2 / 12.0 * ((n + 1) - tie_sum / (n * (n - 1)))
+    if variance <= 0.0:
+        # Combined sample is fully tied → MWU is undefined; scipy returns 1.0
+        # after p clamping. Mirror that exactly.
+        return 1.0
+    s = math.sqrt(variance)
+    z = (u - mu - 0.5) / s  # continuity correction matches scipy
+    p = float(ndtr(-z)) * 2.0
+    return float(np.clip(p, 0.0, 1.0))
+
+
+def _mwu_one_vs_rest_pvalue(
+    cluster_mask: np.ndarray,
+    column_index: int,
+    pre: _NumericPrecompute,
+) -> float:
+    """Two-sided MWU p-value for cluster-vs-rest using precomputed ranks.
+
+    Mirrors ``scipy.stats.mannwhitneyu`` with ``method='auto'`` — uses the
+    asymptotic z-test (with tie correction) when scipy would (n₁>8 and n₂>8,
+    OR ties present in the combined sample) and falls back to scipy for the
+    small-no-tie exact branch. Combined sample is the full column so the
+    precomputed column ranks apply directly.
+    """
+    j = column_index
+    valid_j = pre.valid[:, j]
+    cluster_valid = cluster_mask & valid_j
+    rest_valid = (~cluster_mask) & valid_j
+    n1 = int(cluster_valid.sum())
+    n2 = int(rest_valid.sum())
+    if n1 == 0 or n2 == 0:
+        raise ValueError("mannwhitneyu: at least one input has size 0")
+    n_total = n1 + n2
+    tie_correction = float(pre.tie_correction[j])
+    has_ties = tie_correction < 1.0
+    if (n1 > 8 and n2 > 8) or has_ties:
+        r1 = float(pre.ranks[cluster_valid, j].sum())
+        u1 = r1 - n1 * (n1 + 1) / 2.0
+        tie_sum = (n_total**3 - n_total) * (1.0 - tie_correction)
+        return _mwu_asymptotic_two_sided_pvalue(u1, n1, n2, tie_sum)
+    # Exact branch: scipy handles small-no-tie inputs. Defer to scipy so the
+    # exact-distribution path is preserved bit-for-bit.
+    cluster_arr = pre.X[cluster_valid, j]
+    rest_arr = pre.X[rest_valid, j]
+    return float(
+        stats.mannwhitneyu(cluster_arr, rest_arr, alternative="two-sided").pvalue
+    )
+
+
+def _mwu_pair_pvalue(x: np.ndarray, y: np.ndarray) -> float:
+    """Two-sided MWU p-value for an arbitrary pair (cluster vs neighbor).
+
+    Same method-selection logic as ``_mwu_one_vs_rest_pvalue``. Computes
+    ranks fresh on the combined sample because cluster ∪ neighbor is a
+    subset of the column, so the column-level precompute does not apply.
+    """
+    if x.size == 0 or y.size == 0:
+        raise ValueError("mannwhitneyu: at least one input has size 0")
+    n1, n2 = x.size, y.size
+    n = n1 + n2
+    xy = np.concatenate([x, y])
+    order = np.argsort(xy, kind="mergesort")
+    sorted_xy = xy[order]
+    # Tie-group boundaries: a new group starts where consecutive values differ.
+    diff = np.diff(sorted_xy)
+    boundaries = np.concatenate(
+        ([0], (np.where(diff != 0)[0] + 1).astype(np.int64), [n])
+    )
+    group_sizes = np.diff(boundaries).astype(np.float64)
+    has_ties = bool(np.any(group_sizes > 1))
+    if (n1 > 8 and n2 > 8) or has_ties:
+        # Average ranks per tie group (1-based).
+        avg_ranks_per_group = boundaries[:-1].astype(np.float64) + (group_sizes - 1) / 2.0 + 1.0
+        sorted_ranks = np.repeat(avg_ranks_per_group, group_sizes.astype(np.int64))
+        ranks = np.empty(n, dtype=np.float64)
+        ranks[order] = sorted_ranks
+        r1 = float(ranks[:n1].sum())
+        u1 = r1 - n1 * (n1 + 1) / 2.0
+        tie_sum = float(np.sum(group_sizes**3 - group_sizes))
+        return _mwu_asymptotic_two_sided_pvalue(u1, n1, n2, tie_sum)
+    # Small-no-tie exact branch.
+    return float(stats.mannwhitneyu(x, y, alternative="two-sided").pvalue)
+
+
+def _kruskal_wallis_pvalue(
+    ranks_column: np.ndarray,
+    group_masks: list[np.ndarray],
+    tie_correction: float,
+) -> float:
+    """Kruskal-Wallis p-value from precomputed ranks + tie correction.
+
+    Equivalent to ``scipy.stats.kruskal(*groups).pvalue`` where ``groups`` are
+    the value arrays extracted by ``group_masks`` from the original column.
+    ``ranks_column`` is the column slice of the precomputed rank matrix; NaN
+    positions in the source data are NaN here too and must be excluded via the
+    masks before summation.
+
+    Raises ``ValueError`` when fewer than two groups have data — mirroring
+    ``scipy.stats.kruskal``'s behavior. Returns ``nan`` when the tie
+    correction collapses to zero (every value in the column is tied), again
+    matching scipy's silent divide-by-zero output on that input.
+    """
+    rank_sums: list[float] = []
+    group_sizes: list[float] = []
+    for mask in group_masks:
+        if not mask.any():
+            continue
+        group_ranks = ranks_column[mask]
+        rank_sums.append(float(np.sum(group_ranks)))
+        group_sizes.append(float(group_ranks.size))
+    if len(rank_sums) < 2:
+        raise ValueError("Kruskal-Wallis requires at least two non-empty groups")
+    n_total = float(sum(group_sizes))
+    h_uncorrected = (12.0 / (n_total * (n_total + 1.0))) * sum(
+        rs * rs / gs for rs, gs in zip(rank_sums, group_sizes)
+    ) - 3.0 * (n_total + 1.0)
+    if tie_correction == 0.0:
+        # Matches scipy's ``h /= ties`` behavior on all-identical input:
+        # returns nan (with a RuntimeWarning suppressed here).
+        return float("nan")
+    h = h_uncorrected / tie_correction
+    degrees_of_freedom = len(rank_sums) - 1
+    return float(stats.chi2.sf(h, degrees_of_freedom))
+
+
+def _ks_two_sample_stat(a: np.ndarray, b: np.ndarray) -> float:
+    """Two-sample Kolmogorov-Smirnov statistic via combined-sort ECDFs.
+
+    Equivalent to ``scipy.stats.ks_2samp(a, b).statistic`` for finite inputs.
+    Raises ``ValueError`` on empty inputs (mirroring scipy's behavior). Failure
+    strings emitted by callers retain the legacy ``"ks_2samp: ..."`` label so
+    downstream consumers and the ``stats_failures`` contract are unaffected.
+
+    Acts as the monkeypatch seam for the failure-injection test in
+    ``tests/test_mcp_feature_evidence.py``.
+    """
+    if a.size == 0 or b.size == 0:
+        raise ValueError("ks_2samp: at least one input has size 0")
+    a_sorted = np.sort(a)
+    b_sorted = np.sort(b)
+    combined = np.concatenate([a_sorted, b_sorted])
+    n1, n2 = a.size, b.size
+    cdf_a = np.searchsorted(a_sorted, combined, side="right") / n1
+    cdf_b = np.searchsorted(b_sorted, combined, side="right") / n2
+    cdf_diff = cdf_a - cdf_b
+    max_pos = float(np.clip(np.max(cdf_diff), 0.0, 1.0))
+    max_neg = float(np.clip(-np.min(cdf_diff), 0.0, 1.0))
+    d = max(max_pos, max_neg)
+    # Rationalize to the lcm-denominator. scipy.stats.ks_2samp does this in
+    # its default ``exact`` mode (samples ≤ 10000) — the KS two-sample
+    # statistic is exactly rational with denominator ``lcm(n1, n2)``, so
+    # rounding ``d * lcm`` recovers the exact float scipy returns and
+    # eliminates last-bit drift that would otherwise perturb tie-breaking
+    # in downstream empirical percentile ranks.
+    if max(n1, n2) <= 10_000:
+        g = math.gcd(n1, n2)
+        lcm = (n1 // g) * n2
+        h = int(round(d * lcm))
+        d = h / lcm
+    return d
+
+
+def _wasserstein_distance_1d(a: np.ndarray, b: np.ndarray) -> float:
+    """1D Wasserstein (earth-mover) distance via ECDF integration.
+
+    Equivalent to ``scipy.stats.wasserstein_distance(a, b)``. Closed-form on
+    sorted union: ``Σ |F_a(x_i) − F_b(x_i)| · (x_{i+1} − x_i)``.
+    """
+    if a.size == 0 or b.size == 0:
+        raise ValueError("wasserstein: at least one input has size 0")
+    all_values = np.concatenate([a, b])
+    all_values.sort()
+    deltas = np.diff(all_values)
+    if deltas.size == 0:
+        return 0.0
+    a_sorted = np.sort(a)
+    b_sorted = np.sort(b)
+    cdf_a = np.searchsorted(a_sorted, all_values[:-1], side="right") / a.size
+    cdf_b = np.searchsorted(b_sorted, all_values[:-1], side="right") / b.size
+    return float(np.sum(np.abs(cdf_a - cdf_b) * deltas))
+
+
 def _direction_from_effects(*effects: float) -> str:
     positives = sum(1 for effect in effects if effect > 0)
     negatives = sum(1 for effect in effects if effect < 0)
@@ -688,25 +1032,51 @@ def _compute_numeric_rows(
     clusters: pd.Series,
     adjacency: dict[int, list[dict[str, Any]]],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
-    global_numeric_stats: dict[str, dict[str, Any]] = {}
+    if not numeric_cols:
+        return [], {}
+
+    # Build the numeric matrix once. pandas .loc / .iloc and per-cell
+    # _normalize_numeric / _safe_X calls are replaced by precomputed
+    # per-column arrays and batched numpy operations downstream.
+    pre = _build_numeric_precompute(data, numeric_cols)
+    clusters_array = clusters.to_numpy()
     cluster_values = sorted(int(cid) for cid in clusters.unique())
-    for column in numeric_cols:
-        grouped = [
-            _normalize_numeric(data.loc[clusters == cid, column])
-            for cid in cluster_values
+
+    # Per-column arrays of NaN-dropped values; one extraction per column,
+    # reused for every (cluster, column) cell. Replaces the O(C*K) calls to
+    # `_normalize_numeric(data[column])` and `data.loc[mask, column]`.
+    column_values: list[np.ndarray] = [
+        pre.X[pre.valid[:, j], j] for j in range(len(numeric_cols))
+    ]
+
+    # ------------------------------------------------------------------
+    # Column-level Kruskal + global effect (one pass per column)
+    # ------------------------------------------------------------------
+    global_numeric_stats: dict[str, dict[str, Any]] = {}
+    for j, column in enumerate(numeric_cols):
+        valid_j = pre.valid[:, j]
+        group_masks = [(clusters_array == cid) & valid_j for cid in cluster_values]
+        grouped: list[np.ndarray] = [
+            pre.X[m, j] for m in group_masks if m.any()
         ]
-        grouped = [values for values in grouped if values.size > 0]
         p_value = 1.0
         column_failures: list[str] = []
         if len(grouped) >= 2:
             try:
-                p_value = float(stats.kruskal(*grouped).pvalue)
+                p_value = _kruskal_wallis_pvalue(
+                    pre.ranks[:, j], group_masks, float(pre.tie_correction[j])
+                )
             except ValueError as exc:
                 column_failures.append(f"kruskal: {exc}")
                 logger.warning("kruskal failed for column %s: %s", column, exc)
-        global_scale = np.std(_normalize_numeric(data[column]))
+        # ``global_scale`` mirrors the legacy ``np.std(...)`` (ddof=0). Compute
+        # against the column's NaN-dropped array so float ordering matches the
+        # previous implementation bit-for-bit.
+        global_scale = float(np.std(column_values[j])) if column_values[j].size else 0.0
         mean_dispersion = (
-            np.std([_safe_mean(values) for values in grouped]) if grouped else 0.0
+            float(np.std([float(np.mean(values)) for values in grouped]))
+            if grouped
+            else 0.0
         )
         global_numeric_stats[column] = {
             "p_value": p_value,
@@ -722,27 +1092,50 @@ def _compute_numeric_rows(
             1.0 if q_value is None else float(q_value)
         )
 
+    # ------------------------------------------------------------------
+    # Hoisted per-column "global" stats (formerly recomputed per cluster)
+    # ------------------------------------------------------------------
+    global_std_per_col: list[float] = [
+        max(_safe_std(values), _EPS) for values in column_values
+    ]
+    global_mad_per_col: list[float] = [
+        max(_safe_mad(values), _EPS) for values in column_values
+    ]
+    global_iqr_per_col: list[float] = [
+        max(float(stats.iqr(values)), _EPS) if values.size else _EPS
+        for values in column_values
+    ]
+    global_mean_per_col: list[float] = [
+        _safe_mean(values) for values in column_values
+    ]
+
+    # ------------------------------------------------------------------
+    # Per-cluster row generation
+    # ------------------------------------------------------------------
     rows: list[dict[str, Any]] = []
     for cluster_id in cluster_values:
-        cluster_mask = clusters == cluster_id
-        rest_mask = clusters != cluster_id
+        cluster_mask = clusters_array == cluster_id
+        rest_mask = ~cluster_mask
         neighbor_id = _strongest_neighbor(adjacency, cluster_id)
-        for column in numeric_cols:
-            cluster_values_arr = _normalize_numeric(data.loc[cluster_mask, column])
-            rest_values_arr = _normalize_numeric(data.loc[rest_mask, column])
+        neighbor_mask = (
+            (clusters_array == neighbor_id) if neighbor_id is not None else None
+        )
+        for j, column in enumerate(numeric_cols):
+            valid_j = pre.valid[:, j]
+            cluster_values_arr = pre.X[cluster_mask & valid_j, j]
+            rest_values_arr = pre.X[rest_mask & valid_j, j]
             if cluster_values_arr.size == 0 or rest_values_arr.size == 0:
                 continue
-            global_values_arr = _normalize_numeric(data[column])
             neighbor_values_arr = (
-                _normalize_numeric(data.loc[clusters == neighbor_id, column])
-                if neighbor_id is not None
+                pre.X[neighbor_mask & valid_j, j]
+                if neighbor_mask is not None
                 else np.array([], dtype=float)
             )
             row_failures: list[str] = []
             pooled = _pooled_std(cluster_values_arr, rest_values_arr)
-            global_std = max(_safe_std(global_values_arr), _EPS)
-            global_mad = max(_safe_mad(global_values_arr), _EPS)
-            global_iqr = max(float(stats.iqr(global_values_arr)), _EPS)
+            global_std = global_std_per_col[j]
+            global_mad = global_mad_per_col[j]
+            global_iqr = global_iqr_per_col[j]
             std_cluster = _safe_std(cluster_values_arr)
             std_rest = _safe_std(rest_values_arr)
             mad_cluster = _safe_mad(cluster_values_arr)
@@ -754,9 +1147,7 @@ def _compute_numeric_rows(
                 _safe_median(cluster_values_arr) - _safe_median(rest_values_arr)
             ) / max(1.4826 * max(mad_rest, global_mad), _EPS)
             try:
-                ks_stat = float(
-                    stats.ks_2samp(cluster_values_arr, rest_values_arr).statistic
-                )
+                ks_stat = _ks_two_sample_stat(cluster_values_arr, rest_values_arr)
             except ValueError as exc:
                 ks_stat = 0.0
                 row_failures.append(f"ks_2samp: {exc}")
@@ -766,10 +1157,20 @@ def _compute_numeric_rows(
                     column,
                     exc,
                 )
-            wasserstein_norm = float(
-                stats.wasserstein_distance(cluster_values_arr, rest_values_arr)
-                / max(global_iqr, _EPS)
-            )
+            try:
+                wasserstein_norm = (
+                    _wasserstein_distance_1d(cluster_values_arr, rest_values_arr)
+                    / max(global_iqr, _EPS)
+                )
+            except ValueError as exc:
+                wasserstein_norm = 0.0
+                row_failures.append(f"wasserstein: {exc}")
+                logger.warning(
+                    "wasserstein failed for cluster=%s column=%s: %s",
+                    cluster_id,
+                    column,
+                    exc,
+                )
             variance_ratio_log = float(
                 math.log(
                     (_safe_var(cluster_values_arr) + _EPS)
@@ -780,13 +1181,7 @@ def _compute_numeric_rows(
                 max(0.0, 1.0 - ((std_cluster + _EPS) / max(global_std, _EPS)))
             )
             try:
-                one_vs_rest_p = float(
-                    stats.mannwhitneyu(
-                        cluster_values_arr,
-                        rest_values_arr,
-                        alternative="two-sided",
-                    ).pvalue
-                )
+                one_vs_rest_p = _mwu_one_vs_rest_pvalue(cluster_mask, j, pre)
             except ValueError as exc:
                 one_vs_rest_p = 1.0
                 row_failures.append(f"mannwhitneyu(one_vs_rest): {exc}")
@@ -804,12 +1199,8 @@ def _compute_numeric_rows(
                     _safe_mean(cluster_values_arr) - _safe_mean(neighbor_values_arr)
                 ) / max(_pooled_std(cluster_values_arr, neighbor_values_arr), _EPS)
                 try:
-                    neighbor_p = float(
-                        stats.mannwhitneyu(
-                            cluster_values_arr,
-                            neighbor_values_arr,
-                            alternative="two-sided",
-                        ).pvalue
+                    neighbor_p = _mwu_pair_pvalue(
+                        cluster_values_arr, neighbor_values_arr
                     )
                 except ValueError as exc:
                     neighbor_p = 1.0
@@ -837,10 +1228,10 @@ def _compute_numeric_rows(
                 "std_rest": std_rest,
                 "mad_cluster": mad_cluster,
                 "mad_rest": mad_rest,
-                "global_mean": _safe_mean(global_values_arr),
+                "global_mean": global_mean_per_col[j],
                 "global_mean_rest": _safe_mean(rest_values_arr),
                 "z_score": (
-                    _safe_mean(cluster_values_arr) - _safe_mean(global_values_arr)
+                    _safe_mean(cluster_values_arr) - global_mean_per_col[j]
                 )
                 / max(global_std, _EPS),
                 "homogeneity": std_cluster / max(global_std, _EPS),
@@ -1647,7 +2038,10 @@ def signal_matrix_payload(
     for cid in kept:
         for row in numeric_by_cluster.get(cid, []):
             for key, value in (row.get("values", {}) or {}).items():
-                if isinstance(value, dict) and value.get("signal_tier") not in allowed_tiers:
+                if (
+                    isinstance(value, dict)
+                    and value.get("signal_tier") not in allowed_tiers
+                ):
                     continue
                 score = (
                     safe_float(value.get("aggregate_score"))
@@ -1659,7 +2053,10 @@ def signal_matrix_payload(
                 )
         for row in categorical_by_cluster.get(cid, []):
             for key, value in (row.get("values", {}) or {}).items():
-                if isinstance(value, dict) and value.get("signal_tier") not in allowed_tiers:
+                if (
+                    isinstance(value, dict)
+                    and value.get("signal_tier") not in allowed_tiers
+                ):
                     continue
                 score = (
                     safe_float(value.get("aggregate_score"))

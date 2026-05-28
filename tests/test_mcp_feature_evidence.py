@@ -12,7 +12,6 @@ from pulsar.mcp.tools.clustering import (
     get_cluster_profile,
     get_feature_signal,
     get_cluster_signal_matrix,
-    compare_clusters_tool,
 )
 from pulsar.mcp.interpreter import FeatureEvidenceIndex, build_feature_evidence_index
 from pulsar.mcp.interpreter import signal_matrix_payload
@@ -153,20 +152,14 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     )
     summary = json.loads(summary_text)
     full_text = asyncio.run(
-        generate_cluster_dossier(
-            method="auto", detail="full", response_format="json"
-        )
+        generate_cluster_dossier(method="auto", detail="full", response_format="json")
     )
     full = json.loads(full_text)
     cluster_profile = json.loads(
         asyncio.run(get_cluster_profile(0, response_format="json"))
     )
     feature_payload = json.loads(
-        asyncio.run(
-            get_feature_signal(
-                ["f1", "segment=alpha"], response_format="json"
-            )
-        )
+        asyncio.run(get_feature_signal(["f1", "segment=alpha"], response_format="json"))
     )
     matrix_payload = json.loads(
         asyncio.run(get_cluster_signal_matrix(return_markdown=False))
@@ -328,9 +321,7 @@ def test_signal_matrix_caps_wide_feature_columns():
             method="auto", detail="summary", response_format="json"
         )
     )
-    payload = json.loads(
-        asyncio.run(get_cluster_signal_matrix(return_markdown=False))
-    )
+    payload = json.loads(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
     matrix = payload["signal_matrix"]
 
     assert len(matrix["numeric_columns"]) <= 10
@@ -354,14 +345,10 @@ def test_get_cluster_profile_caps_wide_dataset_feature_output():
         asyncio.run(get_cluster_profile(0, response_format="json"))
     )
     capped = json.loads(
-        asyncio.run(
-            get_cluster_profile(0, max_features=7, response_format="json")
-        )
+        asyncio.run(get_cluster_profile(0, max_features=7, response_format="json"))
     )
     uncapped = json.loads(
-        asyncio.run(
-            get_cluster_profile(0, max_features=200, response_format="json")
-        )
+        asyncio.run(get_cluster_profile(0, max_features=200, response_format="json"))
     )
 
     cluster = capped["cluster"]
@@ -396,14 +383,10 @@ def test_signal_matrix_payload_uses_real_assembled_cell_values():
     payload = signal_matrix_payload(evidence, max_clusters=2, return_markdown=False)
 
     numeric_values = [
-        value
-        for row in payload["numeric_rows"]
-        for value in row["values"].values()
+        value for row in payload["numeric_rows"] for value in row["values"].values()
     ]
     categorical_values = [
-        value
-        for row in payload["categorical_rows"]
-        for value in row["values"].values()
+        value for row in payload["categorical_rows"] for value in row["values"].values()
     ]
 
     assert any(abs(value) > 0 for value in numeric_values)
@@ -508,9 +491,7 @@ def test_generate_cluster_dossier_surfaces_singleton_heavy_readiness():
 
     summary = json.loads(
         asyncio.run(
-            generate_cluster_dossier(
-                method="components", response_format="json"
-            )
+            generate_cluster_dossier(method="components", response_format="json")
         )
     )
 
@@ -547,19 +528,25 @@ def test_evidence_index_surfaces_stats_failures_metadata():
 
 
 def test_evidence_index_captures_ks_failure_when_stats_call_raises(monkeypatch):
-    """When scipy.stats raises ValueError, the failure must be recorded on the row."""
+    """When the KS implementation raises ValueError, the failure must be recorded.
+
+    Monkeypatches ``interpreter._ks_two_sample_stat`` — the wrapped seam that
+    replaced the direct ``scipy.stats.ks_2samp`` call when KS was vectorized.
+    The emitted failure label (``"ks_2samp: ..."``) is preserved so the
+    downstream ``stats_failures`` contract is unchanged.
+    """
     from pulsar.mcp import interpreter
 
     call_count = {"n": 0}
-    original_ks = interpreter.stats.ks_2samp
+    original_ks = interpreter._ks_two_sample_stat
 
-    def flaky_ks_2samp(a, b, *args, **kwargs):
+    def flaky_ks(a, b, *args, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise ValueError("synthetic failure for test")
         return original_ks(a, b, *args, **kwargs)
 
-    monkeypatch.setattr(interpreter.stats, "ks_2samp", flaky_ks_2samp)
+    monkeypatch.setattr(interpreter, "_ks_two_sample_stat", flaky_ks)
 
     data, clusters = _make_multifactor_dataset()
     model = _make_disconnected_model(size_per_cluster=len(data) // 2)
@@ -580,7 +567,9 @@ def test_signal_matrix_software3_markdown_and_telemetry():
             },
             1: {
                 "numeric": [],
-                "categorical": [{"column": "cat1", "value": "v1", "aggregate_score": 3.4}],
+                "categorical": [
+                    {"column": "cat1", "value": "v1", "aggregate_score": 3.4}
+                ],
             },
             2: {
                 "numeric": [{"column": "f1", "aggregate_score": 0.5}],
@@ -595,23 +584,17 @@ def test_signal_matrix_software3_markdown_and_telemetry():
             "numeric_rows": [
                 {
                     "cluster_id": 0,
-                    "values": {
-                        "f1": {"value": 1.2, "signal_tier": "core"}
-                    }
+                    "values": {"f1": {"value": 1.2, "signal_tier": "core"}},
                 },
                 {
                     "cluster_id": 2,
-                    "values": {
-                        "f1": {"value": 0.5, "signal_tier": "core"}
-                    }
-                }
+                    "values": {"f1": {"value": 0.5, "signal_tier": "core"}},
+                },
             ],
             "categorical_rows": [
                 {
                     "cluster_id": 1,
-                    "values": {
-                        "cat1=v1": {"value": "v1", "signal_tier": "core"}
-                    }
+                    "values": {"cat1=v1": {"value": "v1", "signal_tier": "core"}},
                 }
             ],
         },
@@ -622,7 +605,7 @@ def test_signal_matrix_software3_markdown_and_telemetry():
 
     assert payload["clusters_returned"] == 2
     assert payload["clusters_omitted"] == 1
-    
+
     # Assert omitted telemetry has maximum aggregate signal scores
     omitted = payload["omitted_clusters"]
     assert len(omitted) == 1
@@ -647,7 +630,7 @@ def test_signal_matrix_defensive_safe_casting():
             0: {
                 "numeric": [
                     {"column": "f1", "aggregate_score": "N/A"},  # invalid string float
-                    {"column": "f2", "aggregate_score": None},   # None float
+                    {"column": "f2", "aggregate_score": None},  # None float
                 ],
                 "categorical": [],
             }
@@ -662,8 +645,8 @@ def test_signal_matrix_defensive_safe_casting():
                     "cluster_id": 0,
                     "values": {
                         "f1": {"value": 1.0, "signal_tier": "core"},
-                        "f2": {"value": 2.0, "signal_tier": "core"}
-                    }
+                        "f2": {"value": 2.0, "signal_tier": "core"},
+                    },
                 }
             ],
             "categorical_rows": [],
