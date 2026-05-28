@@ -41,16 +41,8 @@ def _format_epsilon(cfg: dict) -> str:
 async def explain_suggestion(
     config_yaml: str, dataset_geometry: str, ctx: Context
 ) -> str:
-    """
-    Explains the mathematical reasoning behind a specific parameter suggestion based on raw geometry.
-
-    Args:
-        config_yaml: The YAML config to explain.
-        dataset_geometry: JSON string of the dataset geometry summary.
-
-    Returns:
-        A Markdown explanation of WHY these parameters were chosen.
-    """
+    """Markdown explanation of WHY config parameters were chosen, given
+    `dataset_geometry` JSON from `characterize_dataset`."""
     try:
         geo = json.loads(dataset_geometry)
         config_dict = yaml.safe_load(config_yaml)
@@ -109,13 +101,9 @@ async def explain_suggestion(
 
 
 async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) -> str:
-    """
-    Generate canonical Pulsar YAML for an ingested dataset_id.
-
-    Calibrates epsilon and PCA dimensions against the processed feature
-    space (after recommended preprocessing + scaling), not raw columns.
-    Supports ingested CSV and Parquet datasets.
-    """
+    """Canonical Pulsar YAML for an ingested dataset. Epsilon and PCA dims are
+    calibrated against the processed feature space (post drop/impute/encode/scale),
+    not raw columns."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id)
         from pulsar.analysis.characterization import characterize_dataset as _char
@@ -182,8 +170,8 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
                 * max(int(epsilon_steps or 0), 1),
                 "agent_guidance": (
                     "Run this broad baseline first, inspect diagnose_cosmic_graph, "
-                    "then use refine_config/refine_active_config plus compare_sweeps "
-                    "to shift or concentrate the grid around the informative region."
+                    "then use refine_config plus compare_sweeps to shift or "
+                    "concentrate the grid around the informative region."
                 ),
             },
         }
@@ -220,18 +208,40 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
         return mcp_error("create_config", str(e))
 
 
-async def refine_config(config_yaml: str, overrides: dict[str, Any]) -> str:
-    """
-    Apply constrained overrides to canonical Pulsar YAML and return normalized YAML.
-    """
+async def refine_config(
+    config_yaml: str = "",
+    overrides: dict[str, Any] | None = None,
+    ctx: Context = None,
+) -> str:
+    """Apply constrained overrides; returns normalized YAML. Omit
+    `config_yaml` (or pass "") to refine the session's active config in place."""
+    if overrides is None:
+        overrides = {}
+    session = _get_session(ctx)
+    use_active = not config_yaml
+    if use_active:
+        if not session.active_config_yaml:
+            return mcp_error(
+                "refine_config",
+                "No config_yaml provided and no active config in session.",
+                error_code="ACTIVE_CONFIG_MISSING",
+                agent_action="Pass config_yaml or call create_config(dataset_id) first.",
+            )
+        source_yaml = session.active_config_yaml
+    else:
+        source_yaml = config_yaml
+
     try:
-        result = apply_overrides(config_yaml, overrides)
-        payload = {
+        result = apply_overrides(source_yaml, overrides)
+        payload: dict[str, Any] = {
             "status": "ok",
             "applied_overrides": result.applied_overrides,
             "diff": result.diff,
             "config_yaml": result.config_yaml,
         }
+        if use_active:
+            session.active_config_yaml = result.config_yaml
+            payload["dataset_id"] = session.active_config_dataset_id
         return json.dumps(payload, indent=2)
     except ValueError as e:
         return mcp_error(
@@ -244,67 +254,12 @@ async def refine_config(config_yaml: str, overrides: dict[str, Any]) -> str:
         return mcp_error("refine_config", str(e))
 
 
-async def get_active_config(ctx: Context = None) -> str:
-    """Return the active in-session config, if any."""
-    session = _get_session(ctx)
-    if not session.active_config_yaml:
-        return mcp_error(
-            "get_active_config",
-            "No active config in session. Run create_config or refine_active_config first.",
-            error_code="ACTIVE_CONFIG_MISSING",
-            agent_action="Create or refine a config before requesting the active session config.",
-        )
-    return json.dumps(
-        {
-            "status": "ok",
-            "config_yaml": session.active_config_yaml,
-            "dataset_id": session.active_config_dataset_id,
-        },
-        indent=2,
-    )
-
-
-async def refine_active_config(overrides: dict[str, Any], ctx: Context = None) -> str:
-    """Apply constrained overrides to the session's active config."""
-    session = _get_session(ctx)
-    if not session.active_config_yaml:
-        return mcp_error(
-            "refine_active_config",
-            "No active config in session. Run create_config first.",
-            error_code="ACTIVE_CONFIG_MISSING",
-            agent_action="Call create_config(dataset_id) before refining the session config.",
-        )
-    try:
-        result = apply_overrides(session.active_config_yaml, overrides)
-        session.active_config_yaml = result.config_yaml
-        payload = {
-            "status": "ok",
-            "applied_overrides": result.applied_overrides,
-            "diff": result.diff,
-            "config_yaml": result.config_yaml,
-            "dataset_id": session.active_config_dataset_id,
-        }
-        return json.dumps(payload, indent=2)
-    except ValueError as e:
-        return mcp_error(
-            "refine_active_config",
-            str(e),
-            error_code="UNKNOWN_OVERRIDE_KEY",
-            agent_action="Use only valid override keys. See error message for valid key list.",
-        )
-    except Exception as e:
-        return mcp_error("refine_active_config", str(e))
-
-
 async def validate_config(
     config_yaml: str,
     dataset_id: str = "",
     ctx: Context = None,
 ) -> str:
-    """
-    Validate full Pulsar config shape and normalize it into canonical YAML.
-    Prefer dataset_id once data has been ingested.
-    """
+    """Validate full Pulsar config and normalize into canonical YAML."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
         report = validate_config_yaml(config_yaml, dataset_path=dataset_path)

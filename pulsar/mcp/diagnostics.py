@@ -399,4 +399,3 @@ def _threshold_stability_summary(
         "top_plateaus": plateaus,
         "warning": warning,
     }
-

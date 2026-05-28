@@ -172,9 +172,7 @@ def summary_evidence_payload_to_markdown(payload: dict[str, Any]) -> str:
     )
 
     for cluster in payload.get("clusters", []):
-        lines.append(
-            f"### Cluster {cluster['cluster_id']}: {cluster['semantic_name']}"
-        )
+        lines.append(f"### Cluster {cluster['cluster_id']}: {cluster['semantic_name']}")
         lines.append(f"- Size: {cluster['size']} ({cluster['size_pct']:.1f}%)")
         lines.append(
             "- Numeric tiers: "
@@ -191,9 +189,7 @@ def summary_evidence_payload_to_markdown(payload: dict[str, Any]) -> str:
                 lines.append(f"  - {_format_feature_preview(row)}")
         else:
             lines.append("- Feature preview: none in selected tiers")
-        lines.append(
-            f"- Feature rows omitted: {cluster.get('features_omitted', 0)}"
-        )
+        lines.append(f"- Feature rows omitted: {cluster.get('features_omitted', 0)}")
         lines.append("")
 
     lines.extend(
@@ -270,9 +266,7 @@ def feature_signal_payload_to_markdown(signals: dict[str, Any]) -> str:
             ]
         )
     for cluster in signals.get("clusters", []):
-        lines.append(
-            f"## Cluster {cluster['cluster_id']}: {cluster['semantic_name']}"
-        )
+        lines.append(f"## Cluster {cluster['cluster_id']}: {cluster['semantic_name']}")
         lines.append(f"- Size: {cluster['cluster_size']}")
         numeric = cluster.get("numeric_features", [])
         categorical = cluster.get("categorical_features", [])
@@ -314,7 +308,9 @@ def build_sweep_summary_payload(
         "spectral_clustering_allowed": response.get("spectral_clustering_allowed"),
         "key_metrics": _sweep_key_metrics(metrics),
         "component_sizes_preview": component_preview,
-        "component_sizes_omitted": max(len(component_sizes) - len(component_preview), 0),
+        "component_sizes_omitted": max(
+            len(component_sizes) - len(component_preview), 0
+        ),
         "diff_summary": _sweep_diff_summary(response.get("diff", [])),
         "threshold_stability_summary": response.get("threshold_stability_summary"),
         "pca_cached": response.get("pca_cached"),
@@ -322,7 +318,7 @@ def build_sweep_summary_payload(
         "memory_usage_mb": response.get("memory_usage_mb"),
         "config_advisory": response.get("config_advisory"),
         "config_yaml_included": include_config_yaml,
-        "config_yaml_available_via": "get_active_config",
+        "config_yaml_available_via": "get_runtime_context",
         "next_tools": [
             "diagnose_cosmic_graph",
             "summarize_sweep_history",
@@ -410,7 +406,9 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
             "## Component Sizes",
             "",
             "- Preview: "
-            + ", ".join(str(value) for value in payload.get("component_sizes_preview", [])),
+            + ", ".join(
+                str(value) for value in payload.get("component_sizes_preview", [])
+            ),
         ]
     )
     omitted = payload.get("component_sizes_omitted", 0)
@@ -769,6 +767,7 @@ def _threshold_surface_payload(
     threshold_source: str,
 ) -> dict[str, Any]:
     import numpy as np
+
     if threshold_source == "spectral_default_full_affinity":
         status = "full_affinity_spectral"
         guidance = (
@@ -819,4 +818,3 @@ def _prepend_threshold_markdown(markdown: str, surface: dict[str, Any]) -> str:
         ]
     )
     return f"{header}\n{markdown}"
-

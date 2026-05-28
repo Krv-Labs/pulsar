@@ -32,9 +32,7 @@ def compact_characterization_payload(
         "n_columns_total": geo.get("n_columns_total"),
         "missingness_pct": geo.get("missingness_pct"),
         "numeric_missingness_pct": geo.get("missingness_pct"),
-        "overall_missingness_pct": _overall_missingness_pct(
-            column_profiles, n_samples
-        ),
+        "overall_missingness_pct": _overall_missingness_pct(column_profiles, n_samples),
         "raw_numeric_geometry": {
             "knn_k5_mean": geo.get("knn_k5_mean"),
             "knn_k10_mean": geo.get("knn_k10_mean"),
@@ -111,7 +109,9 @@ def characterization_payload_to_markdown(payload: dict[str, Any]) -> str:
                 f"missing={_fmt_pct(cp.get('missing_pct'))}"
             )
     else:
-        lines.append("- No high-missingness, categorical, or high-cardinality columns flagged.")
+        lines.append(
+            "- No high-missingness, categorical, or high-cardinality columns flagged."
+        )
     omitted_profiles = payload.get("omitted_column_profiles", 0)
     if omitted_profiles:
         lines.append(f"- Column profiles omitted from preview: {omitted_profiles}")
@@ -133,7 +133,9 @@ def probe_columns_payload(
     requested_columns: list[str],
     missing_columns: list[str],
 ) -> dict[str, Any]:
-    compact_profiles = [_compact_detailed_column_profile(profile) for profile in profiles]
+    compact_profiles = [
+        _compact_detailed_column_profile(profile) for profile in profiles
+    ]
     return {
         "status": "ok",
         "columns_requested": len(requested_columns),

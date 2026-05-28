@@ -19,8 +19,10 @@ from pulsar.config import (
 from pulsar.mcp.errors import classify_path, mcp_error
 import numpy as np
 from pulsar.analysis.characterization import NumericProfile
-from pulsar.mcp.preprocessing import _recommend_preprocessing_block, _preprocessing_block_to_yaml
-
+from pulsar.mcp.preprocessing import (
+    _recommend_preprocessing_block,
+    _preprocessing_block_to_yaml,
+)
 
 
 _ALLOWED_TOP_LEVEL = {"run", "preprocessing", "sweep", "cosmic_graph", "output"}
@@ -746,23 +748,32 @@ def _variance_elbow_dimension(
     return points[-1][0]
 
 
-def _initial_pca_grid(n_features: int, pca_knee: int) -> list[int]:
-    if n_features <= 0:
-        return [2]
-    upper = max(2, int(n_features))
-    if upper <= 4:
-        candidates = [2, 3, 4]
-    elif pca_knee <= 4:
-        candidates = [2, 3, 4, 5, 6]
-    elif pca_knee <= 8:
-        candidates = [4, 5, 6, 8, 10]
-    elif upper <= 12:
-        candidates = [2, 4, 6, 8, 10]
-    else:
-        candidates = [2, 5, 10, 15, 20]
+_VARIANCE_FRONTIER_TARGETS = (0.50, 0.70, 0.85)
+_PCA_FLOOR = 3
 
-    clipped = [min(dim, upper) for dim in candidates if min(dim, upper) >= 2]
-    return sorted(dict.fromkeys(clipped))
+
+def _initial_pca_grid(
+    n_features: int,
+    pca_knee: int,
+    pca_cum_var: list[tuple[int, float]],
+) -> list[int]:
+    """Multi-scale PCA grid targeting variance frontiers (50/70/85%) plus the
+    elbow. Each dim lands on signal-rich geometry rather than arbitrary integers.
+    """
+    points = sorted((int(d), float(v)) for d, v in pca_cum_var)
+    ceiling = min(int(pca_knee), int(n_features))
+
+    def dim_at(target: float) -> int | None:
+        for dim, var in points:
+            if var >= target:
+                return dim
+        return None
+
+    dims = [d for d in (dim_at(t) for t in _VARIANCE_FRONTIER_TARGETS) if d is not None]
+    dims.append(ceiling)
+
+    clipped = [max(_PCA_FLOOR, min(int(d), ceiling)) for d in dims if d >= 2]
+    return sorted(set(clipped))
 
 
 def _build_initial_config_yaml(
@@ -794,7 +805,7 @@ def _build_initial_config_yaml(
         else geo.get("n_features", 0)
     )
     pca_knee = _variance_elbow_dimension(pca_cum_var, n_features)
-    pca_dims = _initial_pca_grid(n_features, pca_knee)
+    pca_dims = _initial_pca_grid(n_features, pca_knee, pca_cum_var)
 
     if knn_p25 > 0 and knn_p75 > 0:
         eps_min = knn_p25 * 0.75
@@ -846,4 +857,3 @@ def _suggest_resolution_pca_dims(pca_dims: list[Any]) -> list[int]:
     if high - low >= 8:
         step = max(2, step)
     return list(range(low, high + 1, step))[:6]
-

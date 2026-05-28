@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
     begin_dataset_upload,
@@ -10,8 +12,6 @@ from pulsar.mcp.tools.config import (
     explain_suggestion,
     create_config,
     refine_config,
-    get_active_config,
-    refine_active_config,
     validate_config,
 )
 from pulsar.mcp.tools.sweeping import (
@@ -48,18 +48,18 @@ from pulsar.mcp.tools.meta import (
     characterize_dataset,
 )
 
+# Chunked-upload trio is a sandboxed-client escape hatch; opt in via env.
+_ENABLE_UPLOAD = os.environ.get("PULSAR_MCP_ENABLE_UPLOAD") == "1"
+
 ALL_TOOLS_LIST = [
     # Ingestion
     ingest_dataset,
-    begin_dataset_upload,
-    append_dataset_chunk,
-    finalize_dataset_upload,
+    *([begin_dataset_upload, append_dataset_chunk, finalize_dataset_upload]
+      if _ENABLE_UPLOAD else []),
     # Config
     explain_suggestion,
     create_config,
     refine_config,
-    get_active_config,
-    refine_active_config,
     validate_config,
     # Sweeping
     get_experiment_history,
@@ -99,8 +99,6 @@ __all__ = [
     "explain_suggestion",
     "create_config",
     "refine_config",
-    "get_active_config",
-    "refine_active_config",
     "validate_config",
     "get_experiment_history",
     "summarize_sweep_history",

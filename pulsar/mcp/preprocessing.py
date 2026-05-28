@@ -68,7 +68,9 @@ def enrich_dirty_numeric_samples(
         name = cp["name"]
         if cp.get("is_numeric") or cp.get("sample_values") or name not in dataframe:
             continue
-        values = dataframe[name].dropna().head(sample_size * 1000).unique()[:sample_size]
+        values = (
+            dataframe[name].dropna().head(sample_size * 1000).unique()[:sample_size]
+        )
         cp["sample_values"] = [str(value) for value in values]
         sampled += 1
     return profiles, {
@@ -425,14 +427,14 @@ def preprocessing_recommendation_to_markdown(payload: dict[str, Any]) -> str:
     if rows:
         lines.extend(["| Column | Decision | Rationale |", "|---|---|---|"])
         for row in rows:
-            lines.append(
-                f"| `{row['column']}` | {row['decision']} | {row['reason']} |"
-            )
+            lines.append(f"| `{row['column']}` | {row['decision']} | {row['reason']} |")
     else:
         lines.append("- No rationale rows.")
     omitted = payload.get("rationale_omitted", 0)
     if omitted:
-        lines.append(f"\n{omitted} rationale rows omitted. Use `detail='full'` for audit.")
+        lines.append(
+            f"\n{omitted} rationale rows omitted. Use `detail='full'` for audit."
+        )
     lines.extend(
         [
             "",
@@ -786,4 +788,3 @@ def _calibrate_processed_space(
         return None
     X_scaled = SkScaler().fit_transform(X)
     return profile_numeric_matrix(X_scaled)
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -47,33 +47,6 @@ def _validate_unit_threshold(value: float, *, name: str) -> float:
     return threshold
 
 
-def _resolve_response_format(
-    *,
-    response_format: str,
-    legacy_format: str,
-    detail: str,
-) -> tuple[str, str]:
-    resolved_detail = detail or "summary"
-    resolved_format = response_format or "json"
-    if legacy_format:
-        if legacy_format == "full":
-            resolved_detail = "full"
-            resolved_format = "json"
-        elif legacy_format in {"json", "markdown"}:
-            resolved_format = legacy_format
-        else:
-            raise ToolError(
-                f"format must be 'json', 'markdown', or 'full', got '{legacy_format}'"
-            )
-    if resolved_detail not in {"summary", "standard", "full"}:
-        raise ToolError(
-            f"detail must be 'summary', 'standard', or 'full', got '{resolved_detail}'"
-        )
-    if resolved_format not in {"json", "markdown"}:
-        raise ToolError(
-            f"response_format must be 'json' or 'markdown', got '{resolved_format}'"
-        )
-    return resolved_detail, resolved_format
 
 
 def _feature_evidence_fingerprint(
@@ -158,65 +131,31 @@ def _require_cluster_state(
 
 
 async def generate_cluster_dossier(
-    method: str = "auto",
+    method: Literal["auto", "spectral", "components"] = "auto",
     max_k: int = 15,
     interpretation_edge_weight_threshold: float | None = None,
-    detail: str = "summary",
+    detail: Literal["summary", "standard", "full"] = "summary",
     max_clusters: int = 8,
     feature_preview_limit: int = 5,
-    response_format: str = "markdown",
-    format: str = "",
+    response_format: Literal["markdown", "json"] = "markdown",
     exclude_columns: list[str] | None = None,
     ctx: Context = None,
 ) -> str:
-    """
-    Generate a statistical dossier of the topological clusters.
-
-    Default to detail="summary" for agent loops. It is the compact map for
-    deciding what to inspect next. Do not request detail="standard" or "full"
-    for initial interpretation; those modes are heavy drill-down/audit payloads
-    after specific clusters or features have already been chosen.
+    """Statistical dossier of topological clusters. Use default `summary` for
+    routine loops; `standard`/`full` are heavy — only after narrowing focus.
 
     Args:
-        method: Clustering method ("auto", "spectral", "components").
-        max_k: Maximum k for spectral clustering search.
         interpretation_edge_weight_threshold: Drop edges with weight <= this
-            value before clustering.  Edge weights are the fraction of ball
-            maps that placed two points together. When omitted, auto/components
-            inherit ``model.resolved_construction_threshold``. Explicit spectral
-            clustering defaults to ``0.0`` to use the full weighted affinity
-            matrix unless a threshold is supplied.
-        detail: Payload richness. Omit this parameter for routine agent loops;
-            the default "summary" returns a compact cluster map with tier counts,
-            capped feature previews, signal-matrix counts, and no evidence rows.
-            Use targeted tools (get_cluster_profile, get_feature_signal,
-            get_cluster_signal_matrix) for follow-up evidence. Only set
-            "standard" after narrowing to specific clusters/features; it returns
-            feature/tier rows and central rows for kept clusters. Use "full" only
-            for statistical audit/debugging, not normal chat context.
-        max_clusters: Cap on the number of clusters returned (top by size).
-            Use a larger value to inspect tail clusters; the response
-            reports ``clusters_omitted`` so you can see what was dropped.
-        feature_preview_limit: In summary mode, return at most this many mixed
-            numeric/categorical feature hints per cluster. Use get_cluster_profile
-            for detailed evidence rows.
-        response_format: "markdown" for the default compact narrative report,
-            or "json" for structured payloads.
-        format: Legacy alias. "full" maps to detail="full"; "json" and
-            "markdown" map to response_format.
-        exclude_columns: Optional list of columns to exclude from the report.
-            This hides columns from the final dossier but does NOT affect the
-            topological modeling itself.
+            before clustering. Omit to inherit `resolved_construction_threshold`
+            (spectral default is 0.0 / full affinity).
+        max_clusters: Truncate to top-N by size; `clusters_omitted` reports drops.
+        feature_preview_limit: Feature hints per cluster in summary mode.
+        exclude_columns: Hide columns from report (does NOT affect modeling).
     """
     session = _get_session(ctx)
 
     if session.model is None or session.data is None:
         raise ToolError("No model found. Run run_topological_sweep() first.")
-
-    if method not in ("auto", "spectral", "components"):
-        raise ToolError(
-            f"method must be 'auto', 'spectral', or 'components', got '{method}'"
-        )
     if max_clusters < 1:
         raise ToolError(f"max_clusters must be >= 1, got '{max_clusters}'")
     if feature_preview_limit < 0:
@@ -225,11 +164,6 @@ async def generate_cluster_dossier(
         )
 
     try:
-        detail, response_format = _resolve_response_format(
-            response_format=response_format,
-            legacy_format=format,
-            detail=detail,
-        )
         construction_threshold = _validate_unit_threshold(
             session.model.resolved_construction_threshold,
             name="resolved_construction_threshold",
@@ -378,21 +312,13 @@ async def generate_cluster_dossier(
 
 async def get_cluster_profile(
     cluster_id: int,
-    detail: str = "standard",
+    detail: Literal["summary", "standard", "full"] = "standard",
     max_features: int = 16,
-    response_format: str = "markdown",
+    response_format: Literal["markdown", "json"] = "markdown",
     ctx: Context = None,
 ) -> str:
-    """Return targeted evidence for one cluster from the cached dossier state."""
+    """Targeted evidence for one cluster from cached dossier state."""
     try:
-        if detail not in {"summary", "standard", "full"}:
-            raise ToolError(
-                f"detail must be 'summary', 'standard', or 'full', got '{detail}'"
-            )
-        if response_format not in {"json", "markdown"}:
-            raise ToolError(
-                f"response_format must be 'json' or 'markdown', got '{response_format}'"
-            )
         if max_features < 1:
             raise ToolError(f"max_features must be >= 1, got '{max_features}'")
 
@@ -427,35 +353,17 @@ async def get_cluster_profile(
 async def get_feature_signal(
     feature_names: list[str],
     cluster_ids: list[int] | None = None,
-    detail: str = "summary",
+    detail: Literal["summary", "standard", "full"] = "summary",
     max_clusters: int = 8,
-    response_format: str = "markdown",
+    response_format: Literal["markdown", "json"] = "markdown",
     ctx: Context = None,
 ) -> str:
-    """Return cross-cluster evidence for specific feature columns.
+    """Cross-cluster evidence for specific feature columns.
 
     Args:
-        feature_names: Numeric columns or ``column=value`` pairs for categoricals.
-        cluster_ids: Restrict to specific clusters. When omitted, the response is
-            capped by ``max_clusters`` (top by aggregate signal); pass an explicit
-            list to override.
-        detail: ``summary`` projects ~16 fields per row (default), ``standard``
-            adds context-tier rows in compact form, ``full`` returns every metric.
-        max_clusters: Cap on the number of clusters returned when ``cluster_ids``
-            is omitted. Ignored when ``cluster_ids`` is provided.
-        response_format: "markdown" for the default compact report, or "json"
-            for structured payloads.
+        feature_names: Numeric columns or `column=value` pairs for categoricals.
+        cluster_ids: Restrict to specific clusters; omit to use top `max_clusters` by signal.
     """
-    if detail not in {"summary", "standard", "full"}:
-        return mcp_error(
-            "get_feature_signal",
-            f"detail must be 'summary', 'standard', or 'full', got '{detail}'",
-        )
-    if response_format not in {"json", "markdown"}:
-        return mcp_error(
-            "get_feature_signal",
-            f"response_format must be 'json' or 'markdown', got '{response_format}'",
-        )
     if max_clusters < 1:
         return mcp_error(
             "get_feature_signal",
@@ -489,15 +397,9 @@ async def get_cluster_signal_matrix(
     return_markdown: bool = True,
     ctx: Context = None,
 ) -> str:
-    """Return the cross-cluster signal matrix in a highly compressed Markdown or raw JSON layout.
-
-    The underlying topology of the data dictates the exact clusters. The parameter
-    ``max_clusters`` serves strictly as a presentation-layer truncation limit to rank
-    and slice the top clusters by signal to prevent context window bloat.
-
-    Set ``include_context_tier=True`` to include context-tier feature signals in addition
-    to core and supporting tiers. Set ``return_markdown=False`` explicitly to obtain
-    the programmatic, flattened JSON dictionary layout.
+    """Cross-cluster signal matrix. `max_clusters` is presentation-only
+    truncation (ranks by signal). `include_context_tier` adds context-tier rows
+    beyond core/supporting. `return_markdown=False` returns flattened JSON.
     """
     if max_clusters < 1:
         return mcp_error(
@@ -528,9 +430,7 @@ async def get_cluster_signal_matrix(
 async def compare_clusters_tool(
     cluster_a: int, cluster_b: int, ctx: Context = None
 ) -> str:
-    """
-    Perform pairwise statistical tests between two clusters.
-    """
+    """Pairwise statistical tests between two clusters."""
     session = _get_session(ctx)
 
     if session.data is None or session.clusters is None:

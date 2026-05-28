@@ -4,6 +4,7 @@ import base64
 import dataclasses
 import json
 import logging
+from typing import Literal
 
 from fastmcp import Context
 
@@ -15,10 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 async def ingest_dataset(path: str, ctx: Context = None) -> str:
-    """
-    Register a host-visible absolute dataset path and return a stable dataset_id handle.
-    Use this only when the MCP server can read the path directly.
-    """
+    """Register a host-visible absolute dataset path; returns a `dataset_id`."""
     try:
         record = registry.register_dataset(path)
         session = _get_session(ctx)
@@ -55,10 +53,7 @@ async def begin_dataset_upload(
     media_type: str = "text/csv",
     ctx: Context = None,
 ) -> str:
-    """
-    Begin a staged server-side upload for a dataset that is not reachable by path.
-    Use this for larger sandboxed uploads, then append chunks and finalize to get dataset_id.
-    """
+    """Begin staged upload (sandboxed clients only). Then append chunks + finalize."""
     try:
         record = registry.begin_upload(filename, media_type=media_type)
         return json.dumps(dataclasses.asdict(record), indent=2)
@@ -69,13 +64,10 @@ async def begin_dataset_upload(
 async def append_dataset_chunk(
     upload_id: str,
     chunk: str,
-    encoding: str = "base64",
+    encoding: Literal["base64", "utf-8"] = "base64",
     ctx: Context = None,
 ) -> str:
-    """
-    Append one chunk to a staged dataset upload.
-    Use base64 encoding by default to avoid newline and control-character corruption.
-    """
+    """Append one chunk to a staged upload (base64 default for binary safety)."""
     try:
         if encoding == "base64":
             try:
@@ -106,9 +98,7 @@ async def append_dataset_chunk(
 
 
 async def finalize_dataset_upload(upload_id: str, ctx: Context = None) -> str:
-    """
-    Finalize a staged upload and register it as a dataset_id for downstream tools.
-    """
+    """Finalize a staged upload; returns a `dataset_id`."""
     try:
         record = registry.finalize_upload(upload_id)
         if record is None:

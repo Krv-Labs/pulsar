@@ -332,4 +332,3 @@ class MCPRegistry:
 
 
 registry = MCPRegistry()
-

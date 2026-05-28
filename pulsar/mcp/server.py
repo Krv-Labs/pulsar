@@ -49,22 +49,10 @@ mcp = FastMCP(
     "Pulsar",
     instructions=(
         "Topological data analysis for tabular datasets. Call "
-        "`get_workflow_guide` for the recommended end-to-end phase-by-phase "
-        "procedure.\n\n"
-        "Tool map:\n"
-        "- Primary loop: `ingest_dataset` -> `characterize_dataset` -> "
-        "`create_config` -> `validate_config` -> `run_topological_sweep` -> "
-        "`diagnose_cosmic_graph` -> `summarize_sweep_history` -> "
-        "`generate_cluster_dossier`.\n"
-        "- Targeted interpretation: `get_cluster_profile`, "
-        "`get_feature_signal`, `compare_clusters_tool`, `export_html_report`.\n"
-        "- Advanced/debug: chunked upload trio, `probe_columns`, "
-        "`recommend_preprocessing`, `validate_preprocessing_config`, "
-        "`repair_preprocessing_config`, `refine_config`, `refine_active_config`, "
-        "`get_active_config`, `get_threshold_stability_curve`, "
-        "`get_topological_skeleton`, `compare_sweeps`, `get_experiment_history`, "
-        "`get_cluster_signal_matrix`, `export_labeled_data`, "
-        "`get_runtime_context`."
+        "`get_workflow_guide` once for the end-to-end procedure and tool map.\n"
+        "Shared params across tools: `detail` ('summary' default; 'full' for "
+        "audit/debug) and `response_format` ('markdown' default; 'json' for "
+        "structured payloads)."
     ),
 )
 

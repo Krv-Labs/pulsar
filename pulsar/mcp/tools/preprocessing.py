@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from fastmcp import Context
@@ -20,81 +20,50 @@ from pulsar.mcp.preprocessing import (
     preprocessing_recommendation_to_markdown,
     repair_config,
 )
-from pulsar.mcp.session import _get_session, _load_session_dataframe, _resolve_dataset_path
+from pulsar.mcp.session import (
+    _get_session,
+    _load_session_dataframe,
+    _resolve_dataset_path,
+)
 
 logger = logging.getLogger(__name__)
 
 
 async def recommend_preprocessing(
-    dataset_geometry: str = "",
     dataset_id: str = "",
-    detail: str = "summary",
-    response_format: str = "markdown",
+    detail: Literal["summary", "full"] = "summary",
+    response_format: Literal["markdown", "json"] = "markdown",
     rationale_limit: int = 20,
     ctx: Context = None,
 ) -> str:
+    """Preprocessing recommendations from column profiles. Returns
+    `preprocessing_yaml`, rationale, and expansion estimate.
     """
-    Analyze column profiles and return preprocessing recommendations.
-    Prefer dataset_id after ingest; accepts dataset_geometry as fallback.
-
-    Args:
-        dataset_geometry: Legacy full geometry JSON with column_profiles.
-        dataset_id: Preferred dataset handle. When provided, characterizes
-            the dataset automatically (dataset_geometry is ignored).
-        detail: "summary" for capped rationale, or "full" for complete audit.
-        response_format: "markdown" for default agent review, or "json".
-        rationale_limit: Max rationale rows in summary mode.
-
-    Returns:
-        Markdown or JSON with preprocessing_yaml, rationale summary, and expansion estimate.
-    """
-    if detail not in {"summary", "full"}:
-        return mcp_error(
-            "recommend_preprocessing",
-            f"detail must be 'summary' or 'full', got '{detail}'",
-        )
-    if response_format not in {"json", "markdown"}:
-        return mcp_error(
-            "recommend_preprocessing",
-            f"response_format must be 'json' or 'markdown', got '{response_format}'",
-        )
     if rationale_limit < 1:
         return mcp_error(
             "recommend_preprocessing",
             f"rationale_limit must be >= 1, got '{rationale_limit}'",
         )
+    if not dataset_id:
+        return mcp_error(
+            "recommend_preprocessing",
+            "dataset_id is required.",
+            error_code="MISSING_INPUT",
+            agent_action="Pass dataset_id from ingest_dataset.",
+        )
     try:
-        df = None
-        if dataset_id:
-            from pulsar.analysis.characterization import characterize_dataset as _char
+        from pulsar.analysis.characterization import characterize_dataset as _char
 
-            session = _get_session(ctx)
-            df, normalized_path = await _load_session_dataframe(
-                session,
-                dataset_id=dataset_id,
-            )
-            result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
-            geo = dataclasses.asdict(result)
-        elif dataset_geometry:
-            geo = json.loads(dataset_geometry)
-        else:
-            return mcp_error(
-                "recommend_preprocessing",
-                "Provide either dataset_id or dataset_geometry.",
-                error_code="MISSING_INPUT",
-                agent_action="Pass dataset_id after ingest, or dataset_geometry JSON from characterize_dataset.",
-            )
+        session = _get_session(ctx)
+        df, normalized_path = await _load_session_dataframe(
+            session,
+            dataset_id=dataset_id,
+        )
+        result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
+        geo = dataclasses.asdict(result)
 
         n_samples = geo.get("n_samples", 0)
         column_profiles = geo.get("column_profiles", [])
-
-        if not column_profiles:
-            return mcp_error(
-                "recommend_preprocessing",
-                "No column_profiles found in dataset_geometry.",
-                error_code="MISSING_COLUMN_PROFILES",
-                agent_action="Pass dataset_id instead of compact characterize_dataset output.",
-            )
 
         column_profiles, dirty_numeric_detection = enrich_dirty_numeric_samples(
             column_profiles, df
@@ -141,53 +110,21 @@ async def recommend_preprocessing(
 async def repair_preprocessing_config(
     error_message: str,
     config_yaml: str,
-    dataset_geometry: str = "",
-    dataset_id: str = "",
+    dataset_id: str,
     ctx: Context = None,
 ) -> str:
-    """
-    Given a preprocessing error from run_topological_sweep, produce a corrected
-    config_yaml with a change log of what was fixed and why.
-
-    Handles: NaN remaining, non-numeric columns, coercion failure, all-missing
-    columns, and cardinality violations.
-
-    Args:
-        error_message: The full error text from the failed sweep.
-        config_yaml: The config_yaml that caused the error.
-        dataset_geometry: Full legacy geometry JSON with column_profiles.
-        dataset_id: Preferred dataset handle. When provided, characterizes
-            the dataset automatically (dataset_geometry is ignored).
-
-    Returns:
-        Markdown with error classification, change log table, and patched config_yaml.
-    """
+    """Given a sweep preprocessing error, return corrected `config_yaml`
+    with a change log. Handles NaN remaining, non-numeric columns, coercion
+    failure, all-missing columns, and cardinality violations."""
     try:
-        if dataset_id:
-            from pulsar.analysis.characterization import characterize_dataset as _char
+        from pulsar.analysis.characterization import characterize_dataset as _char
 
-            session = _get_session(ctx)
-            dataset_path = _resolve_dataset_path(dataset_id)
-            df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
-            result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
-            geo = dataclasses.asdict(result)
-        elif dataset_geometry:
-            geo = json.loads(dataset_geometry)
-        else:
-            return mcp_error(
-                "repair_preprocessing_config",
-                "Provide either dataset_id or legacy dataset_geometry with column_profiles.",
-                error_code="MISSING_INPUT",
-                agent_action="Pass dataset_id when available.",
-            )
+        session = _get_session(ctx)
+        dataset_path = _resolve_dataset_path(dataset_id)
+        df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
+        result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
+        geo = dataclasses.asdict(result)
 
-        if not geo.get("column_profiles"):
-            return mcp_error(
-                "repair_preprocessing_config",
-                "No column_profiles found in dataset_geometry.",
-                error_code="MISSING_COLUMN_PROFILES",
-                agent_action="Pass dataset_id instead of compact characterize_dataset output.",
-            )
         profiles_by_name: dict[str, Any] = {}
         for cp in geo.get("column_profiles", []):
             pname = cp["name"] if isinstance(cp, dict) else cp.name
@@ -199,17 +136,9 @@ async def repair_preprocessing_config(
 
 
 async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
-    """
-    Dry-run the preprocessing stage only against session data — no PCA, no BallMapper,
-    no sweep cost. Use this to confirm a config is valid before run_topological_sweep.
-
-    Requires a prior run_topological_sweep call (to populate session data).
-
-    Args:
-        config_yaml: Inline YAML config string to validate.
-
-    Returns:
-        PASS with schema summary, or a structured error matching repair_preprocessing_config input format.
+    """Dry-run preprocessing only against session data (no PCA/BallMapper/sweep
+    cost). Requires prior `run_topological_sweep` or `characterize_dataset` to
+    load data into the session. Returns PASS+schema summary or structured error.
     """
     session = _get_session(ctx)
 

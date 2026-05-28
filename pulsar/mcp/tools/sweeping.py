@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Literal
 
 import networkx as nx
 import yaml
@@ -79,13 +79,7 @@ def _auto_save_config(cfg) -> str:
 
 
 async def get_experiment_history(ctx: Context) -> str:
-    """
-    Returns a markdown table of all topological sweeps run in the current session.
-    Use this to reason about your trajectory across multiple iterations.
-
-    Returns:
-        Markdown table of history. Returns an empty table if no sweeps have been run.
-    """
+    """Markdown table of all sweeps run in this session."""
     session = _get_session(ctx)
     if not session.sweep_history:
         return "No experiments run yet in this session.\n\n| Run | PCA Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |\n|---|---|---|---|---|---|---|"
@@ -111,18 +105,9 @@ async def get_experiment_history(ctx: Context) -> str:
 
 
 async def summarize_sweep_history(ctx: Context = None) -> str:
-    """
-    Synthesize patterns across the session's sweep history.
-
-    Returns a JSON payload with:
-        - ``n_runs``: number of sweeps recorded in this session
-        - ``observations``: rule-based descriptive findings (e.g., which PCA
-          dimensions produced hairballs, which construction thresholds
-          coincided with singleton collapse)
-        - ``rationale``: short qualitative summary tying observations together
-
-    No recommended-config field is produced — the agent owns the next
-    decision. Use ``get_experiment_history`` for the raw per-run table.
+    """Synthesize patterns across the session's sweeps. Returns
+    `{n_runs, observations, rationale}`. Agent owns next-step decision.
+    Use `get_experiment_history` for the raw per-run table.
     """
     session = _get_session(ctx)
     summary = summarize_history(list(session.sweep_history))
@@ -130,9 +115,7 @@ async def summarize_sweep_history(ctx: Context = None) -> str:
 
 
 async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
-    """
-    Compare two persisted sweep runs by config and graph metrics.
-    """
+    """Compare two persisted sweeps by config and graph metrics."""
     try:
         record_a = registry.get_run(run_a)
         record_b = registry.get_run(run_b)
@@ -175,38 +158,19 @@ async def run_topological_sweep(
     config_yaml: str = "",
     dataset_id: str = "",
     save_config: bool = False,
-    detail: str = "summary",
-    response_format: str = "markdown",
+    detail: Literal["summary", "full"] = "summary",
+    response_format: Literal["markdown", "json"] = "markdown",
     include_config_yaml: bool = False,
     component_limit: int = 20,
     ctx: Context = None,
 ) -> str:
-    """
-    Run the Pulsar topological sweep pipeline on a dataset.
-
-    Returns a compact structured execution summary by default.
+    """Run the Pulsar topological sweep pipeline. Prefer `config_yaml` inline;
+    falls back to active session config if neither is given.
 
     Args:
-        config_path: Path to a params.yaml file on disk.
-        config_yaml: Inline YAML string (preferred).
-        dataset_id: Preferred dataset handle when data has already been ingested.
-        save_config: If True, persist the resolved config YAML to disk.
-        detail: "summary" for bounded agent loops, or "full" for audit/debug.
-        response_format: "markdown" by default for a compact operator log,
-            or "json" for machine-safe run IDs and metrics.
-        include_config_yaml: Include normalized config YAML in summary output.
-        component_limit: Number of component sizes to include in summary output.
+        save_config: Persist resolved config to disk for reproducibility.
+        component_limit: Component sizes included in summary output.
     """
-    if detail not in {"summary", "full"}:
-        return mcp_error(
-            "run_topological_sweep",
-            f"detail must be 'summary' or 'full', got '{detail}'",
-        )
-    if response_format not in {"json", "markdown"}:
-        return mcp_error(
-            "run_topological_sweep",
-            f"response_format must be 'json' or 'markdown', got '{response_format}'",
-        )
     if component_limit < 1:
         return mcp_error(
             "run_topological_sweep",
@@ -336,7 +300,9 @@ async def run_topological_sweep(
             p_dataset = getattr(prev_record, "dataset_id", None)
             c_dataset = persisted_dataset_id
             if p_dataset and c_dataset and p_dataset != c_dataset:
-                diff.append({"field": "dataset_id", "previous": p_dataset, "current": c_dataset})
+                diff.append(
+                    {"field": "dataset_id", "previous": p_dataset, "current": c_dataset}
+                )
 
             pm = prev_record.metrics
             cm = current_metrics

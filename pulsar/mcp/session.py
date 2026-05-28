@@ -267,6 +267,7 @@ def _pca_cache_status(
 ) -> tuple[list | None, dict[str, Any]]:
     """Return reusable PCA embeddings and an operational status payload."""
     from pulsar.runtime.fingerprint import pca_fingerprint
+
     status: dict[str, Any] = {
         "scope": "session",
         "status": "miss",
