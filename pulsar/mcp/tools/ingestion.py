@@ -10,7 +10,7 @@ from fastmcp import Context
 
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.registry import registry
-from pulsar.mcp.session import _get_session, _session_key
+from pulsar.mcp.session import _get_session
 
 logger = logging.getLogger(__name__)
 

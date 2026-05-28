@@ -8,7 +8,6 @@ from typing import Any
 
 import yaml
 from fastmcp import Context
-from fastmcp.exceptions import ToolError
 
 from pulsar.mcp.config_tools import (
     apply_overrides,

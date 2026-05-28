@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from typing import Any, Literal
@@ -12,7 +13,7 @@ from fastmcp.exceptions import ToolError
 
 from pulsar.config import THRESHOLD_RANGE_MESSAGE
 from pulsar.mcp.diagnostics import diagnose_model
-from pulsar.mcp.errors import mcp_error, unknown_handle_error
+from pulsar.mcp.errors import mcp_error
 from pulsar.mcp.interpreter import (
     FeatureEvidenceIndex,
     build_dossier,
@@ -108,14 +109,9 @@ def _get_or_build_evidence_index(
 def _graph_metrics_payload(model: Any) -> dict[str, Any]:
     try:
         return dataclasses.asdict(diagnose_model(model))
-    except Exception as exc:
-        import dataclasses
-
-        try:
-            return dataclasses.asdict(diagnose_model(model))
-        except (RuntimeError, AttributeError, NameError) as e:
-            logger.warning("diagnose_model failed: %s", e)
-            return {}
+    except (RuntimeError, AttributeError, NameError, Exception) as e:
+        logger.warning("diagnose_model failed: %s", e)
+        return {}
 
 
 def _require_cluster_state(
