@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import networkx as nx
@@ -224,7 +224,10 @@ _MAX_EDGES_IN_SUMMARY = 500
 
 def _build_graph_summary(model: Any) -> dict[str, Any]:
     graph = model.cosmic_graph
-    components = list(nx.connected_components(graph))
+    if graph.is_directed():
+        components = list(nx.weakly_connected_components(graph))
+    else:
+        components = list(nx.connected_components(graph))
     component_sizes = sorted((len(component) for component in components), reverse=True)
 
     component_by_node: dict[int, int] = {}
@@ -258,8 +261,56 @@ def _build_graph_summary(model: Any) -> dict[str, Any]:
     truncated = total_edges > _MAX_EDGES_IN_SUMMARY
     edges = edges[:_MAX_EDGES_IN_SUMMARY]
 
+    # Precompute bounded graph signals for detail="nodes" without returning raw nodes.
+    hubs = []
+    for comp_id, comp in enumerate(components):
+        comp_nodes = sorted(
+            [n for n in nodes if n["component_id"] == comp_id],
+            key=lambda x: x["weighted_degree"],
+            reverse=True,
+        )
+        for hn in comp_nodes[:3]:
+            hubs.append(
+                {
+                    "node": hn["node"],
+                    "component_id": comp_id,
+                    "degree": hn["degree"],
+                    "weighted_degree": hn["weighted_degree"],
+                }
+            )
+
+    overall_hubs = sorted(nodes, key=lambda x: x["weighted_degree"], reverse=True)[:3]
+
+    bridges = []
+    n_nodes = graph.number_of_nodes()
+    if not graph.is_directed() and n_nodes <= 1000 and total_edges <= 25000:
+        try:
+            bridges = [int(node) for node in nx.articulation_points(graph)]
+        except Exception as e:
+            logger.warning(f"Error computing articulation points: {e}")
+
+    degrees = [n["degree"] for n in nodes]
+    avg_degree = float(np.mean(degrees)) if degrees else 0.0
+    max_degree = int(np.max(degrees)) if degrees else 0
+    degree_sparkline = (
+        generate_distribution_sparkline(np.array(degrees, dtype=float))
+        if degrees
+        else ""
+    )
+
+    topological_summary = {
+        "key_hubs": hubs,
+        "overall_hubs": overall_hubs,
+        "bridges": sorted(bridges),
+        "degree_distribution": {
+            "mean": avg_degree,
+            "max": max_degree,
+            "sparkline": degree_sparkline,
+        },
+    }
+
     return {
-        "node_count": graph.number_of_nodes(),
+        "node_count": n_nodes,
         "edge_count": total_edges,
         "resolved_construction_threshold": float(model.resolved_construction_threshold),
         "component_count": len(components),
@@ -268,6 +319,7 @@ def _build_graph_summary(model: Any) -> dict[str, Any]:
         "edges": edges,
         "edges_truncated": truncated,
         "edges_shown": len(edges),
+        "topological_summary": topological_summary,
     }
 
 
@@ -282,7 +334,7 @@ def _skeleton_graph_payload(
     all_edges = list(graph.get("edges", []))
     node_count = int(graph.get("node_count", len(all_nodes)))
     edge_count = int(graph.get("edge_count", len(all_edges)))
-    include_nodes = detail in {"nodes", "full"}
+    include_nodes = detail in {"full_nodes", "full"}
     include_edges = detail in {"edges", "full"}
     nodes = all_nodes[:max_nodes] if include_nodes else []
     edges = all_edges[:max_edges] if include_edges else []
@@ -300,6 +352,8 @@ def _skeleton_graph_payload(
         "edges_omitted": max(edge_count - len(edges), 0),
         "source_edges_truncated": bool(graph.get("edges_truncated", False)),
     }
+    if detail == "nodes":
+        payload["topological_summary"] = graph.get("topological_summary", {})
     if include_nodes:
         payload["nodes"] = nodes
     if include_edges:

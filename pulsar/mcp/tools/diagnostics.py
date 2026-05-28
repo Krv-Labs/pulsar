@@ -228,6 +228,15 @@ async def get_threshold_stability_curve(
         selected_profile = (
             plateaus[0].get("component_mass_profile") if plateaus else None
         )
+        if detail == "summary":
+            for p in plateaus:
+                p.pop("component_mass_profile", None)
+            for list_key in ["stable_plateau_candidates", "transition_adjacent_candidates", "candidates"]:
+                if list_key in threshold_options:
+                    for cand in threshold_options[list_key]:
+                        cand.pop("component_mass_profile", None)
+                        cand.pop("mass_shape", None)
+
         payload: dict[str, Any] = {
             "status": "ok",
             "detail": detail,
@@ -270,12 +279,17 @@ async def get_threshold_stability_curve(
 
 async def get_topological_skeleton(
     run_id: str = "",
-    detail: Literal["summary", "nodes", "edges", "full"] = "summary",
+    detail: Literal["summary", "nodes", "edges", "full", "full_nodes"] = "summary",
     max_edges: int = 100,
     max_nodes: int = 100,
     ctx: Context = None,
 ) -> str:
-    """Structured graph connectivity for latest run or explicit `run_id`."""
+    """Structured graph connectivity for latest run or explicit `run_id`.
+
+    Detail modes are summary-first: `nodes` returns a compact topological summary,
+    `edges` returns capped raw edges, `full_nodes` returns capped raw nodes, and
+    `full` returns capped raw nodes, capped raw edges, and config YAML.
+    """
     try:
         if max_edges < 1:
             raise ToolError(f"max_edges must be >= 1, got '{max_edges}'")
