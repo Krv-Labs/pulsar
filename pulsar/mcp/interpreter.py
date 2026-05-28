@@ -1048,6 +1048,7 @@ def _compute_numeric_rows(
     numeric_cols: list[str],
     clusters: pd.Series,
     adjacency: dict[int, list[dict[str, Any]]],
+    target_clusters: set[int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
     if not numeric_cols:
         return [], {}
@@ -1058,6 +1059,9 @@ def _compute_numeric_rows(
     pre = _build_numeric_precompute(data, numeric_cols)
     clusters_array = clusters.to_numpy()
     cluster_values = sorted(int(cid) for cid in clusters.unique())
+
+    if target_clusters is not None:
+        cluster_values = [cid for cid in cluster_values if cid in target_clusters]
 
     # Per-column arrays of NaN-dropped values; one extraction per column,
     # reused for every (cluster, column) cell. Replaces the O(C*K) calls to
@@ -1291,6 +1295,7 @@ def _compute_categorical_rows(
     categorical_cols: list[str],
     clusters: pd.Series,
     adjacency: dict[int, list[dict[str, Any]]],
+    target_clusters: set[int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]], list[dict[str, Any]]]:
     n_total = len(data)
     gated_cols: list[dict[str, Any]] = []
@@ -1318,6 +1323,8 @@ def _compute_categorical_rows(
 
     global_categorical_stats: dict[str, dict[str, Any]] = {}
     cluster_values = sorted(int(cid) for cid in clusters.unique())
+    if target_clusters is not None:
+        cluster_values = [cid for cid in cluster_values if cid in target_clusters]
 
     # Precompute encoded columns, global value counts, and per-column
     # association stats in a single pass over the active columns.
@@ -1328,7 +1335,11 @@ def _compute_categorical_rows(
         encoded_cols[column] = encoded
         global_value_counts[column] = encoded.value_counts().to_dict()
 
-        contingency = pd.crosstab(clusters, encoded)
+        if target_clusters is not None:
+            mask = clusters.isin(target_clusters)
+            contingency = pd.crosstab(clusters[mask], encoded[mask])
+        else:
+            contingency = pd.crosstab(clusters, encoded)
         p_value = 1.0
         association = 0.0
         column_failures: list[str] = []
@@ -1675,6 +1686,7 @@ def build_feature_evidence_index(
     data: pd.DataFrame,
     clusters: pd.Series,
     exclude_columns: list[str] | None = None,
+    max_clusters_to_characterize: int | None = None,
 ) -> FeatureEvidenceIndex:
     """Compute distribution-aware evidence for numeric and categorical signals."""
     if len(clusters) != len(data):
@@ -1690,19 +1702,40 @@ def build_feature_evidence_index(
 
     numeric_cols = working.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = working.select_dtypes(exclude=[np.number]).columns.tolist()
+
+    cluster_sizes = clusters.value_counts()
+    n_unique_clusters = len(cluster_sizes)
+    target_clusters = None
+    omitted_clusters_count = 0
+    if (
+        max_clusters_to_characterize is not None
+        and n_unique_clusters > max_clusters_to_characterize
+    ):
+        target_clusters = set(
+            cluster_sizes.nlargest(max_clusters_to_characterize).index.astype(int)
+        )
+        omitted_clusters_count = n_unique_clusters - max_clusters_to_characterize
+
     adjacency = _graph_cluster_adjacency(model, clusters)
     numeric_rows, global_numeric_stats = _compute_numeric_rows(
-        working, numeric_cols, clusters, adjacency
+        working, numeric_cols, clusters, adjacency, target_clusters=target_clusters
     )
     categorical_rows, global_categorical_stats, gated_cols = _compute_categorical_rows(
         working,
         categorical_cols,
         clusters,
         adjacency,
+        target_clusters=target_clusters,
     )
 
     cluster_bundles: dict[int, dict[str, Any]] = {}
-    for cluster_id in sorted(int(cid) for cid in clusters.unique()):
+    # We only bundle clusters that were actually characterized
+    characterized_cluster_ids = sorted(
+        int(cid)
+        for cid in clusters.unique()
+        if target_clusters is None or cid in target_clusters
+    )
+    for cluster_id in characterized_cluster_ids:
         bundle_numeric = sorted(
             [row for row in numeric_rows if row["cluster_id"] == cluster_id],
             key=lambda row: (-row["aggregate_score"], row["column"]),
@@ -1739,7 +1772,10 @@ def build_feature_evidence_index(
         signal_matrix=signal_matrix,
         metadata={
             "n_total": len(working),
-            "n_clusters": int(clusters.nunique()),
+            "n_clusters": n_unique_clusters,
+            "n_characterized": len(characterized_cluster_ids),
+            "omitted_clusters_count": omitted_clusters_count,
+            "max_clusters_to_characterize": max_clusters_to_characterize,
             "columns": working_columns,
             "excluded_columns": exclude_columns or [],
             "numeric_features_screened": len(numeric_cols),
