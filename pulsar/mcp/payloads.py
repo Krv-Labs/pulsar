@@ -320,6 +320,7 @@ def build_sweep_summary_payload(
         "pca_cached": response.get("pca_cached"),
         "pca_cache_status": response.get("pca_cache_status"),
         "memory_usage_mb": response.get("memory_usage_mb"),
+        "config_advisory": response.get("config_advisory"),
         "config_yaml_included": include_config_yaml,
         "config_yaml_available_via": "get_active_config",
         "next_tools": [
@@ -348,12 +349,18 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
         f"- Graph health: {payload.get('graph_health')}",
         f"- Recommended next action: {payload.get('recommended_next_action')}",
         f"- Finalization gate: {gate.get('status', 'unknown')}",
-        "",
-        "## Key Metrics",
-        "",
-        "| Metric | Value |",
-        "|---|---:|",
     ]
+    if payload.get("config_advisory"):
+        lines.append(f"- Config advisory: {payload['config_advisory']}")
+    lines.extend(
+        [
+            "",
+            "## Key Metrics",
+            "",
+            "| Metric | Value |",
+            "|---|---:|",
+        ]
+    )
     for key, value in metrics.items():
         lines.append(f"| {key} | {_format_metric_value(value)} |")
 
@@ -397,7 +404,6 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
             ]
         )
 
-    omitted = payload.get("component_sizes_omitted", 0)
     lines.extend(
         [
             "",
@@ -405,7 +411,13 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
             "",
             "- Preview: "
             + ", ".join(str(value) for value in payload.get("component_sizes_preview", [])),
-            f"- Omitted: {omitted}",
+        ]
+    )
+    omitted = payload.get("component_sizes_omitted", 0)
+    if omitted > 0:
+        lines.append(f"- Omitted: {omitted}")
+    lines.extend(
+        [
             "",
             "## Next Tools",
             "",
@@ -433,6 +445,7 @@ def _sweep_diff_summary(diff: list[dict[str, Any]]) -> dict[str, Any]:
     field_map = {
         "pca_dims": "sweep.pca.dimensions.values",
         "epsilon": "cosmic_graph.epsilon",
+        "dataset_id": "dataset_id",
     }
     metric_fields = {"n_edges", "component_count", "giant_fraction"}
     parameter_changes = []
@@ -746,3 +759,64 @@ def _cluster_payload_from_dossier(
             entry["central_rows"] = profile.central_rows
         payloads.append(entry)
     return payloads
+
+
+def _threshold_surface_payload(
+    *,
+    construction_threshold: float,
+    interpretation_threshold: float,
+    threshold_inherited: bool,
+    threshold_source: str,
+) -> dict[str, Any]:
+    import numpy as np
+    if threshold_source == "spectral_default_full_affinity":
+        status = "full_affinity_spectral"
+        guidance = (
+            "Spectral clustering used the full retained weighted affinity matrix. "
+            "The persisted diagnostic graph was not rebuilt."
+        )
+    elif threshold_inherited:
+        status = "matched"
+        guidance = "Interpretation inherited the constructed graph surface."
+    elif np.isclose(interpretation_threshold, construction_threshold):
+        status = "matched_explicit"
+        guidance = "Interpretation explicitly matches the constructed graph surface."
+    elif interpretation_threshold < construction_threshold:
+        status = "looser_than_construction"
+        guidance = (
+            "Interpretation uses a looser slice of the retained weighted matrix "
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
+        )
+    else:
+        status = "stricter_than_construction"
+        guidance = (
+            "Interpretation uses a stricter slice of the retained weighted matrix "
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
+        )
+    return {
+        "status": status,
+        "construction_threshold": construction_threshold,
+        "interpretation_edge_weight_threshold": interpretation_threshold,
+        "threshold_inherited": threshold_inherited,
+        "threshold_source": threshold_source,
+        "guidance": guidance,
+    }
+
+
+def _prepend_threshold_markdown(markdown: str, surface: dict[str, Any]) -> str:
+    header = "\n".join(
+        [
+            "# Threshold Surface",
+            "",
+            f"- Construction threshold: {surface['construction_threshold']:.4f}",
+            "- Interpretation edge weight threshold: "
+            f"{surface['interpretation_edge_weight_threshold']:.4f}",
+            f"- Status: {surface['status']}",
+            f"- Guidance: {surface['guidance']}",
+            "",
+        ]
+    )
+    return f"{header}\n{markdown}"
+

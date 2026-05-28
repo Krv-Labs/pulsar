@@ -17,6 +17,10 @@ from pulsar.config import (
     normalize_construction_threshold,
 )
 from pulsar.mcp.errors import classify_path, mcp_error
+import numpy as np
+from pulsar.analysis.characterization import NumericProfile
+from pulsar.mcp.preprocessing import _recommend_preprocessing_block, _preprocessing_block_to_yaml
+
 
 
 _ALLOWED_TOP_LEVEL = {"run", "preprocessing", "sweep", "cosmic_graph", "output"}
@@ -723,3 +727,123 @@ def _infer_issue_error_code(issues: list[ValidationIssue]) -> str:
                 return "HOST_PATH_NOT_VISIBLE"
             return "FILE_NOT_FOUND"
     return "YAML_SCHEMA_MISMATCH"
+
+
+def _variance_elbow_dimension(
+    pca_cum_var: list[tuple[int, float]], n_features: int
+) -> int:
+    if not pca_cum_var:
+        if n_features <= 4:
+            return max(2, n_features)
+        if n_features <= 12:
+            return 5
+        return min(max(10, int(np.log2(max(1, n_features)) * 3)), n_features)
+
+    points = sorted((int(dim), float(var)) for dim, var in pca_cum_var)
+    for dim, var in points:
+        if var >= 0.90:
+            return dim
+    return points[-1][0]
+
+
+def _initial_pca_grid(n_features: int, pca_knee: int) -> list[int]:
+    if n_features <= 0:
+        return [2]
+    upper = max(2, int(n_features))
+    if upper <= 4:
+        candidates = [2, 3, 4]
+    elif pca_knee <= 4:
+        candidates = [2, 3, 4, 5, 6]
+    elif pca_knee <= 8:
+        candidates = [4, 5, 6, 8, 10]
+    elif upper <= 12:
+        candidates = [2, 4, 6, 8, 10]
+    else:
+        candidates = [2, 5, 10, 15, 20]
+
+    clipped = [min(dim, upper) for dim in candidates if min(dim, upper) >= 2]
+    return sorted(dict.fromkeys(clipped))
+
+
+def _build_initial_config_yaml(
+    geo: dict[str, Any],
+    *,
+    data_path: str,
+    run_name: str = "initial_sweep",
+    processed_profile: NumericProfile | None = None,
+) -> str:
+    """Construct a canonical initial config from dataset geometry.
+
+    When *processed_profile* is provided, epsilon and PCA dimensions are
+    calibrated against the processed feature space (after preprocessing +
+    scaling).  Otherwise falls back to raw-space geometry.
+    """
+    if processed_profile is not None:
+        knn_mean = processed_profile.knn_k5_mean or 0.5
+        pca_cum_var = processed_profile.pca_cumulative_variance
+        knn_p25 = processed_profile.knn_p25
+        knn_p75 = processed_profile.knn_p75
+    else:
+        knn_mean = geo.get("knn_k5_mean") or geo.get("knn_mean") or 0.5
+        pca_cum_var = geo.get("pca_cumulative_variance", [])
+        knn_p25 = knn_p75 = 0.0
+
+    n_features = (
+        processed_profile.n_features
+        if processed_profile is not None
+        else geo.get("n_features", 0)
+    )
+    pca_knee = _variance_elbow_dimension(pca_cum_var, n_features)
+    pca_dims = _initial_pca_grid(n_features, pca_knee)
+
+    if knn_p25 > 0 and knn_p75 > 0:
+        eps_min = knn_p25 * 0.75
+        eps_max = knn_p75 * 1.35
+    else:
+        eps_min = knn_mean * 0.8
+        eps_max = knn_mean * 1.5
+
+    n_samples = geo.get("n_samples", 0)
+    column_profiles = geo.get("column_profiles", [])
+    drop, impute, encode, _ = _recommend_preprocessing_block(column_profiles, n_samples)
+    preprocessing_block = _preprocessing_block_to_yaml(drop, impute, encode)
+
+    return f"""run:
+  name: {run_name}
+  data: {data_path}
+{preprocessing_block}
+sweep:
+  pca:
+    dimensions:
+      values: {pca_dims}
+    seed:
+      values: [42, 7, 13]
+  ball_mapper:
+    epsilon:
+      range:
+        min: {eps_min:.4f}
+        max: {eps_max:.4f}
+        steps: 24
+cosmic_graph:
+  construction_threshold: auto
+output:
+  n_reps: 4
+"""
+
+
+def _suggest_resolution_pca_dims(pca_dims: list[Any]) -> list[int]:
+    dims = sorted({int(dim) for dim in pca_dims if int(dim) > 1})
+    if not dims:
+        return [5, 8, 12, 16, 20]
+    if len(dims) == 1:
+        center = dims[0]
+        return sorted({max(2, center - 4), max(2, center - 2), center, center + 2})
+
+    low, high = dims[0], dims[-1]
+    if high <= low:
+        return dims
+    step = max(1, round((high - low) / 5))
+    if high - low >= 8:
+        step = max(2, step)
+    return list(range(low, high + 1, step))[:6]
+

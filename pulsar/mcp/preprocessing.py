@@ -723,3 +723,67 @@ def repair_config(
     result += f"\n## Patched Config\n\n```yaml\n{patched_yaml}```\n"
     result += "\nCall `validate_preprocessing_config` with this config before re-running `run_topological_sweep`."
     return result
+
+
+def _calibrate_processed_space(
+    df: Any,
+    column_profiles: list[Any],
+    n_samples: int,
+    data_path: str,
+) -> Any:
+    """Run recommended preprocessing + scaling, then profile the result.
+
+    Returns ``None`` if preprocessing fails (e.g. too few numeric columns
+    after encoding).  The caller should fall back to raw-space calibration.
+    """
+    drop, impute_dict, encode_dict, _ = _recommend_preprocessing_block(
+        column_profiles, n_samples
+    )
+
+    # Build a minimal config just for preprocessing (sweep/cosmic values
+    # are irrelevant — we only need preprocessing fields + data path).
+    from pulsar.config import (
+        BallMapperSpec,
+        CosmicGraphSpec,
+        EncodeSpec,
+        ImputeSpec,
+        PCASpec,
+        PulsarConfig,
+    )
+    import numpy as np
+    from sklearn.preprocessing import StandardScaler as SkScaler
+    from pulsar.preprocessing import preprocess_dataframe
+    from pulsar.analysis.characterization import profile_numeric_matrix
+
+    impute_specs = {
+        col: ImputeSpec(method=spec["method"], seed=spec.get("seed", 42))
+        for col, spec in impute_dict.items()
+    }
+    encode_specs = {
+        col: EncodeSpec(
+            method=spec["method"], max_categories=spec.get("max_categories")
+        )
+        for col, spec in encode_dict.items()
+    }
+    temp_cfg = PulsarConfig(
+        data=data_path,
+        impute=impute_specs,
+        encode=encode_specs,
+        drop_columns=drop,
+        pca=PCASpec(),
+        ball_mapper=BallMapperSpec(),
+        cosmic_graph=CosmicGraphSpec(),
+    )
+
+    try:
+        df_processed, layout = preprocess_dataframe(df, temp_cfg)
+    except (ValueError, TypeError):
+        logger.info("Processed-space calibration failed; falling back to raw geometry")
+        return None
+
+    X = df_processed.to_numpy(dtype=np.float64)
+    if X.shape[1] < 2:
+        return None
+    X_scaled = SkScaler().fit_transform(X)
+    return profile_numeric_matrix(X_scaled)
+

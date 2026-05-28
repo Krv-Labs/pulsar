@@ -329,3 +329,7 @@ class MCPRegistry:
         finally:
             if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
+
+
+registry = MCPRegistry()
+
