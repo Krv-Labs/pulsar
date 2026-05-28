@@ -514,7 +514,10 @@ def _deduplicate_candidates(
             # Rule 3: Very similar topology and tier
             if tier_cand == tier_exist and abs(f_cand - f_exist) < 0.05:
                 # If component count is very similar
-                if abs(cc_cand - cc_exist) <= 2 or abs(cc_cand - cc_exist) / max(cc_cand, cc_exist, 1) < 0.15:
+                if (
+                    abs(cc_cand - cc_exist) <= 2
+                    or abs(cc_cand - cc_exist) / max(cc_cand, cc_exist, 1) < 0.15
+                ):
                     is_redundant = True
                     break
 
