@@ -464,6 +464,66 @@ def _policy_caps(policy: str, max_candidates: int) -> tuple[int, int]:
     return min(max_candidates, 2), min(max_candidates, 4)
 
 
+def _deduplicate_candidates(
+    candidates: list[dict[str, Any]],
+    n_nodes: int,
+) -> list[dict[str, Any]]:
+    """Filter out candidates that are topologically or threshold-wise redundant."""
+    if not candidates:
+        return []
+
+    def _get_largest_frac(c: dict[str, Any]) -> float:
+        if "component_mass_profile" in c:
+            return float(c["component_mass_profile"]["largest_component_fraction"])
+        if "top_component_sizes" in c and c["top_component_sizes"]:
+            return float(c["top_component_sizes"][0]) / max(n_nodes, 1)
+        return 0.0
+
+    def _get_component_count(c: dict[str, Any]) -> int:
+        if "component_count" in c:
+            return int(c["component_count"])
+        if "component_count_after" in c:
+            return int(c["component_count_after"])
+        return 1
+
+    unique_list: list[dict[str, Any]] = []
+    for cand in candidates:
+        t_cand = float(cand["threshold"])
+        f_cand = _get_largest_frac(cand)
+        cc_cand = _get_component_count(cand)
+        tier_cand = cand.get("interpretability_tier", "")
+
+        is_redundant = False
+        for existing in unique_list:
+            t_exist = float(existing["threshold"])
+            f_exist = _get_largest_frac(existing)
+            cc_exist = _get_component_count(existing)
+            tier_exist = existing.get("interpretability_tier", "")
+
+            # Rule 1: Very close thresholds (practically the same threshold)
+            if abs(t_cand - t_exist) < 0.03:
+                is_redundant = True
+                break
+
+            # Rule 2: Both are giant-dominated (largest component has >= 90% of nodes).
+            # No need to show multiple giant-dominated candidates as separate options.
+            if f_cand >= 0.90 and f_exist >= 0.90:
+                is_redundant = True
+                break
+
+            # Rule 3: Very similar topology and tier
+            if tier_cand == tier_exist and abs(f_cand - f_exist) < 0.05:
+                # If component count is very similar
+                if abs(cc_cand - cc_exist) <= 2 or abs(cc_cand - cc_exist) / max(cc_cand, cc_exist, 1) < 0.15:
+                    is_redundant = True
+                    break
+
+        if not is_redundant:
+            unique_list.append(cand)
+
+    return unique_list
+
+
 def agent_threshold_options(
     adj: ThresholdGraph,
     plateaus: list[Any],
@@ -473,6 +533,7 @@ def agent_threshold_options(
     policy: str = "balanced",
     max_candidates: int = 5,
 ) -> dict[str, Any]:
+    n_nodes = int(_threshold_graph_shape(adj)[0])
     stable_cap, transition_cap = _policy_caps(policy, max_candidates)
     stable_candidates = plateau_threshold_candidates(
         adj,
@@ -487,6 +548,10 @@ def agent_threshold_options(
         policy=policy,
         max_candidates=transition_cap,
     )
+
+    # Pre-deduplicate individual lists for cleaner sub-components
+    stable_candidates = _deduplicate_candidates(stable_candidates, n_nodes)
+    transition_candidates = _deduplicate_candidates(transition_candidates, n_nodes)
 
     if policy == "detail_seeking":
         candidates = transition_candidates + [
@@ -516,6 +581,8 @@ def agent_threshold_options(
         candidates = useful_stable or transition_candidates[:2] or stable_candidates[:1]
         strategy = "stable_plateau" if useful_stable else "transition_adjacent"
 
+    # Post-deduplicate merged recommendations list to ensure distinct options are presented
+    candidates = _deduplicate_candidates(candidates, n_nodes)
     candidates = candidates[:max_candidates]
     auto = stable_candidates[0] if stable_candidates else None
     if auto is None:
