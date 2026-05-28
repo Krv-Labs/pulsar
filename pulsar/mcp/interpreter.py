@@ -39,6 +39,12 @@ _SPECTRAL_K_MAX = 20
 _MAX_SIGNAL_MATRIX_NUMERIC = 10
 _MAX_SIGNAL_MATRIX_CATEGORICAL = 5
 _EPS = 1e-9
+# Cochran's rule: chi-squared is reliable only when every expected 2x2 cell
+# count is at least this large; below it we fall back to Fisher's exact test.
+_CHI2_MIN_EXPECTED_CELL = 5.0
+# A detail="full" dossier with more feature-cluster rows than this warns the
+# reader to use targeted profiling tools instead of consuming the whole report.
+_DOSSIER_OVERSIZE_ROW_WARNING = 500
 
 
 @dataclass
@@ -1310,7 +1316,8 @@ def _compute_categorical_rows(
     global_categorical_stats: dict[str, dict[str, Any]] = {}
     cluster_values = sorted(int(cid) for cid in clusters.unique())
 
-    # Precompute encoded columns and global value counts
+    # Precompute encoded columns, global value counts, and per-column
+    # association stats in a single pass over the active columns.
     encoded_cols: dict[str, pd.Series] = {}
     global_value_counts: dict[str, dict[str, int]] = {}
     for column in active_categorical_cols:
@@ -1318,8 +1325,6 @@ def _compute_categorical_rows(
         encoded_cols[column] = encoded
         global_value_counts[column] = encoded.value_counts().to_dict()
 
-    for column in active_categorical_cols:
-        encoded = encoded_cols[column]
         contingency = pd.crosstab(clusters, encoded)
         p_value = 1.0
         association = 0.0
@@ -1360,6 +1365,7 @@ def _compute_categorical_rows(
 
         for column in active_categorical_cols:
             global_values = encoded_cols[column]
+            col_global_counts = global_value_counts[column]
             cluster_values_series = global_values.loc[cluster_mask]
             cluster_counts = cluster_values_series.value_counts().to_dict()
 
@@ -1371,7 +1377,7 @@ def _compute_categorical_rows(
                 )
 
             for value, count in cluster_counts.items():
-                global_count = global_value_counts[column].get(value, 0)
+                global_count = col_global_counts.get(value, 0)
                 count_rest = global_count - count
                 prevalence_cluster = (count / cluster_size) if cluster_size else 0.0
                 prevalence_rest = (count_rest / rest_size) if rest_size else 0.0
@@ -1394,6 +1400,11 @@ def _compute_categorical_rows(
                 test_method = "fisher"
                 row_failures: list[str] = []
 
+                contingency_table = [
+                    [count, max(cluster_size - count, 0)],
+                    [count_rest, max(rest_size - count_rest, 0)],
+                ]
+
                 # Arithmetic expected cell size guard for the 2x2 contingency table
                 if n_total > 0:
                     e00 = cluster_size * global_count / n_total
@@ -1405,17 +1416,11 @@ def _compute_categorical_rows(
 
                 if (
                     not force_fisher
-                    and e00 >= 5.0
-                    and e01 >= 5.0
-                    and e10 >= 5.0
-                    and e11 >= 5.0
+                    and min(e00, e01, e10, e11) >= _CHI2_MIN_EXPECTED_CELL
                 ):
                     try:
                         _, chi2_p, _, _ = stats.chi2_contingency(
-                            [
-                                [count, max(cluster_size - count, 0)],
-                                [count_rest, max(rest_size - count_rest, 0)],
-                            ],
+                            contingency_table,
                             correction=True,
                         )
                         fisher_p = float(chi2_p)
@@ -1423,7 +1428,6 @@ def _compute_categorical_rows(
                     except ValueError as exc:
                         # chi2 rejected the table (e.g. a zero margin); fall
                         # through to the exact test rather than fail silently.
-                        test_method = "fisher"
                         logger.debug(
                             "chi2_contingency fell back to fisher for "
                             "cluster=%s column=%s value=%s: %s",
@@ -1435,14 +1439,7 @@ def _compute_categorical_rows(
 
                 if test_method == "fisher":
                     try:
-                        fisher_p = float(
-                            stats.fisher_exact(
-                                [
-                                    [count, max(cluster_size - count, 0)],
-                                    [count_rest, max(rest_size - count_rest, 0)],
-                                ]
-                            )[1]
-                        )
+                        fisher_p = float(stats.fisher_exact(contingency_table)[1])
                     except ValueError as exc:
                         row_failures.append(f"fisher_exact: {exc}")
                         logger.warning(
@@ -2339,7 +2336,7 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
         "",
     ]
 
-    if total_rows >= 500:
+    if total_rows >= _DOSSIER_OVERSIZE_ROW_WARNING:
         md.extend(
             [
                 "> [!WARNING]",
