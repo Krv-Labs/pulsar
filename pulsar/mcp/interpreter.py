@@ -45,6 +45,12 @@ _CHI2_MIN_EXPECTED_CELL = 5.0
 # A detail="full" dossier with more feature-cluster rows than this warns the
 # reader to use targeted profiling tools instead of consuming the whole report.
 _DOSSIER_OVERSIZE_ROW_WARNING = 500
+# Categorical columns whose unique-value count exceeds
+# max(_MIN_CARDINALITY_FLOOR, _MAX_CARDINALITY_RATIO * n_rows) are dropped from
+# evidence as high-cardinality noise (IDs, free text). The floor protects
+# small-cardinality columns (e.g. binary fields) at small dataset sizes.
+_MAX_CARDINALITY_RATIO = 0.05
+_MIN_CARDINALITY_FLOOR = 10
 
 
 @dataclass
@@ -1285,9 +1291,6 @@ def _compute_categorical_rows(
     categorical_cols: list[str],
     clusters: pd.Series,
     adjacency: dict[int, list[dict[str, Any]]],
-    max_cardinality_ratio: float = 0.05,
-    min_cardinality_floor: int = 10,
-    force_fisher: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]], list[dict[str, Any]]]:
     n_total = len(data)
     gated_cols: list[dict[str, Any]] = []
@@ -1296,7 +1299,7 @@ def _compute_categorical_rows(
     # Early-Stage Cardinality Gating
     for col in categorical_cols:
         nunique = data[col].nunique()
-        if nunique > max(min_cardinality_floor, max_cardinality_ratio * n_total):
+        if nunique > max(_MIN_CARDINALITY_FLOOR, _MAX_CARDINALITY_RATIO * n_total):
             logger.warning(
                 "Categorical column '%s' gated (cardinality: %d, ratio: %.4f) to prevent context bloat.",
                 col,
@@ -1414,10 +1417,7 @@ def _compute_categorical_rows(
                 else:
                     e00 = e01 = e10 = e11 = 0.0
 
-                if (
-                    not force_fisher
-                    and min(e00, e01, e10, e11) >= _CHI2_MIN_EXPECTED_CELL
-                ):
+                if min(e00, e01, e10, e11) >= _CHI2_MIN_EXPECTED_CELL:
                     try:
                         _, chi2_p, _, _ = stats.chi2_contingency(
                             contingency_table,
@@ -1675,9 +1675,6 @@ def build_feature_evidence_index(
     data: pd.DataFrame,
     clusters: pd.Series,
     exclude_columns: list[str] | None = None,
-    max_cardinality_ratio: float = 0.05,
-    min_cardinality_floor: int = 10,
-    force_fisher: bool = False,
 ) -> FeatureEvidenceIndex:
     """Compute distribution-aware evidence for numeric and categorical signals."""
     if len(clusters) != len(data):
@@ -1702,9 +1699,6 @@ def build_feature_evidence_index(
         categorical_cols,
         clusters,
         adjacency,
-        max_cardinality_ratio=max_cardinality_ratio,
-        min_cardinality_floor=min_cardinality_floor,
-        force_fisher=force_fisher,
     )
 
     cluster_bundles: dict[int, dict[str, Any]] = {}
@@ -2345,6 +2339,18 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
                 "",
             ]
         )
+
+    gated = dossier.global_stats.get("evidence_metadata", {}).get(
+        "categorical_columns_gated", []
+    )
+    if gated:
+        gated_desc = ", ".join(
+            f"{g['column']} (cardinality {g['cardinality']})" for g in gated
+        )
+        md.append(
+            f"**Categorical columns gated as high-cardinality noise**: {gated_desc}"
+        )
+        md.append("")
 
     md.extend(
         [

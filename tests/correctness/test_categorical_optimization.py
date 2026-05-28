@@ -5,6 +5,7 @@ import pandas as pd
 from scipy import stats
 from typing import Any
 
+from pulsar.mcp import interpreter
 from pulsar.mcp.interpreter import (
     _compute_categorical_rows,
     _strongest_neighbor,
@@ -139,8 +140,13 @@ def reference_compute_categorical_rows(
     return rows, global_categorical_stats
 
 
-def test_stage1_precomputation_identity():
-    """Verify that optimized precomputed logic is bit-identical to the original logic under force_fisher=True."""
+def test_stage1_precomputation_identity(monkeypatch):
+    """Optimized precompute is bit-identical to the original Fisher-only logic.
+
+    Forcing every row down the Fisher path (by raising the chi2 expected-cell
+    threshold beyond reach) lets us diff against the naive reference.
+    """
+    monkeypatch.setattr(interpreter, "_CHI2_MIN_EXPECTED_CELL", float("inf"))
     rng = np.random.default_rng(12345)
     n = 100
     df = pd.DataFrame(
@@ -163,9 +169,9 @@ def test_stage1_precomputation_identity():
         df, ["color", "shape"], clusters, adjacency
     )
 
-    # Run optimized under force_fisher=True
+    # Run optimized (chi2 disabled via the monkeypatched threshold above)
     opt_rows, _, _ = _compute_categorical_rows(
-        df, ["color", "shape"], clusters, adjacency, force_fisher=True
+        df, ["color", "shape"], clusters, adjacency
     )
 
     # Sort both results to guarantee matching alignment
@@ -218,11 +224,10 @@ def test_stage2_cardinality_gating(caplog):
             ["unique_id", "gender"],
             clusters,
             adjacency,
-            max_cardinality_ratio=0.05,
-            min_cardinality_floor=10,
         )
 
     # unique_id should be gated because 200 > max(10, 0.05 * 200) = 10
+    # (defaults _MIN_CARDINALITY_FLOOR=10, _MAX_CARDINALITY_RATIO=0.05)
     # gender should NOT be gated because 2 <= 10
     gated_names = [g["column"] for g in gated_cols]
     assert "unique_id" in gated_names
@@ -266,7 +271,6 @@ def test_stage3_chisquared_fallback():
         ["feature"],
         clusters_large,
         adjacency,
-        force_fisher=False,
     )
 
     # Expected count per cell:
@@ -287,7 +291,6 @@ def test_stage3_chisquared_fallback():
         ["feature"],
         clusters_small,
         adjacency,
-        force_fisher=False,
     )
 
     # Expected counts for "A":
@@ -312,9 +315,7 @@ def test_stage3_mixed_methods_share_one_fdr_pool():
     clusters = pd.Series(([0] * (n // 2)) + ([1] * (n - n // 2)), name="cluster")
     adjacency = {0: [], 1: []}
 
-    rows, _, _ = _compute_categorical_rows(
-        df, ["feature"], clusters, adjacency, force_fisher=False
-    )
+    rows, _, _ = _compute_categorical_rows(df, ["feature"], clusters, adjacency)
 
     methods = {row["test_method"] for row in rows}
     assert "chi2" in methods and "fisher" in methods, (
@@ -371,3 +372,47 @@ def test_dossier_warns_when_oversized():
         global_stats={},
     )
     assert "[!WARNING]" not in dossier_to_markdown(small)
+
+
+def test_full_dossier_markdown_surfaces_gated_columns():
+    """Gated columns must be visible in the full markdown dossier, matching the
+    summary path (the data is whitelisted into global_stats.evidence_metadata)."""
+    dossier = TopologicalDossier(
+        n_total=20000,
+        n_clusters=1,
+        clusters=[
+            ClusterProfile(
+                cluster_id=0,
+                size=20000,
+                size_pct=100.0,
+                numeric_features=[_feature(0)],
+            )
+        ],
+        global_stats={
+            "evidence_metadata": {
+                "categorical_columns_gated": [
+                    {
+                        "column": "patient_id",
+                        "cardinality": 20000,
+                        "reason": "high_cardinality",
+                    }
+                ]
+            }
+        },
+    )
+    md = dossier_to_markdown(dossier)
+    assert "gated" in md.lower()
+    assert "patient_id" in md
+
+    # No gated columns -> no gating line.
+    clean = TopologicalDossier(
+        n_total=10,
+        n_clusters=1,
+        clusters=[
+            ClusterProfile(
+                cluster_id=0, size=10, size_pct=100.0, numeric_features=[_feature(0)]
+            )
+        ],
+        global_stats={},
+    )
+    assert "gated" not in dossier_to_markdown(clean).lower()
