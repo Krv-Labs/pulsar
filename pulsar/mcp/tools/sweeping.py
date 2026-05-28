@@ -34,7 +34,6 @@ from pulsar.mcp.session import (
     _dataset_id_for_path,
     _get_session,
     _graph_health_summary,
-    _invalidate_feature_evidence_cache,
     _normalize_data_path,
     _pca_cache_status,
     _resolve_dataset_path,
@@ -256,7 +255,7 @@ async def run_topological_sweep(
             dataset_id=bound_dataset_id,
             data_path=bound_data_path,
         )
-        _invalidate_feature_evidence_cache(session)
+        # _bind_session_data drops the feature-evidence cache on rebind.
 
         if precomputed is None:
             session.embeddings = model._embeddings

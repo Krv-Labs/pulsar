@@ -142,9 +142,9 @@ def _bind_session_data(
     session.data_path = _normalize_data_path(data_path) if data_path else None
     if dataset_id:
         session.dataset_id = dataset_id
-    # Rebinding the underlying data invalidates any cached feature evidence,
-    # which was computed against the previous DataFrame. (The sweep path also
-    # invalidates explicitly; the redundant call here is idempotent.)
+    # Canonical invalidation point: rebinding the underlying data invalidates
+    # any cached feature evidence, which was computed against the previous
+    # DataFrame (the evidence fingerprint does not cover the data itself).
     _invalidate_feature_evidence_cache(session)
 
 
