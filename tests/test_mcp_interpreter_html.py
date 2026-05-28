@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import networkx as nx
+import numpy as np
 import pandas as pd
 
 from pulsar.mcp.interpreter import (
@@ -111,7 +112,23 @@ def _sample_model():
     graph = nx.Graph()
     graph.add_edge(0, 1, weight=0.7)
     graph.add_edge(1, 2, weight=0.5)
-    return SimpleNamespace(cosmic_graph=graph)
+    weighted_adjacency = np.array(
+        [
+            [0.0, 0.9, 0.6, 0.0, 0.0, 0.0],
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.6, 0.0, 0.0, 0.88, 0.0, 0.0],
+            [0.0, 0.0, 0.88, 0.0, 0.55, 0.0],
+            [0.0, 0.0, 0.0, 0.55, 0.0, 0.87],
+            [0.0, 0.0, 0.0, 0.0, 0.87, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    return SimpleNamespace(
+        cosmic_graph=graph,
+        weighted_adjacency=weighted_adjacency,
+        stability_result=None,
+        resolved_construction_threshold=0.5,
+    )
 
 
 def test_dossier_to_html_escapes_untrusted_content():
@@ -142,6 +159,13 @@ def test_dossier_to_html_renders_research_report_shell_and_graph_state():
     assert "Quick links" in html
     assert "C00 —" in html
     assert "Topological skeleton projection" in html
+    assert "Threshold transition map" in html
+    assert "Auto threshold, simply:" in html
+    assert "stable graph cut" in html
+    assert "top component sizes" in html
+    assert "threshold-breakpoint-card--exploratory" in html
+    assert "not final cohort cuts" in html
+    assert "threshold-split-dot" in html
     assert "data-cluster-id='0'" in html
     assert "data-base-radius" in html
     assert "data-base-fill" in html

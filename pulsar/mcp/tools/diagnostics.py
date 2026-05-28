@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from fastmcp import Context
@@ -14,13 +14,20 @@ from pulsar.config import THRESHOLD_RANGE_MESSAGE
 from pulsar.mcp.diagnostics import (
     _finalization_gate,
     _skeleton_graph_payload,
-    _threshold_stability_summary,
     diagnose_model,
 )
 from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.payloads import singleton_count_at_threshold
 from pulsar.mcp.registry import registry
 from pulsar.mcp.session import _get_session
+from pulsar.mcp.thresholds import (
+    THRESHOLD_CANDIDATE_POLICIES,
+    agent_threshold_options,
+    component_mass_profile,
+    mass_profile_hint,
+    prepare_threshold_graph,
+    structural_breakpoints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +40,8 @@ def _validate_unit_threshold(value: float, *, name: str) -> float:
 
 
 async def diagnose_cosmic_graph(ctx: Context) -> str:
-    """
-    Diagnose the fitted cosmic graph quality by returning pure GraphMetrics.
-    Interpret these metrics (e.g. density, component distribution) given N.
-    """
+    """GraphMetrics for the fitted cosmic graph (density, components, etc).
+    Interpret given dataset N."""
     session = _get_session(ctx)
 
     if session.model is None:
@@ -93,26 +98,56 @@ def _sparse_threshold_curve(
     ]
 
 
+def _threshold_agent_readout(
+    selected_profile: dict[str, Any] | None,
+    breakpoints: list[dict[str, Any]],
+) -> str:
+    if not selected_profile:
+        return "No threshold mass profile was available."
+
+    largest_pct = float(selected_profile["largest_component_fraction"]) * 100
+    small_pct = float(selected_profile["small_component_mass_fraction"]) * 100
+    large_breakpoints = [
+        row for row in breakpoints if row["event"] == "large_component_transition"
+    ]
+
+    if largest_pct >= 95:
+        if large_breakpoints:
+            return (
+                f"Auto threshold is stable but giant-component dominated "
+                f"({largest_pct:.2f}% of rows in the largest component); inspect "
+                "large structural breakpoints before naming cohorts."
+            )
+        return (
+            f"Auto threshold is stable but produces one giant component containing "
+            f"{largest_pct:.2f}% of rows; only {small_pct:.2f}% of rows sit in "
+            "small components."
+        )
+    if large_breakpoints:
+        return (
+            "Auto threshold exposes nontrivial component structure and large "
+            "threshold transitions are available for parameter discussion."
+        )
+    return "Auto threshold exposes nontrivial component structure without large split markers."
+
+
 async def get_threshold_stability_curve(
-    detail: str = "summary",
+    detail: Literal["summary", "full"] = "summary",
+    threshold_candidate_policy: Literal[
+        "balanced", "report_ready", "detail_seeking", "outlier_mining"
+    ] = "balanced",
     ctx: Context = None,
 ) -> str:
+    """H0 persistent-homology stability of components vs edge-weight threshold.
+    Use to reason about alternative thresholds after auto-clustering.
+    `detail='full'` returns raw arrays.
     """
-    Return component-count-vs-edge-weight-threshold stability.
-
-    Uses H0 persistent homology on the cosmic graph's weighted adjacency
-    to show how many connected components exist at each edge weight threshold.
-    Use this to reason about alternative clustering thresholds after the
-    initial auto-clustering.
-
-    Returns:
-        Summary JSON with top plateaus, sparse curve sample, and selected
-        threshold by default. Pass detail="full" for raw arrays.
-    """
-    if detail not in {"summary", "full"}:
+    if threshold_candidate_policy not in THRESHOLD_CANDIDATE_POLICIES:
         return mcp_error(
             "get_threshold_stability_curve",
-            f"detail must be 'summary' or 'full', got '{detail}'",
+            "threshold_candidate_policy must be one of "
+            f"{sorted(THRESHOLD_CANDIDATE_POLICIES)}, got "
+            f"'{threshold_candidate_policy}'",
         )
 
     session = _get_session(ctx)
@@ -124,6 +159,7 @@ async def get_threshold_stability_curve(
         from pulsar._pulsar import find_stable_thresholds
 
         adj = session.model.weighted_adjacency
+        threshold_graph = prepare_threshold_graph(adj)
         stability = await asyncio.to_thread(find_stable_thresholds, adj)
 
         thresholds = [float(t) for t in stability.thresholds]
@@ -147,9 +183,11 @@ async def get_threshold_stability_curve(
 
         singleton_counts = await asyncio.to_thread(_singleton_counts)
 
+        plateau_limit = 10 if detail == "full" else 4
         plateaus = []
-        for p in stability.top_k_plateaus(10):
+        for p in stability.top_k_plateaus(plateau_limit):
             singleton_count = singleton_count_at_threshold(adj, float(p.midpoint))
+            mass_profile = component_mass_profile(threshold_graph, float(p.midpoint))
             plateaus.append(
                 {
                     "start": float(p.start_threshold),
@@ -162,6 +200,8 @@ async def get_threshold_stability_curve(
                         singleton_count / max(int(adj.shape[0]), 1),
                         4,
                     ),
+                    "component_mass_profile": mass_profile,
+                    "interpretation_hint": mass_profile_hint(mass_profile),
                 }
             )
 
@@ -170,6 +210,23 @@ async def get_threshold_stability_curve(
             thresholds,
             component_counts,
             singleton_counts,
+            max_points=25 if detail == "full" else 15,
+        )
+        breakpoints = structural_breakpoints(
+            threshold_graph,
+            thresholds,
+            component_counts,
+        )
+        threshold_options = agent_threshold_options(
+            threshold_graph,
+            stability.top_k_plateaus(20 if detail == "full" else 10),
+            thresholds,
+            component_counts,
+            policy=threshold_candidate_policy,
+            max_candidates=12 if detail == "full" else 7,
+        )
+        selected_profile = (
+            plateaus[0].get("component_mass_profile") if plateaus else None
         )
         payload: dict[str, Any] = {
             "status": "ok",
@@ -183,7 +240,15 @@ async def get_threshold_stability_curve(
                 else "Stability optimum differs from the current constructed graph; "
                 "treat it as a rerun candidate, not a change to the fitted graph."
             ),
+            "agent_readout": _threshold_agent_readout(selected_profile, breakpoints),
+            "agent_threshold_options": threshold_options,
             "plateaus": plateaus,
+            "structural_breakpoints": breakpoints,
+            "structural_breakpoints_guidance": (
+                "Breakpoints are capped structural transition candidates ranked "
+                "first by large-component transitions, then by the smaller mass "
+                "that actually joins or splits."
+            ),
             "curve_point_count": len(thresholds),
             "curve_sample": curve_sample,
             "curve_sample_omitted": max(len(thresholds) - len(curve_sample), 0),
@@ -205,23 +270,13 @@ async def get_threshold_stability_curve(
 
 async def get_topological_skeleton(
     run_id: str = "",
-    detail: str = "summary",
+    detail: Literal["summary", "nodes", "edges", "full"] = "summary",
     max_edges: int = 100,
     max_nodes: int = 100,
     ctx: Context = None,
 ) -> str:
-    """
-    Return structured graph connectivity for the latest run or an explicit run_id.
-
-    Defaults to summary-only output for chat-first agent loops. Use
-    detail="edges", "nodes", or "full" with explicit caps for late-stage graph
-    inspection.
-    """
+    """Structured graph connectivity for latest run or explicit `run_id`."""
     try:
-        if detail not in {"summary", "nodes", "edges", "full"}:
-            raise ToolError(
-                f"detail must be 'summary', 'nodes', 'edges', or 'full', got '{detail}'"
-            )
         if max_edges < 1:
             raise ToolError(f"max_edges must be >= 1, got '{max_edges}'")
         if max_nodes < 1:

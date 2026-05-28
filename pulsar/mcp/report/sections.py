@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 
+from pulsar._pulsar import find_stable_thresholds
 from pulsar.mcp.interpreter import ClusterProfile, TopologicalDossier
 from pulsar.mcp.report.formatting import (
     _cluster_trait_summary,
@@ -15,6 +16,12 @@ from pulsar.mcp.report.formatting import (
     _format_heatmap_value,
     _format_value,
     _signal_tone,
+)
+from pulsar.mcp.thresholds import (
+    agent_threshold_options,
+    component_mass_profile,
+    prepare_threshold_graph,
+    structural_breakpoints,
 )
 
 if TYPE_CHECKING:
@@ -255,6 +262,204 @@ def _generate_cosmic_graph_svg(
     return "".join(svg)
 
 
+def _format_component_sizes(sizes: list[int]) -> str:
+    if not sizes:
+        return "none"
+    return " / ".join(f"{int(size):,}" for size in sizes)
+
+
+def _threshold_report_payload(model: ThemaRS | None) -> dict[str, Any] | None:
+    if model is None:
+        return None
+    try:
+        adj = np.asarray(model.weighted_adjacency)
+        threshold_graph = prepare_threshold_graph(adj)
+        stability = getattr(model, "stability_result", None)
+        if stability is None:
+            stability = find_stable_thresholds(adj)
+        thresholds = [float(t) for t in stability.thresholds]
+        component_counts = [int(c) for c in stability.component_counts]
+        resolved_threshold = float(model.resolved_construction_threshold)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+
+    plateaus = []
+    for plateau in stability.top_k_plateaus(3):
+        midpoint = float(plateau.midpoint)
+        plateaus.append(
+            {
+                "midpoint": midpoint,
+                "start": float(plateau.start_threshold),
+                "end": float(plateau.end_threshold),
+                "component_count": int(plateau.component_count),
+                "length": float(plateau.length),
+                "mass_profile": component_mass_profile(
+                    threshold_graph, midpoint, top_k=5
+                ),
+            }
+        )
+
+    report_ready = agent_threshold_options(
+        threshold_graph,
+        stability.top_k_plateaus(10),
+        thresholds,
+        component_counts,
+        policy="report_ready",
+        max_candidates=1,
+    )["stable_plateau_candidates"]
+    exploratory = agent_threshold_options(
+        threshold_graph,
+        stability.top_k_plateaus(10),
+        thresholds,
+        component_counts,
+        policy="detail_seeking",
+        max_candidates=1,
+    )["transition_adjacent_candidates"]
+    candidate_options = []
+    seen_thresholds: set[float] = set()
+    for candidate in [*report_ready, *exploratory]:
+        threshold = round(float(candidate["threshold"]), 8)
+        if threshold in seen_thresholds:
+            continue
+        candidate_options.append(candidate)
+        seen_thresholds.add(threshold)
+        if len(candidate_options) >= 2:
+            break
+
+    return {
+        "resolved_threshold": resolved_threshold,
+        "auto_threshold": float(stability.optimal_threshold),
+        "plateaus": plateaus,
+        "candidate_options": candidate_options,
+        "breakpoints": structural_breakpoints(
+            threshold_graph,
+            thresholds,
+            component_counts,
+            max_breakpoints=4,
+        ),
+    }
+
+
+def _render_threshold_axis(payload: dict[str, Any]) -> str:
+    width = 920
+    height = 180
+    axis_start = 70
+    axis_end = width - 70
+
+    def x_pos(threshold: float) -> float:
+        return axis_start + (1.0 - threshold) * (axis_end - axis_start)
+
+    auto_x = x_pos(float(payload["auto_threshold"]))
+    current_x = x_pos(float(payload["resolved_threshold"]))
+    svg = [
+        f"<svg class='threshold-svg' viewBox='0 0 {width} {height}' role='img' aria-label='Threshold transition map'>",
+        "<defs>",
+        "<linearGradient id='thresholdAxisGradient' x1='0' x2='1' y1='0' y2='0'>",
+        "<stop offset='0%' stop-color='#1f1f1f' stop-opacity='0.82' />",
+        "<stop offset='55%' stop-color='#1a73e8' stop-opacity='0.62' />",
+        "<stop offset='100%' stop-color='#147d64' stop-opacity='0.72' />",
+        "</linearGradient>",
+        "</defs>",
+        f"<line x1='{axis_start}' y1='92' x2='{axis_end}' y2='92' stroke='url(#thresholdAxisGradient)' stroke-width='5' stroke-linecap='round' />",
+        f"<text x='{axis_start}' y='130' text-anchor='start' class='threshold-axis-label'>Stricter: splits appear</text>",
+        f"<text x='{axis_end}' y='130' text-anchor='end' class='threshold-axis-label'>Looser: components merge</text>",
+        f"<line x1='{auto_x:.1f}' y1='38' x2='{auto_x:.1f}' y2='116' class='threshold-marker threshold-marker--auto' />",
+        f"<circle cx='{auto_x:.1f}' cy='38' r='6' class='threshold-dot threshold-dot--auto' />",
+        f"<text x='{auto_x:.1f}' y='24' text-anchor='middle' class='threshold-marker-label'>auto {float(payload['auto_threshold']):.3f}</text>",
+    ]
+    if not np.isclose(auto_x, current_x):
+        svg.extend(
+            [
+                f"<line x1='{current_x:.1f}' y1='54' x2='{current_x:.1f}' y2='118' class='threshold-marker threshold-marker--current' />",
+                f"<circle cx='{current_x:.1f}' cy='54' r='5' class='threshold-dot threshold-dot--current' />",
+                f"<text x='{current_x:.1f}' y='150' text-anchor='middle' class='threshold-marker-label'>current {float(payload['resolved_threshold']):.3f}</text>",
+            ]
+        )
+
+    for bp in payload["breakpoints"]:
+        threshold = float(bp["threshold"])
+        mass = float(bp.get("absorbed_mass_fraction", bp["affected_mass_fraction"]))
+        marker_x = x_pos(threshold)
+        top_y = 92 - (18 + 42 * min(mass, 1.0))
+        svg.extend(
+            [
+                f"<line x1='{marker_x:.1f}' y1='{top_y:.1f}' x2='{marker_x:.1f}' y2='92' class='threshold-split-line' />",
+                f"<circle cx='{marker_x:.1f}' cy='{top_y:.1f}' r='{4 + 7 * min(mass, 1.0):.1f}' class='threshold-split-dot'>",
+                f"<title>{mass:.0%} of rows affected near threshold {threshold:.3f}</title>",
+                "</circle>",
+            ]
+        )
+    svg.append("</svg>")
+    return "".join(svg)
+
+
+def _render_threshold_section(model: ThemaRS | None) -> str:
+    payload = _threshold_report_payload(model)
+    if payload is None:
+        return ""
+
+    parts = [
+        "<div class='threshold-panel'>",
+        "<div class='threshold-panel__header'>",
+        "<div>",
+        "<div class='figure-title'>Threshold transition map</div>",
+        "<p class='figure-subtitle'>Large dots mark thresholds where substantial graph mass changes component membership.</p>",
+        "</div>",
+        "</div>",
+        _render_threshold_axis(payload),
+        "<div class='threshold-explainer'>",
+        "<strong>Auto threshold, simply:</strong> Pulsar sweeps possible edge thresholds and picks the midpoint of the longest flat region where the number of connected components does not change. That favors a stable graph cut, not a guaranteed “best” clustering.",
+        "</div>",
+    ]
+
+    if payload["candidate_options"]:
+        parts.append("<div class='threshold-breakpoints'>")
+        for candidate in payload["candidate_options"]:
+            top_sizes = (
+                candidate.get("top_component_sizes")
+                or candidate.get("component_mass_profile", {}).get(
+                    "top_component_sizes",
+                    [],
+                )
+            )
+            tier = str(candidate["interpretability_tier"]).replace("_", " ")
+            card_class = "threshold-breakpoint-card"
+            if candidate["interpretability_tier"] not in {"report_ready", "balanced"}:
+                card_class += " threshold-breakpoint-card--exploratory"
+            parts.append(
+                f"<article class='{card_class}'>"
+                f"<div class='threshold-card-kicker'>{_escape_html(tier)}</div>"
+                f"<h3>Threshold {_escape_html(_format_value(candidate['threshold'], digits=3))}</h3>"
+                "<p>"
+                f"{_escape_html(_format_component_sizes(top_sizes))} "
+                "<span>top component sizes</span>"
+                "</p>"
+                f"<small>{_escape_html(candidate['why'])}</small>"
+                "</article>"
+            )
+        parts.append("</div>")
+    else:
+        parts.append(
+            "<div class='empty-state'>No report-ready or exploratory threshold alternatives were detected.</div>"
+        )
+
+    if payload["plateaus"]:
+        best = payload["plateaus"][0]
+        profile = best["mass_profile"]
+        parts.append(
+            "<p class='figure-caption'><strong>Suggested cut.</strong> "
+            f"The auto threshold is {_escape_html(_format_value(payload['auto_threshold'], digits=3))}, "
+            f"inside a plateau spanning {_escape_html(_format_value(best['start'], digits=3))} to "
+            f"{_escape_html(_format_value(best['end'], digits=3))}. "
+            f"At that cut, top component sizes are {_escape_html(_format_component_sizes(profile['top_component_sizes']))}. "
+            "Treat giant-dominated cuts as stable diagnostics, not final cohort cuts."
+            "</p>"
+        )
+
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def _render_topology_section(
     dossier: TopologicalDossier,
     model: ThemaRS | None,
@@ -295,6 +500,7 @@ def _render_topology_section(
         parts.append(
             "<p class='figure-caption'><strong>Figure note.</strong> Nodes are sampled manifold landmarks. Edges encode topological consensus. Hover a cohort row below to isolate its sampled support.</p>"
         )
+        parts.append(_render_threshold_section(model))
     else:
         parts.append(
             "<div class='empty-state'>Graph view unavailable for this report.</div>"

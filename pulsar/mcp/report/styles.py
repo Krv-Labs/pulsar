@@ -330,6 +330,139 @@ def _render_report_styles() -> str:
       background: transparent;
     }
 
+    .threshold-panel {
+      display: grid;
+      gap: 16px;
+      margin-top: 24px;
+      padding: 18px;
+      border-radius: var(--radius-lg);
+      background:
+        radial-gradient(circle at 12% 18%, rgba(26, 115, 232, 0.10), transparent 28%),
+        linear-gradient(135deg, #ffffff 0%, #f4f7fb 100%);
+      border: 1px solid var(--hairline);
+    }
+
+    .threshold-panel__header {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .threshold-svg {
+      width: 100%;
+      height: auto;
+      overflow: visible;
+      background: rgba(255, 255, 255, 0.72);
+      border-radius: var(--radius-md);
+    }
+
+    .threshold-axis-label,
+    .threshold-marker-label {
+      fill: var(--muted);
+      font: 600 0.72rem/1 var(--font-sans);
+      letter-spacing: 0.04em;
+    }
+
+    .threshold-marker {
+      stroke-width: 2;
+      stroke-dasharray: 4 4;
+    }
+
+    .threshold-marker--auto {
+      stroke: var(--accent);
+    }
+
+    .threshold-marker--current {
+      stroke: var(--positive);
+    }
+
+    .threshold-dot--auto {
+      fill: var(--accent);
+    }
+
+    .threshold-dot--current {
+      fill: var(--positive);
+    }
+
+    .threshold-split-line {
+      stroke: #c2482b;
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      opacity: 0.65;
+    }
+
+    .threshold-split-dot {
+      fill: #c2482b;
+      fill-opacity: 0.78;
+      stroke: #ffffff;
+      stroke-width: 2;
+    }
+
+    .threshold-explainer {
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      background: rgba(26, 115, 232, 0.07);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .threshold-explainer strong {
+      color: var(--ink);
+    }
+
+    .threshold-breakpoints {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+    }
+
+    .threshold-breakpoint-card {
+      padding: 14px;
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid var(--hairline);
+    }
+
+    .threshold-breakpoint-card--exploratory {
+      border-style: dashed;
+      background: rgba(255, 255, 255, 0.56);
+    }
+
+    .threshold-card-kicker {
+      color: var(--negative);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .threshold-breakpoint-card h3 {
+      margin: 6px 0 8px;
+      font-size: 1.05rem;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }
+
+    .threshold-breakpoint-card p {
+      margin: 0;
+      color: var(--ink);
+      font: 700 0.92rem/1.35 var(--font-mono);
+    }
+
+    .threshold-breakpoint-card p span {
+      color: var(--muted);
+      font: 500 0.78rem/1.35 var(--font-sans);
+    }
+
+    .threshold-breakpoint-card small {
+      display: block;
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.35;
+    }
+
     .search-shell {
       display: grid;
       gap: 10px;

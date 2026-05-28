@@ -20,12 +20,18 @@ from pulsar.mcp.tools.config import (
     create_config,
     validate_config,
     refine_config,
-    get_active_config,
-    refine_active_config,
 )
+from pulsar.mcp.tools.meta import get_runtime_context
 from pulsar.mcp.tools.sweeping import (
     run_topological_sweep,
     compare_sweeps,
+)
+from pulsar.mcp.thresholds import (
+    agent_threshold_options,
+    component_state_at_threshold,
+    component_mass_profile,
+    prepare_threshold_graph,
+    structural_breakpoints,
 )
 from pulsar.mcp.tools.diagnostics import (
     get_threshold_stability_curve,
@@ -120,9 +126,7 @@ sweep:
 def test_validate_config_rejects_fenced_yaml(tmp_path):
     csv_path = _write_dataset(tmp_path)
     payload = asyncio.run(
-        validate_config(
-            f"```yaml\nrun:\n  data: {csv_path}\noutput:\n  n_reps: 1\n```"
-        )
+        validate_config(f"```yaml\nrun:\n  data: {csv_path}\noutput:\n  n_reps: 1\n```")
     )
     report = json.loads(payload)
 
@@ -377,9 +381,7 @@ def test_create_config_supports_parquet_dataset_id(tmp_path):
     )
     report = json.loads(
         asyncio.run(
-            validate_config(
-                create_response["config_yaml"], dataset["dataset_id"]
-            )
+            validate_config(create_response["config_yaml"], dataset["dataset_id"])
         )
     )
 
@@ -400,9 +402,7 @@ def test_probe_columns_reloads_for_requested_dataset_id(tmp_path):
     dataset_b = json.loads(asyncio.run(ingest_dataset(str(path_b))))
 
     asyncio.run(
-        characterize_dataset(
-            dataset_id=dataset_a["dataset_id"], response_format="json"
-        )
+        characterize_dataset(dataset_id=dataset_a["dataset_id"], response_format="json")
     )
     payload = json.loads(
         asyncio.run(
@@ -441,9 +441,7 @@ def test_staged_dataset_upload_round_trip():
     append_b = json.loads(
         asyncio.run(append_dataset_chunk(upload["upload_id"], chunk_b))
     )
-    dataset = json.loads(
-        asyncio.run(finalize_dataset_upload(upload["upload_id"]))
-    )
+    dataset = json.loads(asyncio.run(finalize_dataset_upload(upload["upload_id"])))
     report = json.loads(
         asyncio.run(
             validate_config(
@@ -554,9 +552,7 @@ def test_characterize_dataset_defaults_to_markdown(tmp_path):
     csv_path = _write_dataset(tmp_path, rows=10, cols=4)
     dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
 
-    markdown = asyncio.run(
-        characterize_dataset(dataset_id=dataset["dataset_id"])
-    )
+    markdown = asyncio.run(characterize_dataset(dataset_id=dataset["dataset_id"]))
 
     assert "# Dataset Characterization" in markdown
     assert "## Column Name Preview" in markdown
@@ -596,7 +592,9 @@ def test_probe_columns_reports_missing_and_truncates_long_values(tmp_path):
     assert not markdown.lstrip().startswith("{")
 
 
-def test_recommend_preprocessing_defaults_to_markdown_and_samples_dirty_numeric(tmp_path):
+def test_recommend_preprocessing_defaults_to_markdown_and_samples_dirty_numeric(
+    tmp_path,
+):
     path = tmp_path / "dirty_numeric.csv"
     pd.DataFrame(
         {
@@ -624,8 +622,7 @@ def test_recommend_preprocessing_defaults_to_markdown_and_samples_dirty_numeric(
     assert payload["dirty_numeric_detection"]["status"] == "enabled"
     assert payload["dirty_numeric_detection"]["object_columns_sampled"] == 1
     assert any(
-        warning["code"] == "DIRTY_NUMERIC_DETECTED"
-        for warning in payload["warnings"]
+        warning["code"] == "DIRTY_NUMERIC_DETECTED" for warning in payload["warnings"]
     )
     assert "rationale" in payload
 
@@ -658,17 +655,14 @@ def test_recommend_preprocessing_summary_caps_rationale_and_warns_expansion(tmp_
     assert "rationale" not in payload
     assert payload["expansion_estimate"] > 50
     assert any(
-        warning["code"] == "HIGH_DIMENSION_EXPANSION"
-        for warning in payload["warnings"]
+        warning["code"] == "HIGH_DIMENSION_EXPANSION" for warning in payload["warnings"]
     )
 
 
 def test_unknown_handles_return_stable_codes():
     dataset_report = json.loads(asyncio.run(create_config("ds_missing")))
     run_report = json.loads(asyncio.run(get_topological_skeleton("run_missing")))
-    upload_report = json.loads(
-        asyncio.run(finalize_dataset_upload("upload_missing"))
-    )
+    upload_report = json.loads(asyncio.run(finalize_dataset_upload("upload_missing")))
 
     assert dataset_report["error_code"] == "DATASET_ID_UNKNOWN"
     assert run_report["error_code"] == "RUN_ID_UNKNOWN"
@@ -703,9 +697,7 @@ def test_get_workflow_guide_returns_phase_prompt():
 
 def test_run_topological_sweep_missing_config_path_returns_structured_error():
     report = json.loads(
-        asyncio.run(
-            run_topological_sweep(config_path="/home/claude/missing.yaml")
-        )
+        asyncio.run(run_topological_sweep(config_path="/home/claude/missing.yaml"))
     )
 
     assert report["error_code"] == "HOST_PATH_NOT_VISIBLE"
@@ -713,9 +705,7 @@ def test_run_topological_sweep_missing_config_path_returns_structured_error():
 
 def test_run_topological_sweep_missing_host_config_path_returns_config_code():
     report = json.loads(
-        asyncio.run(
-            run_topological_sweep(config_path="/definitely/not/real.yaml")
-        )
+        asyncio.run(run_topological_sweep(config_path="/definitely/not/real.yaml"))
     )
 
     assert report["error_code"] == "CONFIG_FILE_NOT_VISIBLE"
@@ -780,8 +770,9 @@ def test_create_config_generates_wide_grid(tmp_path):
     pca_seeds = cfg["sweep"]["pca"]["seed"]["values"]
     eps = cfg["sweep"]["ball_mapper"]["epsilon"]["range"]
 
-    # Should have multiple PCA dims for multi-scale aggregation
-    assert len(pca_dims) >= 4
+    # Should have multiple PCA dims spanning a meaningful range
+    assert len(pca_dims) >= 3
+    assert max(pca_dims) > min(pca_dims)
     # Should have multiple seeds
     assert len(pca_seeds) >= 2
     # Should have enough epsilon steps
@@ -801,10 +792,12 @@ def test_create_config_high_dimensional_baseline_uses_broad_tail_grid(tmp_path):
     pca_seeds = cfg["sweep"]["pca"]["seed"]["values"]
     eps_steps = cfg["sweep"]["ball_mapper"]["epsilon"]["range"]["steps"]
 
-    assert pca_dims == [2, 5, 10, 15, 20]
+    # Variance-frontier targeting: drops low-variance dims (e.g., 2, 5 captured
+    # < 50% cumulative variance) in favor of signal-rich frontiers + elbow.
+    assert pca_dims == [10, 15, 20]
     assert pca_seeds == [42, 7, 13]
     assert eps_steps == 24
-    assert response["sweep_strategy"]["estimated_ball_maps"] == 360
+    assert response["sweep_strategy"]["estimated_ball_maps"] == 216
     assert "compare_sweeps" in response["sweep_strategy"]["agent_guidance"]
 
 
@@ -904,9 +897,7 @@ def test_refine_config_returns_diff(tmp_path):
     )
 
     result = json.loads(
-        asyncio.run(
-            refine_config(config_yaml, {"pca_dims": [2, 5], "n_reps": 2})
-        )
+        asyncio.run(refine_config(config_yaml, {"pca_dims": [2, 5], "n_reps": 2}))
     )
 
     assert result["status"] == "ok"
@@ -959,7 +950,7 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert "diff_summary" in result
     assert "config_yaml_normalized" not in result
     assert result["config_yaml_included"] is False
-    assert result["config_yaml_available_via"] == "get_active_config"
+    assert result["config_yaml_available_via"] == "get_runtime_context"
     assert "data_shape" in result
     assert "component_sizes_preview" in result
     assert "component_sizes_omitted" in result
@@ -1008,30 +999,32 @@ def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
     )
     refined = json.loads(
         asyncio.run(
-            refine_active_config(
-                {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+            refine_config(
+                overrides={"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
             )
         )
     )
 
-    active_before = json.loads(asyncio.run(get_active_config()))
+    active_before = json.loads(asyncio.run(get_runtime_context()))
     result = json.loads(asyncio.run(run_topological_sweep(response_format="json")))
 
     assert create_response["status"] == "ok"
     assert refined["status"] == "ok"
-    assert active_before["config_yaml"] == refined["config_yaml"]
+    assert active_before["active_config_yaml"] == refined["config_yaml"]
     assert result["status"] == "ok"
     assert result["dataset_id"] == dataset["dataset_id"]
     assert "config_yaml_normalized" not in result
 
     with_config = json.loads(
-        asyncio.run(run_topological_sweep(include_config_yaml=True, response_format="json"))
+        asyncio.run(
+            run_topological_sweep(include_config_yaml=True, response_format="json")
+        )
     )
     assert with_config["config_yaml_normalized"] == refined["config_yaml"]
 
 
-def test_refine_active_config_supports_nested_and_mixed_overrides(tmp_path):
-    """Verify that refine_active_config successfully flattens nested, mixed, and flat dictionary structures."""
+def test_refine_config_active_supports_nested_and_mixed_overrides(tmp_path):
+    """refine_config (active mode) flattens nested, mixed, and flat overrides."""
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
     dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
@@ -1040,14 +1033,8 @@ def test_refine_active_config_supports_nested_and_mixed_overrides(tmp_path):
     # Pass a mixture of nested (sweep.pca_dims as dict) and flat keys (n_reps)
     refined = json.loads(
         asyncio.run(
-            refine_active_config(
-                {
-                    "sweep": {
-                        "pca_dims": [3],
-                        "epsilon_values": [0.6]
-                    },
-                    "n_reps": 2
-                }
+            refine_config(
+                overrides={"sweep": {"pca_dims": [3], "epsilon_values": [0.6]}, "n_reps": 2}
             )
         )
     )
@@ -1056,13 +1043,11 @@ def test_refine_active_config_supports_nested_and_mixed_overrides(tmp_path):
     assert "sweep.pca_dims" in refined["applied_overrides"]
     assert "sweep.epsilon_values" in refined["applied_overrides"]
     assert "output.n_reps" in refined["applied_overrides"]
-    
-    # Assert values were applied correctly
-    active_after = json.loads(asyncio.run(get_active_config()))
-    assert "dimensions:" in active_after["config_yaml"]
-    assert "epsilon:" in active_after["config_yaml"]
-    assert "n_reps: 2" in active_after["config_yaml"]
 
+    active_after = json.loads(asyncio.run(get_runtime_context()))
+    assert "dimensions:" in active_after["active_config_yaml"]
+    assert "epsilon:" in active_after["active_config_yaml"]
+    assert "n_reps: 2" in active_after["active_config_yaml"]
 
 
 def test_dossier_inherits_construction_threshold(tmp_path):
@@ -1081,9 +1066,7 @@ def test_dossier_inherits_construction_threshold(tmp_path):
         )
     )["config_yaml"]
     asyncio.run(
-        run_topological_sweep(
-            config_yaml=refined, dataset_id=dataset["dataset_id"]
-        )
+        run_topological_sweep(config_yaml=refined, dataset_id=dataset["dataset_id"])
     )
 
     inherited = json.loads(
@@ -1125,9 +1108,7 @@ def test_dossier_rejects_invalid_interpretation_threshold(tmp_path):
         )
     )["config_yaml"]
     asyncio.run(
-        run_topological_sweep(
-            config_yaml=refined, dataset_id=dataset["dataset_id"]
-        )
+        run_topological_sweep(config_yaml=refined, dataset_id=dataset["dataset_id"])
     )
 
     payload = json.loads(
@@ -1164,9 +1145,7 @@ def test_dossier_explicit_spectral_method_is_not_overridden():
     )
 
     payload = json.loads(
-        asyncio.run(
-            generate_cluster_dossier(method="spectral", response_format="json")
-        )
+        asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
     )
 
     assert payload["status"] == "ok"
@@ -1212,7 +1191,9 @@ def test_sweep_response_contains_stability_summary(tmp_path):
     result = json.loads(
         asyncio.run(
             run_topological_sweep(
-                config_yaml=refined, dataset_id=dataset["dataset_id"], response_format="json"
+                config_yaml=refined,
+                dataset_id=dataset["dataset_id"],
+                response_format="json",
             )
         )
     )
@@ -1257,9 +1238,7 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
         )
     )["config_yaml"]
     asyncio.run(
-        run_topological_sweep(
-            config_yaml=refined, dataset_id=dataset["dataset_id"]
-        )
+        run_topological_sweep(config_yaml=refined, dataset_id=dataset["dataset_id"])
     )
 
     summary = json.loads(asyncio.run(get_threshold_stability_curve()))
@@ -1274,8 +1253,16 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
     assert "optimal_threshold" in summary
     assert "matches_current_threshold" in summary
     assert "threshold_guidance" in summary
+    assert "agent_readout" in summary
+    assert "agent_threshold_options" in summary
+    assert summary["agent_threshold_options"]["policy"] == "balanced"
+    assert len(summary["agent_threshold_options"]["candidates"]) <= 7
+    assert "stable_plateau_candidates" in summary["agent_threshold_options"]
+    assert "transition_adjacent_candidates" in summary["agent_threshold_options"]
+    assert "structural_breakpoints" in summary
     assert "curve_sample" in summary
-    assert len(summary["curve_sample"]) <= 25
+    assert len(summary["plateaus"]) <= 4
+    assert len(summary["curve_sample"]) <= 15
     assert summary["curve_point_count"] >= len(summary["curve_sample"])
     if summary["curve_sample"]:
         first = summary["curve_sample"][0]
@@ -1291,6 +1278,182 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
         first_plateau = full["plateaus"][0]
         assert "singleton_count" in first_plateau
         assert "singleton_fraction" in first_plateau
+        assert "component_mass_profile" in first_plateau
+
+
+def test_threshold_mass_profiles_capture_large_structural_transition():
+    adj = np.array(
+        [
+            [0.0, 0.9, 0.6, 0.0, 0.0, 0.0],
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.6, 0.0, 0.0, 0.88, 0.0, 0.0],
+            [0.0, 0.0, 0.88, 0.0, 0.55, 0.0],
+            [0.0, 0.0, 0.0, 0.55, 0.0, 0.87],
+            [0.0, 0.0, 0.0, 0.0, 0.87, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    profile = component_mass_profile(adj, 0.8)
+
+    assert profile["n_nodes"] == 6
+    assert profile["component_count"] == 3
+    assert profile["top_component_sizes"] == [2, 2, 2]
+    assert "top_component_fractions" not in profile
+    assert profile["largest_component_fraction"] == 0.3333
+    assert profile["singleton_count"] == 0
+
+    breakpoints = structural_breakpoints(
+        adj,
+        thresholds=[1.0, 0.8, 0.5, 0.0],
+        component_counts=[6, 3, 1, 1],
+    )
+
+    assert breakpoints[0]["event"] == "large_component_transition"
+    assert breakpoints[0]["threshold"] == 0.5
+    assert breakpoints[0]["before_top_component_sizes"] == [2, 2, 2]
+    assert breakpoints[0]["after_top_component_sizes"] == [6]
+    assert breakpoints[0]["absorbed_mass_fraction"] == 0.6667
+    assert breakpoints[0]["resulting_component_fraction"] == 1.0
+    assert breakpoints[0]["affected_mass_fraction"] == 0.6667
+
+
+def test_prepared_threshold_graph_matches_dense_component_partitions():
+    adj = np.array(
+        [
+            [0.0, 0.9, 0.6, 0.0, 0.0, 0.0],
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.6, 0.0, 0.0, 0.88, 0.0, 0.0],
+            [0.0, 0.0, 0.88, 0.0, 0.55, 0.0],
+            [0.0, 0.0, 0.0, 0.55, 0.0, 0.87],
+            [0.0, 0.0, 0.0, 0.0, 0.87, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    prepared = prepare_threshold_graph(adj)
+
+    dense_sizes, dense_labels = component_state_at_threshold(adj, 0.8)
+    sparse_sizes, sparse_labels = component_state_at_threshold(prepared, 0.8)
+
+    assert sparse_sizes == dense_sizes
+    for i in range(adj.shape[0]):
+        for j in range(adj.shape[0]):
+            assert (sparse_labels[i] == sparse_labels[j]) == (
+                dense_labels[i] == dense_labels[j]
+            )
+
+
+def test_prepared_threshold_graph_matches_dense_threshold_payloads():
+    adj = np.array(
+        [
+            [0.0, 0.9, 0.6, 0.0, 0.0, 0.0],
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.6, 0.0, 0.0, 0.88, 0.0, 0.0],
+            [0.0, 0.0, 0.88, 0.0, 0.55, 0.0],
+            [0.0, 0.0, 0.0, 0.55, 0.0, 0.87],
+            [0.0, 0.0, 0.0, 0.0, 0.87, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    prepared = prepare_threshold_graph(adj)
+    thresholds = [1.0, 0.8, 0.5, 0.0]
+    component_counts = [6, 3, 1, 1]
+
+    assert component_mass_profile(prepared, 0.8) == component_mass_profile(adj, 0.8)
+    assert structural_breakpoints(
+        prepared,
+        thresholds=thresholds,
+        component_counts=component_counts,
+    ) == structural_breakpoints(
+        adj,
+        thresholds=thresholds,
+        component_counts=component_counts,
+    )
+
+
+def test_threshold_options_are_policy_aware_without_excess_payload():
+    adj = np.array(
+        [
+            [0.0, 0.9, 0.6, 0.0, 0.0, 0.0],
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.6, 0.0, 0.0, 0.88, 0.0, 0.0],
+            [0.0, 0.0, 0.88, 0.0, 0.55, 0.0],
+            [0.0, 0.0, 0.0, 0.55, 0.0, 0.87],
+            [0.0, 0.0, 0.0, 0.0, 0.87, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    from pulsar._pulsar import find_stable_thresholds
+
+    stability = find_stable_thresholds(adj, num_bins=10)
+    options = agent_threshold_options(
+        adj,
+        stability.top_k_plateaus(10),
+        [float(t) for t in stability.thresholds],
+        [int(c) for c in stability.component_counts],
+        policy="detail_seeking",
+        max_candidates=5,
+    )
+
+    assert options["policy"] == "detail_seeking"
+    assert options["selection_strategy"] == "transition_adjacent"
+    assert len(options["candidates"]) <= 5
+    assert "recommended_action" in options
+    assert options["transition_adjacent_candidates"]
+    assert options["candidates"][0]["candidate_kind"] == "transition_adjacent"
+    for candidate in options["candidates"]:
+        assert "threshold" in candidate
+        assert "candidate_kind" in candidate
+        assert "mass_shape" in candidate
+        assert "best_for" in candidate
+        assert "avoid_for" in candidate
+        assert "why" in candidate
+
+
+def test_report_ready_threshold_options_do_not_recommend_giant_dust():
+    adj = np.zeros((101, 101), dtype=np.float64)
+    for node in range(99):
+        adj[node, node + 1] = 0.9
+        adj[node + 1, node] = 0.9
+    from pulsar._pulsar import find_stable_thresholds
+
+    stability = find_stable_thresholds(adj, num_bins=10)
+    options = agent_threshold_options(
+        adj,
+        stability.top_k_plateaus(10),
+        [float(t) for t in stability.thresholds],
+        [int(c) for c in stability.component_counts],
+        policy="report_ready",
+        max_candidates=5,
+    )
+
+    assert options["policy"] == "report_ready"
+    assert all(
+        candidate["interpretability_tier"] != "giant_component_with_dust"
+        for candidate in options["candidates"]
+    )
+
+
+def test_threshold_breakpoints_rank_absorbed_mass_not_giant_result():
+    n = 101
+    adj = np.zeros((n, n), dtype=np.float64)
+    for node in range(99):
+        adj[node, node + 1] = 0.9
+        adj[node + 1, node] = 0.9
+    adj[99, 100] = 0.5
+    adj[100, 99] = 0.5
+
+    breakpoints = structural_breakpoints(
+        adj,
+        thresholds=[0.8, 0.4],
+        component_counts=[2, 1],
+    )
+
+    assert breakpoints[0]["event"] == "small_component_absorption"
+    assert breakpoints[0]["before_top_component_sizes"] == [100, 1]
+    assert breakpoints[0]["after_top_component_sizes"] == [101]
+    assert breakpoints[0]["absorbed_mass_fraction"] == 0.0099
+    assert breakpoints[0]["resulting_component_fraction"] == 1.0
 
 
 def test_finalization_gate_blocks_early_dominant_component():
@@ -1349,14 +1512,18 @@ def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):
     first = json.loads(
         asyncio.run(
             run_topological_sweep(
-                config_yaml=refined, dataset_id=dataset["dataset_id"], response_format="json"
+                config_yaml=refined,
+                dataset_id=dataset["dataset_id"],
+                response_format="json",
             )
         )
     )
     second = json.loads(
         asyncio.run(
             run_topological_sweep(
-                config_yaml=refined, dataset_id=dataset["dataset_id"], response_format="json"
+                config_yaml=refined,
+                dataset_id=dataset["dataset_id"],
+                response_format="json",
             )
         )
     )
