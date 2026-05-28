@@ -48,7 +48,7 @@ FunctionTool.run = _lenient_function_tool_run
 mcp = FastMCP(
     "Pulsar",
     instructions=(
-        "Topological data analysis for tabular datasets. Call "
+        "Manifold discovery and topological data analysis for tabular datasets. Call "
         "`get_workflow_guide` once for the end-to-end procedure and tool map.\n"
         "Shared params across tools: `detail` ('summary' default; 'full' for "
         "audit/debug) and `response_format` ('markdown' default; 'json' for "
