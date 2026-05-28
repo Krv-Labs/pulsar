@@ -165,11 +165,21 @@ def summary_evidence_payload_to_markdown(payload: dict[str, Any]) -> str:
             "",
             f"- Numeric signal columns: {signal_summary.get('n_numeric_columns', 0)}",
             f"- Categorical signal values: {signal_summary.get('n_categorical_values', 0)}",
-            "",
-            "## Clusters",
-            "",
         ]
     )
+
+    gated = payload.get("evidence_metadata_summary", {}).get(
+        "categorical_columns_gated", []
+    )
+    if gated:
+        gated_desc = ", ".join(
+            f"{g['column']} (cardinality {g['cardinality']})" for g in gated
+        )
+        lines.append(
+            f"- Categorical columns gated as high-cardinality noise: {gated_desc}"
+        )
+
+    lines.extend(["", "## Clusters", ""])
 
     for cluster in payload.get("clusters", []):
         lines.append(f"### Cluster {cluster['cluster_id']}: {cluster['semantic_name']}")
@@ -727,9 +737,8 @@ def _evidence_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
             for key, value in stats_failures.items()
         },
         "numeric_features_screened": metadata.get("numeric_features_screened", 0),
-        "categorical_features_screened": metadata.get(
-            "categorical_features_screened", 0
-        ),
+        "categorical_columns_screened": metadata.get("categorical_columns_screened", 0),
+        "categorical_columns_gated": metadata.get("categorical_columns_gated", []),
     }
 
 

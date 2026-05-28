@@ -91,6 +91,7 @@ class FeatureEvidenceIndex:
     signal_matrix: Dict[str, Any]
     metadata: Dict[str, Any]
     working_columns: List[str] = field(default_factory=list)
+    categorical_columns_gated: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def resolve_clusters(
@@ -1278,11 +1279,47 @@ def _compute_categorical_rows(
     categorical_cols: list[str],
     clusters: pd.Series,
     adjacency: dict[int, list[dict[str, Any]]],
-) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+    max_cardinality_ratio: float = 0.05,
+    min_cardinality_floor: int = 10,
+    force_fisher: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]], list[dict[str, Any]]]:
+    n_total = len(data)
+    gated_cols: list[dict[str, Any]] = []
+    active_categorical_cols: list[str] = []
+
+    # Early-Stage Cardinality Gating
+    for col in categorical_cols:
+        nunique = data[col].nunique()
+        if nunique > max(min_cardinality_floor, max_cardinality_ratio * n_total):
+            logger.warning(
+                "Categorical column '%s' gated (cardinality: %d, ratio: %.4f) to prevent context bloat.",
+                col,
+                nunique,
+                nunique / n_total if n_total else 0.0,
+            )
+            gated_cols.append(
+                {
+                    "column": col,
+                    "cardinality": int(nunique),
+                    "reason": "high_cardinality",
+                }
+            )
+        else:
+            active_categorical_cols.append(col)
+
     global_categorical_stats: dict[str, dict[str, Any]] = {}
     cluster_values = sorted(int(cid) for cid in clusters.unique())
-    for column in categorical_cols:
+
+    # Precompute encoded columns and global value counts
+    encoded_cols: dict[str, pd.Series] = {}
+    global_value_counts: dict[str, dict[str, int]] = {}
+    for column in active_categorical_cols:
         encoded = data[column].fillna("__MISSING__").astype(str)
+        encoded_cols[column] = encoded
+        global_value_counts[column] = encoded.value_counts().to_dict()
+
+    for column in active_categorical_cols:
+        encoded = encoded_cols[column]
         contingency = pd.crosstab(clusters, encoded)
         p_value = 1.0
         association = 0.0
@@ -1301,41 +1338,50 @@ def _compute_categorical_rows(
         }
 
     global_qs = _bh_fdr(
-        [global_categorical_stats[column]["p_value"] for column in categorical_cols]
+        [
+            global_categorical_stats[column]["p_value"]
+            for column in active_categorical_cols
+        ]
     )
-    for column, q_value in zip(categorical_cols, global_qs):
+    for column, q_value in zip(active_categorical_cols, global_qs):
         global_categorical_stats[column]["q_value"] = (
             1.0 if q_value is None else float(q_value)
         )
 
     rows: list[dict[str, Any]] = []
-    n_total = len(data)
     for cluster_id in cluster_values:
         cluster_mask = clusters == cluster_id
-        rest_mask = clusters != cluster_id
         cluster_size = int(cluster_mask.sum())
-        rest_size = int(rest_mask.sum())
+        # rest_size = n_total - cluster_size is mathematically valid only because len(clusters) == len(data) is strictly enforced.
+        rest_size = n_total - cluster_size
         neighbor_id = _strongest_neighbor(adjacency, cluster_id)
         neighbor_mask = clusters == neighbor_id if neighbor_id is not None else None
         neighbor_size = int(neighbor_mask.sum()) if neighbor_mask is not None else 0
-        for column in categorical_cols:
-            global_values = data[column].fillna("__MISSING__").astype(str)
+
+        for column in active_categorical_cols:
+            global_values = encoded_cols[column]
             cluster_values_series = global_values.loc[cluster_mask]
-            rest_values_series = global_values.loc[rest_mask]
-            cluster_counts = cluster_values_series.value_counts()
+            cluster_counts = cluster_values_series.value_counts().to_dict()
+
+            # Precompute neighbor value counts for O(1) lookups inside the category value loop
+            neighbor_counts = {}
+            if neighbor_mask is not None and neighbor_size > 0:
+                neighbor_counts = (
+                    global_values.loc[neighbor_mask].value_counts().to_dict()
+                )
+
             for value, count in cluster_counts.items():
-                global_count = int((global_values == value).sum())
-                count_rest = int((rest_values_series == value).sum())
+                global_count = global_value_counts[column].get(value, 0)
+                count_rest = global_count - count
                 prevalence_cluster = (count / cluster_size) if cluster_size else 0.0
                 prevalence_rest = (count_rest / rest_size) if rest_size else 0.0
                 prevalence_global = (global_count / n_total) if n_total else 0.0
                 lift = prevalence_cluster / max(prevalence_global, _EPS)
                 log_lift = float(math.log(max(lift, _EPS)))
                 neighbor_prevalence = 0.0
-                if neighbor_mask is not None and neighbor_size:
+                if neighbor_mask is not None and neighbor_size > 0:
                     neighbor_prevalence = float(
-                        ((global_values.loc[neighbor_mask] == value).sum())
-                        / neighbor_size
+                        neighbor_counts.get(value, 0) / neighbor_size
                     )
                 p_cv = count / max(n_total, 1)
                 p_c = cluster_size / max(n_total, 1)
@@ -1343,26 +1389,69 @@ def _compute_categorical_rows(
                 mi_contrib = float(
                     p_cv * math.log(max(p_cv, _EPS) / max(p_c * p_v, _EPS))
                 )
+
                 fisher_p = 1.0
+                test_method = "fisher"
                 row_failures: list[str] = []
-                try:
-                    fisher_p = float(
-                        stats.fisher_exact(
+
+                # Arithmetic expected cell size guard for the 2x2 contingency table
+                if n_total > 0:
+                    e00 = cluster_size * global_count / n_total
+                    e01 = cluster_size * (n_total - global_count) / n_total
+                    e10 = rest_size * global_count / n_total
+                    e11 = rest_size * (n_total - global_count) / n_total
+                else:
+                    e00 = e01 = e10 = e11 = 0.0
+
+                if (
+                    not force_fisher
+                    and e00 >= 5.0
+                    and e01 >= 5.0
+                    and e10 >= 5.0
+                    and e11 >= 5.0
+                ):
+                    try:
+                        _, chi2_p, _, _ = stats.chi2_contingency(
                             [
                                 [count, max(cluster_size - count, 0)],
                                 [count_rest, max(rest_size - count_rest, 0)],
-                            ]
-                        )[1]
-                    )
-                except ValueError as exc:
-                    row_failures.append(f"fisher_exact: {exc}")
-                    logger.warning(
-                        "fisher_exact failed for cluster=%s column=%s value=%s: %s",
-                        cluster_id,
-                        column,
-                        value,
-                        exc,
-                    )
+                            ],
+                            correction=True,
+                        )
+                        fisher_p = float(chi2_p)
+                        test_method = "chi2"
+                    except ValueError as exc:
+                        # chi2 rejected the table (e.g. a zero margin); fall
+                        # through to the exact test rather than fail silently.
+                        test_method = "fisher"
+                        logger.debug(
+                            "chi2_contingency fell back to fisher for "
+                            "cluster=%s column=%s value=%s: %s",
+                            cluster_id,
+                            column,
+                            value,
+                            exc,
+                        )
+
+                if test_method == "fisher":
+                    try:
+                        fisher_p = float(
+                            stats.fisher_exact(
+                                [
+                                    [count, max(cluster_size - count, 0)],
+                                    [count_rest, max(rest_size - count_rest, 0)],
+                                ]
+                            )[1]
+                        )
+                    except ValueError as exc:
+                        row_failures.append(f"fisher_exact: {exc}")
+                        logger.warning(
+                            "fisher_exact failed for cluster=%s column=%s value=%s: %s",
+                            cluster_id,
+                            column,
+                            value,
+                            exc,
+                        )
 
                 rows.append(
                     {
@@ -1396,16 +1485,20 @@ def _compute_categorical_rows(
                         "signal_tier": "noise",
                         "in_cluster_prevalence": float(prevalence_cluster * 100.0),
                         "concentration": float(prevalence_cluster * 100.0),
+                        "test_method": test_method,
                         "failure_reasons": row_failures,
                     }
                 )
 
+    # `fisher_p` may hold either an exact (Fisher) or asymptotic (chi2) p-value
+    # depending on each row's expected cell counts; both are valid p-values, so
+    # pooling them into a single BH-FDR correction is intentional.
     fisher_qs = _bh_fdr([row["fisher_p"] for row in rows])
     for row, q_value in zip(rows, fisher_qs):
         row["fisher_q"] = 1.0 if q_value is None else float(q_value)
 
     _apply_categorical_scores(rows)
-    return rows, global_categorical_stats
+    return rows, global_categorical_stats, gated_cols
 
 
 def _rank_numeric_columns(rows: list[dict[str, Any]]) -> list[str]:
@@ -1585,6 +1678,9 @@ def build_feature_evidence_index(
     data: pd.DataFrame,
     clusters: pd.Series,
     exclude_columns: list[str] | None = None,
+    max_cardinality_ratio: float = 0.05,
+    min_cardinality_floor: int = 10,
+    force_fisher: bool = False,
 ) -> FeatureEvidenceIndex:
     """Compute distribution-aware evidence for numeric and categorical signals."""
     if len(clusters) != len(data):
@@ -1604,8 +1700,14 @@ def build_feature_evidence_index(
     numeric_rows, global_numeric_stats = _compute_numeric_rows(
         working, numeric_cols, clusters, adjacency
     )
-    categorical_rows, global_categorical_stats = _compute_categorical_rows(
-        working, categorical_cols, clusters, adjacency
+    categorical_rows, global_categorical_stats, gated_cols = _compute_categorical_rows(
+        working,
+        categorical_cols,
+        clusters,
+        adjacency,
+        max_cardinality_ratio=max_cardinality_ratio,
+        min_cardinality_floor=min_cardinality_floor,
+        force_fisher=force_fisher,
     )
 
     cluster_bundles: dict[int, dict[str, Any]] = {}
@@ -1650,8 +1752,9 @@ def build_feature_evidence_index(
             "columns": working_columns,
             "excluded_columns": exclude_columns or [],
             "numeric_features_screened": len(numeric_cols),
-            "categorical_columns_screened": len(categorical_cols),
+            "categorical_columns_screened": len(categorical_cols) - len(gated_cols),
             "categorical_values_screened": len(categorical_rows),
+            "categorical_columns_gated": gated_cols,
             "tiering_method": "adaptive_kmeans_on_aggregate_percentiles",
             "neighbor_contrast_enabled": True,
             "global_numeric_stats": global_numeric_stats,
@@ -1660,6 +1763,7 @@ def build_feature_evidence_index(
             "stats_failures": stats_failures,
         },
         working_columns=working_columns,
+        categorical_columns_gated=gated_cols,
     )
 
 
@@ -1795,6 +1899,7 @@ def build_dossier(
                     "numeric_features_screened",
                     "categorical_columns_screened",
                     "categorical_values_screened",
+                    "categorical_columns_gated",
                     "tiering_method",
                     "neighbor_contrast_enabled",
                     "excluded_columns",
@@ -2223,14 +2328,33 @@ def _render_markdown_table(
 
 def dossier_to_markdown(dossier: TopologicalDossier) -> str:
     """Renders the dossier as a high-signal Markdown report for LLM consumption."""
+    total_rows = sum(
+        len(p.numeric_features) + len(p.categorical_features) for p in dossier.clusters
+    )
+
     md = [
         "# Topological Analysis Dossier",
         f"**Dataset Size**: {dossier.n_total} points",
         f"**Clusters Found**: {dossier.n_clusters}",
         "",
-        "## Cluster Profiles",
-        "",
     ]
+
+    if total_rows >= 500:
+        md.extend(
+            [
+                "> [!WARNING]",
+                f"> This dossier contains {total_rows} feature-cluster rows, which is extremely large and may cause substantial context bloat.",
+                "> It is highly recommended to use targeted profiling tools like `get_cluster_profile` or `get_feature_signal` to inspect specific clusters or features of interest instead of analyzing this full report.",
+                "",
+            ]
+        )
+
+    md.extend(
+        [
+            "## Cluster Profiles",
+            "",
+        ]
+    )
 
     for p in dossier.clusters:
         size_bar = generate_proportion_bar(p.size, dossier.n_total, length=12)
