@@ -692,7 +692,8 @@ def test_get_workflow_guide_returns_phase_prompt():
     assert "PHASE III" in guide
     assert "ingest_dataset" in guide
     assert 'generate_cluster_dossier(detail="summary")' in guide
-    assert 'get_topological_skeleton(detail="full")' in guide
+    assert 'get_topological_skeleton(detail="nodes")' in guide
+    assert 'detail="full_nodes"' in guide
 
 
 def test_run_topological_sweep_missing_config_path_returns_structured_error():
