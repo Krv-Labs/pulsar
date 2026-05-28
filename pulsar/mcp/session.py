@@ -144,6 +144,10 @@ def _bind_session_data(
     session.data_path = _normalize_data_path(data_path) if data_path else None
     if dataset_id:
         session.dataset_id = dataset_id
+    # Rebinding the underlying data invalidates any cached feature evidence,
+    # which was computed against the previous DataFrame. (The sweep path also
+    # invalidates explicitly; the redundant call here is idempotent.)
+    _invalidate_feature_evidence_cache(session)
 
 
 def _dataset_id_for_path(dataset_id: str | None, data_path: str | None) -> str | None:
