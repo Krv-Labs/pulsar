@@ -1,0 +1,40 @@
+# Pulsar MCP service (Stage 1) — AUTHORED, not built/applied (GCP-deploy residual).
+# One image, two run modes: the MCP HTTP server (default CMD) and the sweep worker.
+# Pinned dependency: thema-pulsar (this repo) @ 0.2.3 — D17 versioned contract.
+FROM python:3.12-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH="/root/.local/bin:/root/.cargo/bin:${PATH}"
+
+# Rust toolchain (PyO3 native ext via maturin) + uv.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl build-essential ca-certificates \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . /app
+
+# Sync pinned deps (uv.lock) and build the native extension.
+RUN uv sync --frozen || uv sync
+RUN uv run maturin develop --release
+
+# Local-first defaults; prod overrides via env (DEPLOY_ENV=gcp, GCS/Cloud Tasks adapters).
+# INTERNAL_MCP_TOKEN is injected at runtime (Secret Manager in prod) — NEVER baked into the image.
+ENV PULSAR_TRANSPORT=http \
+    PULSAR_TOOLSET=curated \
+    PULSAR_MCP_HOST=0.0.0.0 \
+    PULSAR_MCP_PORT=8000 \
+    PULSAR_MCP_PATH=/mcp \
+    OBJECT_STORE_DIR=/data/store \
+    JOB_QUEUE_DIR=/data/queue
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
+    CMD curl -fsS "http://localhost:8000/healthz" || exit 1
+
+# MCP server (default). Sweep worker: override the command:
+#   docker run ... pulsar-mcp uv run python -m pulsar.mcp.worker
+CMD ["uv", "run", "python", "-m", "pulsar.mcp.server"]
