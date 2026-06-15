@@ -24,6 +24,10 @@ LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE = (
 )
 THRESHOLD_RANGE_MESSAGE = "Threshold must be finite and between 0.0 and 1.0."
 
+# Spike-3 row cap: the sweep is memory-bound, ~5000 rows on a 4GB worker (n>10k prohibitive).
+# Config default only — Stage 1 wires the admission/ingest enforcement against this value.
+MAX_ROWS = 5000
+
 
 # ---------------------------------------------------------------------------
 # Parameter grid helpers
@@ -122,6 +126,7 @@ class PulsarConfig:
     cosmic_graph: CosmicGraphSpec
     n_reps: int = 4
     run_name: str = ""
+    max_rows: int = MAX_ROWS
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +194,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     # output section
     output = raw.get("output", {})
     n_reps = int(output.get("n_reps", 4))
+    max_rows = int(output.get("max_rows", MAX_ROWS))
 
     return PulsarConfig(
         data=data_path,
@@ -200,6 +206,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         cosmic_graph=cosmic_graph,
         n_reps=n_reps,
         run_name=run_name,
+        max_rows=max_rows,
     )
 
 
