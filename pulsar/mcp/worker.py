@@ -29,10 +29,17 @@ class AdmissionError(Exception):
     """Raised when a job exceeds the compute envelope (row cap, etc.)."""
 
 
-def _load_data(job: dict) -> pd.DataFrame:
+def _load_data(job: dict, store=None) -> pd.DataFrame:
+    # Preferred: dataset persisted in the object store (curated flow).
+    ref = job.get("data_ref")
+    if ref:
+        import io
+
+        return pd.read_parquet(io.BytesIO((store or get_object_store()).get(ref)))
+    # Fallback: a local path (dev / direct enqueue).
     path = job.get("data_path")
     if not path:
-        raise AdmissionError("job has no data_path")
+        raise AdmissionError("job has no data_ref or data_path")
     if str(path).endswith(".parquet"):
         return pd.read_parquet(path)
     return pd.read_csv(path)
@@ -74,7 +81,7 @@ def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore 
     job_id = job["job_id"]
     t0 = time.time()
     try:
-        df = _load_data(job)
+        df = _load_data(job, store)
         cfg = load_config(job["config"])
         max_rows = int(getattr(cfg, "max_rows", MAX_ROWS) or MAX_ROWS)
         if len(df) > max_rows:

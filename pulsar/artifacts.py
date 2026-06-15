@@ -276,6 +276,10 @@ class ArtifactView:
             self._stability_result_cache = find_stable_thresholds(self._weighted_adjacency)
         return self._stability_result_cache
 
+    @property
+    def _stability_result(self):  # alias for helpers that read the private attr name
+        return self.stability_result
+
 
 def load_artifact(d: dict, store) -> ArtifactView:
     """Reconstruct an ``ArtifactView`` from an artifact dict + blobs in ``store``."""
