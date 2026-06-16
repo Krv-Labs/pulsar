@@ -28,12 +28,16 @@ from pulsar.runtime.utils import (
     generate_proportion_bar,
 )
 from pulsar.mcp.diagnostics import diagnose_model
+from pulsar.mcp.thresholds import (
+    component_mass_profile,
+    component_state_at_threshold,
+    mass_profile_hint,
+    useful_component_size_floor,
+)
 
 logger = logging.getLogger(__name__)
 
 # Clustering strategy constants
-_MAX_COMPONENTS = 30  # Use component strategy if fewer than this
-_MAX_SINGLETON_RATIO = 0.5  # Reject if >50% of nodes are singletons
 _SPECTRAL_K_MIN = 2
 _SPECTRAL_K_MAX = 20
 _MAX_SIGNAL_MATRIX_NUMERIC = 10
@@ -167,6 +171,36 @@ def resolve_clusters(
     raise ValueError(f"Unknown clustering method: {method}")
 
 
+def _has_reliable_mass_split(adj: np.ndarray, threshold: float) -> bool:
+    """Accept stable plateaus when the component mass is not singleton-dominated.
+
+    This keeps the reliability gate dataset-relative: use a size floor tied to n,
+    then compare meaningful component mass against singleton dust instead of raw
+    component count. If we later need a softer policy, split this into tiers.
+    """
+    sizes, _ = component_state_at_threshold(adj, threshold)
+    if len(sizes) <= 1:
+        return False
+
+    hint = mass_profile_hint(component_mass_profile(adj, threshold, top_k=5))
+    if hint == "singleton-heavy fragmentation":
+        return False
+
+    floor = useful_component_size_floor(int(adj.shape[0]))
+    nontrivial_sizes = [size for size in sizes if size >= floor]
+    if len(nontrivial_sizes) < 2:
+        return False
+
+    total = float(sum(sizes))
+    singleton_mass = sum(size for size in sizes if size == 1) / total
+    nontrivial_mass = sum(nontrivial_sizes) / total
+    return hint in {
+        "stable nontrivial multi-component structure",
+        "mostly connected graph with a small tail",
+        "giant component with small-tail fragmentation",
+    } and nontrivial_mass > singleton_mass
+
+
 def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | None:
     """Find clusters via H0 persistent homology on edge weights."""
     stability = find_stable_thresholds(adj)
@@ -181,17 +215,12 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
     ]
 
     for plateau in stability.plateaus:
-        comp_count = int(plateau.component_count)
-        if comp_count <= 1 or comp_count >= _MAX_COMPONENTS:
+        thresh = float(plateau.midpoint)
+        if not _has_reliable_mass_split(adj, thresh):
             continue
 
-        # Check singleton ratio
-        thresh = float(plateau.midpoint)
         binary_adj = (adj > thresh).astype(np.int64)
         G = nx.from_numpy_array(binary_adj)
-        singletons = sum(1 for node in G.nodes() if G.degree(node) == 0)
-        if (singletons / n) > _MAX_SINGLETON_RATIO:
-            continue
 
         # Success: valid stable split
         labels = np.zeros(n, dtype=int)

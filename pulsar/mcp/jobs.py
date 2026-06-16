@@ -16,9 +16,9 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-QUEUED, RUNNING, DONE, ERROR = "queued", "running", "done", "error"
+QUEUED, RUNNING, DONE, ERROR, CANCELLED = "queued", "running", "done", "error", "cancelled"
 
 
 def config_hash(config: dict) -> str:
@@ -74,6 +74,8 @@ class FsJobQueue:
             "artifact_ref": None,
             "structure_status": None,
             "error": None,
+            "cancel_reason": None,
+            "cancelled_at": None,
             "peak_rss_mb": None,
             "vcpu_ms": None,
             **payload,
@@ -121,6 +123,9 @@ class FsJobQueue:
         rec = self._read(job_id)
         if rec is None:
             return
+        if rec.get("status") == CANCELLED:
+            self._unlock(job_id)
+            return
         rec.update(
             status=DONE,
             artifact_ref=artifact_ref,
@@ -136,7 +141,23 @@ class FsJobQueue:
         rec = self._read(job_id)
         if rec is None:
             return
+        if rec.get("status") == CANCELLED:
+            self._unlock(job_id)
+            return
         rec.update(status=ERROR, error=str(error), finished_at=time.time())
+        self._write(rec)
+        self._unlock(job_id)
+
+    def cancel(self, job_id: str, reason: str = "cancel_requested") -> None:
+        rec = self._read(job_id)
+        if rec is None:
+            return
+        rec.update(
+            status=CANCELLED,
+            cancel_reason=reason,
+            cancelled_at=time.time(),
+            finished_at=time.time(),
+        )
         self._write(rec)
         self._unlock(job_id)
 

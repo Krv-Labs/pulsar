@@ -38,7 +38,12 @@ from pulsar.mcp.config_tools import (
     validate_config_yaml,
 )
 from pulsar.mcp.config_refs import load_config_ref, save_config_ref
-from pulsar.mcp.datasets import data_key, dataset_exists, load_dataset
+from pulsar.mcp.datasets import (
+    data_key,
+    dataset_exists,
+    load_dataset,
+    load_dataset_meta,
+)
 from pulsar.mcp.preprocessing import (
     _calibrate_processed_space,
     _preprocessing_block_to_yaml,
@@ -92,6 +97,8 @@ def _require_dataset(dataset_id: str, user_id: str):
 _CURATED_WORKFLOW = """# Pulsar curated workflow (H0 connected-component analysis)
 
 1. Orient — a dataset is usually already linked. If not, `ingest_dataset` first.
+   Before spending a sweep, call `list_sweeps(dataset_id)`: if a completed sweep already exists, reuse
+   its `artifact_ref` (datasetId + configHash) with the interpret tools and SKIP steps 3-4 entirely.
 2. Characterize (optional) — `characterize_dataset(dataset_id)` to judge whether reliable
    connected-component (H0) structure is plausible before spending a sweep.
 3. Prepare — `prepare_sweep(dataset_id)` with NO `config`. It auto-characterizes, auto-calibrates,
@@ -106,7 +113,7 @@ _CURATED_WORKFLOW = """# Pulsar curated workflow (H0 connected-component analysi
      columns with `probe_columns(dataset_id, columns)`.
 4. Run — `run_sweep(dataset_id)` with the prepared config; it waits server-side (~90s). Re-check long
    runs with `get_sweep_status(job_id)`.
-5. Evaluate — if `structureStatus` is "no_reliable_structure", report that and STOP. Do not interpret.
+5. Evaluate — if `structureStatus` is "no_reliable_structure", report that and STOP. If it is "caution", keep going but frame the interpretation as tentative.
 6. Interpret — `diagnose_cosmic_graph` → `get_threshold_stability_curve` →
    `generate_cluster_dossier` → `get_feature_signal` / `get_cluster_profile` /
    `get_cluster_signal_matrix` / `get_topological_skeleton` / `compare_clusters`.
@@ -379,3 +386,102 @@ async def validate_config(config_yaml: str, dataset_id: str = "", user_id: str =
         _df, data_path = _require_dataset(dataset_id, user_id)
     report = validate_config_yaml(config_yaml, dataset_path=data_path)
     return _result(render_validation_report(report), {"status": "ok", "validated": True})
+
+
+# --------------------------------------------------------------------------- #
+# Completed-sweep lookup (tenant-safe, read-only) — the "did I already run this?" tool.
+#
+# A finished sweep persists a derived artifact at
+# ``{user_id}/{dataset_id}/{config_hash}/artifact.json`` in the object store (see
+# pulsar/mcp/worker.py + pulsar/artifacts.py). ``get_sweep_status`` answers "is THIS job
+# done?" but needs the ephemeral ``job_id``; an agent that lost the job_id (new turn,
+# compaction, re-prompt) otherwise has NO way to discover a completed sweep and would
+# re-prepare/re-run the whole pipeline. This tool reads only the persisted artifacts under
+# the caller's own ``user_id`` prefix and returns the ``artifact_ref`` (datasetId +
+# configHash) the interpret tools need. No host paths, no file bytes, no mutation.
+# --------------------------------------------------------------------------- #
+async def list_sweeps(dataset_id: str = "", user_id: str = "local") -> str:
+    """List COMPLETED topological sweeps already persisted for this user (optionally one dataset).
+
+    CALL THIS BEFORE prepare_sweep / run_topological_sweep: if a completed sweep already exists for
+    the dataset (and config) you want, reuse it instead of re-running the pipeline. Each entry is an
+    artifact_ref — pass its `datasetId` + `configHash` straight to the interpret tools
+    (diagnose_cosmic_graph, get_threshold_stability_curve, generate_cluster_dossier, etc.) with NO
+    new sweep. Pass `dataset_id` to scope to one dataset; omit it to list every completed sweep for
+    the user. Returns [] when nothing has been swept yet (that is the only case where you must run a
+    sweep). Read-only and tenant-scoped: it can never see another user's sweeps."""
+    store = get_object_store()
+    root = getattr(store, "root", None)
+    if root is None:
+        # Non-filesystem store (e.g. a GCS prod adapter without prefix-listing wired here):
+        # degrade safely rather than scan something we cannot enumerate.
+        raise ToolError(
+            "list_sweeps requires an enumerable object store; not available on this backend."
+        )
+
+    sweeps: list[dict] = []
+    user_root = root / user_id
+    # Artifacts live at {user_id}/{dataset_id}/{config_hash}/artifact.json. The {user_id}/datasets/*
+    # tree (raw snapshots) has no artifact.json, so this glob naturally excludes un-swept datasets.
+    for artifact_path in sorted(user_root.glob("*/*/artifact.json")):
+        rel = artifact_path.relative_to(user_root)
+        ds_id, cfg_hash = rel.parts[0], rel.parts[1]
+        if dataset_id and ds_id != dataset_id:
+            continue
+        try:
+            art = json.loads(artifact_path.read_text())
+        except Exception:
+            continue
+        name = None
+        try:
+            name = load_dataset_meta(ds_id, store, user_id=user_id).get("name")
+        except Exception:
+            name = None
+        sweeps.append(
+            {
+                "artifact_ref": {"datasetId": ds_id, "configHash": cfg_hash, "userId": user_id},
+                "datasetId": ds_id,
+                "configHash": cfg_hash,
+                "datasetName": name,
+                "n": art.get("n"),
+                "metrics": art.get("metrics"),
+                "pulsarVersion": art.get("pulsarVersion"),
+                "createdAt": art.get("createdAt"),
+            }
+        )
+
+    sweeps.sort(key=lambda s: s.get("createdAt") or "", reverse=True)
+    structured = {
+        "status": "ok",
+        "datasetId": dataset_id or None,
+        "count": len(sweeps),
+        "sweeps": sweeps,
+        "agent_action": (
+            "If a sweep matching your target dataset/config is listed, reuse its artifact_ref with the "
+            "interpret tools instead of calling prepare_sweep/run_topological_sweep again."
+            if sweeps
+            else "No completed sweep exists yet — prepare_sweep then run_topological_sweep."
+        ),
+    }
+    if not sweeps:
+        scope = f" for dataset `{dataset_id}`" if dataset_id else ""
+        md = f"No completed sweeps found{scope}. Prepare and run one before interpreting."
+    else:
+        lines = [
+            f"Found {len(sweeps)} completed sweep(s)"
+            + (f" for dataset `{dataset_id}`" if dataset_id else "")
+            + " — reuse these instead of re-running:",
+            "",
+            "| dataset | config | n | components | created |",
+            "|---|---|---|---|---|",
+        ]
+        for s in sweeps:
+            m = s.get("metrics") or {}
+            comp = m.get("componentCount")
+            comp_str = str(int(comp)) if isinstance(comp, (int, float)) else "?"
+            lines.append(
+                f"| `{s['datasetId']}` | `{s['configHash']}` | {s.get('n', '?')} | "
+                f"{comp_str} | {s.get('createdAt', '?')} |"
+            )
+        md = "\n".join(lines)
+    return _result(md, structured)

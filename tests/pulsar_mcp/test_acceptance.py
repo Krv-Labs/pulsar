@@ -98,10 +98,129 @@ def test_sweep_enqueue_worker_status(store_env):
     run_job(q.claim(), queue=q, store=store)
     st = q.status(jid)
     assert st["status"] == "done"
-    assert st["structure_status"] == "ok"
+    assert st["structure_status"] == "caution"
     assert st["artifact_ref"]["datasetId"] == "ds"
     assert st["peak_rss_mb"] is not None and st["vcpu_ms"] is not None
     assert store.exists(f"u/ds/{ch}/artifact.json")
+
+
+def test_worker_cancels_before_compute_when_control_requests_stop(store_env, monkeypatch):
+    from pulsar.mcp.jobs import config_hash, get_job_queue
+    from pulsar.mcp.store import get_object_store
+    from pulsar.mcp.worker import run_job
+
+    import pulsar.mcp.tools.curated as C
+    import pulsar.mcp.worker as worker
+
+    q = get_job_queue()
+    store = get_object_store()
+    cfg = _penguins_cfg()
+    jid = q.enqueue(
+        {
+            "user_id": "u",
+            "dataset_id": "ds_cancel",
+            "config_hash": config_hash(cfg),
+            "data_path": PENGUINS,
+            "config": cfg,
+        }
+    )
+    monkeypatch.setattr(
+        worker,
+        "_post_heartbeat",
+        lambda job_id, worker_id: {"shouldStop": True, "cancelReason": "user_requested"},
+    )
+    monkeypatch.setattr(
+        worker,
+        "ThemaRS_fit",
+        lambda cfg, df: pytest.fail("cancelled sweep should not compute"),
+    )
+
+    run_job(q.claim(), queue=q, store=store)
+    st = q.status(jid)
+    assert st["status"] == "cancelled"
+    assert st["cancel_reason"] == "user_requested"
+
+    payload = json.loads(asyncio.run(C.get_sweep_status(jid)))
+    assert payload["structured"]["status"] == "cancelled"
+    assert payload["structured"]["cancelReason"] == "user_requested"
+
+
+def test_worker_heartbeat_posts_to_isomorph_control(monkeypatch):
+    import pulsar.mcp.worker as worker
+
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return b'{"shouldStop": false}'
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["authorization"] = req.get_header("Authorization")
+        captured["content_type"] = req.get_header("Content-type")
+        captured["body"] = json.loads(req.data.decode())
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setenv("ISOMORPH_WEB_URL", "http://web.test/")
+    monkeypatch.setenv("INTERNAL_WORKER_TOKEN", "secret")
+    monkeypatch.setattr(worker.urllib.request, "urlopen", fake_urlopen)
+
+    assert worker._post_heartbeat("job_123", "worker-a") == {"shouldStop": False}
+    assert captured == {
+        "url": "http://web.test/api/internal/sweeps/job_123/heartbeat",
+        "authorization": "Bearer secret",
+        "content_type": "application/json",
+        "body": {"workerId": "worker-a"},
+        "timeout": 5,
+    }
+
+
+def test_sweep_enqueue_worker_status_caution(store_env, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from pulsar.mcp.jobs import config_hash, get_job_queue
+    from pulsar.mcp.store import get_object_store
+    from pulsar.mcp.worker import run_job
+
+    import pulsar.mcp.interpreter as interpreter
+    import pulsar.mcp.worker as worker
+
+    q = get_job_queue()
+    store = get_object_store()
+    cfg = _penguins_cfg()
+    ch = config_hash(cfg)
+    data = pd.DataFrame({"x": [1.0, 1.1, 1.2, 5.0, 5.1, 9.0]})
+    data_path = tmp_path / "advisory.csv"
+    data.to_csv(data_path, index=False)
+    jid = q.enqueue(
+        {"user_id": "u", "dataset_id": "ds_caution", "config_hash": ch, "data_path": str(data_path), "config": cfg}
+    )
+
+    fake_result = SimpleNamespace(
+        labels=pd.Series([0, 0, 0, 1, 1, 2], name="cluster"),
+        method_used="threshold_stability",
+        n_clusters=3,
+        silhouette_score=None,
+        failure_reason=None,
+        interpretation_edge_weight_threshold_applied=0.0,
+        stability_plateaus=[],
+    )
+    monkeypatch.setattr(interpreter, "_cluster_by_threshold_stability", lambda adj, n: fake_result)
+    monkeypatch.setattr(worker, "ThemaRS_fit", lambda cfg, df: SimpleNamespace(_weighted_adjacency=np.eye(len(df), dtype=float)))
+    monkeypatch.setattr(worker, "dump_artifact", lambda *args, **kwargs: {"schemaVersion": 1, "structureStatus": "ok"})
+
+    run_job(q.claim(), queue=q, store=store)
+    st = q.status(jid)
+    assert st["status"] == "done"
+    assert st["structure_status"] == "caution"
+    assert store.exists(f"u/ds_caution/{ch}/artifact.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -246,6 +365,60 @@ def test_curated_artifact_analysis_tools_are_tenant_scoped(store_env):
             await C.get_topological_skeleton(ds, ch, user_id="bob")
         with pytest.raises(Exception, match="No artifact"):
             await C.get_cluster_signal_matrix(ds, ch, user_id="bob")
+
+    asyncio.run(run())
+
+
+def test_curated_list_sweeps_discovers_completed_and_is_tenant_scoped(store_env):
+    """list_sweeps lets an agent find an already-completed sweep (artifact_ref) instead of re-running,
+    and never sees another tenant's sweeps."""
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.jobs import get_job_queue
+    from pulsar.mcp.store import get_object_store
+    from pulsar.mcp.worker import run_job
+
+    store = get_object_store()
+    q = get_job_queue()
+
+    async def run():
+        # Nothing swept yet for alice => empty list.
+        empty = json.loads(await C.list_sweeps(user_id="alice"))
+        assert empty["structured"]["count"] == 0
+        assert empty["structured"]["sweeps"] == []
+
+        df = pd.read_csv(PENGUINS)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        store.put("up/p.parquet", buf.getvalue())
+        ds = json.loads(await C.ingest_dataset("up/p.parquet", user_id="alice"))["structured"]["datasetId"]
+
+        # Before the sweep finishes, the dataset exists but no completed sweep does.
+        assert json.loads(await C.list_sweeps(ds, user_id="alice"))["structured"]["count"] == 0
+
+        prep = json.loads(await C.prepare_sweep(ds, intent="penguins_demo", user_id="alice"))
+        ch = prep["structured"]["configHash"]
+        rs = json.loads(await C.run_topological_sweep(ds, config=prep["structured"]["config"], user_id="alice"))
+        run_job(q.claim(), queue=q, store=store)
+        assert json.loads(await C.get_sweep_status(rs["structured"]["jobId"]))["structured"]["status"] == "done"
+
+        # Now alice can DISCOVER the completed sweep without the job_id.
+        listed = json.loads(await C.list_sweeps(ds, user_id="alice"))
+        assert listed["structured"]["count"] == 1
+        entry = listed["structured"]["sweeps"][0]
+        assert entry["artifact_ref"] == {"datasetId": ds, "configHash": ch, "userId": "alice"}
+        assert entry["metrics"] is not None
+
+        # The artifact_ref drives the interpret tools directly (no re-run).
+        rd = json.loads(
+            await C.diagnose_cosmic_graph(
+                entry["artifact_ref"]["datasetId"], entry["artifact_ref"]["configHash"], user_id="alice"
+            )
+        )
+        assert "n_nodes" in rd["structured"]
+
+        # Tenant isolation: bob sees nothing.
+        assert json.loads(await C.list_sweeps(user_id="bob"))["structured"]["count"] == 0
+        assert json.loads(await C.list_sweeps(ds, user_id="bob"))["structured"]["count"] == 0
 
     asyncio.run(run())
 

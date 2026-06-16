@@ -7,26 +7,115 @@ WITHOUT the MCP HTTP request ever holding the sweep.
 Admission is row-based (claude.md: "row-based envelope, not file bytes"): an input
 over ``MAX_ROWS`` fails the job with a STRUCTURED error — never a 500/SIGKILL. Any
 fit exception (incl. MemoryError) is caught and recorded as a clean job failure.
-A post-sweep structure check surfaces "no reliable structure detected" for noise.
+A post-sweep structure check surfaces "no reliable structure detected" for noise and
+advisory "caution" when the plateau is real but singleton/tail mass still merits care.
 """
 from __future__ import annotations
 
 import json
 import os
 import resource
+import socket
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 
 import pandas as pd
 
 from pulsar.artifacts import dump_artifact
 from pulsar.config import MAX_ROWS, load_config
 from pulsar.mcp.jobs import FsJobQueue, get_job_queue
+from pulsar.mcp.payloads import cluster_result_payload
 from pulsar.mcp.store import FsObjectStore, artifact_prefix, get_object_store
 
 
 class AdmissionError(Exception):
     """Raised when a job exceeds the compute envelope (row cap, etc.)."""
+
+
+class SweepCancelled(Exception):
+    """Raised when the upstream controller asks the worker to stop a sweep."""
+
+
+def _worker_id() -> str:
+    return os.environ.get("PULSAR_WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _control_base_url() -> str | None:
+    explicit = os.environ.get("SWEEP_CONTROL_BASE_URL") or os.environ.get("ISOMORPH_WEB_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    port = os.environ.get("WEB_PORT")
+    return f"http://localhost:{port}" if port else None
+
+
+def _control_token() -> str | None:
+    return os.environ.get("INTERNAL_WORKER_TOKEN") or os.environ.get("INTERNAL_MCP_TOKEN")
+
+
+def _post_heartbeat(job_id: str, worker_id: str) -> dict:
+    base_url = _control_base_url()
+    token = _control_token()
+    if not base_url or not token:
+        return {"shouldStop": False}
+
+    body = json.dumps({"workerId": worker_id}).encode()
+    req = urllib.request.Request(
+        f"{base_url}/api/internal/sweeps/{job_id}/heartbeat",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode() or "{}")
+    except (
+        TimeoutError,
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+    ):
+        return {"shouldStop": False}
+
+
+def _cancel_if_requested(job_id: str, queue: FsJobQueue, control: dict) -> None:
+    if not control.get("shouldStop"):
+        return
+    reason = str(control.get("cancelReason") or "cancel_requested")
+    queue.cancel(job_id, reason)
+    raise SweepCancelled(reason)
+
+
+def _raise_if_cancelled(job_id: str, queue: FsJobQueue) -> None:
+    rec = queue.status(job_id)
+    if rec and rec.get("status") == "cancelled":
+        raise SweepCancelled(str(rec.get("cancel_reason") or "cancel_requested"))
+
+
+def _start_heartbeat_loop(job_id: str, queue: FsJobQueue, worker_id: str) -> threading.Event:
+    stop = threading.Event()
+    try:
+        interval = float(os.environ.get("SWEEP_HEARTBEAT_INTERVAL_S", "15"))
+    except ValueError:
+        interval = 15.0
+    if interval <= 0:
+        return stop
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            try:
+                _cancel_if_requested(job_id, queue, _post_heartbeat(job_id, worker_id))
+            except SweepCancelled:
+                stop.set()
+
+    thread = threading.Thread(target=beat, name=f"sweep-heartbeat-{job_id}", daemon=True)
+    thread.start()
+    return stop
 
 
 def _load_data(job: dict, store=None) -> pd.DataFrame:
@@ -71,7 +160,8 @@ def _assess_structure(model) -> str:
         ts = None
     if ts is None or ts.n_clusters <= 1:
         return "no_reliable_structure"
-    return "ok"
+    readiness = cluster_result_payload(ts).get("interpretation_readiness", {})
+    return "ok" if readiness.get("status") == "ready" else "caution"
 
 
 def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore | None = None):
@@ -79,9 +169,14 @@ def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore 
     queue = queue or get_job_queue()
     store = store or get_object_store()
     job_id = job["job_id"]
+    worker_id = _worker_id()
     t0 = time.time()
+    heartbeat_stop: threading.Event | None = None
     try:
+        _cancel_if_requested(job_id, queue, _post_heartbeat(job_id, worker_id))
+        heartbeat_stop = _start_heartbeat_loop(job_id, queue, worker_id)
         df = _load_data(job, store)
+        _raise_if_cancelled(job_id, queue)
         cfg = load_config(job["config"])
         max_rows = int(getattr(cfg, "max_rows", MAX_ROWS) or MAX_ROWS)
         if len(df) > max_rows:
@@ -91,7 +186,9 @@ def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore 
             )
 
         model = ThemaRS_fit(cfg, df)
+        _raise_if_cancelled(job_id, queue)
         structure_status = _assess_structure(model)
+        _raise_if_cancelled(job_id, queue)
 
         prefix = artifact_prefix(job["user_id"], job["dataset_id"], job["config_hash"])
         artifact = dump_artifact(
@@ -103,6 +200,7 @@ def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore 
         )
         artifact["structureStatus"] = structure_status
         store.put(f"{prefix}/artifact.json", json.dumps(artifact).encode())
+        _raise_if_cancelled(job_id, queue)
 
         artifact_ref = {
             "userId": job["user_id"],
@@ -117,9 +215,14 @@ def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore 
             vcpu_ms=int((time.time() - t0) * 1000),
         )
         return artifact_ref
+    except SweepCancelled:
+        return None
     except Exception as e:  # incl. AdmissionError / MemoryError → clean job failure
         queue.fail(job_id, f"{type(e).__name__}: {e}")
         return None
+    finally:
+        if heartbeat_stop is not None:
+            heartbeat_stop.set()
 
 
 def ThemaRS_fit(cfg, df):

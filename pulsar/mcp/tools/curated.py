@@ -377,7 +377,7 @@ async def run_topological_sweep(dataset_id: str, config: dict | None = None, use
 
 
 async def get_sweep_status(job_id: str) -> str:
-    """Poll an async sweep. status ∈ queued|running|done|error; carries artifact_ref when done."""
+    """Poll an async sweep. status ∈ queued|running|done|error|cancelled."""
     rec = get_job_queue().status(job_id)
     if rec is None:
         raise ToolError(f"unknown job {job_id}")
@@ -386,6 +386,8 @@ async def get_sweep_status(job_id: str) -> str:
         "artifactRef": rec.get("artifact_ref"),
         "structureStatus": rec.get("structure_status"),
         "error": rec.get("error"),
+        "cancelReason": rec.get("cancel_reason"),
+        "cancelledAt": rec.get("cancelled_at"),
         "peakRssMb": rec.get("peak_rss_mb"),
         "vcpuMs": rec.get("vcpu_ms"),
     }
@@ -394,6 +396,8 @@ async def get_sweep_status(job_id: str) -> str:
         md += f" — {rec['structure_status']}"
     if rec.get("error"):
         md += f" — error: {rec['error']}"
+    if rec.get("cancel_reason"):
+        md += f" — cancelled: {rec['cancel_reason']}"
     return _result(md, structured)
 
 
@@ -741,6 +745,7 @@ async def sync_to_pulsar(
 from pulsar.mcp.tools.curated_preprocessing import (  # noqa: E402
     create_config,
     get_workflow_guide,
+    list_sweeps,
     probe_columns,
     recommend_preprocessing,
     refine_config,
@@ -752,6 +757,7 @@ from pulsar.mcp.tools.curated_preprocessing import (  # noqa: E402
 CURATED_TOOLS_LIST = [
     ingest_dataset,
     characterize_dataset,
+    list_sweeps,
     prepare_sweep,
     run_topological_sweep,
     get_sweep_status,
