@@ -24,7 +24,7 @@ from fastmcp.exceptions import ToolError
 
 from pulsar.artifacts import load_artifact
 from pulsar.mcp.config_tools import _build_initial_config_yaml, validate_config_yaml
-from pulsar.mcp.config_refs import load_config_ref
+from pulsar.mcp.config_refs import load_config_ref, save_config_ref
 from pulsar.mcp.datasets import (
     DatasetAdmissionError,
     data_key,
@@ -330,6 +330,7 @@ async def prepare_sweep(
         config, dataset_id=dataset_id, user_id=user_id, store=store
     )
     ch = config_hash(validated_config)
+    save_config_ref(store, user_id=user_id, dataset_id=dataset_id, config_yaml=normalized_yaml)
     structured = {
         "status": "ok",
         "datasetId": dataset_id,
@@ -744,6 +745,7 @@ async def sync_to_pulsar(
 # These give the HTTP agent self-correction parity with the stdio surface; see curated_preprocessing.py.
 from pulsar.mcp.tools.curated_preprocessing import (  # noqa: E402
     create_config,
+    get_config,
     get_workflow_guide,
     list_sweeps,
     probe_columns,
@@ -773,6 +775,7 @@ CURATED_TOOLS_LIST = [
     # Config build/edit/validate + self-correction + workflow (tenant-safe ports).
     get_workflow_guide,
     create_config,
+    get_config,
     refine_config,
     validate_config,
     recommend_preprocessing,

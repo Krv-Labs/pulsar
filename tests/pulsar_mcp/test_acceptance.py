@@ -408,6 +408,12 @@ def test_curated_list_sweeps_discovers_completed_and_is_tenant_scoped(store_env)
         assert entry["artifact_ref"] == {"datasetId": ds, "configHash": ch, "userId": "alice"}
         assert entry["metrics"] is not None
 
+        # The same historical artifact_ref can recover the exact validated config parameters.
+        cfg = json.loads(await C.get_config(ds, ch, user_id="alice"))["structured"]
+        assert cfg["configHash"] == ch
+        assert cfg["config"] == prep["structured"]["config"]
+        assert "config_yaml" in cfg
+
         # The artifact_ref drives the interpret tools directly (no re-run).
         rd = json.loads(
             await C.diagnose_cosmic_graph(
@@ -419,6 +425,8 @@ def test_curated_list_sweeps_discovers_completed_and_is_tenant_scoped(store_env)
         # Tenant isolation: bob sees nothing.
         assert json.loads(await C.list_sweeps(user_id="bob"))["structured"]["count"] == 0
         assert json.loads(await C.list_sweeps(ds, user_id="bob"))["structured"]["count"] == 0
+        with pytest.raises(Exception, match="config_ref"):
+            await C.get_config(ds, ch, user_id="bob")
 
     asyncio.run(run())
 

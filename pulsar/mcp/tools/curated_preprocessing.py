@@ -378,6 +378,31 @@ async def refine_config(
     return _result(md, structured)
 
 
+async def get_config(dataset_id: str, config_ref: str, user_id: str = "local") -> str:
+    """Return the exact tenant-scoped config params for a dataset/config_ref.
+
+    Use this when you have a historical `configHash` from `list_sweeps` and need to inspect the
+    original sweep parameters without re-running or reconstructing the config. `config_ref` and
+    `configHash` are the same stable config hash returned by create_config/refine_config/prepare_sweep.
+    """
+    store = get_object_store()
+    try:
+        config_yaml = load_config_ref(store, user_id=user_id, dataset_id=dataset_id, config_ref=config_ref)
+    except FileNotFoundError as e:
+        raise ToolError(str(e)) from e
+    config = yaml.safe_load(config_yaml)
+    structured = {
+        "status": "ok",
+        "datasetId": dataset_id,
+        "config_ref": config_ref,
+        "configHash": config_ref,
+        "config_yaml": config_yaml,
+        "config": config,
+    }
+    md = f"Loaded config `{config_ref}` for dataset `{dataset_id}`."
+    return _result(md, structured)
+
+
 async def validate_config(config_yaml: str, dataset_id: str = "", user_id: str = "local") -> str:
     """Validate a full Pulsar config (and normalize it). Pass `dataset_id` to also check column
     references (e.g. that drop_columns names exist) against the actual data."""
