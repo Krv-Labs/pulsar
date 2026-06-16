@@ -99,10 +99,16 @@ class _BearerAuthASGI:
 
 # ---------------------------------------------------------------------------
 # Tool registration — env-gated allowlist (build-spec §3.2)
-#   PULSAR_TOOLSET=full (default; stdio dev — all tools)
-#                 |curated (artifact-based HTTP production surface)
+#   PULSAR_TOOLSET=full    — all tools
+#                 |curated — artifact-based production surface
+# The default is TRANSPORT-AWARE: HTTP (the web/production surface) defaults to `curated`; stdio dev
+# keeps the `full` surface. An explicit PULSAR_TOOLSET always overrides. This stops an HTTP launch
+# that forgets the env var from silently serving the full surface (the web app's curated-contract
+# gate would then 503 every chat).
 # ---------------------------------------------------------------------------
-_TOOLSET = os.environ.get("PULSAR_TOOLSET", "full").lower()
+_TRANSPORT = os.environ.get("PULSAR_TRANSPORT", "stdio").lower()
+_DEFAULT_TOOLSET = "curated" if _TRANSPORT in ("http", "streamable-http") else "full"
+_TOOLSET = os.environ.get("PULSAR_TOOLSET", _DEFAULT_TOOLSET).lower()
 if _TOOLSET == "curated":
     from pulsar.mcp.tools.curated import CURATED_TOOLS_LIST  # noqa: E402
 
@@ -117,7 +123,7 @@ for tool_fn in _TOOLS:
 
 
 def main():
-    transport = os.environ.get("PULSAR_TRANSPORT", "stdio").lower()
+    transport = _TRANSPORT
     if transport in ("http", "streamable-http"):
         token = os.environ.get("INTERNAL_MCP_TOKEN", "")
         host = os.environ.get("PULSAR_MCP_HOST", "127.0.0.1")

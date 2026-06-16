@@ -23,11 +23,14 @@ Reveal the dataset's topology; do not force convenient clusters.
    `probe_columns(dataset_id, ['col_name'])` for deep per-column inspection
    (sample values, distributions). Call `characterize_dataset` once per dataset;
    do not repeat it casually on wide tables. Max 20 columns per probe call.
-3. Calibrate: `create_config(dataset_id)` is mandatory. It returns the
-   baseline config, processed-space distance percentiles, and a
-   `sweep_strategy` block. Treat this as a broad first pass, not a final
-   answer.
-4. Validate Config: `validate_config(config_yaml, dataset_id)`.
+3. Calibrate: `create_config(dataset_id)` is mandatory. It returns a
+   `config_ref`, the baseline config, processed-space distance percentiles, and
+   a `sweep_strategy` block. Treat this as a broad first pass, not a final
+   answer. Prefer passing `config_ref` to `refine_config`; do not copy large
+   YAML strings between tools.
+4. Validate Config: `validate_config(config_yaml, dataset_id)` when you have
+   raw YAML, or pass the refined `config_ref` directly to sweep-preparation
+   tools on the curated surface.
 
 ## PHASE II: EXECUTE & VALIDATE
 5. Run: `run_topological_sweep`.
@@ -69,7 +72,8 @@ The default config returned by `create_config` is ONLY a baseline starting guess
   domain unless you have a diagnostic reason to test a boundary. If the graph is
   shattered, raise the upper epsilon bound. If it is a dense hairball, lower the
   upper bound or shift the PCA grid upward.
-- **Use the Tools**: `refine_config` supports quick PCA/epsilon edits,
+- **Use the Tools**: `refine_config` supports quick PCA/epsilon edits via
+  `config_ref`,
   `run_topological_sweep` reports metric diffs, and `compare_sweeps` compares
   run IDs. Use them to iteratively find a representative grid.
 

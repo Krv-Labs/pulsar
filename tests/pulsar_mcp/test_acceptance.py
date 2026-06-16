@@ -2,7 +2,7 @@
 
 Covers the sharp, locally-verifiable gates:
   - artifact round-trips DERIVED artifacts; interpret funcs run off the cold view (no PyO3)
-  - async sweep ENQUEUES; a worker persists the artifact; get_sweep_status reports done
+  - phase-gated sweep preparation; async sweep ENQUEUES only with a validated config
   - over-row-cap ingest/sweep => structured error (not crash); noise => no_reliable_structure
   - curated tools interpret off the persisted artifact and carry a viz_payload (H0 vocab)
   - MCP initialize over Streamable HTTP: bearer => 200, missing/wrong bearer => 401
@@ -171,9 +171,12 @@ def test_curated_interpret_with_viz(store_env):
         df.to_parquet(buf, index=False)
         store.put("up/p.parquet", buf.getvalue())
         ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"]["datasetId"]
-        rs = json.loads(await C.run_topological_sweep(ds, config=_penguins_cfg()))
-        ch = rs["structured"]["artifactRef"]["configHash"]
+        prep = json.loads(await C.prepare_sweep(ds, intent="penguins_demo"))
+        assert prep["structured"]["phaseState"] == "validated"
+        rs = json.loads(await C.run_topological_sweep(ds, config=prep["structured"]["config"]))
+        ch = prep["structured"]["configHash"]
         assert rs["structured"]["status"] == "queued"
+        assert rs["structured"]["artifactRef"]["configHash"] == ch
         run_job(q.claim(), queue=q, store=store)
         st = json.loads(await C.get_sweep_status(rs["structured"]["jobId"]))
         assert st["structured"]["status"] == "done"
@@ -182,9 +185,84 @@ def test_curated_interpret_with_viz(store_env):
         assert "n_nodes" in rd["structured"]
         assert rd["vizPayload"]["kind"] == "cosmic_graph"
 
+        ts = json.loads(await C.get_threshold_stability_curve(ds, ch))
+        assert ts["vizPayload"]["kind"] == "threshold_stability"
+        assert ts["structured"]["detail"] == "summary"
+        assert "thresholds" not in ts["structured"]
+        assert ts["structured"]["curve_sample"]
+        ts_full = json.loads(await C.get_threshold_stability_curve(ds, ch, detail="full"))
+        assert ts_full["structured"]["thresholds"]
+        assert ts_full["structured"]["component_counts"]
+
+        sk = json.loads(await C.get_topological_skeleton(ds, ch, detail="nodes", max_nodes=5))
+        assert sk["vizPayload"]["kind"] == "cosmic_graph"
+        assert sk["structured"]["graph"]["detail"] == "nodes"
+        assert "topological_summary" in sk["structured"]["graph"]
+        sk_edges = json.loads(await C.get_topological_skeleton(ds, ch, detail="edges", max_edges=5))
+        assert sk_edges["structured"]["graph"]["edges_returned"] <= 5
+
         rdo = json.loads(await C.generate_cluster_dossier(ds, ch))
         assert rdo["vizPayload"]["kind"] == "manifold3d"
         assert len(rdo["vizPayload"]["points"][0]) == 3  # real 3-D projection
+
+        matrix = json.loads(await C.get_cluster_signal_matrix(ds, ch, max_clusters=3))
+        assert "Topological Signal Matrix" in matrix["markdown"]
+        assert matrix["structured"]["signal_matrix"]["clusters_returned"] <= 3
+        matrix_json = json.loads(
+            await C.get_cluster_signal_matrix(ds, ch, max_clusters=3, return_markdown=False)
+        )
+        assert "numeric_rows" in matrix_json["structured"]["signal_matrix"]
+
+    asyncio.run(run())
+
+
+def test_curated_artifact_analysis_tools_are_tenant_scoped(store_env):
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.jobs import get_job_queue
+    from pulsar.mcp.store import get_object_store
+    from pulsar.mcp.worker import run_job
+
+    store = get_object_store()
+    q = get_job_queue()
+
+    async def run():
+        df = pd.read_csv(PENGUINS)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        store.put("up/p.parquet", buf.getvalue())
+        ds = json.loads(await C.ingest_dataset("up/p.parquet", user_id="alice"))["structured"]["datasetId"]
+        prep = json.loads(await C.prepare_sweep(ds, intent="penguins_demo", user_id="alice"))
+        rs = json.loads(await C.run_topological_sweep(ds, config=prep["structured"]["config"], user_id="alice"))
+        ch = prep["structured"]["configHash"]
+        run_job(q.claim(), queue=q, store=store)
+        st = json.loads(await C.get_sweep_status(rs["structured"]["jobId"]))
+        assert st["structured"]["status"] == "done"
+
+        alice_threshold = json.loads(await C.get_threshold_stability_curve(ds, ch, user_id="alice"))
+        assert alice_threshold["structured"]["status"] == "ok"
+        with pytest.raises(Exception, match="No artifact"):
+            await C.get_threshold_stability_curve(ds, ch, user_id="bob")
+        with pytest.raises(Exception, match="No artifact"):
+            await C.get_topological_skeleton(ds, ch, user_id="bob")
+        with pytest.raises(Exception, match="No artifact"):
+            await C.get_cluster_signal_matrix(ds, ch, user_id="bob")
+
+    asyncio.run(run())
+
+
+def test_curated_sweep_rejects_missing_prepared_config(store_env):
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.store import get_object_store
+
+    async def run():
+        df = pd.read_csv(PENGUINS)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        store = get_object_store()
+        store.put("up/p.parquet", buf.getvalue())
+        ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"]["datasetId"]
+        with pytest.raises(Exception, match="Validated config required"):
+            await C.run_topological_sweep(ds)
 
     asyncio.run(run())
 
@@ -209,11 +287,105 @@ def test_sync_to_pulsar_one_new_snapshot(store_env):
         b2 = io.BytesIO()
         df2.to_parquet(b2, index=False)
         store.put("up/mod.parquet", b2.getvalue())
-        rsy = json.loads(await C.sync_to_pulsar(ds, "up/mod.parquet", config=_penguins_cfg()))
+        rsy = json.loads(await C.sync_to_pulsar(ds, "up/mod.parquet"))
         assert rsy["structured"]["newDatasetId"] != ds  # ONE new-fingerprint snapshot
+        assert rsy["structured"]["recommendedNextTool"] == "prepare_sweep"
+        prep = json.loads(await C.prepare_sweep(rsy["structured"]["newDatasetId"], intent="synced_penguins"))
+        rsy = json.loads(
+            await C.run_topological_sweep(
+                rsy["structured"]["newDatasetId"], config=prep["structured"]["config"]
+            )
+        )
         run_job(q.claim(), queue=q, store=store)
         st = json.loads(await C.get_sweep_status(rsy["structured"]["jobId"]))
         assert st["structured"]["status"] == "done"
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# curated config/preprocessing helpers run over the tenant-scoped object store
+# --------------------------------------------------------------------------- #
+def test_curated_preprocessing_helpers(store_env):
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.store import get_object_store
+
+    store = get_object_store()
+
+    async def run():
+        df = pd.read_csv(PENGUINS)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        store.put("up/p.parquet", buf.getvalue())
+        ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"]["datasetId"]
+
+        # workflow guide is stateless + curated-accurate (names only curated tools)
+        wf = json.loads(await C.get_workflow_guide())
+        assert "prepare_sweep" in wf["markdown"]
+
+        # recommend / probe load via the object store (penguins has missing values)
+        rec = json.loads(await C.recommend_preprocessing(ds))
+        assert rec["markdown"] and rec["structured"]
+        pc = json.loads(await C.probe_columns(ds, ["species", "bill_length_mm"]))
+        assert pc["structured"]
+
+        # a known-good config (from prepare_sweep) validates PASS
+        prep = json.loads(await C.prepare_sweep(ds, intent="penguins_demo"))
+        vok = json.loads(await C.validate_preprocessing_config(ds, prep["structured"]["configYaml"]))
+        assert vok["structured"]["valid"] is True
+
+    asyncio.run(run())
+
+
+def test_curated_preprocessing_is_tenant_scoped(store_env):
+    """The ported tools take user_id and must not resolve another tenant's dataset."""
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.store import get_object_store
+
+    store = get_object_store()
+
+    async def run():
+        df = pd.read_csv(PENGUINS)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        store.put("up/p.parquet", buf.getvalue())
+        ds = json.loads(await C.ingest_dataset("up/p.parquet", user_id="alice"))["structured"]["datasetId"]
+
+        assert json.loads(await C.recommend_preprocessing(ds, user_id="alice"))["structured"]
+        with pytest.raises(Exception, match="not found"):
+            await C.recommend_preprocessing(ds, user_id="bob")
+
+    asyncio.run(run())
+
+
+def test_curated_exclude_column_via_create_refine_prepare(store_env):
+    """The discoverable exclude-a-column path: create_config -> refine_config(drop_columns) ->
+    prepare_sweep. Proves the excluded column is actually dropped from the validated config (the
+    session that 'assumed' species was excluded was silently wrong — this is the real fix)."""
+    import yaml as _yaml
+
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.store import get_object_store
+
+    store = get_object_store()
+
+    async def run():
+        df = pd.read_csv(PENGUINS)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        store.put("up/p.parquet", buf.getvalue())
+        ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"]["datasetId"]
+
+        cc = json.loads(await C.create_config(ds))
+        cfg_yaml = cc["structured"]["config_yaml"]
+        assert "drop_columns" in cfg_yaml  # the exclusion key is discoverable in the built config
+
+        rc = json.loads(await C.refine_config(cfg_yaml, {"preprocessing.drop_columns": ["species"]}))
+        assert rc["structured"]["status"] == "ok"
+        refined = _yaml.safe_load(rc["structured"]["config_yaml"])
+
+        prep = json.loads(await C.prepare_sweep(ds, config=refined))
+        assert "species" in prep["structured"]["config"]["preprocessing"]["drop_columns"]
 
     asyncio.run(run())
 

@@ -17,10 +17,14 @@ import dataclasses
 import io
 import json
 
+import numpy as np
 import pandas as pd
+import yaml
 from fastmcp.exceptions import ToolError
 
 from pulsar.artifacts import load_artifact
+from pulsar.mcp.config_tools import _build_initial_config_yaml, validate_config_yaml
+from pulsar.mcp.config_refs import load_config_ref
 from pulsar.mcp.datasets import (
     DatasetAdmissionError,
     data_key,
@@ -28,7 +32,11 @@ from pulsar.mcp.datasets import (
     ingest_dataframe,
     load_dataset,
 )
-from pulsar.mcp.diagnostics import diagnose_model
+from pulsar.mcp.diagnostics import (
+    _build_graph_summary,
+    _skeleton_graph_payload,
+    diagnose_model,
+)
 from pulsar.mcp.interpreter import (
     build_feature_evidence_index,
     cluster_profile_payload,
@@ -36,6 +44,7 @@ from pulsar.mcp.interpreter import (
     comparison_to_markdown,
     feature_signal_payload,
     resolve_clusters,
+    signal_matrix_payload,
 )
 from pulsar.mcp.jobs import config_hash, get_job_queue
 from pulsar.mcp.payloads import (
@@ -43,16 +52,19 @@ from pulsar.mcp.payloads import (
     cluster_profile_payload_to_markdown,
     cluster_result_payload,
     feature_signal_payload_to_markdown,
+    singleton_count_at_threshold,
     summary_evidence_payload_to_markdown,
 )
+from pulsar.mcp.preprocessing import _calibrate_processed_space
 from pulsar.mcp.store import get_object_store
-
-# A 3D PCA dim is included so manifold3d has a real 3-D projection.
-DEFAULT_SWEEP_CONFIG = {
-    "sweep": {"pca": {"dimensions": [2, 3], "seed": [42]}, "ball_mapper": {"epsilon": [0.5]}},
-    "cosmic_graph": {"construction_threshold": "auto"},
-    "output": {"n_reps": 4},
-}
+from pulsar.mcp.thresholds import (
+    THRESHOLD_CANDIDATE_POLICIES,
+    agent_threshold_options,
+    component_mass_profile,
+    mass_profile_hint,
+    prepare_threshold_graph,
+    structural_breakpoints,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -94,6 +106,21 @@ def _safe_clusters(view, method: str = "auto", max_k: int = 15):
         return resolve_clusters(view, method=method, max_k=max_k)
     except Exception:
         return None
+
+
+def _dataset_validation_path(store, user_id: str, dataset_id: str) -> str:
+    return str(store.root / data_key(user_id, dataset_id))
+
+
+def _validated_config_for_dataset(
+    config: dict, *, dataset_id: str, user_id: str, store
+) -> tuple[dict, str]:
+    data_path = _dataset_validation_path(store, user_id, dataset_id)
+    report = validate_config_yaml(yaml.safe_dump(config, sort_keys=False), dataset_path=data_path)
+    if not report.ok or report.normalized_yaml is None:
+        issues = "; ".join(f"{i.path}: {i.message}" for i in report.issues)
+        raise ToolError(f"Config validation failed for dataset {dataset_id}: {issues}")
+    return yaml.safe_load(report.normalized_yaml), report.normalized_yaml
 
 
 # --------------------------------------------------------------------------- #
@@ -171,6 +198,57 @@ def _diagnose_markdown(gm) -> str:
     )
 
 
+def _sparse_threshold_curve(
+    thresholds: list[float],
+    component_counts: list[int],
+    singleton_counts: list[int],
+    *,
+    max_points: int,
+) -> list[dict]:
+    n_points = len(thresholds)
+    if n_points == 0:
+        return []
+    indices = (
+        range(n_points)
+        if n_points <= max_points
+        else sorted({int(i) for i in np.linspace(0, n_points - 1, num=max_points)})
+    )
+    return [
+        {
+            "threshold": thresholds[i],
+            "component_count": component_counts[i],
+            "singleton_count": singleton_counts[i],
+        }
+        for i in indices
+    ]
+
+
+def _threshold_agent_readout(selected_profile: dict | None, breakpoints: list[dict]) -> str:
+    if not selected_profile:
+        return "No threshold mass profile was available."
+
+    largest_pct = float(selected_profile["largest_component_fraction"]) * 100
+    small_pct = float(selected_profile["small_component_mass_fraction"]) * 100
+    large_breakpoints = [row for row in breakpoints if row["event"] == "large_component_transition"]
+
+    if largest_pct >= 95:
+        if large_breakpoints:
+            return (
+                f"Auto threshold is stable but giant-component dominated ({largest_pct:.2f}% of rows in the largest component); "
+                "inspect large structural breakpoints before naming cohorts."
+            )
+        return (
+            f"Auto threshold is stable but produces one giant component containing {largest_pct:.2f}% of rows; "
+            f"only {small_pct:.2f}% of rows sit in small components."
+        )
+    if large_breakpoints:
+        return (
+            "Auto threshold exposes nontrivial component structure and large threshold transitions "
+            "are available for parameter discussion."
+        )
+    return "Auto threshold exposes nontrivial component structure without large split markers."
+
+
 # --------------------------------------------------------------------------- #
 # ingest / characterize / sweep / status
 # --------------------------------------------------------------------------- #
@@ -209,13 +287,73 @@ async def characterize_dataset(dataset_id: str, user_id: str = "local") -> str:
     return _result(md, payload)
 
 
+async def prepare_sweep(
+    dataset_id: str,
+    intent: str = "",
+    config: dict | None = None,
+    config_ref: str = "",
+    user_id: str = "local",
+) -> str:
+    """Create/reuse a dataset-calibrated config and validate it before any sweep."""
+    store = get_object_store()
+    if not dataset_exists(dataset_id, store, user_id=user_id):
+        raise ToolError(f"dataset {dataset_id} not found; ingest it first.")
+
+    df = load_dataset(dataset_id, store, user_id=user_id)
+    data_path = _dataset_validation_path(store, user_id, dataset_id)
+    source = "provided_config" if config is not None else "config_ref" if config_ref else "create_config"
+
+    if config is None and config_ref:
+        try:
+            config_yaml = load_config_ref(
+                store, user_id=user_id, dataset_id=dataset_id, config_ref=config_ref
+            )
+        except FileNotFoundError as e:
+            raise ToolError(str(e)) from e
+        config = yaml.safe_load(config_yaml)
+
+    if config is None:
+        from pulsar.analysis.characterization import characterize_dataset as _char
+
+        profile = _char(data_path, dataframe=df)
+        geo = dataclasses.asdict(profile)
+        processed = _calibrate_processed_space(df, geo["column_profiles"], geo["n_samples"], data_path)
+        config_yaml = _build_initial_config_yaml(
+            geo,
+            data_path=data_path,
+            run_name=intent.strip() or "initial_sweep",
+            processed_profile=processed,
+        )
+        config = yaml.safe_load(config_yaml)
+
+    validated_config, normalized_yaml = _validated_config_for_dataset(
+        config, dataset_id=dataset_id, user_id=user_id, store=store
+    )
+    ch = config_hash(validated_config)
+    structured = {
+        "status": "ok",
+        "datasetId": dataset_id,
+        "configHash": ch,
+        "config": validated_config,
+        "configYaml": normalized_yaml,
+        "source": source,
+        "phaseState": "validated",
+    }
+    md = f"Prepared dataset `{dataset_id}` for sweeping with validated config `{ch}`."
+    return _result(md, structured)
+
+
 async def run_topological_sweep(dataset_id: str, config: dict | None = None, user_id: str = "local") -> str:
     """Enqueue an async sweep (NEVER blocks). Returns a job_id + the artifact_ref to poll for."""
     store = get_object_store()
     queue = get_job_queue()
     if not dataset_exists(dataset_id, store, user_id=user_id):
         raise ToolError(f"dataset {dataset_id} not found; ingest it first.")
-    cfg = config or DEFAULT_SWEEP_CONFIG
+    if config is None:
+        raise ToolError(
+            "Validated config required. Call prepare_sweep(dataset_id) first and pass its returned config to run_topological_sweep."
+        )
+    cfg, _ = _validated_config_for_dataset(config, dataset_id=dataset_id, user_id=user_id, store=store)
     ch = config_hash(cfg)
     job_id = queue.enqueue(
         {
@@ -364,15 +502,214 @@ async def compare_clusters(
     return _result(md, {"comparison": results, "clusterA": cluster_a, "clusterB": cluster_b})
 
 
+async def get_threshold_stability_curve(
+    dataset_id: str,
+    config_hash: str,
+    detail: str = "summary",
+    threshold_candidate_policy: str = "balanced",
+    user_id: str = "local",
+) -> str:
+    """H0 component stability vs edge-weight threshold off a persisted artifact. viz: threshold_stability."""
+    if detail not in {"summary", "full"}:
+        raise ToolError("detail must be one of ['summary', 'full']")
+    if threshold_candidate_policy not in THRESHOLD_CANDIDATE_POLICIES:
+        raise ToolError(
+            "threshold_candidate_policy must be one of "
+            f"{sorted(THRESHOLD_CANDIDATE_POLICIES)}, got '{threshold_candidate_policy}'"
+        )
+
+    view = _load_view(user_id, dataset_id, config_hash, get_object_store())
+    adj = view.weighted_adjacency
+    stability = view.stability_result
+    threshold_graph = prepare_threshold_graph(adj)
+    thresholds = [float(t) for t in stability.thresholds]
+    component_counts = [int(c) for c in stability.component_counts]
+    resolved_construction_threshold = float(view.resolved_construction_threshold)
+    optimal_threshold = float(stability.optimal_threshold)
+    matches_current = bool(np.isclose(resolved_construction_threshold, optimal_threshold))
+
+    row_max = adj.max(axis=1)
+    ts = np.asarray(thresholds, dtype=adj.dtype)
+    singleton_counts = [int(c) for c in (row_max[None, :] <= ts[:, None]).sum(axis=1)]
+
+    plateau_limit = 10 if detail == "full" else 4
+    plateaus = []
+    for p in stability.top_k_plateaus(plateau_limit):
+        singleton_count = singleton_count_at_threshold(adj, float(p.midpoint))
+        mass_profile = component_mass_profile(threshold_graph, float(p.midpoint))
+        plateaus.append(
+            {
+                "start": float(p.start_threshold),
+                "end": float(p.end_threshold),
+                "component_count": int(p.component_count),
+                "length": float(p.length),
+                "midpoint": float(p.midpoint),
+                "singleton_count": singleton_count,
+                "singleton_fraction": round(singleton_count / max(int(adj.shape[0]), 1), 4),
+                "component_mass_profile": mass_profile,
+                "interpretation_hint": mass_profile_hint(mass_profile),
+            }
+        )
+
+    breakpoints = structural_breakpoints(threshold_graph, thresholds, component_counts)
+    threshold_options = agent_threshold_options(
+        threshold_graph,
+        stability.top_k_plateaus(20 if detail == "full" else 10),
+        thresholds,
+        component_counts,
+        policy=threshold_candidate_policy,
+        max_candidates=12 if detail == "full" else 7,
+    )
+    selected_profile = plateaus[0].get("component_mass_profile") if plateaus else None
+    if detail == "summary":
+        for p in plateaus:
+            p.pop("component_mass_profile", None)
+        for list_key in ["stable_plateau_candidates", "transition_adjacent_candidates", "candidates"]:
+            for cand in threshold_options.get(list_key, []):
+                cand.pop("component_mass_profile", None)
+                cand.pop("mass_shape", None)
+
+    curve_sample = _sparse_threshold_curve(
+        thresholds,
+        component_counts,
+        singleton_counts,
+        max_points=25 if detail == "full" else 15,
+    )
+    structured = {
+        "status": "ok",
+        "detail": detail,
+        "datasetId": dataset_id,
+        "configHash": config_hash,
+        "resolved_construction_threshold": resolved_construction_threshold,
+        "optimal_threshold": optimal_threshold,
+        "matches_current_threshold": matches_current,
+        "threshold_guidance": (
+            "Current graph construction matches the stability optimum."
+            if matches_current
+            else "Stability optimum differs from the current constructed graph; treat it as a rerun candidate, not a change to the fitted graph."
+        ),
+        "agent_readout": _threshold_agent_readout(selected_profile, breakpoints),
+        "agent_threshold_options": threshold_options,
+        "plateaus": plateaus,
+        "structural_breakpoints": breakpoints,
+        "structural_breakpoints_guidance": (
+            "Breakpoints are capped structural transition candidates ranked first by large-component transitions, "
+            "then by the smaller mass that actually joins or splits."
+        ),
+        "curve_point_count": len(thresholds),
+        "curve_sample": curve_sample,
+        "curve_sample_omitted": max(len(thresholds) - len(curve_sample), 0),
+        "curve_sample_guidance": (
+            "curve_sample is an evenly spaced sketch of the full threshold curve. "
+            "Use detail='full' only when exact per-threshold arrays are needed."
+        ),
+    }
+    if detail == "full":
+        structured["thresholds"] = thresholds
+        structured["component_counts"] = component_counts
+        structured["singleton_counts"] = singleton_counts
+    md = (
+        f"Threshold stability for `{dataset_id}` / `{config_hash}`: "
+        f"optimal {optimal_threshold:.4f}, construction {resolved_construction_threshold:.4f}. "
+        f"{structured['agent_readout']}"
+    )
+    return _result(md, structured, _viz_threshold_stability(view))
+
+
+async def get_topological_skeleton(
+    dataset_id: str,
+    config_hash: str,
+    detail: str = "summary",
+    max_edges: int = 100,
+    max_nodes: int = 100,
+    user_id: str = "local",
+) -> str:
+    """Structured graph connectivity off a persisted artifact."""
+    if detail not in {"summary", "nodes", "edges", "full", "full_nodes"}:
+        raise ToolError(
+            "detail must be one of ['summary', 'nodes', 'edges', 'full', 'full_nodes']"
+        )
+    if max_edges < 1:
+        raise ToolError(f"max_edges must be >= 1, got '{max_edges}'")
+    if max_nodes < 1:
+        raise ToolError(f"max_nodes must be >= 1, got '{max_nodes}'")
+    view = _load_view(user_id, dataset_id, config_hash, get_object_store())
+    graph_summary = _build_graph_summary(view)
+    structured = {
+        "status": "ok",
+        "datasetId": dataset_id,
+        "configHash": config_hash,
+        "config_yaml_omitted": True,
+        "config_yaml_unavailable": (
+            "Curated HTTP skeleton reads persisted artifacts only; config YAML is not stored in the artifact."
+        ),
+        "resolved_construction_threshold": graph_summary.get("resolved_construction_threshold"),
+        "graph": _skeleton_graph_payload(graph_summary, detail=detail, max_edges=max_edges, max_nodes=max_nodes),
+        "recommended_next_tools": [
+            "diagnose_cosmic_graph",
+            "get_threshold_stability_curve",
+            "generate_cluster_dossier",
+        ],
+    }
+    graph = structured["graph"]
+    md = (
+        f"Topological skeleton for `{dataset_id}` / `{config_hash}`: "
+        f"{graph['node_count']} nodes, {graph['edge_count']} edges, {graph.get('component_count')} components."
+    )
+    return _result(md, structured, _viz_cosmic_graph(view, view._cluster_labels))
+
+
+async def get_cluster_signal_matrix(
+    dataset_id: str,
+    config_hash: str,
+    cluster_ids: list[int] | None = None,
+    include_context_tier: bool = False,
+    max_clusters: int = 8,
+    return_markdown: bool = True,
+    user_id: str = "local",
+) -> str:
+    """Cross-cluster feature-signal matrix off a persisted artifact."""
+    if max_clusters < 1:
+        raise ToolError(f"max_clusters must be >= 1, got '{max_clusters}'")
+    view = _load_view(user_id, dataset_id, config_hash, get_object_store())
+    cr = _safe_clusters(view)
+    if cr is None:
+        raise ToolError("No reliable structure detected; run generate_cluster_dossier first.")
+    fei = build_feature_evidence_index(view, view.data, cr.labels)
+    matrix = signal_matrix_payload(
+        fei,
+        cluster_ids=cluster_ids,
+        include_context_tier=include_context_tier,
+        max_clusters=max_clusters,
+        return_markdown=return_markdown,
+    )
+    structured = {
+        "status": "ok",
+        "datasetId": dataset_id,
+        "configHash": config_hash,
+        "cluster_result": cluster_result_payload(cr),
+        "signal_matrix": matrix,
+    }
+    md = (
+        matrix["markdown_report"]
+        if return_markdown and isinstance(matrix, dict)
+        else "Cluster signal matrix computed."
+    )
+    return _result(md, structured)
+
+
 async def sync_to_pulsar(
     parent_dataset_id: str,
     sandbox_file_ref: str,
-    config: dict | None = None,
     user_id: str = "local",
 ) -> str:
-    """D13 explicit sync: register a sandbox-modified file as a NEW snapshot + enqueue ONE sweep."""
+    """D13 explicit sync: register a sandbox-modified file as a NEW snapshot.
+
+    Sweeps are phase-gated: callers must run prepare_sweep(newDatasetId) before
+    run_topological_sweep. This prevents derived datasets from falling back to a
+    generic default config.
+    """
     store = get_object_store()
-    queue = get_job_queue()
     raw = store.get(sandbox_file_ref)
     df = (
         pd.read_parquet(io.BytesIO(raw))
@@ -386,38 +723,54 @@ async def sync_to_pulsar(
     except DatasetAdmissionError as e:
         raise ToolError(str(e))
     new_id = meta["datasetId"]
-    cfg = config or DEFAULT_SWEEP_CONFIG
-    ch = config_hash(cfg)
-    job_id = queue.enqueue(
-        {
-            "user_id": user_id,
-            "dataset_id": new_id,
-            "config_hash": ch,
-            "data_ref": data_key(user_id, new_id),
-            "config": cfg,
-        }
-    )
     structured = {
+        "status": "synced",
         "newDatasetId": new_id,
-        "jobId": job_id,
-        "artifactRef": {"userId": user_id, "datasetId": new_id, "configHash": ch},
+        "parentDatasetId": parent_dataset_id,
+        "recommendedNextTool": "prepare_sweep",
     }
     md = (
-        f"Synced sandbox file → new snapshot `{new_id}` (parent `{parent_dataset_id}`); "
-        f"sweep enqueued (`{job_id}`)."
+        f"Synced sandbox file → new snapshot `{new_id}` (parent `{parent_dataset_id}`). "
+        "Call `prepare_sweep` on the new dataset before sweeping."
     )
     return _result(md, structured)
 
 
+# Tenant-safe config/preprocessing helpers + workflow guide (object-store loader, user_id-scoped).
+# These give the HTTP agent self-correction parity with the stdio surface; see curated_preprocessing.py.
+from pulsar.mcp.tools.curated_preprocessing import (  # noqa: E402
+    create_config,
+    get_workflow_guide,
+    probe_columns,
+    recommend_preprocessing,
+    refine_config,
+    repair_preprocessing_config,
+    validate_config,
+    validate_preprocessing_config,
+)
+
 CURATED_TOOLS_LIST = [
     ingest_dataset,
     characterize_dataset,
+    prepare_sweep,
     run_topological_sweep,
     get_sweep_status,
     diagnose_cosmic_graph,
+    get_threshold_stability_curve,
+    get_topological_skeleton,
     generate_cluster_dossier,
     get_feature_signal,
     get_cluster_profile,
+    get_cluster_signal_matrix,
     compare_clusters,
     sync_to_pulsar,
+    # Config build/edit/validate + self-correction + workflow (tenant-safe ports).
+    get_workflow_guide,
+    create_config,
+    refine_config,
+    validate_config,
+    recommend_preprocessing,
+    validate_preprocessing_config,
+    repair_preprocessing_config,
+    probe_columns,
 ]
