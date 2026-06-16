@@ -148,11 +148,15 @@ def dump_artifact(model, *, dataset_id: str, config_hash: str, prefix: str, stor
     store.put(data_ref, _df_parquet_bytes(model._data))
 
     sr = model._stability_result
-    stability_curve = {
-        "optimalThreshold": float(sr.optimal_threshold),
-        "thresholds": [float(t) for t in sr.thresholds],
-        "componentCounts": [int(c) for c in sr.component_counts],
-    }
+    stability_curve = (
+        {
+            "optimalThreshold": float(sr.optimal_threshold),
+            "thresholds": [float(t) for t in sr.thresholds],
+            "componentCounts": [int(c) for c in sr.component_counts],
+        }
+        if sr is not None
+        else None
+    )
 
     return {
         "schemaVersion": SCHEMA_VERSION,
