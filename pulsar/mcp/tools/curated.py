@@ -128,17 +128,33 @@ def _validated_config_for_dataset(
 # viz builders (H0 vocabulary — D15)
 # --------------------------------------------------------------------------- #
 def _project_3d(embeddings):
+    """Deterministic 3-D projection of the widest embedding for manifold3d.
+
+    Returns ``(points, method)``:
+      * >3 dims → ``PCA`` to 3 components (deterministic; sklearn dep), ``method="pca"``.
+      * ≤3 dims → pass through (zero-padded to 3 cols), ``method="raw"`` (no real DR).
+
+    The old behaviour SLICED the first 3 dims — discarding variance and mislabelling
+    it as a projection. PCA preserves the dominant axes of variation instead.
+    """
     import numpy as np
 
     if not embeddings:
         return None
     emb = np.asarray(max(embeddings, key=lambda a: a.shape[1]), dtype=float)
     d = emb.shape[1]
-    if d >= 3:
-        return emb[:, :3]
+    if d > 3:
+        from sklearn.decomposition import PCA
+
+        # Deterministic: PCA with a fixed solver + seed. ``svd_solver="full"`` avoids
+        # the randomized solver entirely; ``random_state`` is fixed for belt-and-braces.
+        pts = PCA(n_components=3, svd_solver="full", random_state=0).fit_transform(emb)
+        return np.asarray(pts, dtype=float), "pca"
+    if d == 3:
+        return emb, "raw"
     if d == 2:
-        return np.column_stack([emb, np.zeros(len(emb))])
-    return np.column_stack([emb, np.zeros((len(emb), 2))])
+        return np.column_stack([emb, np.zeros(len(emb))]), "raw"
+    return np.column_stack([emb, np.zeros((len(emb), 2))]), "raw"
 
 
 def _viz_cosmic_graph(view, labels, max_edges: int = 2500, provenance=None):
@@ -166,15 +182,17 @@ def _viz_threshold_stability(view):
 
 
 def _viz_manifold3d(view, labels):
-    pts = _project_3d(view._embeddings)
-    if pts is None:
+    projected = _project_3d(view._embeddings)
+    if projected is None:
         return None
+    pts, method = projected
     lab = [int(x) for x in labels] if labels is not None else [0] * view.n
     return {
         "kind": "manifold3d",
         "points": [[float(x) for x in row] for row in pts],
         "cluster": lab,
         "ids": list(range(view.n)),
+        "method": method,
     }
 
 

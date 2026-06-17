@@ -37,6 +37,18 @@ CONTEXT_K = 4
 # n-1-ish backbone for meaningful local structure. Tunable single source of truth.
 EDGE_BUDGET_PER_NODE = 6
 
+# Fixed seed + iteration count for the per-component force layout. Determinism is a
+# hard contract (same fitted view → identical coords), so NOTHING here may be random.
+LAYOUT_SEED = 42
+LAYOUT_ITERATIONS = 60
+# Packing geometry. Components are placed on a deterministic Archimedean spiral with
+# bounding circles that NEVER overlap; the giant (largest) sits at the origin.
+_PACK_PADDING = 0.25       # extra gap between adjacent bounding circles (in radius units)
+_PACK_SPIRAL_B = 1.0       # spiral tightness; larger = looser turns
+# Singleton periphery band: tiled on concentric rings OUTSIDE every packed component.
+_SINGLETON_BAND_GAP = 1.5  # gap (radius units) between the packed region and ring 1
+_SINGLETON_RING_STEP = 0.6 # radial spacing between successive singleton rings
+
 
 def _edge_budget(n_nodes: int) -> int:
     return EDGE_BUDGET_PER_NODE * max(n_nodes, 1)
@@ -167,6 +179,190 @@ def _context_edges(
 
 
 # --------------------------------------------------------------------------- #
+# Layout — server-precomputed island layout (D3-disjoint analog, deterministic)
+# --------------------------------------------------------------------------- #
+def _component_force_layout(
+    members: list[int], member_edges: list[tuple[int, int]]
+) -> dict[int, tuple[float, float]]:
+    """Seeded force layout of ONE multi-node component, centred on its centroid.
+
+    Uses ``nx.spring_layout`` with a FIXED ``seed`` and ``iterations`` so the same
+    component (same node set + edge set) always yields identical coordinates.
+    """
+    g = nx.Graph()
+    g.add_nodes_from(members)
+    g.add_edges_from(member_edges)
+    # spring_layout is deterministic given a fixed seed AND a deterministic initial
+    # node ordering — networkx seeds its RNG from ``seed`` and lays out in graph
+    # insertion order, which we control via the sorted ``members`` list above.
+    pos = nx.spring_layout(g, seed=LAYOUT_SEED, iterations=LAYOUT_ITERATIONS)
+    coords = {int(node): (float(xy[0]), float(xy[1])) for node, xy in pos.items()}
+    # Centre on the centroid so the bounding radius below is measured about (0,0).
+    cx = sum(x for x, _ in coords.values()) / len(coords)
+    cy = sum(y for _, y in coords.values()) / len(coords)
+    return {node: (x - cx, y - cy) for node, (x, y) in coords.items()}
+
+
+def _bounding_radius(local: dict[int, tuple[float, float]]) -> float:
+    """Radius of the smallest origin-centred circle enclosing ``local`` coords.
+
+    ``local`` is already centroid-centred. For a degenerate (single point at origin
+    after centring) component we fall back to a small positive radius proportional to
+    √size so packing still leaves room.
+    """
+    if not local:
+        return 0.0
+    r = max((x * x + y * y) ** 0.5 for x, y in local.values())
+    # Floor proportional to √size: a tight/degenerate component still claims space.
+    return max(r, 0.5 * (len(local) ** 0.5))
+
+
+def _spiral_pack_centers(radii: list[float]) -> list[tuple[float, float]]:
+    """Place components (sorted by size DESC → ``radii`` index 0 = giant) so their
+    bounding circles never overlap. Giant at the origin; the rest on a deterministic
+    Archimedean spiral, each pushed outward until it clears ALL already-placed circles.
+
+    Returns one ``(cx, cy)`` per input radius, in the same order. Deterministic: no
+    randomness, fixed spiral parameters.
+    """
+    centers: list[tuple[float, float]] = []
+    if not radii:
+        return centers
+    centers.append((0.0, 0.0))  # giant at origin
+    placed: list[tuple[float, float, float]] = [(0.0, 0.0, radii[0])]
+
+    # Archimedean spiral r(θ) = b·θ. We advance θ in small steps and, for each new
+    # component, find the first angle whose radial distance also clears every placed
+    # circle (so the spiral only ever expands outward, never collides).
+    theta = 0.0
+    d_theta = 0.35
+    for i in range(1, len(radii)):
+        ri = radii[i]
+        while True:
+            theta += d_theta
+            rad = _PACK_SPIRAL_B * theta
+            cx = rad * float(np.cos(theta))
+            cy = rad * float(np.sin(theta))
+            ok = True
+            for (px, py, pr) in placed:
+                dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                if dist < (pr + ri + _PACK_PADDING):
+                    ok = False
+                    break
+            if ok:
+                centers.append((cx, cy))
+                placed.append((cx, cy, ri))
+                break
+    return centers
+
+
+def _outer_packed_radius(
+    centers: list[tuple[float, float]], radii: list[float]
+) -> float:
+    """Farthest extent (center distance + bounding radius) of any packed component."""
+    if not centers:
+        return 0.0
+    return max(
+        ((cx * cx + cy * cy) ** 0.5) + r
+        for (cx, cy), r in zip(centers, radii)
+    )
+
+
+def compute_island_layout(
+    nodes: list[dict],
+    edges: list[dict],
+    components: list[dict],
+) -> dict[int, tuple[float, float]]:
+    """Deterministic island layout: per-component force layout + non-overlapping
+    spiral packing of components + a tidy singleton periphery band.
+
+    Args:
+        nodes: emitted node dicts (``id``, ``component``, ...).
+        edges: emitted edge dicts (``u``, ``v``, ``role``, ...) — both backbone and
+            context edges feed the per-component force sim.
+        components: ``components_meta`` (``id``, ``size``, ``isSingleton``), size desc.
+
+    Returns ``{node_id: (x, y)}`` normalized into a stable unit-ish coordinate space
+    centred on the giant. No unseeded randomness anywhere → same input, same output.
+    """
+    comp_of = {int(nd["id"]): int(nd["component"]) for nd in nodes}
+    members_by_comp: dict[int, list[int]] = {}
+    for nd in nodes:
+        members_by_comp.setdefault(int(nd["component"]), []).append(int(nd["id"]))
+    for cid in members_by_comp:
+        members_by_comp[cid].sort()  # deterministic node ordering for the sim
+
+    edges_by_comp: dict[int, list[tuple[int, int]]] = {}
+    for e in edges:
+        u, v = int(e["u"]), int(e["v"])
+        cu = comp_of.get(u)
+        if cu is not None and cu == comp_of.get(v):
+            edges_by_comp.setdefault(cu, []).append((u, v))
+
+    # Partition multi-node components (force-sim + pack) from singletons (periphery).
+    multi = [c for c in components if int(c["size"]) > 1]
+    singleton_comp_ids = [int(c["id"]) for c in components if int(c["size"]) == 1]
+    # Already size-desc in components_meta; sort defensively (size desc, id asc).
+    multi.sort(key=lambda c: (-int(c["size"]), int(c["id"])))
+
+    local_layouts: dict[int, dict[int, tuple[float, float]]] = {}
+    radii: list[float] = []
+    for c in multi:
+        cid = int(c["id"])
+        local = _component_force_layout(
+            members_by_comp.get(cid, []), edges_by_comp.get(cid, [])
+        )
+        local_layouts[cid] = local
+        radii.append(_bounding_radius(local))
+
+    centers = _spiral_pack_centers(radii)
+
+    positions: dict[int, tuple[float, float]] = {}
+    for (c, (cx, cy)) in zip(multi, centers):
+        cid = int(c["id"])
+        for node, (x, y) in local_layouts[cid].items():
+            positions[node] = (cx + x, cy + y)
+
+    # Singletons: tidy concentric periphery rings OUTSIDE every packed component.
+    if singleton_comp_ids:
+        # Singletons map 1:1 to their single member node (sorted for determinism).
+        singleton_nodes = sorted(
+            members_by_comp.get(cid, [cid])[0] for cid in singleton_comp_ids
+        )
+        outer = _outer_packed_radius(centers, radii)
+        base = outer + _SINGLETON_BAND_GAP
+        idx = 0
+        ring = 0
+        while idx < len(singleton_nodes):
+            ring_r = base + ring * _SINGLETON_RING_STEP
+            # Circumference grows with radius → more slots per outer ring.
+            capacity = max(1, int(round(2.0 * np.pi * ring_r)))
+            count = min(capacity, len(singleton_nodes) - idx)
+            for j in range(count):
+                ang = 2.0 * np.pi * (j / count)
+                node = singleton_nodes[idx + j]
+                positions[node] = (
+                    ring_r * float(np.cos(ang)),
+                    ring_r * float(np.sin(ang)),
+                )
+            idx += count
+            ring += 1
+
+    # Any node not placed (defensive — should not happen) → origin.
+    for nd in nodes:
+        positions.setdefault(int(nd["id"]), (0.0, 0.0))
+
+    # Normalize to a stable unit-ish space: scale by max |coord| so coords land in
+    # roughly [-1, 1]. Centred on the giant (origin) already; the client re-normalizes
+    # to the viewport. Deterministic — pure function of the (deterministic) positions.
+    extent = max((abs(x) for x, _ in positions.values()), default=0.0)
+    extent = max(extent, max((abs(y) for _, y in positions.values()), default=0.0))
+    if extent > 0:
+        positions = {nid: (x / extent, y / extent) for nid, (x, y) in positions.items()}
+    return positions
+
+
+# --------------------------------------------------------------------------- #
 # Assembly
 # --------------------------------------------------------------------------- #
 def build_cosmic_graph_payload(view, labels, *, provenance=None) -> dict:
@@ -224,6 +420,13 @@ def build_cosmic_graph_payload(view, labels, *, provenance=None) -> dict:
         for i in range(n_nodes)
     ]
 
+    # Server-precomputed deterministic island layout → x,y on every node.
+    layout = compute_island_layout(nodes, out_edges, components_meta)
+    for nd in nodes:
+        x, y = layout[nd["id"]]
+        nd["x"] = float(x)
+        nd["y"] = float(y)
+
     rendered_edges = len(out_edges)
     pruned_edges = total_edges - rendered_edges
 
@@ -236,6 +439,7 @@ def build_cosmic_graph_payload(view, labels, *, provenance=None) -> dict:
         "totalEdges": total_edges,
         "prunedEdges": pruned_edges,
         "backboneEdges": len(backbone),
+        "layoutSeed": LAYOUT_SEED,
         # Back-compat camelCase flag (the OLD code wrongly emitted snake_case, which
         # never reached the client). True iff anything was pruned.
         "edgesTruncated": pruned_edges > 0,
