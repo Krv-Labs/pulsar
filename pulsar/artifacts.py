@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 SCHEMA_VERSION = 1
+_UNLOADED = object()
 
 
 def pulsar_version() -> str:
@@ -215,11 +216,11 @@ class ArtifactView:
     def __init__(
         self,
         *,
-        weighted_adjacency,
-        cosmic_graph,
-        embeddings,
-        preprocessed_data,
-        data,
+        weighted_adjacency=_UNLOADED,
+        cosmic_graph=_UNLOADED,
+        embeddings=_UNLOADED,
+        preprocessed_data=_UNLOADED,
+        data=_UNLOADED,
         resolved_construction_threshold: float,
         stability_curve: dict | None,
         cluster_labels: list[int],
@@ -229,12 +230,16 @@ class ArtifactView:
         pulsar_version: str | None,
         n: int,
         n_ball_maps: int,
+        artifact: dict | None = None,
+        store=None,
     ) -> None:
-        self._weighted_adjacency = weighted_adjacency
-        self._cosmic_graph = cosmic_graph
-        self._embeddings = embeddings
-        self._preprocessed_data = preprocessed_data
-        self._data = data
+        self._artifact = artifact
+        self._store = store
+        self._weighted_adjacency_cache = weighted_adjacency
+        self._cosmic_graph_cache = cosmic_graph
+        self._embeddings_cache = embeddings
+        self._preprocessed_data_cache = preprocessed_data
+        self._data_cache = data
         self._resolved_construction_threshold = float(resolved_construction_threshold)
         self._stability_curve = stability_curve
         self._cluster_labels = cluster_labels
@@ -249,11 +254,41 @@ class ArtifactView:
     # ThemaRS-compatible read surface ------------------------------------- #
     @property
     def weighted_adjacency(self):
-        return self._weighted_adjacency
+        if self._weighted_adjacency_cache is _UNLOADED:
+            import numpy as np
+            from scipy.sparse import csr_matrix
+
+            wa = self._artifact["weightedAdjacency"]
+            shape = tuple(int(x) for x in wa["shape"])
+            self._weighted_adjacency_cache = csr_matrix(
+                (
+                    np.asarray(wa["data"], dtype=np.float64),
+                    np.asarray(wa["indices"], dtype=np.int64),
+                    np.asarray(wa["indptr"], dtype=np.int64),
+                ),
+                shape=shape,
+            ).toarray().astype(np.float64)
+        return self._weighted_adjacency_cache
+
+    @property
+    def _weighted_adjacency(self):
+        return self.weighted_adjacency
 
     @property
     def cosmic_graph(self):
-        return self._cosmic_graph
+        if self._cosmic_graph_cache is _UNLOADED:
+            import networkx as nx
+
+            G = nx.Graph()
+            G.add_nodes_from(range(self.n))
+            for e in self._artifact["cosmicGraph"]["edges"]:
+                G.add_edge(int(e["u"]), int(e["v"]), weight=float(e["w"]))
+            self._cosmic_graph_cache = G
+        return self._cosmic_graph_cache
+
+    @property
+    def _cosmic_graph(self):
+        return self.cosmic_graph
 
     @property
     def resolved_construction_threshold(self) -> float:
@@ -261,11 +296,36 @@ class ArtifactView:
 
     @property
     def preprocessed_data(self):
-        return self._preprocessed_data
+        if self._preprocessed_data_cache is _UNLOADED:
+            self._preprocessed_data_cache = _load_df_parquet(
+                self._store.get(self._artifact["preprocessedDataRef"])
+            )
+        return self._preprocessed_data_cache
+
+    @property
+    def _preprocessed_data(self):
+        return self.preprocessed_data
 
     @property
     def data(self):
-        return self._data
+        if self._data_cache is _UNLOADED:
+            if self._artifact.get("dataRef"):
+                self._data_cache = _load_df_parquet(self._store.get(self._artifact["dataRef"]))
+            else:
+                self._data_cache = self.preprocessed_data
+        return self._data_cache
+
+    @property
+    def _data(self):
+        return self.data
+
+    @property
+    def _embeddings(self):
+        if self._embeddings_cache is _UNLOADED:
+            self._embeddings_cache = [
+                _load_ndarray(self._store.get(m["ref"])) for m in self._artifact.get("embeddings", [])
+            ]
+        return self._embeddings_cache
 
     @property
     def ball_maps(self):
@@ -277,7 +337,7 @@ class ArtifactView:
         if self._stability_result_cache is None:
             from pulsar._pulsar import find_stable_thresholds
 
-            self._stability_result_cache = find_stable_thresholds(self._weighted_adjacency)
+            self._stability_result_cache = find_stable_thresholds(self.weighted_adjacency)
         return self._stability_result_cache
 
     @property
@@ -287,37 +347,11 @@ class ArtifactView:
 
 def load_artifact(d: dict, store) -> ArtifactView:
     """Reconstruct an ``ArtifactView`` from an artifact dict + blobs in ``store``."""
-    import networkx as nx
-    import numpy as np
-    from scipy.sparse import csr_matrix
-
     wa = d["weightedAdjacency"]
     shape = tuple(int(x) for x in wa["shape"])
     n = shape[0]
-    W = csr_matrix(
-        (
-            np.asarray(wa["data"], dtype=np.float64),
-            np.asarray(wa["indices"], dtype=np.int64),
-            np.asarray(wa["indptr"], dtype=np.int64),
-        ),
-        shape=shape,
-    ).toarray().astype(np.float64)
-
-    G = nx.Graph()
-    G.add_nodes_from(range(n))
-    for e in d["cosmicGraph"]["edges"]:
-        G.add_edge(int(e["u"]), int(e["v"]), weight=float(e["w"]))
-
-    embeddings = [_load_ndarray(store.get(m["ref"])) for m in d.get("embeddings", [])]
-    preprocessed = _load_df_parquet(store.get(d["preprocessedDataRef"]))
-    data = _load_df_parquet(store.get(d["dataRef"])) if d.get("dataRef") else preprocessed
 
     return ArtifactView(
-        weighted_adjacency=W,
-        cosmic_graph=G,
-        embeddings=embeddings,
-        preprocessed_data=preprocessed,
-        data=data,
         resolved_construction_threshold=float(d["resolvedConstructionThreshold"]),
         stability_curve=d.get("stabilityCurve"),
         cluster_labels=d.get("clusterLabels", []),
@@ -327,4 +361,6 @@ def load_artifact(d: dict, store) -> ArtifactView:
         pulsar_version=d.get("pulsarVersion"),
         n=n,
         n_ball_maps=int(d.get("nBallMaps", 0)),
+        artifact=d,
+        store=store,
     )
