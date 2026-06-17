@@ -375,6 +375,7 @@ def test_curated_list_sweeps_discovers_completed_and_is_tenant_scoped(store_env)
     import pulsar.mcp.tools.curated as C
     from pulsar.mcp.jobs import get_job_queue
     from pulsar.mcp.store import get_object_store
+    from pulsar.mcp.sweep_index import sweep_manifest_key
     from pulsar.mcp.worker import run_job
 
     store = get_object_store()
@@ -402,11 +403,24 @@ def test_curated_list_sweeps_discovers_completed_and_is_tenant_scoped(store_env)
         assert json.loads(await C.get_sweep_status(rs["structured"]["jobId"]))["structured"]["status"] == "done"
 
         # Now alice can DISCOVER the completed sweep without the job_id.
+        assert store.exists(sweep_manifest_key("alice", ds, ch))
         listed = json.loads(await C.list_sweeps(ds, user_id="alice"))
         assert listed["structured"]["count"] == 1
         entry = listed["structured"]["sweeps"][0]
+        assert entry["artifactRef"] == {"datasetId": ds, "configHash": ch, "userId": "alice"}
         assert entry["artifact_ref"] == {"datasetId": ds, "configHash": ch, "userId": "alice"}
         assert entry["metrics"] is not None
+        assert entry["structureStatus"] in {"ok", "caution", "no_reliable_structure"}
+
+        # Listing is metadata-only: it must not read the heavyweight artifact body.
+        artifact_path = store.root / "alice" / ds / ch / "artifact.json"
+        artifact_backup = artifact_path.with_suffix(".bak")
+        artifact_path.rename(artifact_backup)
+        try:
+            listed_without_artifact = json.loads(await C.list_sweeps(ds, user_id="alice"))
+        finally:
+            artifact_backup.rename(artifact_path)
+        assert listed_without_artifact["structured"]["count"] == 1
 
         # The same historical artifact_ref can recover the exact validated config parameters.
         cfg = json.loads(await C.get_config(ds, ch, user_id="alice"))["structured"]

@@ -54,6 +54,7 @@ from pulsar.mcp.preprocessing import (
     repair_config,
 )
 from pulsar.mcp.store import get_object_store
+from pulsar.mcp.sweep_index import load_sweep_manifest
 
 
 # --------------------------------------------------------------------------- #
@@ -97,8 +98,9 @@ def _require_dataset(dataset_id: str, user_id: str):
 _CURATED_WORKFLOW = """# Pulsar curated workflow (H0 connected-component analysis)
 
 1. Orient — a dataset is usually already linked. If not, `ingest_dataset` first.
-   Before spending a sweep, call `list_sweeps(dataset_id)`: if a completed sweep already exists, reuse
-   its `artifact_ref` (datasetId + configHash) with the interpret tools and SKIP steps 3-4 entirely.
+   Before spending a new sweep on an existing dataset, use `list_sweeps(dataset_id)` to check for a
+   completed artifact; if one matches, reuse its `artifact_ref` (datasetId + configHash) with the
+   interpret tools and SKIP steps 3-4 entirely.
 2. Characterize (optional) — `characterize_dataset(dataset_id)` to judge whether reliable
    connected-component (H0) structure is plausible before spending a sweep.
 3. Prepare — `prepare_sweep(dataset_id)` with NO `config`. It auto-characterizes, auto-calibrates,
@@ -421,15 +423,15 @@ async def validate_config(config_yaml: str, dataset_id: str = "", user_id: str =
 # pulsar/mcp/worker.py + pulsar/artifacts.py). ``get_sweep_status`` answers "is THIS job
 # done?" but needs the ephemeral ``job_id``; an agent that lost the job_id (new turn,
 # compaction, re-prompt) otherwise has NO way to discover a completed sweep and would
-# re-prepare/re-run the whole pipeline. This tool reads only the persisted artifacts under
+# re-prepare/re-run the whole pipeline. This tool reads only compact sweep manifests under
 # the caller's own ``user_id`` prefix and returns the ``artifact_ref`` (datasetId +
-# configHash) the interpret tools need. No host paths, no file bytes, no mutation.
+# configHash) the interpret tools need. No artifact bytes, no host paths, no mutation.
 # --------------------------------------------------------------------------- #
-async def list_sweeps(dataset_id: str = "", user_id: str = "local") -> str:
+async def list_sweeps(dataset_id: str = "", user_id: str = "local", limit: int = 20) -> str:
     """List COMPLETED topological sweeps already persisted for this user (optionally one dataset).
 
-    CALL THIS BEFORE prepare_sweep / run_topological_sweep: if a completed sweep already exists for
-    the dataset (and config) you want, reuse it instead of re-running the pipeline. Each entry is an
+    Use this before spending a new sweep on an existing dataset: if a completed sweep already exists
+    for the dataset (and config) you want, reuse it instead of re-running the pipeline. Each entry is an
     artifact_ref — pass its `datasetId` + `configHash` straight to the interpret tools
     (diagnose_cosmic_graph, get_threshold_stability_curve, generate_cluster_dossier, etc.) with NO
     new sweep. Pass `dataset_id` to scope to one dataset; omit it to list every completed sweep for
@@ -444,17 +446,26 @@ async def list_sweeps(dataset_id: str = "", user_id: str = "local") -> str:
             "list_sweeps requires an enumerable object store; not available on this backend."
         )
 
+    try:
+        max_items = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        max_items = 20
+
     sweeps: list[dict] = []
     user_root = root / user_id
-    # Artifacts live at {user_id}/{dataset_id}/{config_hash}/artifact.json. The {user_id}/datasets/*
-    # tree (raw snapshots) has no artifact.json, so this glob naturally excludes un-swept datasets.
-    for artifact_path in sorted(user_root.glob("*/*/artifact.json")):
-        rel = artifact_path.relative_to(user_root)
-        ds_id, cfg_hash = rel.parts[0], rel.parts[1]
-        if dataset_id and ds_id != dataset_id:
-            continue
+    # Sweep manifests live at {user_id}/{dataset_id}/sweeps/{config_hash}.json. They are compact
+    # listing metadata; never read the heavyweight artifact.json on this path.
+    manifest_paths = (
+        (user_root / dataset_id / "sweeps").glob("*.json")
+        if dataset_id
+        else user_root.glob("*/sweeps/*.json")
+    )
+    for manifest_path in sorted(manifest_paths):
+        rel = manifest_path.relative_to(user_root)
+        ds_id, cfg_file = rel.parts[0], rel.parts[2]
+        cfg_hash = cfg_file.removesuffix(".json")
         try:
-            art = json.loads(artifact_path.read_text())
+            sweep = load_sweep_manifest(store, user_id=user_id, dataset_id=ds_id, config_hash=cfg_hash)
         except Exception:
             continue
         name = None
@@ -462,25 +473,35 @@ async def list_sweeps(dataset_id: str = "", user_id: str = "local") -> str:
             name = load_dataset_meta(ds_id, store, user_id=user_id).get("name")
         except Exception:
             name = None
+        artifact_ref = sweep.get("artifactRef") or sweep.get("artifact_ref") or {
+            "datasetId": ds_id,
+            "configHash": cfg_hash,
+            "userId": user_id,
+        }
         sweeps.append(
             {
-                "artifact_ref": {"datasetId": ds_id, "configHash": cfg_hash, "userId": user_id},
+                "artifactRef": artifact_ref,
+                "artifact_ref": artifact_ref,
                 "datasetId": ds_id,
                 "configHash": cfg_hash,
                 "datasetName": name,
-                "n": art.get("n"),
-                "metrics": art.get("metrics"),
-                "pulsarVersion": art.get("pulsarVersion"),
-                "createdAt": art.get("createdAt"),
+                "n": sweep.get("n"),
+                "metrics": sweep.get("metrics"),
+                "structureStatus": sweep.get("structureStatus"),
+                "pulsarVersion": sweep.get("pulsarVersion"),
+                "createdAt": sweep.get("createdAt"),
             }
         )
 
     sweeps.sort(key=lambda s: s.get("createdAt") or "", reverse=True)
+    returned = sweeps[:max_items]
     structured = {
         "status": "ok",
         "datasetId": dataset_id or None,
         "count": len(sweeps),
-        "sweeps": sweeps,
+        "returned": len(returned),
+        "limit": max_items,
+        "sweeps": returned,
         "agent_action": (
             "If a sweep matching your target dataset/config is listed, reuse its artifact_ref with the "
             "interpret tools instead of calling prepare_sweep/run_topological_sweep again."
@@ -488,7 +509,7 @@ async def list_sweeps(dataset_id: str = "", user_id: str = "local") -> str:
             else "No completed sweep exists yet — prepare_sweep then run_topological_sweep."
         ),
     }
-    if not sweeps:
+    if not returned:
         scope = f" for dataset `{dataset_id}`" if dataset_id else ""
         md = f"No completed sweeps found{scope}. Prepare and run one before interpreting."
     else:
@@ -500,7 +521,7 @@ async def list_sweeps(dataset_id: str = "", user_id: str = "local") -> str:
             "| dataset | config | n | components | created |",
             "|---|---|---|---|---|",
         ]
-        for s in sweeps:
+        for s in returned:
             m = s.get("metrics") or {}
             comp = m.get("componentCount")
             comp_str = str(int(comp)) if isinstance(comp, (int, float)) else "?"

@@ -29,6 +29,7 @@ from pulsar.config import MAX_ROWS, load_config
 from pulsar.mcp.jobs import FsJobQueue, get_job_queue
 from pulsar.mcp.payloads import cluster_result_payload
 from pulsar.mcp.store import FsObjectStore, artifact_prefix, get_object_store
+from pulsar.mcp.sweep_index import write_sweep_manifest
 
 
 class AdmissionError(Exception):
@@ -199,7 +200,16 @@ def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore 
             store=store,
         )
         artifact["structureStatus"] = structure_status
-        store.put(f"{prefix}/artifact.json", json.dumps(artifact).encode())
+        artifact_key = f"{prefix}/artifact.json"
+        store.put(artifact_key, json.dumps(artifact).encode())
+        write_sweep_manifest(
+            store,
+            artifact,
+            user_id=job["user_id"],
+            dataset_id=job["dataset_id"],
+            config_hash=job["config_hash"],
+            object_key=artifact_key,
+        )
         _raise_if_cancelled(job_id, queue)
 
         artifact_ref = {
