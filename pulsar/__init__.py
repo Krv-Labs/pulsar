@@ -1,6 +1,8 @@
 from pulsar._pulsar import (
     impute_column,
     StandardScaler,
+    JLProjection,
+    jl_grid,
     PCA,
     pca_grid,
     BallMapper,
@@ -30,6 +32,8 @@ __all__ = [
     "impute_column",
     "StandardScaler",
     # Dimensionality reduction
+    "JLProjection",
+    "jl_grid",
     "PCA",
     "pca_grid",
     # Ball Mapper

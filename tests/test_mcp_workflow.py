@@ -755,7 +755,14 @@ def test_run_topological_sweep_returns_json(tmp_path):
     refined = json.loads(
         asyncio.run(
             server.refine_config(
-                config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+                config_yaml,
+                {
+                    "projection_method": "pca",
+                    "pca_dims": [2],
+                    "epsilon_values": [0.5],
+                    "construction_threshold": 0.0,
+                    "n_reps": 1,
+                },
             )
         )
     )["config_yaml"]
@@ -863,7 +870,14 @@ def test_dossier_inherits_construction_threshold(tmp_path):
     refined = json.loads(
         asyncio.run(
             server.refine_config(
-                config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
+                config_yaml,
+                {
+                    "projection_method": "pca",
+                    "pca_dims": [2],
+                    "epsilon_values": [0.5],
+                    "construction_threshold": 0.0,
+                    "n_reps": 1,
+                },
             )
         )
     )["config_yaml"]

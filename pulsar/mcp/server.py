@@ -201,6 +201,13 @@ def _build_initial_config_yaml(
   data: {data_path}
 {preprocessing_block}
 sweep:
+  projection:
+    method: jl
+    dimensions:
+      values: {pca_dims}
+    seed:
+      values: [42, 7, 13]
+    center: true
   pca:
     dimensions:
       values: {pca_dims}

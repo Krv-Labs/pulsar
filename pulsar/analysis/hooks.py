@@ -100,6 +100,11 @@ def unclustered_points(ball_mapper, n: int) -> list[int]:
 
 def cosmic_to_networkx(cg) -> nx.Graph:
     """Convert a CosmicGraph Rust object to a NetworkX graph with 'weight' attributes."""
+    if hasattr(cg, "weighted_edges"):
+        graph = nx.Graph()
+        graph.add_nodes_from(range(cg.n))
+        graph.add_weighted_edges_from(cg.weighted_edges())
+        return graph
     adj = np.array(cg.adj, dtype=np.float64)
     wadj = np.array(cg.weighted_adj, dtype=np.float64)
     # Use np.where to vectorize weight assignment: keep wadj values where adj > 0, else 0.0

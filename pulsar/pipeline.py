@@ -20,6 +20,7 @@ from pulsar._pulsar import (
     accumulate_pseudo_laplacians,
     ball_mapper_grid,
     find_stable_thresholds,
+    jl_grid,
     pca_grid,
 )
 from pulsar.analysis import cosmic_to_networkx
@@ -30,6 +31,28 @@ from pulsar.runtime.utils import (
     build_cumulative_fractions,
     rayon_thread_override,
 )
+
+
+def projection_grid(X_scaled: np.ndarray, cfg: PulsarConfig) -> list[np.ndarray]:
+    projection = getattr(cfg, "projection", None)
+    if projection is None:
+        dimensions = cfg.pca.dimensions
+        seeds = cfg.pca.seeds
+        method = "jl"
+        center = True
+    else:
+        dimensions = projection.dimensions
+        seeds = projection.seeds
+        method = projection.method
+        center = projection.center
+
+    if method == "pca":
+        raw = pca_grid(X_scaled, dimensions, seeds)
+    elif method == "jl":
+        raw = jl_grid(X_scaled, dimensions, seeds, center=center)
+    else:
+        raise ValueError(f"Unsupported projection method: {method!r}")
+    return [np.ascontiguousarray(emb) for emb in raw]
 
 
 class ThemaRS:
@@ -136,17 +159,14 @@ class ThemaRS:
         X_scaled = np.array(scaler.fit_transform(X))
         _notify()  # scale
 
-        # 5. PCA grid (randomized SVD, parallelised across seeds)
+        # 5. Projection grid (JL by default; PCA retained as explicit legacy mode)
         if _precomputed_embeddings is not None:
             assert all(
                 e.shape[0] == X_scaled.shape[0] for e in _precomputed_embeddings
             ), "Precomputed embedding row count does not match current data"
             embeddings = _precomputed_embeddings
         else:
-            embeddings = [
-                np.ascontiguousarray(emb)
-                for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
-            ]
+            embeddings = projection_grid(X_scaled, cfg)
         # Cache embeddings for MCP session reuse
         self._embeddings = embeddings
         _notify("pca (cached)" if use_cached_pca else None)  # pca
@@ -301,10 +321,7 @@ class ThemaRS:
                 X_scaled = np.array(scaler.fit_transform(X))
                 _notify()  # Dataset i: scale
 
-                embeddings = [
-                    np.ascontiguousarray(emb)
-                    for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
-                ]
+                embeddings = projection_grid(X_scaled, cfg)
                 _notify()  # Dataset i: pca
 
                 batches = (

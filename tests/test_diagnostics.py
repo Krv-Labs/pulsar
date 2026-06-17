@@ -74,7 +74,11 @@ def connected_spectral_model():
             "run": {"name": "spectral_test"},
             "preprocessing": {"drop_columns": [], "impute": {}},
             "sweep": {
-                "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
+                "projection": {
+                    "method": "pca",
+                    "dimensions": {"values": [2]},
+                    "seed": {"values": [42]},
+                },
                 "ball_mapper": {"epsilon": {"values": [2.0, 3.0]}},
             },
             "cosmic_graph": {"construction_threshold": "0.0"},

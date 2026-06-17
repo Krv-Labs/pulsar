@@ -101,6 +101,14 @@ class PCASpec:
 
 
 @dataclass
+class ProjectionSpec:
+    method: Literal["jl", "pca"] = "jl"
+    dimensions: list[int] = field(default_factory=lambda: [2])
+    seeds: list[int] = field(default_factory=lambda: [42])
+    center: bool = True
+
+
+@dataclass
 class BallMapperSpec:
     epsilons: list[float] = field(default_factory=lambda: [0.5])
 
@@ -117,11 +125,22 @@ class PulsarConfig:
     impute: dict[str, ImputeSpec]
     encode: dict[str, EncodeSpec]
     drop_columns: list[str]
-    pca: PCASpec
-    ball_mapper: BallMapperSpec
-    cosmic_graph: CosmicGraphSpec
+    pca: PCASpec = field(default_factory=PCASpec)
+    projection: ProjectionSpec = field(default_factory=ProjectionSpec)
+    ball_mapper: BallMapperSpec = field(default_factory=BallMapperSpec)
+    cosmic_graph: CosmicGraphSpec = field(default_factory=CosmicGraphSpec)
     n_reps: int = 4
     run_name: str = ""
+
+    def __post_init__(self) -> None:
+        default_projection = ProjectionSpec()
+        if self.projection == default_projection and self.pca != PCASpec():
+            self.projection = ProjectionSpec(
+                method="jl",
+                dimensions=list(self.pca.dimensions),
+                seeds=list(self.pca.seeds),
+                center=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +184,29 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     # sweep section
     sweep = raw.get("sweep", {})
 
+    projection_raw = sweep.get("projection")
     pca_raw = sweep.get("pca", {})
+    if projection_raw is None:
+        projection_raw = {
+            "method": "jl",
+            "dimensions": pca_raw.get("dimensions", [2]),
+            "seed": pca_raw.get("seed", [42]),
+            "center": True,
+        }
+    method = str(projection_raw.get("method", "jl")).lower()
+    if method not in {"jl", "pca"}:
+        raise ValueError("sweep.projection.method must be 'jl' or 'pca'")
+    projection = ProjectionSpec(
+        method=method,  # type: ignore[arg-type]
+        dimensions=[
+            int(d) for d in _expand_param(projection_raw.get("dimensions", [2]))
+        ],
+        seeds=[int(s) for s in _expand_param(projection_raw.get("seed", [42]))],
+        center=bool(projection_raw.get("center", True)),
+    )
     pca = PCASpec(
-        dimensions=[int(d) for d in _expand_param(pca_raw.get("dimensions", [2]))],
-        seeds=[int(s) for s in _expand_param(pca_raw.get("seed", [42]))],
+        dimensions=list(projection.dimensions),
+        seeds=list(projection.seeds),
     )
 
     bm_raw = sweep.get("ball_mapper", {})
@@ -196,6 +234,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         encode=encode,
         drop_columns=drop_columns,
         pca=pca,
+        projection=projection,
         ball_mapper=ball_mapper,
         cosmic_graph=cosmic_graph,
         n_reps=n_reps,
@@ -241,11 +280,18 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
 preprocessing:
   drop_columns: {drop_line}{impute_block}{encode_block}
 sweep:
+  projection:
+    method: {cfg.projection.method}
+    dimensions:
+      values: {list(cfg.projection.dimensions)}
+    seed:
+      values: {list(cfg.projection.seeds)}
+    center: {str(cfg.projection.center).lower()}
   pca:
     dimensions:
-      values: {list(cfg.pca.dimensions)}
+      values: {list(cfg.projection.dimensions)}
     seed:
-      values: {list(cfg.pca.seeds)}
+      values: {list(cfg.projection.seeds)}
   ball_mapper:
     epsilon:
       range:

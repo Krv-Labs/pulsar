@@ -21,8 +21,9 @@ from pulsar.mcp.errors import classify_path, mcp_error
 
 _ALLOWED_TOP_LEVEL = {"run", "preprocessing", "sweep", "cosmic_graph", "output"}
 _ALLOWED_PREPROCESSING = {"drop_columns", "impute", "encode"}
-_ALLOWED_SWEEP = {"pca", "ball_mapper"}
+_ALLOWED_SWEEP = {"projection", "pca", "ball_mapper"}
 _ALLOWED_PCA = {"dimensions", "seed"}
+_ALLOWED_PROJECTION = {"method", "dimensions", "seed", "center"}
 _ALLOWED_BALL_MAPPER = {"epsilon"}
 _ALLOWED_OUTPUT = {"n_reps"}
 _ALLOWED_COSMIC_GRAPH = ALLOWED_COSMIC_GRAPH_KEYS
@@ -175,6 +176,7 @@ _VALID_OVERRIDE_KEYS = frozenset(
     {
         "run_name",
         "dataset_path",
+        "projection_method",
         "pca_dims",
         "pca_seeds",
         "epsilon_values",
@@ -228,6 +230,7 @@ def apply_overrides(
     prefix_map = {
         "sweep.pca_dims": "pca_dims",
         "sweep.pca_seeds": "pca_seeds",
+        "sweep.projection_method": "projection_method",
         "sweep.epsilon_values": "epsilon_values",
         "sweep.epsilon_range": "epsilon_range",
         "cosmic_graph.construction_threshold": "construction_threshold",
@@ -284,6 +287,7 @@ def apply_overrides(
     diff: list[dict[str, Any]] = []
 
     flat_key_to_canonical = {
+        "projection_method": "sweep.projection.method",
         "pca_dims": "sweep.pca.dimensions.values",
         "pca_seeds": "sweep.pca.seed.values",
         "epsilon_values": "sweep.ball_mapper.epsilon.values",
@@ -309,6 +313,9 @@ def apply_overrides(
 
     for path, value in dotted_overrides.items():
         old = _set_dotted_path(raw, path, value)
+        if path.startswith("sweep.pca."):
+            projection_path = path.replace("sweep.pca.", "sweep.projection.", 1)
+            _set_dotted_path(raw, projection_path, value)
         _track(path, old, value)
 
     overrides = flat_overrides
@@ -321,15 +328,27 @@ def apply_overrides(
         old = raw.get("run", {}).get("data")
         raw.setdefault("run", {})["data"] = overrides["dataset_path"]
         _track("run.data", old, overrides["dataset_path"])
+    if "projection_method" in overrides:
+        old = raw.get("sweep", {}).get("projection", {}).get("method")
+        raw.setdefault("sweep", {}).setdefault("projection", {})["method"] = overrides[
+            "projection_method"
+        ]
+        _track("sweep.projection.method", old, overrides["projection_method"])
     if "pca_dims" in overrides:
         old = raw.get("sweep", {}).get("pca", {}).get("dimensions")
         raw.setdefault("sweep", {}).setdefault("pca", {})["dimensions"] = {
+            "values": list(overrides["pca_dims"])
+        }
+        raw.setdefault("sweep", {}).setdefault("projection", {})["dimensions"] = {
             "values": list(overrides["pca_dims"])
         }
         _track("sweep.pca.dimensions.values", old, list(overrides["pca_dims"]))
     if "pca_seeds" in overrides:
         old = raw.get("sweep", {}).get("pca", {}).get("seed")
         raw.setdefault("sweep", {}).setdefault("pca", {})["seed"] = {
+            "values": list(overrides["pca_seeds"])
+        }
+        raw.setdefault("sweep", {}).setdefault("projection", {})["seed"] = {
             "values": list(overrides["pca_seeds"])
         }
         _track("sweep.pca.seed.values", old, list(overrides["pca_seeds"]))
@@ -590,7 +609,7 @@ def _validate_sweep(sweep: Any, issues: list[ValidationIssue]) -> None:
                 ValidationIssue(
                     path=f"sweep.{legacy_key}",
                     message=f"Unsupported sweep key '{legacy_key}'",
-                    expected="Use sweep.pca and sweep.ball_mapper.epsilon",
+                    expected="Use sweep.projection and sweep.ball_mapper.epsilon",
                 )
             )
     for key in sweep.keys():
@@ -603,6 +622,12 @@ def _validate_sweep(sweep: Any, issues: list[ValidationIssue]) -> None:
                 )
             )
     _validate_nested_section(sweep.get("pca"), "sweep.pca", _ALLOWED_PCA, issues)
+    _validate_nested_section(
+        sweep.get("projection"),
+        "sweep.projection",
+        _ALLOWED_PROJECTION,
+        issues,
+    )
     _validate_nested_section(
         sweep.get("ball_mapper"), "sweep.ball_mapper", _ALLOWED_BALL_MAPPER, issues
     )

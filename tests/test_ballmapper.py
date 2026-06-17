@@ -93,3 +93,46 @@ def test_single_point_cloud():
     bm.fit(pts)
     # Points 0 and 1 are within 0.5, point 2 is far away
     assert bm.n_nodes() == 2
+
+
+def test_kd_tree_path_4d_membership_and_edges():
+    pts = make_grid_points(n=40, d=4, seed=11)
+    bm = BallMapper(eps=1.2)
+    bm.fit(pts)
+    for members in bm.nodes:
+        assert members == sorted(members)
+        pts_arr = pts[members]
+        for i in range(len(pts_arr)):
+            for j in range(len(pts_arr)):
+                assert np.linalg.norm(pts_arr[i] - pts_arr[j]) <= 2.4 + 1e-9
+    for a, b in bm.edges:
+        assert set(bm.nodes[a]) & set(bm.nodes[b])
+
+
+def test_linear_fallback_17d_remains_correct():
+    pts = make_grid_points(n=35, d=17, seed=12)
+    bm = BallMapper(eps=4.0)
+    bm.fit(pts)
+    covered = {pt for members in bm.nodes for pt in members}
+    assert covered == set(range(len(pts)))
+    for members in bm.nodes:
+        pts_arr = pts[members]
+        for i in range(len(pts_arr)):
+            for j in range(len(pts_arr)):
+                assert np.linalg.norm(pts_arr[i] - pts_arr[j]) <= 8.0 + 1e-9
+
+
+def test_ball_mapper_grid_matches_individual_fits():
+    embs = [make_grid_points(n=25, d=3, seed=20), make_grid_points(n=25, d=4, seed=21)]
+    epsilons = [0.7, 1.1]
+    grid = ball_mapper_grid(embs, epsilons)
+
+    expected = []
+    for emb in embs:
+        for eps in epsilons:
+            bm = BallMapper(eps=eps)
+            bm.fit(emb)
+            expected.append((eps, bm.nodes, bm.edges))
+
+    observed = [(bm.eps, bm.nodes, bm.edges) for bm in grid]
+    assert observed == expected
