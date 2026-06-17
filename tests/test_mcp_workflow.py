@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from pulsar.mcp.session import _sessions, _get_session
+from pulsar.mcp.session import _sessions, _get_session, _graph_health_summary
 from pulsar.mcp.diagnostics import _finalization_gate
 from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
@@ -912,6 +912,26 @@ def test_refine_config_returns_diff(tmp_path):
 # ---------------------------------------------------------------------------
 # JSON output structure tests
 # ---------------------------------------------------------------------------
+
+
+def test_graph_health_summary_empty_graph():
+    """A zero-edge constructed graph gets an explicit empty health label."""
+    health, is_connected, action = _graph_health_summary(
+        {
+            "n_nodes": 10,
+            "n_edges": 0,
+            "density": 0.0,
+            "component_count": 10,
+            "singleton_fraction": 1.0,
+            "giant_fraction": 0.1,
+        }
+    )
+
+    assert health == "empty"
+    assert is_connected is False
+    assert "No edges are present" in action
+    assert "lower stability plateau" in action
+    assert "broader PCA/epsilon sweep" in action
 
 
 def test_run_topological_sweep_returns_json(tmp_path):
