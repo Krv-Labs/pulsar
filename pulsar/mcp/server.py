@@ -128,7 +128,9 @@ def _variance_elbow_dimension(
 def _initial_pca_grid(n_features: int, pca_knee: int) -> list[int]:
     if n_features <= 0:
         return [2]
-    upper = max(2, int(n_features))
+    # Keep generated defaults in Kiddo's accelerated Ball Mapper path. Users can
+    # still request dimensions >16 explicitly in their config or overrides.
+    upper = max(2, min(int(n_features), 16))
     if upper <= 4:
         candidates = [2, 3, 4]
     elif pca_knee <= 4:
@@ -139,8 +141,9 @@ def _initial_pca_grid(n_features: int, pca_knee: int) -> list[int]:
         candidates = [2, 4, 6, 8, 10]
     else:
         # Start broad in high-dimensional processed spaces, then let agents
-        # compare sweeps and concentrate around the informative tail.
-        candidates = [2, 5, 10, 15, 20]
+        # compare sweeps and concentrate around the informative tail while
+        # staying in the 1-16D KD-tree acceleration envelope.
+        candidates = [2, 5, 10, 15, 16]
 
     clipped = [min(dim, upper) for dim in candidates if min(dim, upper) >= 2]
     return sorted(dict.fromkeys(clipped))
@@ -501,16 +504,16 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
 def _suggest_resolution_pca_dims(pca_dims: list[Any]) -> list[int]:
     dims = sorted({int(dim) for dim in pca_dims if int(dim) > 1})
     if not dims:
-        return [5, 8, 12, 16, 20]
+        return [5, 8, 12, 16]
     if len(dims) == 1:
-        center = dims[0]
-        return sorted({max(2, center - 4), max(2, center - 2), center, center + 2})
+        center = min(dims[0], 16)
+        return sorted({max(2, center - 4), max(2, center - 2), center, min(16, center + 2)})
 
-    low, high = dims[0], dims[-1]
+    low, high = dims[0], min(dims[-1], 16)
     if high <= low:
         return dims
     step = max(1, round((high - low) / 5))
-    if high - low >= 8:
+    if high - low >= 6:
         step = max(2, step)
     return list(range(low, high + 1, step))[:6]
 

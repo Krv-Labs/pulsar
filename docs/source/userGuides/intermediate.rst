@@ -89,7 +89,7 @@ Projection Parameters
 
 ``sweep.projection.dimensions``
    The number of projected dimensions to retain before Ball Mapper. Lower
-   dimensions (2-5) emphasize global structure; higher dimensions (10-50)
+   dimensions (2-5) emphasize global structure; higher dimensions (10-16)
    preserve more local variation.
 
    .. code-block:: yaml
@@ -97,11 +97,12 @@ Projection Parameters
       sweep:
         projection:
           method: jl
-          dimensions: {values: [2, 5, 10, 20]}
+          dimensions: {values: [2, 5, 10, 16]}
 
-   Start with ``[2, 5, 10]`` for exploration. For high-dimensional data, add
-   ``20`` or ``50``. Ball Mapper membership queries use a KD-tree for projected
-   dimensions from 1 through 16; dimensions above 16 still work, but use the
+   Start with ``[2, 5, 10]`` for exploration. For exceptionally high-dimensional data, add
+   ``15`` or ``16``. Unless the user specifically asks for wider projections,
+   keep both JL and PCA dimensions at 16 or below so Ball Mapper can use the
+   KD-tree radius-query path. Dimensions above 16 still work, but use the
    compatibility linear scan path.
 
 ``sweep.projection.seed``

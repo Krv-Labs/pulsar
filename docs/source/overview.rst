@@ -111,7 +111,7 @@ Pulsar uses a hierarchical configuration:
      pca:
      projection:
        method: jl
-       dimensions: {values: [2, 5, 10, 20]}
+       dimensions: {values: [2, 5, 10, 16]}
        seed: {values: [42, 7, 13]}
        center: true
      ball_mapper:

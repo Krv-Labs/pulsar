@@ -623,7 +623,7 @@ def test_create_config_high_dimensional_baseline_uses_broad_tail_grid(tmp_path):
     pca_seeds = cfg["sweep"]["pca"]["seed"]["values"]
     eps_steps = cfg["sweep"]["ball_mapper"]["epsilon"]["range"]["steps"]
 
-    assert pca_dims == [2, 5, 10, 15, 20]
+    assert pca_dims == [2, 5, 10, 15, 16]
     assert pca_seeds == [42, 7, 13]
     assert eps_steps == 24
     assert response["sweep_strategy"]["estimated_ball_maps"] == 360
@@ -1095,7 +1095,7 @@ sweep:
 
     assert gate["status"] == "blocked"
     assert gate["code"] == "UNRESOLVED_DOMINANT_COMPONENT"
-    assert gate["suggested_refinement"]["pca_dims"] == [10, 12, 14, 16, 18, 20]
+    assert gate["suggested_refinement"]["pca_dims"] == [10, 12, 14, 16]
     assert gate["suggested_refinement"]["pca_seeds"] == [42, 7, 13]
     assert gate["suggested_refinement"]["epsilon_steps_min"] == 24
 

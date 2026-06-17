@@ -56,9 +56,12 @@ The default config returned by `create_config` is ONLY a baseline starting guess
 
 - **Broad First, Then Concentrate**: Start with the broad baseline grid from
   `create_config`. On high-dimensional processed data this may include a wide
-  PCA tail such as `[2, 5, 10, 15, 20]`. After the first run, compare sweeps and
+  projection tail such as `[2, 5, 10, 15, 16]`. After the first run, compare sweeps and
   concentrate around the stable region rather than keeping every tail value
   forever.
+- **Stay in the KD-tree Envelope by Default**: Unless the user explicitly asks
+  for higher-dimensional projections, keep JL/PCA projection dimensions at
+  `16` or less so Ball Mapper can use the KD-tree radius-query acceleration.
 - **"Widen and Shift" over "Narrow Down"**: Do not optimize by narrowing down to a single PCA dimension. To find stable structures, maintain a wide multi-scale grid, but *shift* it away from degenerate areas. For example, if a baseline sweep of `[2, 3, 4, 5]` results in a dense hairball, do not narrow to `[5]`. Instead, shift the grid upwards (e.g., to `[4, 6, 8, 10]` or `[5, 8, 12]`) to drop low-dimensional flat noise while preserving multi-scale consensus.
 - **The PCA Floor**: Never include PCA dimensions below the elbow of the cumulative variance curve. 1D, 2D, or 3D projections of complex, high-dimensional datasets collapse structures and inject spurious consensus edges that create false "hairballs." If the variance elbow is at 5D, your grid floor must be at least 4D or 5D (e.g., sweep `[5, 8, 12]`).
 - **The Epsilon Gates**: Keep epsilon inside the returned k-NN distance
