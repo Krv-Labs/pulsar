@@ -151,7 +151,9 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     feature_payload = json.loads(
         asyncio.run(server.get_feature_signal(["f1", "segment=alpha"]))
     )
-    matrix_payload = json.loads(asyncio.run(server.get_cluster_signal_matrix(return_markdown=False)))
+    matrix_payload = json.loads(
+        asyncio.run(server.get_cluster_signal_matrix(return_markdown=False))
+    )
 
     assert summary["status"] == "ok"
     assert summary["cluster_result"]["method_used"] in {
@@ -435,7 +437,9 @@ def test_signal_matrix_software3_markdown_and_telemetry():
             },
             1: {
                 "numeric": [],
-                "categorical": [{"column": "cat1", "value": "v1", "aggregate_score": 3.4}],
+                "categorical": [
+                    {"column": "cat1", "value": "v1", "aggregate_score": 3.4}
+                ],
             },
             2: {
                 "numeric": [{"column": "f1", "aggregate_score": 0.5}],
@@ -450,23 +454,17 @@ def test_signal_matrix_software3_markdown_and_telemetry():
             "numeric_rows": [
                 {
                     "cluster_id": 0,
-                    "values": {
-                        "f1": {"value": 1.2, "signal_tier": "core"}
-                    }
+                    "values": {"f1": {"value": 1.2, "signal_tier": "core"}},
                 },
                 {
                     "cluster_id": 2,
-                    "values": {
-                        "f1": {"value": 0.5, "signal_tier": "core"}
-                    }
-                }
+                    "values": {"f1": {"value": 0.5, "signal_tier": "core"}},
+                },
             ],
             "categorical_rows": [
                 {
                     "cluster_id": 1,
-                    "values": {
-                        "cat1=v1": {"value": "v1", "signal_tier": "core"}
-                    }
+                    "values": {"cat1=v1": {"value": "v1", "signal_tier": "core"}},
                 }
             ],
         },
@@ -477,7 +475,7 @@ def test_signal_matrix_software3_markdown_and_telemetry():
 
     assert payload["clusters_returned"] == 2
     assert payload["clusters_omitted"] == 1
-    
+
     # Assert omitted telemetry has maximum aggregate signal scores
     omitted = payload["omitted_clusters"]
     assert len(omitted) == 1
@@ -502,7 +500,7 @@ def test_signal_matrix_defensive_safe_casting():
             0: {
                 "numeric": [
                     {"column": "f1", "aggregate_score": "N/A"},  # invalid string float
-                    {"column": "f2", "aggregate_score": None},   # None float
+                    {"column": "f2", "aggregate_score": None},  # None float
                 ],
                 "categorical": [],
             }
@@ -517,8 +515,8 @@ def test_signal_matrix_defensive_safe_casting():
                     "cluster_id": 0,
                     "values": {
                         "f1": {"value": 1.0, "signal_tier": "core"},
-                        "f2": {"value": 2.0, "signal_tier": "core"}
-                    }
+                        "f2": {"value": 2.0, "signal_tier": "core"},
+                    },
                 }
             ],
             "categorical_rows": [],

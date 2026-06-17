@@ -278,7 +278,9 @@ def main() -> None:
                 f"{best_plateau.end_threshold:.3f} ({best_plateau.component_count} components)"
             )
     else:
-        print(f"[threshold] using manual threshold: {model._resolved_construction_threshold:.4f}")
+        print(
+            f"[threshold] using manual threshold: {model._resolved_construction_threshold:.4f}"
+        )
 
     print(
         f"[run]    cosmic graph: {model.cosmic_graph.number_of_nodes()} nodes,"

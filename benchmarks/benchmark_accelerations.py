@@ -47,7 +47,7 @@ def main() -> None:
     dims = [8, 16]
     seeds = [42, 7, 13]
 
-    jl_embeddings = bench("jl_grid 1500x128 dims=8,16", lambda: jl_grid(X, dims, seeds))
+    bench("jl_grid 1500x128 dims=8,16", lambda: jl_grid(X, dims, seeds))
     bench("pca_grid 1500x128 dims=8,16", lambda: pca_grid(X, dims, seeds), repeats=3)
 
     bm16 = rng.standard_normal((5_000, 16)).astype(np.float64)

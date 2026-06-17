@@ -835,13 +835,7 @@ def test_refine_active_config_supports_nested_and_mixed_overrides(tmp_path):
     refined = json.loads(
         asyncio.run(
             server.refine_active_config(
-                {
-                    "sweep": {
-                        "pca_dims": [3],
-                        "epsilon_values": [0.6]
-                    },
-                    "n_reps": 2
-                }
+                {"sweep": {"pca_dims": [3], "epsilon_values": [0.6]}, "n_reps": 2}
             )
         )
     )
@@ -850,13 +844,12 @@ def test_refine_active_config_supports_nested_and_mixed_overrides(tmp_path):
     assert "sweep.pca_dims" in refined["applied_overrides"]
     assert "sweep.epsilon_values" in refined["applied_overrides"]
     assert "output.n_reps" in refined["applied_overrides"]
-    
+
     # Assert values were applied correctly
     active_after = json.loads(asyncio.run(server.get_active_config()))
     assert "dimensions:" in active_after["config_yaml"]
     assert "epsilon:" in active_after["config_yaml"]
     assert "n_reps: 2" in active_after["config_yaml"]
-
 
 
 def test_dossier_inherits_construction_threshold(tmp_path):
@@ -928,9 +921,7 @@ def test_dossier_rejects_invalid_interpretation_threshold(tmp_path):
 
     payload = json.loads(
         asyncio.run(
-            server.generate_cluster_dossier(
-                interpretation_edge_weight_threshold=-0.1
-            )
+            server.generate_cluster_dossier(interpretation_edge_weight_threshold=-0.1)
         )
     )
 
@@ -958,7 +949,9 @@ def test_dossier_explicit_spectral_method_is_not_overridden():
         }
     )
 
-    payload = json.loads(asyncio.run(server.generate_cluster_dossier(method="spectral")))
+    payload = json.loads(
+        asyncio.run(server.generate_cluster_dossier(method="spectral"))
+    )
 
     assert payload["status"] == "ok"
     assert payload["cluster_result"]["method_used"] == "spectral"
