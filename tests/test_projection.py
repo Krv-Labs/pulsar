@@ -205,4 +205,6 @@ def test_pipeline_spectral_sparsify_update_refreshes_thresholded_graph():
 
     assert model.cosmic_rust is sparse
     assert model.cosmic_rust.n_edges <= before
-    assert all(w > model.resolved_construction_threshold for _, _, w in model.weighted_edges())
+    assert all(
+        w > model.resolved_construction_threshold for _, _, w in model.weighted_edges()
+    )

@@ -432,9 +432,13 @@ class ThemaRS:
         Defaults to the model's resolved construction threshold.
         """
         cutoff = (
-            self.resolved_construction_threshold if threshold is None else float(threshold)
+            self.resolved_construction_threshold
+            if threshold is None
+            else float(threshold)
         )
-        return [(i, j, w) for i, j, w in self.cosmic_rust.weighted_edges() if w > cutoff]
+        return [
+            (i, j, w) for i, j, w in self.cosmic_rust.weighted_edges() if w > cutoff
+        ]
 
     def spectral_sparsify(
         self,
@@ -465,7 +469,9 @@ class ThemaRS:
             self._weighted_adjacency = np.array(sparse.weighted_adj)
             threshold = self.config.cosmic_graph.construction_threshold
             if threshold == "auto":
-                self._stability_result = find_stable_thresholds(self._weighted_adjacency)
+                self._stability_result = find_stable_thresholds(
+                    self._weighted_adjacency
+                )
                 self._resolved_construction_threshold = float(
                     self._stability_result.optimal_threshold
                 )

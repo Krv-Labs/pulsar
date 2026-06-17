@@ -507,7 +507,9 @@ def _suggest_resolution_pca_dims(pca_dims: list[Any]) -> list[int]:
         return [5, 8, 12, 16]
     if len(dims) == 1:
         center = min(dims[0], 16)
-        return sorted({max(2, center - 4), max(2, center - 2), center, min(16, center + 2)})
+        return sorted(
+            {max(2, center - 4), max(2, center - 2), center, min(16, center + 2)}
+        )
 
     low, high = dims[0], min(dims[-1], 16)
     if high <= low:
