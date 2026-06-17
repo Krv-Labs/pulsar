@@ -142,26 +142,17 @@ def _project_3d(embeddings):
 
 
 def _viz_cosmic_graph(view, labels, max_edges: int = 2500, provenance=None):
-    lab = [int(x) for x in labels] if labels is not None else []
-    nodes = [{"id": i, "cluster": (lab[i] if i < len(lab) else -1)} for i in range(view.n)]
-    all_edges = sorted(
-        ((int(u), int(v), float(d.get("weight", 1.0))) for u, v, d in view.cosmic_graph.edges(data=True)),
-        key=lambda e: -e[2],
-    )
-    total_edges = len(all_edges)
-    edges = all_edges[:max_edges]
-    viz = {
-        "kind": "cosmic_graph",
-        "nodes": nodes,
-        "edges": [{"u": u, "v": v, "w": w} for u, v, w in edges],
-        # Tag the server-side cap so a consumer never mistakes a truncated edge
-        # list for the full graph (and never recomputes components from it).
-        "edges_truncated": total_edges > max_edges,
-        "total_edges": total_edges,
-    }
-    if provenance is not None:
-        viz["provenance"] = provenance
-    return viz
+    """Connectivity-preserving backbone payload over the FULL weighted-adjacency.
+
+    Delegates to ``pulsar.mcp.viz_graph``: the rendered graph has far fewer edges than
+    the full thresholded set but the IDENTICAL connected-component structure (the
+    component count AGREES with ``diagnose_model``). ``max_edges`` is retained for
+    call-site back-compat but no longer caps by raw weight — the budget is internal
+    (see ``viz_graph.EDGE_BUDGET_PER_NODE``).
+    """
+    from pulsar.mcp.viz_graph import build_cosmic_graph_payload
+
+    return build_cosmic_graph_payload(view, labels, provenance=provenance)
 
 
 def _viz_threshold_stability(view):

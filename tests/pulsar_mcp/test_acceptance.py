@@ -80,6 +80,107 @@ def test_artifact_roundtrip_and_cold_interpret(store_env):
 
 
 # --------------------------------------------------------------------------- #
+# cosmic_graph backbone viz: connectivity-preserving pipeline invariants
+# --------------------------------------------------------------------------- #
+def test_cosmic_graph_backbone_payload_invariants(store_env):
+    from pulsar.artifacts import dump_artifact, load_artifact
+    from pulsar.config import load_config
+    from pulsar.mcp.diagnostics import diagnose_model
+    from pulsar.mcp.store import artifact_prefix, get_object_store
+    from pulsar.mcp.tools.curated import _safe_clusters, _viz_cosmic_graph
+    from pulsar.mcp.viz_graph import EDGE_BUDGET_PER_NODE
+    from pulsar.pipeline import ThemaRS
+
+    df = pd.read_csv(PENGUINS)
+    model = ThemaRS(load_config(_penguins_cfg())).fit(df)
+    store = get_object_store()
+    prefix = artifact_prefix("u", "ds", "cfg")
+    art = json.loads(
+        json.dumps(dump_artifact(model, dataset_id="ds", config_hash="cfg", prefix=prefix, store=store))
+    )
+    del model
+    view = load_artifact(art, store)
+
+    gm = diagnose_model(view)
+    cr = _safe_clusters(view)
+    labels = cr.labels if cr is not None else None
+    viz = _viz_cosmic_graph(view, labels, provenance="PROV_SENTINEL")
+
+    n_nodes = view.n
+
+    # All viz keys are camelCase; legacy snake_case must be gone.
+    for key in ("renderedEdges", "totalEdges", "prunedEdges", "backboneEdges", "edgesTruncated"):
+        assert key in viz, key
+    assert "edges_truncated" not in viz and "total_edges" not in viz
+
+    # FAITHFULNESS GATE (inviolable): distinct component ids == diagnose_model count.
+    distinct_components = {nd["component"] for nd in viz["nodes"]}
+    assert len(distinct_components) == gm.component_count
+    assert len(viz["components"]) == gm.component_count
+
+    # 0 = giant: components sorted by size desc, exactly one entry per component.
+    sizes = [c["size"] for c in viz["components"]]
+    assert sizes == sorted(sizes, reverse=True)
+    assert sum(sizes) == n_nodes  # partition of all nodes (incl. singletons)
+    for c in viz["components"]:
+        assert c["isSingleton"] == (c["size"] == 1)
+
+    # Forest invariant: backbone edge count == n_nodes - n_components.
+    n_components = gm.component_count
+    assert viz["backboneEdges"] == n_nodes - n_components
+    backbone_count = sum(1 for e in viz["edges"] if e["role"] == "backbone")
+    assert backbone_count == viz["backboneEdges"]
+
+    # No backbone edge joins two different components.
+    comp_of = {nd["id"]: nd["component"] for nd in viz["nodes"]}
+    for e in viz["edges"]:
+        assert comp_of[e["u"]] == comp_of[e["v"]]
+
+    # Honest pruning counts.
+    assert viz["renderedEdges"] == len(viz["edges"])
+    assert viz["prunedEdges"] == viz["totalEdges"] - viz["renderedEdges"] >= 0
+    assert viz["edgesTruncated"] == (viz["prunedEdges"] > 0)
+    assert viz["renderedEdges"] <= EDGE_BUDGET_PER_NODE * n_nodes
+
+    # Nodes carry component, cluster, and a degree-based size hint.
+    for nd in viz["nodes"]:
+        assert nd["size"] >= 1
+        assert "cluster" in nd
+    # Edges are undirected-deduped (no (u,v) and (v,u), no self loops, no repeats).
+    seen = set()
+    for e in viz["edges"]:
+        assert e["u"] != e["v"]
+        key = (min(e["u"], e["v"]), max(e["u"], e["v"]))
+        assert key not in seen
+        seen.add(key)
+
+    # Provenance attached verbatim.
+    assert viz["provenance"] == "PROV_SENTINEL"
+
+
+def test_cosmic_graph_backbone_empty_graph():
+    """0-edge graph: nodes emitted, edges empty, every node its own singleton."""
+    from pulsar.mcp.viz_graph import build_cosmic_graph_payload
+
+    class _EmptyView:
+        n = 5
+        resolved_construction_threshold = 0.5
+        weighted_adjacency = np.zeros((5, 5), dtype=np.float64)
+
+    viz = build_cosmic_graph_payload(_EmptyView(), labels=[0, 0, 1, 1, 2])
+    assert len(viz["nodes"]) == 5
+    assert viz["edges"] == []
+    assert viz["totalEdges"] == 0
+    assert viz["renderedEdges"] == 0
+    assert viz["prunedEdges"] == 0
+    assert viz["backboneEdges"] == 0
+    assert viz["edgesTruncated"] is False
+    assert len(viz["components"]) == 5  # all singletons
+    assert all(c["isSingleton"] for c in viz["components"])
+    assert {nd["component"] for nd in viz["nodes"]} == {0, 1, 2, 3, 4}
+
+
+# --------------------------------------------------------------------------- #
 # async sweep: enqueue -> worker -> status=done + artifact persisted
 # --------------------------------------------------------------------------- #
 def test_sweep_enqueue_worker_status(store_env):
@@ -313,11 +414,19 @@ def test_curated_interpret_with_viz(store_env):
         assert diag_prov["comparable_to_component_count"] is True
         assert diag_prov["matches_construction_threshold"] is True
         assert diag_prov["n_groups"] == rd["structured"]["component_count"]
-        # The cosmic_graph viz tags the server-side edge cap and carries provenance.
-        assert "edges_truncated" in rd["vizPayload"]
-        assert isinstance(rd["vizPayload"]["edges_truncated"], bool)
-        assert rd["vizPayload"]["total_edges"] >= len(rd["vizPayload"]["edges"])
-        assert rd["vizPayload"]["provenance"]["method_used"] == "components"
+        # The cosmic_graph viz emits the connectivity-preserving backbone payload with
+        # camelCase honest-pruning disclosure (the OLD code wrongly emitted snake_case).
+        viz = rd["vizPayload"]
+        assert "edges_truncated" not in viz and "total_edges" not in viz  # legacy gone
+        assert isinstance(viz["edgesTruncated"], bool)
+        assert viz["totalEdges"] >= len(viz["edges"])
+        assert viz["renderedEdges"] == len(viz["edges"])
+        assert viz["prunedEdges"] == viz["totalEdges"] - viz["renderedEdges"] >= 0
+        assert viz["edgesTruncated"] == (viz["prunedEdges"] > 0)
+        # FAITHFULNESS GATE: distinct component ids == diagnose_model component_count.
+        distinct_components = {n["component"] for n in viz["nodes"]}
+        assert len(distinct_components) == rd["structured"]["component_count"]
+        assert viz["provenance"]["method_used"] == "components"
 
         ts = json.loads(await C.get_threshold_stability_curve(ds, ch))
         assert ts["vizPayload"]["kind"] == "threshold_stability"
