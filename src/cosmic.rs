@@ -11,6 +11,12 @@ use crate::error::PulsarError;
 
 type WeightedEdge = (usize, usize, f64);
 
+#[derive(Copy, Clone)]
+struct PcgOptions {
+    tol: f64,
+    max_iter: usize,
+}
+
 /// Internal Cosmic Graph data.
 ///
 /// Dense storage preserves the historical construction path. Sparse storage is
@@ -198,8 +204,17 @@ impl CosmicGraph {
                 rhs[v] -= noise;
             }
 
-            let potentials =
-                solve_by_component(n, &edges, &components, &diag, &rhs, pcg_tol, max_iter);
+            let potentials = solve_by_component(
+                n,
+                &edges,
+                &components,
+                &diag,
+                &rhs,
+                PcgOptions {
+                    tol: pcg_tol,
+                    max_iter,
+                },
+            );
             for (idx, &(u, v, _)) in edges.iter().enumerate() {
                 let diff = potentials[u] - potentials[v];
                 resistances[idx] += diff * diff;
@@ -345,8 +360,7 @@ fn solve_by_component(
     components: &[Vec<usize>],
     diag: &[f64],
     rhs: &[f64],
-    tol: f64,
-    max_iter: usize,
+    options: PcgOptions,
 ) -> Vec<f64> {
     let mut out = vec![0.0; n];
     for component in components {
@@ -354,7 +368,7 @@ fn solve_by_component(
             continue;
         }
         let anchor = component[0];
-        let x = pcg_component(n, edges, component, anchor, diag, rhs, tol, max_iter);
+        let x = pcg_component(n, edges, component, anchor, diag, rhs, options);
         for &idx in component {
             out[idx] = x[idx];
         }
@@ -369,9 +383,9 @@ fn pcg_component(
     anchor: usize,
     diag: &[f64],
     rhs: &[f64],
-    tol: f64,
-    max_iter: usize,
+    options: PcgOptions,
 ) -> Vec<f64> {
+    let PcgOptions { tol, max_iter } = options;
     let in_component = {
         let mut flags = vec![false; n];
         for &idx in component {
