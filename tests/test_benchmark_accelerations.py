@@ -1,10 +1,4 @@
-"""Benchmark JL, KD-tree Ball Mapper, and CosmicGraph sparsification.
-
-Run from the repository root after building the extension:
-
-    PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 uv run maturin develop --release
-    uv run python benchmarks/benchmark_accelerations.py
-"""
+"""Benchmark JL, KD-tree Ball Mapper, and CosmicGraph sparsification as a pytest-based benchmark."""
 
 from __future__ import annotations
 
@@ -41,21 +35,40 @@ def complete_laplacian(n: int) -> np.ndarray:
     return lap
 
 
-def main() -> None:
+def fit_ball_mapper(points: np.ndarray, eps: float) -> BallMapper:
+    bm = BallMapper(eps)
+    bm.fit(points)
+    return bm
+
+
+def test_benchmark_accelerations() -> None:
     rng = np.random.default_rng(42)
     X = rng.standard_normal((1_500, 128)).astype(np.float64)
     dims = [8, 16]
     seeds = [42, 7, 13]
 
-    bench("jl_grid 1500x128 dims=8,16", lambda: jl_grid(X, dims, seeds))
-    bench("pca_grid 1500x128 dims=8,16", lambda: pca_grid(X, dims, seeds), repeats=3)
+    print()  # Ensure clean starting line for pytest with -s
+    jl_res = bench("jl_grid 1500x128 dims=8,16", lambda: jl_grid(X, dims, seeds))
+    pca_res = bench(
+        "pca_grid 1500x128 dims=8,16", lambda: pca_grid(X, dims, seeds), repeats=3
+    )
+
+    assert len(jl_res) == len(dims) * len(seeds)
+    assert len(pca_res) == len(dims) * len(seeds)
 
     bm16 = rng.standard_normal((5_000, 16)).astype(np.float64)
     bm17 = np.ascontiguousarray(
         np.concatenate([bm16, rng.standard_normal((5_000, 1))], axis=1)
     )
-    bench("BallMapper KD-eligible 16D", lambda: fit_ball_mapper(bm16, 3.0), repeats=5)
-    bench("BallMapper fallback 17D", lambda: fit_ball_mapper(bm17, 3.0), repeats=5)
+    bm16_res = bench(
+        "BallMapper KD-eligible 16D", lambda: fit_ball_mapper(bm16, 3.0), repeats=5
+    )
+    bm17_res = bench(
+        "BallMapper fallback 17D", lambda: fit_ball_mapper(bm17, 3.0), repeats=5
+    )
+
+    assert isinstance(bm16_res, BallMapper)
+    assert isinstance(bm17_res, BallMapper)
 
     cg = CosmicGraph.from_pseudo_laplacian(complete_laplacian(180), 0.0)
     sparse = bench(
@@ -65,12 +78,4 @@ def main() -> None:
     )
     print(f"CosmicGraph edges dense={cg.n_edges} sparse={sparse.n_edges}")
 
-
-def fit_ball_mapper(points: np.ndarray, eps: float) -> BallMapper:
-    bm = BallMapper(eps)
-    bm.fit(points)
-    return bm
-
-
-if __name__ == "__main__":
-    main()
+    assert sparse.n_edges < cg.n_edges

@@ -205,5 +205,5 @@ cosmic_graph:
 uv run maturin develop        # debug build
 uv run maturin develop --release  # optimised build
 uv run pytest tests/ -v
-uv run python benchmarks/benchmark_accelerations.py
+uv run pytest tests/test_benchmark_accelerations.py -s -v
 ```
