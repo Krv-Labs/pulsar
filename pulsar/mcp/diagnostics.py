@@ -45,6 +45,10 @@ class GraphMetrics:
     grid_adequacy_status: str = "unknown"
     grid_adequacy_note: str = ""
     advisories: list[dict] = field(default_factory=list)
+    # Self-describing provenance for the component_count above: it is the
+    # connected-component count of the FITTED cosmic graph at the construction
+    # threshold — the reference partition both sides can compare against.
+    cluster_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 def _grid_adequacy(n_ball_maps: int) -> tuple[str, str]:
@@ -188,6 +192,14 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
         density=density,
     )
 
+    from pulsar.mcp.interpreter import component_count_provenance
+
+    provenance = component_count_provenance(
+        resolved_construction_threshold=float(model.resolved_construction_threshold),
+        component_count=component_count,
+        singleton_count=singleton_count,
+    )
+
     logger.info(
         "diagnose_model: nodes=%d, edges=%d, components=%d, ball_maps=%d",
         n,
@@ -216,6 +228,7 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
         grid_adequacy_status=grid_status,
         grid_adequacy_note=grid_note,
         advisories=advisories,
+        cluster_provenance=provenance,
     )
 
 

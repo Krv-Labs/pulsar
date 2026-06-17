@@ -40,6 +40,7 @@ from pulsar.mcp.diagnostics import (
 from pulsar.mcp.interpreter import (
     build_feature_evidence_index,
     cluster_profile_payload,
+    cluster_provenance,
     compare_clusters as _compare_clusters_fn,
     comparison_to_markdown,
     feature_signal_payload,
@@ -140,14 +141,27 @@ def _project_3d(embeddings):
     return np.column_stack([emb, np.zeros((len(emb), 2))])
 
 
-def _viz_cosmic_graph(view, labels, max_edges: int = 2500):
+def _viz_cosmic_graph(view, labels, max_edges: int = 2500, provenance=None):
     lab = [int(x) for x in labels] if labels is not None else []
     nodes = [{"id": i, "cluster": (lab[i] if i < len(lab) else -1)} for i in range(view.n)]
-    edges = sorted(
+    all_edges = sorted(
         ((int(u), int(v), float(d.get("weight", 1.0))) for u, v, d in view.cosmic_graph.edges(data=True)),
         key=lambda e: -e[2],
-    )[:max_edges]
-    return {"kind": "cosmic_graph", "nodes": nodes, "edges": [{"u": u, "v": v, "w": w} for u, v, w in edges]}
+    )
+    total_edges = len(all_edges)
+    edges = all_edges[:max_edges]
+    viz = {
+        "kind": "cosmic_graph",
+        "nodes": nodes,
+        "edges": [{"u": u, "v": v, "w": w} for u, v, w in edges],
+        # Tag the server-side cap so a consumer never mistakes a truncated edge
+        # list for the full graph (and never recomputes components from it).
+        "edges_truncated": total_edges > max_edges,
+        "total_edges": total_edges,
+    }
+    if provenance is not None:
+        viz["provenance"] = provenance
+    return viz
 
 
 def _viz_threshold_stability(view):
@@ -190,10 +204,12 @@ def _viz_feature_signal(numeric_rows):
 
 def _diagnose_markdown(gm) -> str:
     return (
-        f"**Cosmic graph** — {gm.n_nodes} nodes, {gm.n_edges} edges, density {gm.density:.3f}.\n"
-        f"Components: {gm.component_count} (giant fraction {gm.giant_fraction:.2f}, "
-        f"singleton fraction {gm.singleton_fraction:.2f}). "
-        f"Construction threshold {gm.resolved_construction_threshold:.4f}.\n"
+        f"**{gm.component_count} connected components** via `components` @ "
+        f"τ={gm.resolved_construction_threshold:.2f} on cosmic_graph "
+        f"({gm.singleton_count} singletons). This is the reference component count; "
+        f"clustering tools may report a different number at a different threshold.\n"
+        f"**Cosmic graph** — {gm.n_nodes} nodes, {gm.n_edges} edges, density {gm.density:.3f} "
+        f"(giant fraction {gm.giant_fraction:.2f}, singleton fraction {gm.singleton_fraction:.2f}).\n"
         + ("Advisories: " + "; ".join(a.get("code", "") for a in (gm.advisories or [])) if gm.advisories else "")
     )
 
@@ -412,7 +428,13 @@ async def diagnose_cosmic_graph(dataset_id: str, config_hash: str, user_id: str 
     structured = dataclasses.asdict(gm)
     cr = _safe_clusters(view)
     labels = list(cr.labels) if cr else None
-    return _result(_diagnose_markdown(gm), structured, _viz_cosmic_graph(view, labels))
+    # The cosmic-graph viz carries the reference component-count provenance so a
+    # consumer reading the (truncated) edge list knows which partition it shows.
+    return _result(
+        _diagnose_markdown(gm),
+        structured,
+        _viz_cosmic_graph(view, labels, provenance=gm.cluster_provenance),
+    )
 
 
 async def generate_cluster_dossier(
@@ -434,7 +456,7 @@ async def generate_cluster_dossier(
         )
     fei = build_feature_evidence_index(view, view.data, cr.labels)
     gm = diagnose_model(view)
-    cmeta = cluster_result_payload(cr)
+    cmeta = cluster_result_payload(cr, view.resolved_construction_threshold)
     structured = build_summary_evidence_payload(fei, cmeta, dataclasses.asdict(gm))
     md = summary_evidence_payload_to_markdown(structured)
     return _result(md, structured, _viz_manifold3d(view, cr.labels))
@@ -483,9 +505,11 @@ async def get_cluster_profile(
         raise ToolError("No reliable structure detected; run generate_cluster_dossier first.")
     fei = build_feature_evidence_index(view, view.data, cr.labels)
     cluster = cluster_profile_payload(fei, cluster_id, detail=detail, max_features=max_features)
+    gm = diagnose_model(view)
     payload = {
         "status": "ok",
-        "cluster_result": cluster_result_payload(cr),
+        "cluster_result": cluster_result_payload(cr, view.resolved_construction_threshold),
+        "graph_metrics": dataclasses.asdict(gm),
         "detail": detail,
         "max_features": max_features,
         "cluster": cluster,
@@ -661,7 +685,15 @@ async def get_topological_skeleton(
         f"Topological skeleton for `{dataset_id}` / `{config_hash}`: "
         f"{graph['node_count']} nodes, {graph['edge_count']} edges, {graph.get('component_count')} components."
     )
-    return _result(md, structured, _viz_cosmic_graph(view, view._cluster_labels))
+    cr = _safe_clusters(view)
+    provenance = (
+        cluster_provenance(cr, view.resolved_construction_threshold) if cr else None
+    )
+    return _result(
+        md,
+        structured,
+        _viz_cosmic_graph(view, view._cluster_labels, provenance=provenance),
+    )
 
 
 async def get_cluster_signal_matrix(
@@ -692,7 +724,7 @@ async def get_cluster_signal_matrix(
         "status": "ok",
         "datasetId": dataset_id,
         "configHash": config_hash,
-        "cluster_result": cluster_result_payload(cr),
+        "cluster_result": cluster_result_payload(cr, view.resolved_construction_threshold),
         "signal_matrix": matrix,
     }
     md = (

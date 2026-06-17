@@ -13,11 +13,14 @@ def singleton_count_at_threshold(adj: np.ndarray, threshold: float) -> int:
     return int((row_max <= threshold).sum())
 
 
-def cluster_result_payload(result: Any) -> dict[str, Any]:
+def cluster_result_payload(
+    result: Any,
+    resolved_construction_threshold: float | None = None,
+) -> dict[str, Any]:
     sizes = result.labels.value_counts().sort_index()
     total = len(result.labels)
     fragmentation = _cluster_fragmentation_payload(sizes, total)
-    return {
+    payload = {
         "method_used": result.method_used,
         "n_clusters": result.n_clusters,
         "cluster_sizes": [
@@ -31,6 +34,16 @@ def cluster_result_payload(result: Any) -> dict[str, Any]:
         "stability_plateaus": result.stability_plateaus,
         "failure_reason": result.failure_reason,
     }
+    # cluster_provenance: makes this count self-describing (which method/threshold/
+    # matrix produced it) so consumers don't read it as 1:1 with the cosmic-graph
+    # component count. Only emitted when the fitted construction threshold is known.
+    if resolved_construction_threshold is not None:
+        from pulsar.mcp.interpreter import cluster_provenance
+
+        payload["cluster_provenance"] = cluster_provenance(
+            result, float(resolved_construction_threshold)
+        )
+    return payload
 
 
 def build_evidence_payload(
@@ -137,17 +150,80 @@ def build_summary_evidence_payload(
     }
 
 
+def _provenance_headline(
+    provenance: dict[str, Any] | None,
+    graph_metrics: dict[str, Any] | None = None,
+) -> str | None:
+    """One-line, self-describing headline naming method + both thresholds.
+
+    Promotes ``cluster_provenance`` into the markdown so a reader never has to
+    dig into structured fields to learn that the clustering count and the
+    cosmic-graph component count answer different questions.
+    """
+    if not provenance:
+        return None
+    method = provenance.get("method_used", "unknown")
+    n_groups = provenance.get("n_groups", 0)
+    base_matrix = provenance.get("base_matrix", "weighted_adjacency")
+    construction = provenance.get("resolved_construction_threshold")
+    threshold_applied = provenance.get("threshold_applied")
+    unit = provenance.get("unit", "connected_component")
+
+    group_word = "spectral communities" if unit == "spectral_community" else "interpretation groups"
+    if threshold_applied is None:
+        cut = "full affinity (no threshold)"
+    else:
+        cut = f"τ={float(threshold_applied):.2f}"
+
+    construction_text = (
+        f"{float(construction):.2f}" if construction is not None else "n/a"
+    )
+    headline = (
+        f"**{n_groups} {group_word}** via `{method}` @ {cut} on {base_matrix} · "
+        f"construction τ={construction_text}"
+    )
+
+    # Append the comparable component count when available so the contrast is explicit.
+    if graph_metrics:
+        component_count = graph_metrics.get("component_count")
+        singleton_count = graph_metrics.get("singleton_count")
+        if component_count is not None:
+            singleton_text = (
+                f" ({int(singleton_count)} singletons)"
+                if singleton_count is not None
+                else ""
+            )
+            headline += (
+                f" → **{int(component_count)} connected components**{singleton_text}"
+            )
+
+    if not provenance.get("comparable_to_component_count", False):
+        headline += (
+            ". These answer different questions; counts are not 1:1."
+        )
+    return headline
+
+
 def summary_evidence_payload_to_markdown(payload: dict[str, Any]) -> str:
     cluster_result = payload.get("cluster_result", {})
     readiness = cluster_result.get("interpretation_readiness", {})
+    provenance = cluster_result.get("cluster_provenance")
+    graph_metrics = payload.get("graph_metrics", {})
     lines = [
         "# Cluster Dossier Summary",
         "",
-        f"- Method: {cluster_result.get('method_used', 'unknown')}",
-        f"- Clusters: {cluster_result.get('n_clusters', 0)}",
-        f"- Returned: {payload.get('clusters_returned', 0)}",
-        f"- Omitted: {payload.get('clusters_omitted', 0)}",
     ]
+    headline = _provenance_headline(provenance, graph_metrics)
+    if headline:
+        lines.extend([headline, ""])
+    lines.extend(
+        [
+            f"- Method: {cluster_result.get('method_used', 'unknown')}",
+            f"- Clusters: {cluster_result.get('n_clusters', 0)}",
+            f"- Returned: {payload.get('clusters_returned', 0)}",
+            f"- Omitted: {payload.get('clusters_omitted', 0)}",
+        ]
+    )
     if readiness:
         lines.append(f"- Readiness: {readiness.get('status', 'unknown')}")
         reason_codes = readiness.get("reason_codes") or []
@@ -223,9 +299,15 @@ def cluster_profile_payload_to_markdown(payload: dict[str, Any]) -> str:
         )
         or "None"
     )
+    provenance = payload.get("cluster_result", {}).get("cluster_provenance")
     lines = [
         "# Cluster Profile",
         "",
+    ]
+    headline = _provenance_headline(provenance, payload.get("graph_metrics"))
+    if headline:
+        lines.extend([headline, ""])
+    lines.extend([
         f"## Cluster {cluster['cluster_id']}: {cluster['semantic_name']}",
         f"- Size: {cluster['size']} ({cluster['size_pct']:.1f}%)",
         f"- Topological neighbors: {neighbor_text}",
@@ -234,7 +316,7 @@ def cluster_profile_payload_to_markdown(payload: dict[str, Any]) -> str:
         f"- Feature rows omitted: {cluster['features_omitted']['total']}",
         "",
         "### Numeric signals",
-    ]
+    ])
     if not cluster["numeric_features"]:
         lines.append("- None in selected tiers.")
     for row in cluster["numeric_features"]:

@@ -303,6 +303,21 @@ def test_curated_interpret_with_viz(store_env):
         rd = json.loads(await C.diagnose_cosmic_graph(ds, ch))
         assert "n_nodes" in rd["structured"]
         assert rd["vizPayload"]["kind"] == "cosmic_graph"
+        # cluster_provenance: the reference component count is self-describing and
+        # 1:1-comparable to itself by definition.
+        diag_prov = rd["structured"]["cluster_provenance"]
+        assert diag_prov["unit"] == "connected_component"
+        assert diag_prov["method_used"] == "components"
+        assert diag_prov["threshold_source"] == "construction_threshold"
+        assert diag_prov["base_matrix"] == "cosmic_graph"
+        assert diag_prov["comparable_to_component_count"] is True
+        assert diag_prov["matches_construction_threshold"] is True
+        assert diag_prov["n_groups"] == rd["structured"]["component_count"]
+        # The cosmic_graph viz tags the server-side edge cap and carries provenance.
+        assert "edges_truncated" in rd["vizPayload"]
+        assert isinstance(rd["vizPayload"]["edges_truncated"], bool)
+        assert rd["vizPayload"]["total_edges"] >= len(rd["vizPayload"]["edges"])
+        assert rd["vizPayload"]["provenance"]["method_used"] == "components"
 
         ts = json.loads(await C.get_threshold_stability_curve(ds, ch))
         assert ts["vizPayload"]["kind"] == "threshold_stability"
@@ -323,6 +338,22 @@ def test_curated_interpret_with_viz(store_env):
         rdo = json.loads(await C.generate_cluster_dossier(ds, ch))
         assert rdo["vizPayload"]["kind"] == "manifold3d"
         assert len(rdo["vizPayload"]["points"][0]) == 3  # real 3-D projection
+        # cluster_provenance is well-formed and threaded into the dossier payload.
+        dossier_prov = rdo["structured"]["cluster_result"]["cluster_provenance"]
+        assert dossier_prov["unit"] in {"connected_component", "spectral_community"}
+        assert dossier_prov["method_used"] == rdo["structured"]["cluster_result"]["method_used"]
+        assert dossier_prov["method_used"] in {
+            "components",
+            "threshold_stability",
+            "spectral",
+        }
+        assert "resolved_construction_threshold" in dossier_prov
+        # The dossier markdown headline names the method and BOTH thresholds.
+        dossier_md = rdo["markdown"]
+        assert dossier_prov["method_used"] in dossier_md
+        assert "construction τ=" in dossier_md
+        if dossier_prov["threshold_applied"] is not None:
+            assert "τ=" in dossier_md
 
         matrix = json.loads(await C.get_cluster_signal_matrix(ds, ch, max_clusters=3))
         assert "Topological Signal Matrix" in matrix["markdown"]

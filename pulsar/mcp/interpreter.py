@@ -110,6 +110,101 @@ class FeatureEvidenceIndex:
     categorical_columns_gated: List[Dict[str, Any]] = field(default_factory=list)
 
 
+# Float tolerance for declaring that the interpretation threshold equals the
+# fitted construction threshold (mirrors np.isclose defaults used elsewhere).
+_THRESHOLD_MATCH_ATOL = 1e-8
+_THRESHOLD_MATCH_RTOL = 1e-5
+
+
+def cluster_provenance(
+    result: "ClusterResult",
+    resolved_construction_threshold: float,
+) -> dict[str, Any]:
+    """Self-describing provenance for a ``resolve_clusters`` partition.
+
+    Emits the snake_case ``cluster_provenance`` contract (mirrors
+    ``ClusterProvenance`` in isomorph ``packages/contracts/src/index.ts``) so a
+    consumer never confuses a clustering count with the fitted cosmic-graph
+    component count. Different methods cut a DIFFERENT matrix at a DIFFERENT
+    threshold; this object says which, so divergent counts are expected, not a
+    paradox.
+    """
+    construction = float(resolved_construction_threshold)
+    labels = result.labels
+    n_groups = int(labels.nunique())
+    sizes = labels.value_counts()
+    n_singletons = int((sizes == 1).sum())
+
+    if result.method_used == "spectral":
+        # Spectral labels every node into a community; there is no edge-weight
+        # cut and no singleton notion.
+        unit = "spectral_community"
+        threshold_applied: float | None = None
+        threshold_source = "none"
+        base_matrix = "weighted_adjacency"
+        matches_construction = False
+        n_singletons = 0
+    else:
+        unit = "connected_component"
+        threshold_applied = float(result.interpretation_edge_weight_threshold_applied)
+        base_matrix = "weighted_adjacency"
+        matches_construction = bool(
+            math.isclose(
+                threshold_applied,
+                construction,
+                rel_tol=_THRESHOLD_MATCH_RTOL,
+                abs_tol=_THRESHOLD_MATCH_ATOL,
+            )
+        )
+        if result.method_used == "threshold_stability":
+            threshold_source = "stability_plateau_midpoint"
+        elif threshold_applied == 0.0:
+            threshold_source = "full_affinity"
+        else:
+            threshold_source = "explicit"
+
+    comparable = unit == "connected_component" and matches_construction
+    return {
+        "unit": unit,
+        "method_used": result.method_used,
+        "threshold_applied": threshold_applied,
+        "threshold_source": threshold_source,
+        "base_matrix": base_matrix,
+        "resolved_construction_threshold": construction,
+        "matches_construction_threshold": matches_construction,
+        "n_groups": n_groups,
+        "n_singletons": n_singletons,
+        "comparable_to_component_count": bool(comparable),
+    }
+
+
+def component_count_provenance(
+    *,
+    resolved_construction_threshold: float,
+    component_count: int,
+    singleton_count: int,
+) -> dict[str, Any]:
+    """Provenance for the fitted cosmic-graph connected-component count.
+
+    This is the reference partition: connected components of the cosmic graph AT
+    the construction threshold. It is the ONE count that is 1:1-comparable to
+    itself, so ``comparable_to_component_count`` is true by definition.
+    """
+    construction = float(resolved_construction_threshold)
+    return {
+        "unit": "connected_component",
+        "method_used": "components",
+        "threshold_applied": construction,
+        "threshold_source": "construction_threshold",
+        "base_matrix": "cosmic_graph",
+        "resolved_construction_threshold": construction,
+        "matches_construction_threshold": True,
+        "n_groups": int(component_count),
+        "n_singletons": int(singleton_count),
+        "comparable_to_component_count": True,
+    }
+
+
 def resolve_clusters(
     model: ThemaRS,
     method: str = "auto",
