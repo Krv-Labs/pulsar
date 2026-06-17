@@ -76,6 +76,7 @@ class ThemaRS:
         self._cosmic_graph: nx.Graph | None = None
         self._weighted_adjacency: np.ndarray | None = None
         self._cosmic_rust: CosmicGraph | None = None
+        self._dense_cosmic_rust: CosmicGraph | None = None
         self._data: pd.DataFrame | None = None
         self._preprocessed_data: pd.DataFrame | None = None
         self._stability_result: StabilityResult | None = None
@@ -179,29 +180,38 @@ class ThemaRS:
         galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
         _notify()  # laplacian
 
-        # 8. CosmicGraph (+ optional stability analysis)
+        # 8. CosmicGraph: build the original graph, sparsify, then threshold.
         threshold = cfg.cosmic_graph.construction_threshold
+        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+        self._cosmic_rust = self._apply_default_sparsification(self._dense_cosmic_rust)
+        weighted_adj = np.array(self._cosmic_rust.weighted_adj)
         if threshold == "auto":
-            cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
-            weighted_adj = np.array(cg_temp.weighted_adj)
             self._stability_result = find_stable_thresholds(weighted_adj)
             self._resolved_construction_threshold = float(
                 self._stability_result.optimal_threshold
             )
-            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_construction_threshold
-            )
         else:
             self._resolved_construction_threshold = float(threshold)
-            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_construction_threshold
-            )
-            weighted_adj = np.array(self._cosmic_rust.weighted_adj)
         self._weighted_adjacency = weighted_adj
-        self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
+        self._cosmic_graph = cosmic_to_networkx(
+            self._cosmic_rust, threshold=self._resolved_construction_threshold
+        )
         _notify()  # cosmic (always last, always 1.0)
 
         return self
+
+    def _apply_default_sparsification(self, cosmic: CosmicGraph) -> CosmicGraph:
+        spec = self.config.cosmic_graph
+        if not spec.sparsify:
+            return cosmic
+        return cosmic.spectral_sparsify(
+            spec.sparsify_epsilon,
+            seed=spec.sparsify_seed,
+            sketch_dim=spec.sparsify_sketch_dim,
+            sample_count=spec.sparsify_sample_count,
+            pcg_tol=spec.sparsify_pcg_tol,
+            max_iter=spec.sparsify_max_iter,
+        )
 
     def fit_multi(
         self,
@@ -360,25 +370,21 @@ class ThemaRS:
         _notify()  # laplacian
 
         threshold = cfg.cosmic_graph.construction_threshold
+        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+        self._cosmic_rust = self._apply_default_sparsification(self._dense_cosmic_rust)
+        weighted_adj = np.array(self._cosmic_rust.weighted_adj)
         if threshold == "auto":
-            cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
-            weighted_adj = np.array(cg_temp.weighted_adj)
             self._stability_result = find_stable_thresholds(weighted_adj)
             self._resolved_construction_threshold = float(
                 self._stability_result.optimal_threshold
             )
-            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_construction_threshold
-            )
         else:
             self._resolved_construction_threshold = float(threshold)
-            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
-                galactic_L, self._resolved_construction_threshold
-            )
-            weighted_adj = np.array(self._cosmic_rust.weighted_adj)
 
         self._weighted_adjacency = weighted_adj
-        self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
+        self._cosmic_graph = cosmic_to_networkx(
+            self._cosmic_rust, threshold=self._resolved_construction_threshold
+        )
         _notify()  # cosmic (always last, always 1.0)
 
         return self
@@ -396,10 +402,79 @@ class ThemaRS:
 
     @property
     def weighted_adjacency(self) -> np.ndarray:
-        """n×n float64 weighted adjacency matrix."""
+        """n×n float64 weighted adjacency matrix before threshold filtering.
+
+        This is sparse by default when ``cosmic_graph.sparsify`` is enabled.
+        """
         if self._weighted_adjacency is None:
             raise RuntimeError("Call fit() first")
         return self._weighted_adjacency
+
+    @property
+    def cosmic_rust(self) -> CosmicGraph:
+        """Rust CosmicGraph backing ``cosmic_graph``; sparse by default."""
+        if self._cosmic_rust is None:
+            raise RuntimeError("Call fit() first")
+        return self._cosmic_rust
+
+    @property
+    def dense_cosmic_rust(self) -> CosmicGraph:
+        """Original dense Rust CosmicGraph before default spectral sparsification."""
+        if self._dense_cosmic_rust is None:
+            raise RuntimeError("Call fit() first")
+        return self._dense_cosmic_rust
+
+    def weighted_edges(
+        self, threshold: float | None = None
+    ) -> list[tuple[int, int, float]]:
+        """Weighted edge list from the exposed Cosmic graph.
+
+        Defaults to the model's resolved construction threshold.
+        """
+        cutoff = (
+            self.resolved_construction_threshold if threshold is None else float(threshold)
+        )
+        return [(i, j, w) for i, j, w in self.cosmic_rust.weighted_edges() if w > cutoff]
+
+    def spectral_sparsify(
+        self,
+        epsilon: float = 1.0,
+        *,
+        seed: int = 42,
+        sketch_dim: int | None = None,
+        sample_count: int | None = None,
+        pcg_tol: float = 1e-6,
+        max_iter: int = 1000,
+        update: bool = False,
+    ) -> CosmicGraph:
+        """Sparsify the original dense CosmicGraph.
+
+        When ``update=True``, this also recomputes threshold selection on the
+        sparsified graph and refreshes ``cosmic_graph`` / ``weighted_adjacency``.
+        """
+        sparse = self.dense_cosmic_rust.spectral_sparsify(
+            epsilon,
+            seed=seed,
+            sketch_dim=sketch_dim,
+            sample_count=sample_count,
+            pcg_tol=pcg_tol,
+            max_iter=max_iter,
+        )
+        if update:
+            self._cosmic_rust = sparse
+            self._weighted_adjacency = np.array(sparse.weighted_adj)
+            threshold = self.config.cosmic_graph.construction_threshold
+            if threshold == "auto":
+                self._stability_result = find_stable_thresholds(self._weighted_adjacency)
+                self._resolved_construction_threshold = float(
+                    self._stability_result.optimal_threshold
+                )
+            else:
+                self._resolved_construction_threshold = float(threshold)
+            self._cosmic_graph = cosmic_to_networkx(
+                sparse, threshold=self._resolved_construction_threshold
+            )
+        return sparse
 
     @property
     def ball_maps(self) -> list[BallMapper]:

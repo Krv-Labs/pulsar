@@ -1,245 +1,217 @@
 .. _intermediate:
 
-=============
 Tuning Guide
-=============
+============
 
-Pulsar sweeps over a grid of PCA dimensions and epsilon values. The quality of your results depends on how well that grid covers the structure of your data. This guide explains each parameter, what it controls, and how to tune it.
+Pulsar sweeps over projection dimensions, random seeds, and Ball Mapper
+epsilon values. The quality of a run depends on how well that grid covers the
+geometry of the data.
 
 Parameter Specification Styles
---------------------------------
+------------------------------
 
-Every sweep parameter supports three styles:
+Sweep parameters support explicit values, ranges, and scalars:
 
 .. code-block:: yaml
 
-   # Explicit list — use exactly these values
    dimensions: {values: [2, 3, 5, 10]}
-
-   # Linspace — evenly spaced between min and max
    epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
-
-   # Single scalar — equivalent to values: [x]
    seed: 42
 
-Mix styles freely within a config. The total grid size is
-``len(dimensions) × len(seeds) × len(epsilons)``.
-
-----
+The total grid size is ``len(dimensions) * len(seeds) * len(epsilons)``.
 
 Preprocessing
 -------------
 
-Before any sweep runs, Pulsar preprocesses the input DataFrame. All preprocessing is declared in the ``preprocessing:`` block of your config.
-
 ``preprocessing.drop_columns``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   Columns listed here are removed before any other step.
 
-Columns listed here are removed before any other step:
+   .. code-block:: yaml
 
-.. code-block:: yaml
-
-   preprocessing:
-     drop_columns: [id, timestamp, row_index]
+      preprocessing:
+        drop_columns: [id, timestamp, row_index]
 
 ``preprocessing.impute``
-~~~~~~~~~~~~~~~~~~~~~~~~~
+   Numeric imputation is applied before scaling. Available methods are
+   ``fill_mean``, ``fill_median``, ``fill_mode``, ``sample_normal``, and
+   ``sample_categorical``.
 
-Numeric imputation is applied before scaling. Each column gets a method and an optional seed:
+   .. code-block:: yaml
 
-.. code-block:: yaml
+      preprocessing:
+        impute:
+          age: {method: fill_mean}
+          income: {method: fill_median}
+          weight: {method: sample_normal, seed: 42}
 
-   preprocessing:
-     impute:
-       age:      {method: fill_mean}          # low missingness (< 30%)
-       income:   {method: fill_median}        # skewed distributions
-       weight:   {method: sample_normal, seed: 42}  # high missingness (>= 30%)
+   Columns not listed in ``impute`` or ``encode`` must arrive NaN-free. If NaNs
+   remain after preprocessing, Pulsar raises a ``ValueError`` naming the
+   offending columns and row counts.
 
-Available methods: ``fill_mean``, ``fill_median``, ``fill_mode``, ``sample_normal``, ``sample_categorical``.
+``preprocessing.encode``
+   Categorical columns must be encoded before they can be passed to the Rust
+   pipeline. Only one-hot encoding is currently supported.
+
+   .. code-block:: yaml
+
+      preprocessing:
+        encode:
+          island: {method: one_hot}
+          sex: {method: one_hot}
+          diagnosis: {method: one_hot, max_categories: 20}
+
+   If a column has more than 50 unique values, Pulsar emits a ``UserWarning``.
+   Use ``max_categories`` to make that limit a hard error. Columns with more
+   than 100 unique values should usually be dropped instead of encoded.
+
+Projection Parameters
+---------------------
+
+``sweep.projection.method``
+   The projection backend used before Ball Mapper. ``jl`` is the default
+   Johnson-Lindenstrauss random projection. ``pca`` selects the legacy
+   randomized PCA implementation.
+
+   .. code-block:: yaml
+
+      sweep:
+        projection:
+          method: jl
+
+   Use PCA explicitly only when you need variance-ordered axes or compatibility
+   with older runs:
+
+   .. code-block:: yaml
+
+      sweep:
+        projection:
+          method: pca
+
+``sweep.projection.dimensions``
+   The number of projected dimensions to retain before Ball Mapper. Lower
+   dimensions (2-5) emphasize global structure; higher dimensions (10-50)
+   preserve more local variation.
+
+   .. code-block:: yaml
+
+      sweep:
+        projection:
+          method: jl
+          dimensions: {values: [2, 5, 10, 20]}
+
+   Start with ``[2, 5, 10]`` for exploration. For high-dimensional data, add
+   ``20`` or ``50``. Ball Mapper membership queries use a KD-tree for projected
+   dimensions from 1 through 16; dimensions above 16 still work, but use the
+   compatibility linear scan path.
+
+``sweep.projection.seed``
+   Random seeds for projection generation. Multiple seeds produce different
+   views of the same dimensionality, and Pulsar fuses them through the
+   pseudo-Laplacian accumulator.
+
+   .. code-block:: yaml
+
+      sweep:
+        projection:
+          seed: {values: [42, 7, 13]}
+
+``sweep.projection.center``
+   Whether to subtract column means before JL projection. The default is
+   ``true``.
+
+   .. code-block:: yaml
+
+      sweep:
+        projection:
+          center: true
 
 .. note::
 
-   Columns **not** listed in ``impute`` or ``encode`` must arrive NaN-free. If any NaN values remain after preprocessing, Pulsar raises a ``ValueError`` naming the offending column(s) and row counts. There is no silent row-dropping.
-
-``preprocessing.encode``
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Categorical (string/object) columns must be encoded before they can be passed to the Rust pipeline. Only one-hot encoding is supported:
-
-.. code-block:: yaml
-
-   preprocessing:
-     encode:
-       island:    {method: one_hot}
-       sex:       {method: one_hot}
-       diagnosis: {method: one_hot, max_categories: 20}
-
-**Cardinality rules:**
-
-- If a column has more than 50 unique values, Pulsar emits a ``UserWarning`` — each category adds a dimension that dilates Euclidean distances after scaling.
-- Use ``max_categories: N`` to turn this into a hard error, preventing accidental high-cardinality encodings.
-- Columns with more than 100 unique values should generally be dropped, not encoded.
-
-.. code-block:: yaml
-
-   preprocessing:
-     encode:
-       # Hard limit — raises ValueError if more than 20 categories found
-       icd_code: {method: one_hot, max_categories: 20}
-
-**String imputation before encoding:**
-
-If a categorical column has missing values, add an ``impute`` rule alongside the ``encode`` rule. Use ``sample_categorical`` for multi-class columns (preserves class proportions) or ``fill_mode`` for binary columns:
-
-.. code-block:: yaml
-
-   preprocessing:
-     impute:
-       sex: {method: fill_mode}         # binary — fill_mode is safe
-       island: {method: sample_categorical, seed: 42}  # multi-class
-     encode:
-       sex:    {method: one_hot}
-       island: {method: one_hot}
-
-----
-
-PCA Parameters
---------------
-
-``sweep.pca.dimensions``
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**What it is**: The number of principal components to retain before building Ball Mapper. Each dimension value produces a separate projection of the scaled data.
-
-**What it controls**: Lower dimensions (2–5) emphasize dominant global structure. Higher dimensions (10–50) preserve more local variance and find finer-grained clusters. Pulsar sweeps all values and fuses the results, so you get multi-scale coverage in a single run.
-
-**How to choose**:
-
-- Start with ``[2, 5, 10]`` for exploration.
-- For high-dimensional data (>100 features), add ``20`` or ``50``.
-- Avoid dimensions larger than the number of features — Pulsar will error.
-- There is no benefit to values above ~50 for most datasets; the randomized SVD approximation degrades on very high dimensions.
-
-.. code-block:: yaml
-
-   sweep:
-     pca:
-       dimensions: {values: [2, 5, 10, 20]}
-
-``sweep.pca.seed``
-~~~~~~~~~~~~~~~~~~~
-
-**What it is**: Random seeds for the randomized SVD (Halko et al. 2011). Multiple seeds produce slightly different PCA projections of the same dimensionality.
-
-**What it controls**: Seed variation captures rotational ambiguity in PCA — two seeds at ``dimensions: 5`` give different 5D projections, each revealing slightly different structure. The Pseudo-Laplacian accumulator fuses all of them, improving robustness.
-
-**How to choose**:
-
-- Use 3–5 seeds for production runs: ``{values: [42, 7, 13, 99, 0]}``.
-- One seed is fine for quick iteration.
-- More seeds increase runtime linearly but rarely improve results beyond ~5.
-
-.. code-block:: yaml
-
-   sweep:
-     pca:
-       seed: {values: [42, 7, 13]}
-
-----
+   Legacy configs that only contain ``sweep.pca`` are still accepted. They are
+   treated as dimension/seed aliases for the default JL projection. To restore
+   old PCA behavior, use ``sweep.projection.method: pca``.
 
 Ball Mapper Parameters
------------------------
+----------------------
 
 ``sweep.ball_mapper.epsilon``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   The ball radius used to define neighborhoods in projection space.
 
-**What it is**: The ball radius used to define neighborhoods in PCA space. A ball centered on each landmark point covers all data points within distance ``epsilon``.
+   - Small epsilon: many small balls, fine-grained but possibly fragmented.
+   - Large epsilon: fewer balls with heavy overlap, coarse and possibly
+     over-connected.
 
-**What it controls**: This is the most impactful parameter.
+   .. code-block:: yaml
 
-- **Small epsilon** → many small, tight balls → many nodes → fine-grained, poztentially fragmented graph
-- **Large epsilon** → few large balls with heavy overlap → fewer nodes → coarse, over-connected graph
+      sweep:
+        ball_mapper:
+          epsilon: {range: {min: 0.1, max: 1.5, steps: 10}}
 
-The right epsilon captures natural cluster density without merging distinct groups.
-
-**How to choose**:
-
-- Start with a range spanning roughly one order of magnitude: ``{range: {min: 0.1, max: 1.5, steps: 8}}``.
-- After a first run, inspect ``model.resolved_construction_threshold`` and the node/edge count of ``model.cosmic_graph``. If the graph has a single giant component, epsilon is too large. If it is entirely disconnected, epsilon is too small.
-- For normalized data (post-StandardScaler), values between 0.2 and 2.0 are typical.
-- Use ``construction_threshold: "auto"`` (see below) — it is designed to work with a wide epsilon range.
-
-.. code-block:: yaml
-
-   sweep:
-     ball_mapper:
-       epsilon: {range: {min: 0.1, max: 1.5, steps: 10}}
-
-----
+   After a first run, inspect ``model.resolved_construction_threshold`` and the
+   node/edge count of ``model.cosmic_graph``. If the graph is a giant component,
+   epsilon is too large. If it is mostly disconnected, epsilon is too small.
 
 Cosmic Graph Parameters
-------------------------
+-----------------------
 
 ``cosmic_graph.construction_threshold``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   Minimum edge-weight cutoff applied after graph construction. ``"auto"`` uses
+   approximate H0 persistent homology to find a stable component-count plateau.
 
-**What it is**: A minimum edge-weight cutoff applied to the weighted adjacency matrix before converting to a NetworkX graph. Edges below the threshold are removed.
+   .. code-block:: yaml
 
-**What it controls**: Threshold trades sparsity against connectivity.
+      cosmic_graph:
+        construction_threshold: auto
 
-- **High threshold** → sparse graph, only the strongest topological relationships retained
-- **Low threshold (0.0)** → dense graph, all co-memberships included; often produces one giant component with no useful structure
-- **``"auto"``** → uses approximate H₀ persistent homology to find the threshold where the number of connected components stabilizes (a "plateau" in the component-count curve)
+``cosmic_graph.sparsify``
+   Whether Pulsar should sparsify the original unthresholded Cosmic Graph before
+   selecting and applying ``construction_threshold``. The default is ``true``.
 
-**How to choose**:
+   .. code-block:: yaml
 
-Always use ``construction_threshold: "auto"`` unless you have a specific reason not to. It is the correct default for high-dimensional data. A fixed threshold of ``0.0`` will almost always produce a single, structureless component.
+      cosmic_graph:
+        construction_threshold: auto
+        sparsify: true
+        sparsify_epsilon: 1.0
+        sparsify_seed: 42
+        sparsify_sketch_dim: null
+        sparsify_sample_count: null
 
-If you need a manual threshold (e.g. for reproducibility after exploration), read it from the fitted model:
+   With this default, ``model.cosmic_graph`` is a sparse ``networkx.Graph`` with
+   ``weight`` edge attributes. Set ``sparsify: false`` only when you explicitly
+   need dense graph behavior.
+
+``cosmic_graph.neighborhood``
+   The method used to compute normalized edge weights from the accumulated
+   pseudo-Laplacian. Currently ``"node"`` is the only supported value.
+
+Public Python hooks
+-------------------
 
 .. code-block:: python
 
-   model.fit()
-   print(model.resolved_construction_threshold)  # use this value in your YAML
+   graph = model.cosmic_graph      # sparse NetworkX graph, threshold applied
+   edges = model.weighted_edges()  # thresholded sparse edge list
+   dense = model.dense_cosmic_rust # original dense Rust graph
 
-.. code-block:: yaml
-
-   cosmic_graph:
-     construction_threshold: "auto"      # recommended
-     # construction_threshold: 0.42      # manual override after inspection
-
-``cosmic_graph.neighborhood``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**What it is**: The method used to compute normalized edge weights from the accumulated Pseudo-Laplacian. Currently ``"node"`` is the only supported value.
-
-----
+   # Re-sparsify from the original dense graph and refresh model outputs.
+   model.spectral_sparsify(epsilon=0.8, seed=7, update=True)
 
 Output Parameters
-------------------
+-----------------
 
 ``output.n_reps``
-~~~~~~~~~~~~~~~~~~
+   Number of representative BallMapper configurations returned by
+   ``model.select_representatives()``. This does not affect
+   ``model.cosmic_graph``, which is always built from the full sweep.
 
-**What it is**: The number of representative BallMapper configurations returned by ``model.select_representatives()``.
+   .. code-block:: yaml
 
-**What it controls**: After fitting, Pulsar has built hundreds or thousands of individual Ball Maps (one per ``dimension × seed × epsilon`` combination). ``select_representatives`` clusters them by structural similarity (node count, edge count, epsilon) and returns the ``n_reps`` maps closest to each cluster centroid — a diverse, compact summary of the full sweep.
+      output:
+        n_reps: 4
 
-**How to choose**:
-
-- ``4`` is a reasonable default for visualization and reporting.
-- Increase to ``8–12`` for a richer sample if you are building an ensemble or feeding results to a downstream model.
-- Has no effect on ``model.cosmic_graph`` — that is always built from the full sweep.
-
-.. code-block:: yaml
-
-   output:
-     n_reps: 4
-
-----
-
-Example: Full Tuned Config
----------------------------
+Full Example
+------------
 
 .. code-block:: yaml
 
@@ -250,24 +222,30 @@ Example: Full Tuned Config
    preprocessing:
      drop_columns: [id, timestamp]
      impute:
-       age:      {method: fill_mean}
-       income:   {method: sample_normal, seed: 42}
-       sex:      {method: fill_mode}
+       age: {method: fill_mean}
+       income: {method: sample_normal, seed: 42}
+       sex: {method: fill_mode}
      encode:
-       sex:      {method: one_hot}
+       sex: {method: one_hot}
        category: {method: one_hot, max_categories: 10}
 
    sweep:
-     pca:
+     projection:
+       method: jl
        dimensions: {values: [2, 5, 10]}
        seed: {values: [42, 7, 13]}
+       center: true
      ball_mapper:
        epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 
    cosmic_graph:
-     construction_threshold: "auto"
+     construction_threshold: auto
+     sparsify: true
+     sparsify_epsilon: 1.0
+     sparsify_seed: 42
 
    output:
      n_reps: 4
 
-This produces ``3 × 3 × 8 = 72`` Ball Maps, fused into a single Cosmic Graph with an automatically selected threshold.
+This produces ``3 * 3 * 8 = 72`` Ball Maps, fuses them into a Cosmic Graph,
+sparsifies that graph, and then selects/applies the construction threshold.

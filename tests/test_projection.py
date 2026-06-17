@@ -133,3 +133,76 @@ def test_projection_fingerprint_alias_and_method_sensitivity():
 
     assert projection_fingerprint(cfg_jl, 10) == pca_fingerprint(cfg_jl, 10)
     assert projection_fingerprint(cfg_jl, 10) != projection_fingerprint(cfg_pca, 10)
+
+
+def test_pipeline_cosmic_graph_is_sparse_by_default():
+    import pandas as pd
+
+    rng = np.random.default_rng(4)
+    data = pd.DataFrame(
+        rng.standard_normal((40, 4)),
+        columns=["a", "b", "c", "d"],
+    )
+    cfg = load_config(
+        {
+            "preprocessing": {},
+            "sweep": {
+                "projection": {
+                    "method": "jl",
+                    "dimensions": {"values": [2]},
+                    "seed": {"values": [42]},
+                },
+                "ball_mapper": {"epsilon": {"values": [100.0]}},
+            },
+            "cosmic_graph": {
+                "construction_threshold": 0.0,
+                "sparsify": True,
+                "sparsify_epsilon": 1.0,
+                "sparsify_seed": 42,
+                "sparsify_sketch_dim": 4,
+                "sparsify_sample_count": 80,
+            },
+        }
+    )
+
+    model = ThemaRS(cfg).fit(data=data)
+
+    assert model.cosmic_rust.n_edges <= model.dense_cosmic_rust.n_edges
+    assert model.cosmic_graph.number_of_edges() == len(model.weighted_edges())
+    assert model.cosmic_graph.number_of_edges() <= 80
+    assert np.count_nonzero(model.weighted_adjacency) // 2 == model.cosmic_rust.n_edges
+
+
+def test_pipeline_spectral_sparsify_update_refreshes_thresholded_graph():
+    import pandas as pd
+
+    rng = np.random.default_rng(5)
+    data = pd.DataFrame(rng.standard_normal((30, 3)), columns=["a", "b", "c"])
+    cfg = load_config(
+        {
+            "preprocessing": {},
+            "sweep": {
+                "projection": {
+                    "method": "jl",
+                    "dimensions": {"values": [2]},
+                    "seed": {"values": [42]},
+                },
+                "ball_mapper": {"epsilon": {"values": [1.0]}},
+            },
+            "cosmic_graph": {"construction_threshold": "auto", "sparsify": False},
+        }
+    )
+
+    model = ThemaRS(cfg).fit(data=data)
+    before = model.cosmic_rust.n_edges
+    sparse = model.spectral_sparsify(
+        epsilon=1.0,
+        seed=7,
+        sketch_dim=4,
+        sample_count=30,
+        update=True,
+    )
+
+    assert model.cosmic_rust is sparse
+    assert model.cosmic_rust.n_edges <= before
+    assert all(w > model.resolved_construction_threshold for _, _, w in model.weighted_edges())

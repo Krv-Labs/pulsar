@@ -139,7 +139,7 @@ Once connected, give the AI a goal rather than instructions. The AI already know
 
 Under the hood the AI will:
 
-1. **Characterize geometry** — probe k-NN distances and PCA variance to ground parameter choices
+1. **Characterize geometry** — probe k-NN distances and projection dimensions to ground parameter choices
 2. **Generate a preprocessing config** — recommend impute/encode rules for every column with rationale
 3. **Validate preprocessing** — dry-run the preprocessing stage before committing to a full sweep
 4. **Run a topological sweep** — find the most stable version of the data's shape
@@ -158,9 +158,9 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - Tool
      - What It Does
    * - **characterize_dataset**
-     - Quick exploratory summary: k-NN distances (is your data sparse or dense?), PCA variance (how many dimensions matter?), missing value patterns. Claude uses this to make smart initial parameter guesses instead of random choices.
+     - Quick exploratory summary: k-NN distances (is your data sparse or dense?), projection dimensions, missing value patterns. Claude uses this to make smart initial parameter guesses instead of random choices.
    * - **run_topological_sweep**
-     - Execute the full Pulsar pipeline: imputation → PCA → Ball Mapper → cosmic graph, all from inline YAML config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
+     - Execute the full Pulsar pipeline: imputation → projection → Ball Mapper → cosmic graph, all from inline YAML config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
    * - **generate_cluster_dossier**
      - Deep statistical report per discovered cluster: trait profiles, homogeneity scores, separation metrics, concentration measures. Answers "What makes this cluster distinct?" and "How confident are we in the boundaries?"
    * - **compare_clusters_tool**
@@ -174,7 +174,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - **repair_preprocessing_config**
      - Parse a preprocessing error from ``run_topological_sweep``, look up the offending column in the dataset profile, and return a patched config with a change log. Fixes most errors in one call.
    * - **validate_preprocessing_config**
-     - Dry-run only the preprocessing stage against the session data — no PCA, no sweep cost. Returns PASS with a schema summary, or a structured error ready to pass to ``repair_preprocessing_config``.
+     - Dry-run only the preprocessing stage against the session data — no projection, no sweep cost. Returns PASS with a schema summary, or a structured error ready to pass to ``repair_preprocessing_config``.
 
 Example: Palmer Penguins
 ------------------------
@@ -214,9 +214,13 @@ The dataset is not bundled with Pulsar. Export it to CSV with either of these on
        flipper_length_mm: {method: fill_mean}
        body_mass_g: {method: fill_mean}
    sweep:
-     pca:
+     projection:
+       method: jl
        dimensions:
          values: [5]
+       seed:
+         values: [42]
+       center: true
      ball_mapper:
        epsilon:
          range: {min: 0.80, max: 1.50, steps: 15}
@@ -237,4 +241,3 @@ The AI handles imputation, categorical encoding, and parameter scaling. Your job
 .. seealso::
 
    - :ref:`Configuration <configuration>` — full YAML schema reference
-

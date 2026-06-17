@@ -16,7 +16,19 @@ import numpy as np
 import yaml
 
 
-ALLOWED_COSMIC_GRAPH_KEYS = frozenset({"construction_threshold", "neighborhood"})
+ALLOWED_COSMIC_GRAPH_KEYS = frozenset(
+    {
+        "construction_threshold",
+        "neighborhood",
+        "sparsify",
+        "sparsify_epsilon",
+        "sparsify_seed",
+        "sparsify_sketch_dim",
+        "sparsify_sample_count",
+        "sparsify_pcg_tol",
+        "sparsify_max_iter",
+    }
+)
 LEGACY_COSMIC_GRAPH_THRESHOLD_KEY = "threshold"
 LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE = (
     "Unsupported legacy key cosmic_graph.threshold. "
@@ -117,6 +129,13 @@ class BallMapperSpec:
 class CosmicGraphSpec:
     construction_threshold: float | Literal["auto"] = "auto"
     neighborhood: str = "node"
+    sparsify: bool = True
+    sparsify_epsilon: float = 1.0
+    sparsify_seed: int = 42
+    sparsify_sketch_dim: int | None = None
+    sparsify_sample_count: int | None = None
+    sparsify_pcg_tol: float = 1e-6
+    sparsify_max_iter: int = 1000
 
 
 @dataclass
@@ -222,6 +241,21 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     cosmic_graph = CosmicGraphSpec(
         construction_threshold=construction_threshold,
         neighborhood=str(cg_raw.get("neighborhood", "node")),
+        sparsify=bool(cg_raw.get("sparsify", True)),
+        sparsify_epsilon=float(cg_raw.get("sparsify_epsilon", 1.0)),
+        sparsify_seed=int(cg_raw.get("sparsify_seed", 42)),
+        sparsify_sketch_dim=(
+            None
+            if cg_raw.get("sparsify_sketch_dim") is None
+            else int(cg_raw.get("sparsify_sketch_dim"))
+        ),
+        sparsify_sample_count=(
+            None
+            if cg_raw.get("sparsify_sample_count") is None
+            else int(cg_raw.get("sparsify_sample_count"))
+        ),
+        sparsify_pcg_tol=float(cg_raw.get("sparsify_pcg_tol", 1e-6)),
+        sparsify_max_iter=int(cg_raw.get("sparsify_max_iter", 1000)),
     )
 
     # output section
@@ -273,6 +307,16 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
         if construction_threshold == "auto"
         else str(construction_threshold)
     )
+    sparsify_sketch_dim = (
+        "null"
+        if cfg.cosmic_graph.sparsify_sketch_dim is None
+        else str(cfg.cosmic_graph.sparsify_sketch_dim)
+    )
+    sparsify_sample_count = (
+        "null"
+        if cfg.cosmic_graph.sparsify_sample_count is None
+        else str(cfg.cosmic_graph.sparsify_sample_count)
+    )
 
     return f"""run:
   name: {cfg.run_name or "experiment"}
@@ -300,6 +344,13 @@ sweep:
         steps: {len(cfg.ball_mapper.epsilons)}
 cosmic_graph:
   construction_threshold: {threshold_str}
+  sparsify: {str(cfg.cosmic_graph.sparsify).lower()}
+  sparsify_epsilon: {cfg.cosmic_graph.sparsify_epsilon}
+  sparsify_seed: {cfg.cosmic_graph.sparsify_seed}
+  sparsify_sketch_dim: {sparsify_sketch_dim}
+  sparsify_sample_count: {sparsify_sample_count}
+  sparsify_pcg_tol: {cfg.cosmic_graph.sparsify_pcg_tol}
+  sparsify_max_iter: {cfg.cosmic_graph.sparsify_max_iter}
 output:
   n_reps: {cfg.n_reps}
 """

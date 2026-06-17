@@ -1,6 +1,6 @@
 # Pulsar
 
-Rust-backed Python library for topological data analysis. Implements the Thema pipeline: imputation → scaling → PCA → Ball Mapper → Cosmic Graph.
+Rust-backed Python library for topological data analysis. Implements the Thema pipeline: imputation → scaling → projection → Ball Mapper → Cosmic Graph.
 
 Performance-critical algorithms are written in Rust (PyO3/maturin) and exposed as `pulsar._pulsar`. Python orchestrates the pipeline.
 
@@ -53,7 +53,7 @@ It's important you let the agent follow this exact sequence for a few reasons:
 Here is the exact loop the agent should run:
 
 1. **Ingest the dataset** to get a stable `dataset_id` handle.
-2. **Create a calibrated config** via `create_config(dataset_id)` — calibrates epsilon and PCA against the processed feature space.
+2. **Create a calibrated config** via `create_config(dataset_id)` — calibrates epsilon and projection dimensions against the processed feature space.
 3. **Sweep the topology** using that config.
 4. **Diagnose the graph** to see if it's a giant useless blob or actually balanced. Use the metrics to decide what to adjust, then iterate via `refine_config`.
 5. **Generate the dossier** to explain the clusters in plain English.
@@ -64,7 +64,7 @@ Here is the exact loop the agent should run:
 
 We didn't just wrap our Python functions in JSON schemas. We built *Thick Tools*—stateful, workflow-aware engines that pass configuration directly between each other so you don't have to watch the agent screw up file I/O.
 
-*   `create_config(dataset_id)`: The primary config generation tool. Analyzes k-NN distances and PCA variance in the *processed* feature space (after preprocessing + scaling) to produce a calibrated YAML config. Never let the agent guess parameters.
+*   `create_config(dataset_id)`: The primary config generation tool. Analyzes k-NN distances and projection dimensions in the *processed* feature space (after preprocessing + scaling) to produce a calibrated YAML config. Never let the agent guess parameters.
 *   `run_topological_sweep`: Runs the heavy Rust pipeline. Takes inline YAML and returns structured JSON with metrics and experiment diff. Config persistence is opt-in via `save_config=True`.
 *   `diagnose_cosmic_graph`: Returns pure graph metrics (density, components, weight quantiles). The agent interprets these to decide what to adjust — e.g., "hairball" means high density, "shattered" means too many small components.
 *   `generate_cluster_dossier`: Returns structured JSON with per-cluster profiles (Z-scores, homogeneity, concentration) plus a Markdown summary. Includes clustering method metadata (method used, silhouette score).
@@ -124,9 +124,13 @@ from pulsar import ThemaRS
 
 model = ThemaRS("params.yaml").fit()
 
-graph = model.cosmic_graph        # networkx.Graph with 'weight' edge attributes
-adj   = model.weighted_adjacency  # np.ndarray, shape (n, n)
+graph = model.cosmic_graph        # sparse networkx.Graph with 'weight' edge attributes
+adj   = model.weighted_adjacency  # sparse weighted adjacency materialized as np.ndarray
+edges = model.weighted_edges()    # thresholded sparse edge list
 reps  = model.select_representatives()  # uses the configured default
+
+# Re-sparsify with custom parameters and refresh model.cosmic_graph
+model.spectral_sparsify(epsilon=0.8, seed=7, update=True)
 ```
 
 Copy `params.yaml.sample` to `params.yaml` and edit it for your dataset.
@@ -178,14 +182,21 @@ preprocessing:
       seed: 7
 
 sweep:
-  pca:
+  projection:
+    method: jl # default; set to pca for legacy randomized PCA
     dimensions:
       values: [2, 3, 5]
     seed:
       values: [42, 7, 13]
+    center: true
   ball_mapper:
     epsilon:
       range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
+cosmic_graph:
+  construction_threshold: auto
+  sparsify: true
+  sparsify_epsilon: 1.0
+  sparsify_seed: 42
 ```
 
 ## Development
@@ -194,5 +205,5 @@ sweep:
 uv run maturin develop        # debug build
 uv run maturin develop --release  # optimised build
 uv run pytest tests/ -v
+uv run python benchmarks/benchmark_accelerations.py
 ```
-

@@ -213,10 +213,11 @@ def _cluster_spectral(
             "Use method='components' or increase epsilon to connect the graph."
         )
 
-    # Distance = 1 - Affinity
+    # Distance = 1 - affinity. Spectral sparsification can reweight edges above
+    # 1.0, so clip only for the silhouette distance matrix.
     affinity = adj.copy()
     np.fill_diagonal(affinity, 1.0)
-    distance = 1.0 - affinity
+    distance = 1.0 - np.clip(affinity, 0.0, 1.0)
 
     best_score = -1.0
     best_labels = None
