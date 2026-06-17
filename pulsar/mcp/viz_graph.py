@@ -200,7 +200,12 @@ def _component_force_layout(
     # Centre on the centroid so the bounding radius below is measured about (0,0).
     cx = sum(x for x, _ in coords.values()) / len(coords)
     cy = sum(y for _, y in coords.values()) / len(coords)
-    return {node: (x - cx, y - cy) for node, (x, y) in coords.items()}
+    # spring_layout normalizes EVERY component to ~unit radius, which crushes a large component into a
+    # dense "blob" while a tiny one stays airy. Scale each component's extent by √size so node DENSITY
+    # is ~constant across islands (radius ∝ √size ⇒ area ∝ size) — readable, breathing components.
+    # Packing measures the scaled radius, so islands stay non-overlapping regardless of this factor.
+    spread = float(len(coords)) ** 0.5
+    return {node: ((x - cx) * spread, (y - cy) * spread) for node, (x, y) in coords.items()}
 
 
 def _bounding_radius(local: dict[int, tuple[float, float]]) -> float:
