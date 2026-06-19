@@ -11,6 +11,7 @@ import yaml
 
 from pulsar.mcp.session import SweepRecord, _sessions, _get_session
 from pulsar.mcp.diagnostics import _finalization_gate
+from pulsar.mcp.config_tools import _initial_pca_grid
 from pulsar.mcp.payloads import sweep_payload_to_markdown
 from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
@@ -1022,6 +1023,27 @@ def test_create_config_high_dimensional_baseline_uses_broad_tail_grid(tmp_path):
     assert response["sweep_strategy"]["projection_seeds"] == [42, 7, 13]
     assert response["sweep_strategy"]["estimated_ball_maps"] == 216
     assert "compare_sweeps" in response["sweep_strategy"]["agent_guidance"]
+
+
+def test_initial_pca_grid_expands_diffuse_high_dimensional_curve():
+    grid = _initial_pca_grid(
+        384,
+        20,
+        [
+            (2, 0.01),
+            (3, 0.015),
+            (5, 0.025),
+            (10, 0.05),
+            (15, 0.075),
+            (20, 0.10),
+        ],
+    )
+
+    assert grid == [8, 12, 16]
+
+
+def test_initial_pca_grid_respects_tiny_feature_ceiling():
+    assert _initial_pca_grid(2, 2, [(2, 0.9)]) == [2]
 
 
 def test_create_config_numeric_only_still_works(tmp_path):

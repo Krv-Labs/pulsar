@@ -900,6 +900,9 @@ def _initial_pca_grid(
     """
     points = sorted((int(d), float(v)) for d, v in pca_cum_var)
     ceiling = min(int(pca_knee), int(n_features), 16)
+    if ceiling <= 0:
+        return []
+    floor = min(_PCA_FLOOR, ceiling)
 
     def dim_at(target: float) -> int | None:
         for dim, var in points:
@@ -910,8 +913,21 @@ def _initial_pca_grid(
     dims = [d for d in (dim_at(t) for t in _VARIANCE_FRONTIER_TARGETS) if d is not None]
     dims.append(ceiling)
 
-    clipped = [max(_PCA_FLOOR, min(int(d), ceiling)) for d in dims if d >= 2]
-    return sorted(set(clipped))
+    clipped = [max(floor, min(int(d), ceiling)) for d in dims if d >= 2]
+    grid = sorted(set(clipped))
+    target_count = min(3, max(1, ceiling - floor + 1))
+    if len(grid) >= target_count:
+        return grid
+
+    if ceiling <= 4:
+        return sorted(set(grid + list(range(floor, ceiling + 1))))
+
+    fallback = {
+        max(floor, ceiling // 2),
+        max(floor, round(ceiling * 0.75)),
+        ceiling,
+    }
+    return sorted(set(grid + list(fallback)))
 
 
 def _build_initial_config_yaml(
