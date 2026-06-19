@@ -15,9 +15,9 @@ import pandas as pd
 from pulsar._pulsar import (
     BallMapper,
     CosmicGraph,
+    MinHashAccumulator,
     StabilityResult,
     StandardScaler,
-    accumulate_pseudo_laplacians_sparse,
     ball_mapper_grid,
     find_stable_thresholds_sparse,
     jl_grid,
@@ -204,17 +204,18 @@ class ThemaRS:
             ]
         )
         self._ball_maps = []
-        galactic_L: Any | None = None
+        minhash_accum: MinHashAccumulator | None = None
         total_batches = len(batches)
         for batch_index, batch in enumerate(batches, start=1):
             batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
             self._ball_maps.extend(batch_ball_maps)
-            batch_spl = accumulate_pseudo_laplacians_sparse(batch_ball_maps, n)
-            if galactic_L is None:
-                galactic_L = batch_spl
-            else:
-                galactic_L.merge_in_place(batch_spl)
-            del batch_spl
+            if minhash_accum is None:
+                minhash_accum = MinHashAccumulator(
+                    n,
+                    cfg.cosmic_graph.minhash_d,
+                    cfg.cosmic_graph.minhash_seed,
+                )
+            minhash_accum.accumulate(batch_ball_maps)
             gc.collect()
             progress.update(
                 "sweep_batches",
@@ -222,13 +223,17 @@ class ThemaRS:
                 f"sweep batch {batch_index}/{total_batches}: ball_mapper + laplacian",
             )
 
-        if galactic_L is None:
+        if minhash_accum is None:
             raise RuntimeError("No BallMapper batches were processed")
 
-        # 8. CosmicGraph: build the (sparse-backed) graph, sparsify if opted-in, threshold.
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
-            galactic_L, 0.0
-        )
+        # 7–8. CosmicGraph construction via MinHash/LSH (Rust parallel). This bypasses
+        # the exact pseudo-Laplacian whose Σ|B_c|² pair materialization is the real
+        # bottleneck: edge weights are unbiased Jaccard estimates of each point's
+        # ball-set (Var = J(1−J)/d). The signature was folded in per batch above; this
+        # finalize step (LSH banding + weight estimation) builds the graph.
+        self._dense_cosmic_rust = minhash_accum.to_cosmic_graph()
+
+        # 8. Sparsify if opted-in, then resolve threshold and build the NetworkX graph.
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
         progress.complete("cosmic_graph")
         self._finalize_cosmic_graph(
@@ -384,9 +389,10 @@ class ThemaRS:
         progress = ProgressTracker(stages, progress_callback)
 
         all_ball_maps: list[BallMapper] = []
-        # Sparse co-membership accumulator (SparsePseudoLaplacian), fused across
-        # datasets via merge_in_place — never allocates an n×n matrix.
-        galactic_L_accum: Any | None = None
+        # Streaming MinHash signature accumulator, folded across datasets via
+        # element-wise min — constant d×n memory, never allocates an n×n matrix and
+        # never holds all ball maps. Created lazily once n is known.
+        minhash_accum: MinHashAccumulator | None = None
         n: int | None = None
         ref_layout = None
 
@@ -444,13 +450,15 @@ class ThemaRS:
                     batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
                     if store_ball_maps:
                         all_ball_maps.extend(batch_ball_maps)
-                    batch_spl = accumulate_pseudo_laplacians_sparse(batch_ball_maps, n)
-                    if galactic_L_accum is None:
-                        galactic_L_accum = batch_spl
-                    else:
-                        galactic_L_accum.merge_in_place(batch_spl)
+                    if minhash_accum is None:
+                        minhash_accum = MinHashAccumulator(
+                            n,
+                            cfg.cosmic_graph.minhash_d,
+                            cfg.cosmic_graph.minhash_seed,
+                        )
+                    minhash_accum.accumulate(batch_ball_maps)
                     # Release batch memory aggressively in notebook contexts
-                    del batch_ball_maps, batch_spl
+                    del batch_ball_maps
                     gc.collect()
                     progress.update(
                         f"{prefix}sweep_batches",
@@ -465,14 +473,13 @@ class ThemaRS:
 
         self._ball_maps = all_ball_maps if store_ball_maps else []
 
-        if galactic_L_accum is None or n is None:
+        if minhash_accum is None or n is None:
             raise RuntimeError("No datasets were processed")
 
-        galactic_L = galactic_L_accum
+        # Build the cosmic graph from the accumulated MinHash signature (LSH banding +
+        # candidate weight estimation). The signature was folded in per batch above.
+        self._dense_cosmic_rust = minhash_accum.to_cosmic_graph()
 
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
-            galactic_L, 0.0
-        )
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
         progress.complete("cosmic_graph")
         self._finalize_cosmic_graph(
