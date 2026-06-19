@@ -131,7 +131,7 @@ class CosmicGraphSpec:
     neighborhood: str = "node"
     # Spectral sparsification is an opt-in hook, not a default. It runs *after* the
     # (already sparse) cosmic graph is built, so it is pure additional cost on the
-    # construction path; its value is a leverage-aware, epsilon-free O(n)-edge graph
+    # construction path; its value is a leverage-aware, epsilon-controlled graph
     # that preserves spectrum/distances for downstream spectral analysis. See
     # ThemaRS.spectral_sparsify.
     # WARNING: it is SLOW on large datasets (solves a preconditioned-CG system per

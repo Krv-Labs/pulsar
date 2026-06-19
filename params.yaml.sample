@@ -37,7 +37,7 @@ sweep:
 cosmic_graph:
   construction_threshold: auto
   neighborhood: node
-  sparsify: true
+  sparsify: false
   sparsify_epsilon: 1.0
   sparsify_seed: 42
   sparsify_sketch_dim: null

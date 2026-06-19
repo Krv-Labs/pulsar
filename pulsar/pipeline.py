@@ -499,7 +499,7 @@ class ThemaRS:
 
         This is NOT a construction-time speedup — it runs after the graph is
         already built and is pure additional cost on that path. Its value is a
-        leverage-aware, epsilon-free sparsifier that produces an O(n)-edge graph
+        leverage-aware, epsilon-controlled sparsifier that produces a compact graph
         **preserving the spectrum / effective resistances (distances)**, not the
         topology. Use it when you want a compact graph to run spectral algorithms
         on (spectral embeddings/clustering) or to hand to downstream analysis,
