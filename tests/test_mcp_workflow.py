@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import importlib
 import json
 from types import SimpleNamespace
 
@@ -8,7 +9,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from pulsar.mcp.session import _sessions, _get_session
+from pulsar.mcp.session import SweepRecord, _sessions, _get_session
 from pulsar.mcp.diagnostics import _finalization_gate
 from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
@@ -23,6 +24,7 @@ from pulsar.mcp.tools.config import (
 )
 from pulsar.mcp.tools.meta import get_runtime_context
 from pulsar.mcp.tools.sweeping import (
+    get_sweep_history,
     run_topological_sweep,
     compare_sweeps,
 )
@@ -34,6 +36,12 @@ from pulsar.mcp.thresholds import (
     structural_breakpoints,
 )
 from pulsar.mcp.tools.diagnostics import (
+    _build_recommendation,
+    _summary_structural_breakpoints,
+    _threshold_agent_readout,
+    _threshold_next_tool_lines,
+    create_graph_artifact,
+    diagnose_cosmic_graph,
     get_threshold_stability_curve,
     get_topological_skeleton,
 )
@@ -97,6 +105,87 @@ def _normalize_config_data_path(config_yaml: str) -> str:
         else:
             lines.append(line)
     return "\n".join(lines)
+
+
+def test_default_mcp_tool_surface_is_curated(monkeypatch):
+    monkeypatch.delenv("PULSAR_MCP_ENABLE_UPLOAD", raising=False)
+    import pulsar.mcp.tools as tools
+
+    tools = importlib.reload(tools)
+    names = [tool.__name__ for tool in tools.ALL_TOOLS_LIST]
+
+    assert len(names) == 25
+    assert "get_sweep_history" in names
+    assert "compare_clusters" in names
+    assert "explain_suggestion" not in names
+    assert "get_experiment_history" not in names
+    assert "summarize_sweep_history" not in names
+    assert "compare_clusters_tool" not in names
+    assert "begin_dataset_upload" not in names
+    assert "append_dataset_chunk" not in names
+    assert "finalize_dataset_upload" not in names
+
+
+def test_upload_tools_are_opt_in(monkeypatch):
+    import pulsar.mcp.tools as tools
+
+    monkeypatch.setenv("PULSAR_MCP_ENABLE_UPLOAD", "1")
+    tools = importlib.reload(tools)
+    names = [tool.__name__ for tool in tools.ALL_TOOLS_LIST]
+    assert "begin_dataset_upload" in names
+    assert "append_dataset_chunk" in names
+    assert "finalize_dataset_upload" in names
+
+    monkeypatch.delenv("PULSAR_MCP_ENABLE_UPLOAD", raising=False)
+    importlib.reload(tools)
+
+
+def test_get_sweep_history_consolidates_table_summary_and_full_modes():
+    _sessions.clear()
+    session = _get_session(None)
+    session.sweep_history.append(
+        SweepRecord(
+            timestamp=1.0,
+            dataset_id="ds_test",
+            config_yaml="""
+sweep:
+  projection:
+    dimensions:
+      values: [2, 4]
+  ball_mapper:
+    epsilon:
+      range:
+        min: 0.1
+        max: 0.3
+""",
+            metrics={
+                "n_nodes": 30,
+                "n_edges": 44,
+                "component_count": 3,
+                "giant_fraction": 0.8,
+            },
+        )
+    )
+
+    table = asyncio.run(get_sweep_history())
+    assert "| Run | Projection Dims | Epsilon Range |" in table
+    assert "[2, 4]" in table
+    assert "80.00%" in table
+
+    summary = json.loads(
+        asyncio.run(get_sweep_history(detail="summary", response_format="json"))
+    )
+    assert summary["detail"] == "summary"
+    assert summary["n_runs"] == 1
+    assert "summary" in summary
+    assert "runs" not in summary
+
+    full = json.loads(
+        asyncio.run(get_sweep_history(detail="full", response_format="json"))
+    )
+    assert full["detail"] == "full"
+    assert full["runs"][0]["dataset_id"] == "ds_test"
+    assert "summary" in full
 
 
 def test_validate_config_reports_schema_mismatches(tmp_path):
@@ -310,6 +399,8 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
     assert skeleton["dataset_id"] == dataset["dataset_id"]
     assert skeleton["graph"]["node_count"] > 0
     assert skeleton["graph"]["detail"] == "summary"
+    assert "component_sizes_summary" in skeleton["graph"]
+    assert "component_sizes" not in skeleton["graph"]
     assert "nodes" not in skeleton["graph"]
     assert "edges" not in skeleton["graph"]
     assert skeleton["graph"]["nodes_returned"] == 0
@@ -321,6 +412,7 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
     assert "config_yaml" in skeleton_full
     assert "nodes" in skeleton_full["graph"]
     assert "edges" in skeleton_full["graph"]
+    assert "component_sizes" in skeleton_full["graph"]
     assert "Sweep Comparison" in comparison
     assert run_a in comparison
     assert run_b in comparison
@@ -659,6 +751,52 @@ def test_recommend_preprocessing_summary_caps_rationale_and_warns_expansion(tmp_
     )
 
 
+def test_recommend_preprocessing_surfaces_high_missingness_decisions(tmp_path):
+    rows = 20
+    path = tmp_path / "high_missingness.csv"
+    pd.DataFrame(
+        {
+            "clean": list(range(rows)),
+            "sparse_numeric": [None] * 17 + [1.0, 2.0, 3.0],
+            "review_numeric": [None] * 13 + [float(i) for i in range(7)],
+            "outcome_score": [None] * 17 + [0.0, 1.0, 1.0],
+        }
+    ).to_csv(path, index=False)
+    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+
+    markdown = asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
+    payload = json.loads(
+        asyncio.run(
+            recommend_preprocessing(
+                dataset_id=dataset["dataset_id"],
+                response_format="json",
+                detail="full",
+            )
+        )
+    )
+
+    block = yaml.safe_load(payload["preprocessing_yaml"])["preprocessing"]
+    assert "sparse_numeric" in block["drop_columns"]
+    assert "review_numeric" in block["impute"]
+    assert "outcome_score" in block["impute"]
+    assert payload["recommended_action"] == "probe_columns_first"
+    assert payload["next_tool_call"]["tool"] == "probe_columns"
+    assert {row["column"] for row in payload["high_missingness_columns_full"]} == {
+        "sparse_numeric",
+        "review_numeric",
+        "outcome_score",
+    }
+    protected = {
+        row["column"]: row["protected_name_hint"]
+        for row in payload["high_missingness_columns_full"]
+    }
+    assert protected["outcome_score"] is True
+    assert any(
+        warning["code"] == "HIGH_MISSINGNESS_COLUMNS" for warning in payload["warnings"]
+    )
+    assert "## High Missingness Review" in markdown
+
+
 def test_unknown_handles_return_stable_codes():
     dataset_report = json.loads(asyncio.run(create_config("ds_missing")))
     run_report = json.loads(asyncio.run(get_topological_skeleton("run_missing")))
@@ -691,6 +829,9 @@ def test_get_workflow_guide_returns_phase_prompt():
     assert "PHASE II" in guide
     assert "PHASE III" in guide
     assert "ingest_dataset" in guide
+    assert "get_sweep_history" in guide
+    assert "get_experiment_history" not in guide
+    assert "summarize_sweep_history" not in guide
     assert 'generate_cluster_dossier(detail="summary")' in guide
     assert 'get_topological_skeleton(detail="nodes")' in guide
     assert 'detail="full_nodes"' in guide
@@ -767,17 +908,21 @@ def test_create_config_generates_wide_grid(tmp_path):
     response = json.loads(asyncio.run(create_config(dataset["dataset_id"])))
 
     cfg = yaml.safe_load(response["config_yaml"])
-    pca_dims = cfg["sweep"]["pca"]["dimensions"]["values"]
-    pca_seeds = cfg["sweep"]["pca"]["seed"]["values"]
+    projection = cfg["sweep"]["projection"]
+    projection_dims = projection["dimensions"]["values"]
+    projection_seeds = projection["seed"]["values"]
     eps = cfg["sweep"]["ball_mapper"]["epsilon"]["range"]
 
-    # Should have multiple PCA dims spanning a meaningful range
-    assert len(pca_dims) >= 3
-    assert max(pca_dims) > min(pca_dims)
+    assert projection["method"] == "jl"
+    # Should have multiple projection dims spanning a meaningful range
+    assert len(projection_dims) >= 3
+    assert max(projection_dims) > min(projection_dims)
     # Should have multiple seeds
-    assert len(pca_seeds) >= 2
+    assert len(projection_seeds) >= 2
     # Should have enough epsilon steps
     assert eps["steps"] >= 20
+    assert "pca_dimensions" not in response["sweep_strategy"]
+    assert "pca_seeds" not in response["sweep_strategy"]
 
 
 def test_create_config_high_dimensional_baseline_uses_broad_tail_grid(tmp_path):
@@ -790,18 +935,22 @@ def test_create_config_high_dimensional_baseline_uses_broad_tail_grid(tmp_path):
     cfg = yaml.safe_load(response["config_yaml"])
 
     projection = cfg["sweep"]["projection"]
-    pca_dims = cfg["sweep"]["pca"]["dimensions"]["values"]
-    pca_seeds = cfg["sweep"]["pca"]["seed"]["values"]
+    projection_dims = projection["dimensions"]["values"]
+    projection_seeds = projection["seed"]["values"]
+    legacy_pca_dims = cfg["sweep"]["pca"]["dimensions"]["values"]
     eps_steps = cfg["sweep"]["ball_mapper"]["epsilon"]["range"]["steps"]
 
     # Variance-frontier targeting: drops low-variance dims (e.g., 2, 5 captured
     # < 50% cumulative variance) in favor of signal-rich frontiers + elbow.
-    assert pca_dims == [10, 15, 16]
     assert projection["method"] == "jl"
-    assert projection["dimensions"]["values"] == pca_dims
-    assert max(projection["dimensions"]["values"]) <= 16
-    assert pca_seeds == [42, 7, 13]
+    assert projection_dims == [10, 15, 16]
+    assert legacy_pca_dims == projection_dims
+    assert max(projection_dims) <= 16
+    assert projection_seeds == [42, 7, 13]
     assert eps_steps == 24
+    assert response["sweep_strategy"]["projection_method"] == "jl"
+    assert response["sweep_strategy"]["projection_dimensions"] == [10, 15, 16]
+    assert response["sweep_strategy"]["projection_seeds"] == [42, 7, 13]
     assert response["sweep_strategy"]["estimated_ball_maps"] == 216
     assert "compare_sweeps" in response["sweep_strategy"]["agent_guidance"]
 
@@ -877,6 +1026,98 @@ def test_refine_config_accepts_dotted_paths(tmp_path):
     assert refined_cfg["output"]["n_reps"] == 4
 
 
+def test_sweep_markdown_surfaces_resolved_construction_threshold():
+    """The selected edge-weight cut must be visible in the markdown summary, not
+    only in the JSON payload."""
+    from pulsar.mcp.payloads import (
+        build_sweep_summary_payload,
+        sweep_payload_to_markdown,
+    )
+
+    response = {
+        "status": "ok",
+        "run_id": "run_abc",
+        "dataset_id": "ds_abc",
+        "construction_threshold": 0.4213,
+        "graph_health": "connected",
+        "analysis_status": "diagnostics_required",
+        "constructed_graph_connected": False,
+        "metrics": {
+            "n_nodes": 1700,
+            "n_edges": 916476,
+            "component_count": 2,
+            "giant_fraction": 0.96,
+            "component_sizes": [1631, 9],
+        },
+    }
+    md = sweep_payload_to_markdown(build_sweep_summary_payload(response))
+    assert "Construction threshold (edge-weight cut): 0.4213" in md
+    assert "Graph health status: usable_giant_component_with_tail" in md
+    assert "Constructed graph connected: False" in md
+
+
+def test_apply_overrides_remove_keys_deletes_nested_key():
+    """remove_keys deletes a config entry entirely (vs. nulling it), is
+    idempotent, and validates roots."""
+    from pulsar.mcp.config_tools import (
+        _MISSING,
+        _remove_dotted_path,
+        apply_overrides,
+    )
+
+    raw = {"preprocessing": {"encode": {"species": {"method": "onehot"}, "keep": 1}}}
+    removed = _remove_dotted_path(raw, "preprocessing.encode.species")
+    assert removed == {"method": "onehot"}
+    assert raw["preprocessing"]["encode"] == {"keep": 1}
+    # Idempotent: removing a missing path is a no-op sentinel, not an error.
+    assert _remove_dotted_path(raw, "preprocessing.encode.species") is _MISSING
+
+    # Validation fires before any config parsing.
+    try:
+        apply_overrides("run:\n  data: x\n", {"remove_keys": "notalist"})
+        raise AssertionError("expected ValueError for non-list remove_keys")
+    except ValueError as e:
+        assert "remove_keys" in str(e)
+    try:
+        apply_overrides("run:\n  data: x\n", {"remove_keys": ["bogus.path"]})
+        raise AssertionError("expected ValueError for unknown remove_keys root")
+    except ValueError as e:
+        assert "bogus" in str(e)
+
+
+def test_refine_config_remove_keys_drops_preprocessing_entry(tmp_path):
+    """End-to-end: a key injected under preprocessing can be deleted via
+    remove_keys, and the deletion is reported in the diff with removed=true."""
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(create_config(dataset["dataset_id"]))
+    )
+    seeded = json.loads(
+        asyncio.run(
+            refine_config(
+                config_yaml, {"preprocessing.impute.f0": {"method": "fill_mean"}}
+            )
+        )
+    )["config_yaml"]
+    assert "f0" in (
+        yaml.safe_load(seeded).get("preprocessing", {}).get("impute", {}) or {}
+    )
+
+    removed = json.loads(
+        asyncio.run(refine_config(seeded, {"remove_keys": ["preprocessing.impute.f0"]}))
+    )
+    assert removed["status"] == "ok"
+    impute = (
+        yaml.safe_load(removed["config_yaml"])
+        .get("preprocessing", {})
+        .get("impute", {})
+        or {}
+    )
+    assert "f0" not in impute
+    assert any(d.get("removed") for d in removed["diff"])
+
+
 def test_refine_config_rejects_unknown_dotted_root(tmp_path):
     """Dotted paths under unknown roots should error."""
     csv_path = _write_dataset(tmp_path)
@@ -902,15 +1143,50 @@ def test_refine_config_returns_diff(tmp_path):
     )
 
     result = json.loads(
-        asyncio.run(refine_config(config_yaml, {"pca_dims": [2, 5], "n_reps": 2}))
+        asyncio.run(
+            refine_config(config_yaml, {"projection_dimensions": [2, 5], "n_reps": 2})
+        )
     )
 
     assert result["status"] == "ok"
     assert "diff" in result
-    assert len(result["diff"]) >= 2  # pca_dims and n_reps changed
+    assert len(result["diff"]) >= 2  # projection_dimensions and n_reps changed
     diff_paths = {d["path"] for d in result["diff"]}
-    assert "sweep.pca.dimensions.values" in diff_paths
+    assert "sweep.projection.dimensions.values" in diff_paths
     assert "output.n_reps" in diff_paths
+
+
+def test_refine_config_supports_human_readable_outputs(tmp_path):
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(create_config(dataset["dataset_id"]))
+    )
+
+    markdown = asyncio.run(
+        refine_config(
+            config_yaml,
+            {"projection_dimensions": [2], "n_reps": 2},
+            response_format="markdown",
+        )
+    )
+    raw_yaml = asyncio.run(
+        refine_config(
+            config_yaml,
+            {"projection_dimensions": [2], "n_reps": 2},
+            response_format="yaml",
+        )
+    )
+
+    assert markdown.startswith("# Refined Config")
+    assert "## Diff" in markdown
+    assert "`sweep.projection.dimensions.values`" in markdown
+    assert "```yaml" in markdown
+    assert not markdown.lstrip().startswith("{")
+    parsed = yaml.safe_load(raw_yaml)
+    assert parsed["sweep"]["projection"]["dimensions"]["values"] == [2]
+    assert parsed["output"]["n_reps"] == 2
+    assert not raw_yaml.lstrip().startswith("{")
 
 
 # ---------------------------------------------------------------------------
@@ -967,7 +1243,9 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert "component_sizes_preview" in result
     assert "component_sizes_omitted" in result
     assert "graph_health" in result
-    assert "recommended_next_action" in result
+    assert "recommended_next_action" not in result
+    assert result["analysis_status"] == "diagnostics_required"
+    assert result["next_required_check"] == "diagnose_cosmic_graph(task=...)"
     assert result["pca_cached"] is False
     assert result["pca_cache_status"] == {
         "scope": "session",
@@ -1042,12 +1320,12 @@ def test_refine_config_active_supports_nested_and_mixed_overrides(tmp_path):
     dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
     asyncio.run(create_config(dataset["dataset_id"], "active_config"))
 
-    # Pass a mixture of nested (sweep.pca_dims as dict) and flat keys (n_reps)
+    # Pass a mixture of nested projection shorthand and flat keys (n_reps)
     refined = json.loads(
         asyncio.run(
             refine_config(
                 overrides={
-                    "sweep": {"pca_dims": [3], "epsilon_values": [0.6]},
+                    "sweep": {"projection_dimensions": [3], "epsilon_values": [0.6]},
                     "n_reps": 2,
                 }
             )
@@ -1055,7 +1333,7 @@ def test_refine_config_active_supports_nested_and_mixed_overrides(tmp_path):
     )
 
     assert refined["status"] == "ok"
-    assert "sweep.pca_dims" in refined["applied_overrides"]
+    assert "sweep.projection_dimensions" in refined["applied_overrides"]
     assert "sweep.epsilon_values" in refined["applied_overrides"]
     assert "output.n_reps" in refined["applied_overrides"]
 
@@ -1193,6 +1471,55 @@ def test_dossier_explicit_spectral_method_is_not_overridden():
     assert sparse_payload["threshold_surface"]["status"] == "matched_explicit"
 
 
+def test_generate_cluster_dossier_spectral_failure_is_diagnostic():
+    _sessions.clear()
+    session = _get_session(None)
+    session.model = SimpleNamespace(
+        weighted_adjacency=np.zeros((5, 5), dtype=float),
+        resolved_construction_threshold=0.0,
+    )
+    session.data = pd.DataFrame({"x": [0, 1, 2, 3, 4]})
+    session.latest_run_id = "run_spectral_fail"
+
+    markdown = asyncio.run(
+        generate_cluster_dossier(
+            method="spectral",
+            max_k=4,
+            response_format="markdown",
+        )
+    )
+    summary = json.loads(
+        asyncio.run(
+            generate_cluster_dossier(
+                method="spectral",
+                max_k=4,
+                response_format="json",
+            )
+        )
+    )
+    full = json.loads(
+        asyncio.run(
+            generate_cluster_dossier(
+                method="spectral",
+                max_k=4,
+                detail="full",
+                response_format="json",
+            )
+        )
+    )
+
+    assert markdown.startswith("# No Stable Spectral Cut")
+    assert "Affinity components: 5" in markdown
+    assert "k evaluated: 2-4" in markdown
+    assert "candidate_scores" not in markdown
+    assert summary["error_code"] == "NO_STABLE_SPECTRAL_CUT"
+    assert summary["details"]["affinity_component_count"] == 5
+    assert summary["details"]["giant_component_size"] == 1
+    assert "candidate_scores" not in summary["details"]
+    assert full["error_code"] == "NO_STABLE_SPECTRAL_CUT"
+    assert "candidate_scores" in full["details"]
+
+
 def test_sweep_response_contains_stability_summary(tmp_path):
     """run_topological_sweep with auto threshold emits threshold_stability_summary."""
     _sessions.clear()
@@ -1263,44 +1590,218 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
         run_topological_sweep(config_yaml=refined, dataset_id=dataset["dataset_id"])
     )
 
-    summary = json.loads(asyncio.run(get_threshold_stability_curve()))
-    full = json.loads(asyncio.run(get_threshold_stability_curve(detail="full")))
+    markdown = asyncio.run(get_threshold_stability_curve())
+    summary = json.loads(
+        asyncio.run(get_threshold_stability_curve(response_format="json"))
+    )
+    full = json.loads(
+        asyncio.run(get_threshold_stability_curve(detail="full", response_format="json"))
+    )
 
+    assert "# Threshold Stability" in markdown
+    assert "## Threshold Morphology Sample" in markdown
+    assert "| Threshold | Components | Top sizes | Giant % | SLR | Singleton % |" in markdown
+    assert "| Threshold | Components | Top sizes | Giant % | SLR | Singleton % | State |" not in markdown
+    assert "## Candidate Lenses" in markdown
+    assert "| Threshold | Kind | Tier | Components | Top sizes | Giant % | SLR | Singleton % | Why |" in markdown
+    assert "- H0 longest plateau:" in markdown
+    assert "- Current construction morphology:" in markdown
+    assert "- H0 plateau morphology:" in markdown
+    assert "## Compatible Next Tools" in markdown
+    assert not markdown.lstrip().startswith("{")
     assert summary["status"] == "ok"
     assert summary["detail"] == "summary"
     assert "thresholds" not in summary
     assert "component_counts" not in summary
     assert "singleton_counts" not in summary
     assert "resolved_construction_threshold" in summary
-    assert "optimal_threshold" in summary
+    assert "h0_longest_plateau_threshold" in summary
+    assert "current_threshold_morphology" in summary
+    assert "h0_longest_plateau_morphology" in summary
     assert "matches_current_threshold" in summary
-    assert "threshold_guidance" in summary
-    assert "agent_readout" in summary
-    assert "agent_threshold_options" in summary
-    assert summary["agent_threshold_options"]["policy"] == "balanced"
-    assert len(summary["agent_threshold_options"]["candidates"]) <= 7
-    assert "stable_plateau_candidates" in summary["agent_threshold_options"]
-    assert "transition_adjacent_candidates" in summary["agent_threshold_options"]
+    assert "h0_plateau_readout" in summary
+    assert "agent_threshold_options" not in summary
+    assert summary["threshold_candidate_policy"] == "balanced"
+    assert len(summary["threshold_candidates"]) <= 3
+    assert "threshold_candidates_omitted" in summary
+    for candidate in summary["threshold_candidates"]:
+        assert "morphology" in candidate
+        assert "top_component_sizes" in candidate["morphology"]
+        assert "giant_fraction" in candidate["morphology"]
+        assert "second_largest_ratio" in candidate["morphology"]
+        assert "singleton_fraction" in candidate["morphology"]
+    assert "threshold_profiles" in summary
+    assert len(summary["threshold_profiles"]) <= 10
+    assert "threshold_profiles_omitted" in summary
+    if summary["threshold_profiles"]:
+        profile = summary["threshold_profiles"][0]
+        assert "top_component_sizes" in profile
+        assert "giant_fraction" in profile
+        assert "second_largest_ratio" in profile
+        assert "state_label" not in profile
     assert "structural_breakpoints" in summary
-    assert "curve_sample" in summary
-    assert len(summary["plateaus"]) <= 4
-    assert len(summary["curve_sample"]) <= 15
-    assert summary["curve_point_count"] >= len(summary["curve_sample"])
-    if summary["curve_sample"]:
-        first = summary["curve_sample"][0]
-        assert {"threshold", "component_count", "singleton_count"} <= set(first)
+    assert len(summary["structural_breakpoints"]) <= 3
+    assert all(
+        row["event"] != "small_component_absorption"
+        for row in summary["structural_breakpoints"]
+    )
+    assert "structural_breakpoints_omitted" in summary
+    assert "structural_breakpoints_filter" in summary
+    assert "curve_sample" not in summary
+    assert "plateaus" not in summary
+    assert "full_detail_available" in summary
 
     assert full["detail"] == "full"
     assert "resolved_construction_threshold" in full
     assert "thresholds" in full
     assert "component_counts" in full
     assert "singleton_counts" in full
+    assert "agent_threshold_options" in full
+    assert "threshold_candidates" in full
+    for candidate in full["threshold_candidates"]:
+        assert "morphology" in candidate
+    assert "curve_sample" in full
+    assert "plateaus" in full
+    assert "threshold_profiles" in full
+    assert len(full["threshold_profiles"]) == full["curve_point_count"]
     assert len(full["thresholds"]) == full["curve_point_count"]
     if full["plateaus"]:
         first_plateau = full["plateaus"][0]
         assert "singleton_count" in first_plateau
         assert "singleton_fraction" in first_plateau
         assert "component_mass_profile" in first_plateau
+
+
+def test_diagnose_cosmic_graph_task_is_single_decider(tmp_path):
+    _sessions.clear()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(create_config(dataset["dataset_id"], "diagnose_task"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            refine_config(
+                config_yaml,
+                {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1},
+            )
+        )
+    )["config_yaml"]
+    asyncio.run(
+        run_topological_sweep(
+            config_yaml=refined,
+            dataset_id=dataset["dataset_id"],
+            response_format="json",
+        )
+    )
+
+    objective = json.loads(asyncio.run(diagnose_cosmic_graph()))
+    advised = json.loads(asyncio.run(diagnose_cosmic_graph(task="clustering")))
+
+    assert "recommendation" not in objective
+    assert "component_sizes" not in objective
+    assert "component_sizes_summary" in objective
+    full = json.loads(asyncio.run(diagnose_cosmic_graph(detail="full")))
+    assert "component_sizes" in full
+    assert "component_sizes_summary" not in full
+    assert advised["recommendation"]["recommended_surface"] in {
+        "threshold_slice",
+        "re_grid",
+        "exact_sparse",
+    }
+    for advisory in advised["advisories"]:
+        assert "agent_action" not in advisory
+
+
+def test_graph_artifact_estimate_build_and_staleness(tmp_path):
+    _sessions.clear()
+    csv_path = _write_dataset(tmp_path, rows=24)
+    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(create_config(dataset["dataset_id"], "artifact"))
+    )
+    refined = json.loads(
+        asyncio.run(
+            refine_config(
+                config_yaml,
+                {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1},
+            )
+        )
+    )["config_yaml"]
+    first = json.loads(
+        asyncio.run(
+            run_topological_sweep(
+                config_yaml=refined,
+                dataset_id=dataset["dataset_id"],
+                response_format="json",
+            )
+        )
+    )
+
+    estimate = json.loads(asyncio.run(create_graph_artifact()))
+    assert estimate["estimate_only"] is True
+    assert estimate["build_call"]["args"]["estimate_only"] is False
+    assert estimate["estimated_cost"]["runtime_s"] is not None
+
+    # structural_backbone is a planned surface, not a callable artifact kind.
+    unsupported = json.loads(
+        asyncio.run(
+            create_graph_artifact(kind="structural_backbone", run_id=first["run_id"])
+        )
+    )
+    assert unsupported["status"] == "error"
+    assert unsupported["error_code"] == "GRAPH_ARTIFACT_KIND_UNSUPPORTED"
+
+    built = json.loads(
+        asyncio.run(
+            create_graph_artifact(
+                run_id=first["run_id"],
+                sketch_dim=2,
+                sample_count=12,
+                estimate_only=False,
+            )
+        )
+    )
+    assert built["status"] == "ok"
+    assert built["artifact_id"].startswith("graph_")
+
+    artifact = json.loads(
+        asyncio.run(
+            get_topological_skeleton(
+                surface="artifact",
+                artifact_id=built["artifact_id"],
+            )
+        )
+    )
+    assert artifact["artifact_staleness"]["stale"] is False
+
+    asyncio.run(
+        run_topological_sweep(
+            config_yaml=refined,
+            dataset_id=dataset["dataset_id"],
+            response_format="json",
+        )
+    )
+    stale = json.loads(
+        asyncio.run(
+            get_topological_skeleton(
+                surface="artifact",
+                artifact_id=built["artifact_id"],
+            )
+        )
+    )
+    assert stale["artifact_staleness"]["stale"] is True
+    old_curve = json.loads(
+        asyncio.run(
+            get_threshold_stability_curve(
+                run_id=built["run_id"],
+                detail="full",
+                response_format="json",
+            )
+        )
+    )
+    assert old_curve["status"] == "error"
+    assert old_curve["error_code"] == "RUN_NOT_LIVE"
 
 
 def test_threshold_mass_profiles_capture_large_structural_transition():
@@ -1338,6 +1839,66 @@ def test_threshold_mass_profiles_capture_large_structural_transition():
     assert breakpoints[0]["absorbed_mass_fraction"] == 0.6667
     assert breakpoints[0]["resulting_component_fraction"] == 1.0
     assert breakpoints[0]["affected_mass_fraction"] == 0.6667
+
+
+def test_summary_structural_breakpoints_hide_dust_absorption():
+    breakpoints = [
+        {
+            "threshold": 0.7,
+            "event": "small_component_absorption",
+            "component_count_before": 20,
+            "component_count_after": 18,
+        },
+        {
+            "threshold": 0.5,
+            "event": "large_component_transition",
+            "component_count_before": 3,
+            "component_count_after": 1,
+        },
+        {
+            "threshold": 0.4,
+            "event": "mixed_component_transition",
+            "component_count_before": 5,
+            "component_count_after": 3,
+        },
+    ]
+
+    summary = _summary_structural_breakpoints(breakpoints)
+
+    assert [row["event"] for row in summary] == [
+        "large_component_transition",
+        "mixed_component_transition",
+    ]
+
+
+def test_threshold_readout_calls_singleton_plateau_dust():
+    readout = _threshold_agent_readout(
+        {
+            "largest_component_fraction": 0.001,
+            "singleton_fraction": 0.995,
+            "small_component_mass_fraction": 0.999,
+        },
+        [],
+    )
+
+    assert "singleton-dominated" in readout
+    assert "not a construction or cohort threshold" in readout
+
+
+def test_threshold_next_tools_are_contextual_for_giant_tail():
+    lines = _threshold_next_tool_lines(
+        {
+            "current_threshold_morphology": {
+                "giant_fraction": 0.945,
+                "second_largest_ratio": 0.002,
+                "singleton_fraction": 0.046,
+            }
+        }
+    )
+
+    assert lines[0].startswith("- `generate_cluster_dossier(method=\"spectral\")`")
+    assert "dominant component" in lines[0]
+    assert "only when the tail/outlier components" in lines[1]
 
 
 def test_prepared_threshold_graph_matches_dense_component_partitions():
@@ -1497,8 +2058,8 @@ sweep:
 
     assert gate["status"] == "blocked"
     assert gate["code"] == "UNRESOLVED_DOMINANT_COMPONENT"
-    assert gate["suggested_refinement"]["pca_dims"] == [10, 12, 14, 16]
-    assert gate["suggested_refinement"]["pca_seeds"] == [42, 7, 13]
+    assert gate["suggested_refinement"]["projection_dimensions"] == [10, 12, 14, 16]
+    assert gate["suggested_refinement"]["projection_seeds"] == [42, 7, 13]
     assert gate["suggested_refinement"]["epsilon_steps_min"] == 24
 
 
@@ -1558,3 +2119,114 @@ def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):
         "status": "hit",
         "reason": "fingerprint_match",
     }
+
+
+def _rec_payload(*, n_nodes, n_edges, codes=()):
+    return {
+        "n_nodes": n_nodes,
+        "n_edges": n_edges,
+        "advisories": [{"code": c} for c in codes],
+    }
+
+
+def test_recommendation_excludes_spectral_for_hairball_even_when_asked():
+    """The footgun guard: a hairball/dominant graph must never be steered to
+    spectral sparsification, even when the task explicitly asks for spectral
+    analysis. It must re-grid and name why spectral is excluded."""
+    for code in ("HAIRBALL_DENSITY", "DOMINANT_COMPONENT"):
+        rec = _build_recommendation(
+            _rec_payload(n_nodes=400, n_edges=70000, codes=(code,)),
+            task="spectral_analysis",
+            constraints=None,
+        )
+        assert rec["recommended_surface"] == "re_grid"
+        excluded = {row["surface"] for row in rec["excluded"]}
+        assert "spectral_sparsifier" in excluded
+        reason = next(
+            r["reason"]
+            for r in rec["excluded"]
+            if r["surface"] == "spectral_sparsifier"
+        )
+        assert "effective-resistance" in reason or "cuts" in reason
+        future = {row["kind"] for row in rec["supported_future_surfaces"]}
+        assert "structural_backbone" in future
+
+
+def test_recommendation_re_grids_fragmented_graph():
+    for code in ("EMPTY_GRAPH", "HIGH_SINGLETONS"):
+        rec = _build_recommendation(
+            _rec_payload(n_nodes=200, n_edges=3, codes=(code,)),
+            task="clustering",
+            constraints=None,
+        )
+        assert rec["recommended_surface"] == "re_grid"
+
+
+def test_recommendation_dense_affinity_gate():
+    """dense_full_affinity is only offered for the explicit task within the
+    node/memory gate; otherwise it is excluded, not silently granted."""
+    # Small graph, dense affinity fits the gate.
+    ok = _build_recommendation(
+        _rec_payload(n_nodes=100, n_edges=400),
+        task="dense_affinity_required",
+        constraints=None,
+    )
+    assert ok["recommended_surface"] == "dense_full_affinity"
+    assert ok["estimated_cost"]["runtime_s"] is not None
+
+    # Node cap tripped -> excluded, falls back to sparse.
+    capped = _build_recommendation(
+        _rec_payload(n_nodes=3000, n_edges=9000),
+        task="dense_affinity_required",
+        constraints=None,
+    )
+    assert capped["recommended_surface"] != "dense_full_affinity"
+    assert any(r["surface"] == "dense_full_affinity" for r in capped["excluded"])
+
+    # Explicit memory constraint tripped -> excluded.
+    budget = _build_recommendation(
+        _rec_payload(n_nodes=1000, n_edges=9000),
+        task="dense_affinity_required",
+        constraints={"max_memory_mb": 1.0},
+    )
+    assert budget["recommended_surface"] != "dense_full_affinity"
+
+
+def test_recommendation_build_artifact_only_above_density_gate():
+    """Spectral artifact is recommended only when edges far exceed n log n; an
+    already-sparse graph with the same task gets the exact sparse surface."""
+    dense = _build_recommendation(
+        _rec_payload(n_nodes=200, n_edges=5000),
+        task="spectral_analysis",
+        constraints=None,
+    )
+    assert dense["recommended_surface"] == "build_artifact"
+    assert dense["estimated_cost"]["runtime_s"] is not None
+    assert dense["next_tool_call"]["args"]["estimate_only"] is True
+
+    sparse = _build_recommendation(
+        _rec_payload(n_nodes=200, n_edges=300),
+        task="spectral_analysis",
+        constraints=None,
+    )
+    assert sparse["recommended_surface"] == "exact_sparse"
+
+    # An agent may disable artifacts entirely via constraints.
+    blocked = _build_recommendation(
+        _rec_payload(n_nodes=200, n_edges=5000),
+        task="spectral_analysis",
+        constraints={"allow_artifacts": False},
+    )
+    assert blocked["recommended_surface"] != "build_artifact"
+
+
+def test_recommendation_defaults_by_task():
+    for task in ("clustering", "reporting", "anomaly_mining"):
+        rec = _build_recommendation(
+            _rec_payload(n_nodes=120, n_edges=300), task=task, constraints=None
+        )
+        assert rec["recommended_surface"] == "threshold_slice"
+    structure = _build_recommendation(
+        _rec_payload(n_nodes=120, n_edges=300), task="structure", constraints=None
+    )
+    assert structure["recommended_surface"] == "exact_sparse"

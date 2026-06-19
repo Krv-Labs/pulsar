@@ -8,7 +8,7 @@ component and isolates the residual instead of raising.
 import numpy as np
 import pytest
 
-from pulsar.mcp.interpreter import _cluster_spectral
+from pulsar.mcp.interpreter import SpectralClusterCutError, _cluster_spectral
 
 
 def _two_cluster_block(n_per: int = 8, intra: float = 0.9) -> np.ndarray:
@@ -98,5 +98,13 @@ def test_spectral_connected_graph_unchanged_behavior():
 def test_spectral_all_singletons_finds_no_cut():
     """A graph with no giant structure cannot produce a stable cut."""
     adj = np.zeros((5, 5), dtype=float)  # 5 isolated nodes
-    with pytest.raises(ValueError, match="No stable cluster cut"):
+    with pytest.raises(SpectralClusterCutError, match="No stable spectral cut") as exc:
         _cluster_spectral(adj, 5, max_k=4)
+
+    diagnostics = exc.value.diagnostics
+    assert diagnostics["affinity_component_count"] == 5
+    assert diagnostics["giant_component_size"] == 1
+    assert diagnostics["residual_node_count"] == 4
+    assert diagnostics["k_min"] == 2
+    assert diagnostics["max_k"] == 4
+    assert "candidate_scores" in diagnostics

@@ -93,6 +93,27 @@ class ClusterResult:
     stability_plateaus: list[dict] | None = None
 
 
+class SpectralClusterCutError(ValueError):
+    """Spectral search completed, but no evaluated k passed the cut floor."""
+
+    def __init__(self, diagnostics: dict[str, Any]):
+        super().__init__("No stable spectral cut found.")
+        self.diagnostics = diagnostics
+
+    def payload(self, *, detail: str = "summary") -> dict[str, Any]:
+        diagnostics = dict(self.diagnostics)
+        candidate_scores = diagnostics.pop("candidate_scores", [])
+        if detail == "full":
+            diagnostics["candidate_scores"] = candidate_scores
+        return {
+            "status": "error",
+            "tool": "generate_cluster_dossier",
+            "reason": "No stable spectral cut found.",
+            "error_code": "NO_STABLE_SPECTRAL_CUT",
+            "details": diagnostics,
+        }
+
+
 @dataclass
 class FeatureEvidenceIndex:
     """Cached feature evidence derived from a clustering assignment."""
@@ -215,7 +236,7 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
 def _spectral_best_cut(
     affinity_sub: np.ndarray,
     max_k: int,
-) -> tuple[np.ndarray | None, int, float]:
+) -> tuple[np.ndarray | None, int, float, list[dict[str, Any]]]:
     """Sweep k on a connected affinity submatrix; return best (labels, k, score).
 
     Operates on a self-contained affinity matrix (no global node ids); callers
@@ -234,6 +255,7 @@ def _spectral_best_cut(
     best_score = -1.0
     best_labels: np.ndarray | None = None
     best_k = _SPECTRAL_K_MIN
+    candidate_scores: list[dict[str, Any]] = []
 
     for k_test in range(_SPECTRAL_K_MIN, min(max_k + 1, sub_n)):
         sc = SpectralClustering(
@@ -246,17 +268,71 @@ def _spectral_best_cut(
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
                 labels = sc.fit_predict(affinity)
-        except Exception:
+        except Exception as exc:
+            candidate_scores.append(
+                {
+                    "k": k_test,
+                    "status": "solver_error",
+                    "error": str(exc),
+                }
+            )
             continue
 
         if len(np.unique(labels)) > 1:
             score = float(silhouette_score(distance, labels, metric="precomputed"))
+            candidate_scores.append(
+                {
+                    "k": k_test,
+                    "status": "scored",
+                    "silhouette_score": round(score, 6),
+                    "n_labels": int(len(np.unique(labels))),
+                }
+            )
             if score > best_score:
                 best_score = score
                 best_k = k_test
                 best_labels = labels
+        else:
+            candidate_scores.append(
+                {
+                    "k": k_test,
+                    "status": "single_label",
+                    "n_labels": int(len(np.unique(labels))),
+                }
+            )
 
-    return best_labels, best_k, best_score
+    return best_labels, best_k, best_score, candidate_scores
+
+
+def _spectral_failure_diagnostics(
+    *,
+    n: int,
+    max_k: int,
+    interpretation_edge_weight_threshold: float,
+    components: list[set[int]],
+    giant_size: int,
+    candidate_scores: list[dict[str, Any]],
+    best_k: int,
+    best_score: float,
+) -> dict[str, Any]:
+    return {
+        "method": "spectral",
+        "interpretation_edge_weight_threshold": round(
+            float(interpretation_edge_weight_threshold), 6
+        ),
+        "affinity_component_count": len(components),
+        "giant_component_size": int(giant_size),
+        "giant_component_fraction": round(giant_size / max(n, 1), 6),
+        "residual_node_count": int(n - giant_size),
+        "k_min": _SPECTRAL_K_MIN,
+        "max_k": int(max_k),
+        "best_k": int(best_k) if best_score >= 0 else None,
+        "best_silhouette_score": round(float(best_score), 6)
+        if best_score >= 0
+        else None,
+        "accepted_silhouette_min": 0.05,
+        "candidate_scores": candidate_scores,
+    }
 
 
 def _cluster_spectral(
@@ -280,7 +356,9 @@ def _cluster_spectral(
 
     if len(components) <= 1:
         # Connected graph: cluster all nodes directly (unchanged behavior).
-        best_labels, best_k, best_score = _spectral_best_cut(adj, max_k)
+        best_labels, best_k, best_score, candidate_scores = _spectral_best_cut(
+            adj, max_k
+        )
         if best_labels is not None and best_score > 0.05:
             return ClusterResult(
                 labels=pd.Series(best_labels, name="cluster"),
@@ -292,16 +370,40 @@ def _cluster_spectral(
                     interpretation_edge_weight_threshold
                 ),
             )
-        raise ValueError("No stable cluster cut found.")
+        raise SpectralClusterCutError(
+            _spectral_failure_diagnostics(
+                n=n,
+                max_k=max_k,
+                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+                components=components,
+                giant_size=n,
+                candidate_scores=candidate_scores,
+                best_k=best_k,
+                best_score=best_score,
+            )
+        )
 
     # Disconnected graph: cluster the giant component, isolate the residual.
     giant = sorted(components[0])
     giant_idx = np.asarray(giant, dtype=int)
     affinity_sub = adj[np.ix_(giant_idx, giant_idx)]
 
-    best_labels, best_k, best_score = _spectral_best_cut(affinity_sub, max_k)
+    best_labels, best_k, best_score, candidate_scores = _spectral_best_cut(
+        affinity_sub, max_k
+    )
     if best_labels is None or best_score <= 0.05:
-        raise ValueError("No stable cluster cut found.")
+        raise SpectralClusterCutError(
+            _spectral_failure_diagnostics(
+                n=n,
+                max_k=max_k,
+                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+                components=components,
+                giant_size=len(giant),
+                candidate_scores=candidate_scores,
+                best_k=best_k,
+                best_score=best_score,
+            )
+        )
 
     labels = np.empty(n, dtype=int)
     labels[giant_idx] = best_labels

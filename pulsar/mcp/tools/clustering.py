@@ -16,10 +16,11 @@ from pulsar.mcp.diagnostics import diagnose_model
 from pulsar.mcp.errors import mcp_error
 from pulsar.mcp.interpreter import (
     FeatureEvidenceIndex,
+    SpectralClusterCutError,
     build_dossier,
     build_feature_evidence_index,
     cluster_profile_payload,
-    compare_clusters,
+    compare_clusters as _compare_clusters,
     comparison_to_markdown,
     dossier_to_markdown,
     feature_signal_payload,
@@ -29,11 +30,15 @@ from pulsar.mcp.interpreter import (
 from pulsar.mcp.payloads import (
     _prepend_threshold_markdown,
     _threshold_surface_payload,
+    build_cluster_selection,
     build_evidence_payload,
     build_summary_evidence_payload,
     cluster_profile_payload_to_markdown,
     cluster_result_payload,
+    cluster_selection_to_markdown,
+    compact_cluster_result_payload,
     feature_signal_payload_to_markdown,
+    size_summary,
     summary_evidence_payload_to_markdown,
 )
 from pulsar.mcp.session import _get_session
@@ -82,6 +87,37 @@ def _validate_unit_threshold(value: float, *, name: str) -> float:
     if not np.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
         raise ToolError(f"{name}: {THRESHOLD_RANGE_MESSAGE}")
     return threshold
+
+
+def _spectral_cut_error_to_markdown(error: SpectralClusterCutError) -> str:
+    payload = error.payload(detail="summary")
+    details = payload["details"]
+    best_score = details.get("best_silhouette_score")
+    best = (
+        f"k={details.get('best_k')}, silhouette={best_score:.3f}"
+        if isinstance(best_score, (int, float))
+        else "none"
+    )
+    acceptance_floor = float(details.get("accepted_silhouette_min", 0.0))
+    return "\n".join(
+        [
+            "# No Stable Spectral Cut",
+            "",
+            "- Method: `spectral`",
+            "- Interpretation threshold: "
+            f"`{details.get('interpretation_edge_weight_threshold', 0.0):.4f}`",
+            f"- Affinity components: {details.get('affinity_component_count')}",
+            "- Giant component: "
+            f"{details.get('giant_component_size')} "
+            f"({float(details.get('giant_component_fraction', 0.0)):.1%})",
+            f"- Residual nodes: {details.get('residual_node_count')}",
+            f"- k evaluated: {details.get('k_min')}-{details.get('max_k')}",
+            f"- Best candidate: {best}",
+            f"- Acceptance floor: {acceptance_floor:.3f}",
+            "",
+            "Spectral search ran, but no evaluated cut exceeded the acceptance floor.",
+        ]
+    ).strip()
 
 
 def _feature_evidence_fingerprint(
@@ -138,16 +174,22 @@ def _get_or_build_evidence_index(
     )
     session.feature_evidence_index = evidence_index
     session.feature_evidence_fingerprint = fingerprint
-    session.feature_evidence_cluster_meta = cluster_result_payload(cluster_result)
+    # cluster_meta is owned by generate_cluster_dossier (built once per call and
+    # assigned to the session), so it is not (re)built here. Building it on the
+    # cache-miss path only would also leave it stale on a cache hit.
     return evidence_index
 
 
 def _graph_metrics_payload(model: Any) -> dict[str, Any]:
     try:
-        return dataclasses.asdict(diagnose_model(model))
+        payload = dataclasses.asdict(diagnose_model(model))
     except (RuntimeError, AttributeError, NameError, Exception) as e:
         logger.warning("diagnose_model failed: %s", e)
-        return {}
+        return {"component_sizes_summary": size_summary([])}
+    component_sizes = list(payload.get("component_sizes", []) or [])
+    payload["component_sizes_summary"] = size_summary(component_sizes)
+    payload.pop("component_sizes", None)
+    return payload
 
 
 class StaleClusterCacheError(Exception):
@@ -280,7 +322,11 @@ async def generate_cluster_dossier(
         session.clusters_run_id = session.latest_run_id
         session.report_exclude_columns = exclude_columns
 
-        session.feature_evidence_cluster_meta = cluster_result_payload(result)
+        # Single source of truth for cluster metadata: build the O(n) size table
+        # once, store it on the session, and reuse it for every downstream reader
+        # (compacted header, cluster_selection ID universe, sibling tools).
+        cluster_meta = cluster_result_payload(result)
+        session.feature_evidence_cluster_meta = cluster_meta
 
         # Safety cap: only characterize top N clusters to prevent O(K*F) hang
         # on shattered graphs. Small singletons/noise are omitted from profiling.
@@ -293,15 +339,18 @@ async def generate_cluster_dossier(
             exclude_columns=exclude_columns,
             max_clusters_to_characterize=max_char_cap,
         )
-
-        cluster_meta = cluster_result_payload(result)
         if detail == "summary":
+            summary_feature_preview_limit = (
+                min(feature_preview_limit, 3)
+                if response_format == "json"
+                else feature_preview_limit
+            )
             payload = build_summary_evidence_payload(
                 evidence_index,
                 cluster_meta,
                 _graph_metrics_payload(session.model),
                 max_clusters=max_clusters,
-                feature_preview_limit=feature_preview_limit,
+                feature_preview_limit=summary_feature_preview_limit,
             )
             payload["construction_threshold"] = construction_threshold
             payload["interpretation_edge_weight_threshold"] = (
@@ -310,24 +359,29 @@ async def generate_cluster_dossier(
             payload["threshold_inherited"] = threshold_inherited
             payload["threshold_source"] = threshold_source
             payload["threshold_surface"] = threshold_surface
-            payload["surface_labels"] = _SURFACE_LABELS
+            payload["cluster_selection"] = build_cluster_selection(
+                cluster_meta,
+                [c["cluster_id"] for c in payload["clusters"]],
+                ranked_by="size",
+            )
             payload["recommended_next_tools"] = [
                 "get_cluster_profile",
                 "get_feature_signal",
                 "get_cluster_signal_matrix",
-                "compare_clusters_tool",
+                "compare_clusters",
             ]
-            payload["payload_guidance"] = (
-                "Default summary output is a compact cluster map. Use "
-                "response_format='json' for structured fields, or targeted tools "
-                "for cluster/feature evidence. Set detail='standard' or 'full' "
-                "only after narrowing to specific clusters/features or for "
-                "explicit audit/debugging."
+            payload["detail_hint"] = (
+                "Use get_cluster_profile/get_feature_signal for evidence; "
+                "detail='full' returns lossless arrays for audit."
             )
             if response_format == "markdown":
-                body = _two_lever_markdown_note(
-                    construction_threshold, resolved_interpretation_threshold
-                ) + summary_evidence_payload_to_markdown(payload)
+                body = (
+                    _two_lever_markdown_note(
+                        construction_threshold, resolved_interpretation_threshold
+                    )
+                    + cluster_selection_to_markdown(payload["cluster_selection"])
+                    + summary_evidence_payload_to_markdown(payload)
+                )
                 return _prepend_threshold_markdown(body, threshold_surface)
             return json.dumps(
                 payload,
@@ -363,23 +417,28 @@ async def generate_cluster_dossier(
         payload["threshold_inherited"] = threshold_inherited
         payload["threshold_source"] = threshold_source
         payload["threshold_surface"] = threshold_surface
-        payload["surface_labels"] = _SURFACE_LABELS
+        if detail != "full":
+            payload["surface_labels_ref"] = "get_workflow_guide"
+        else:
+            payload["surface_labels"] = _SURFACE_LABELS
+        payload["cluster_selection"] = build_cluster_selection(
+            cluster_meta,
+            [c["cluster_id"] for c in payload["clusters"]],
+            ranked_by="size",
+        )
         payload["recommended_next_tools"] = (
             [
                 "get_cluster_profile",
                 "get_feature_signal",
                 "get_cluster_signal_matrix",
-                "compare_clusters_tool",
+                "compare_clusters",
             ]
             if detail == "summary"
-            else ["get_feature_signal", "compare_clusters_tool", "export_html_report"]
+            else ["get_feature_signal", "compare_clusters", "export_html_report"]
         )
-        payload["payload_guidance"] = (
-            "For routine agent loops, omit detail or use detail='summary'. Summary "
-            "is a compact cluster map with capped feature previews and counts only. "
-            "Use get_cluster_profile, get_feature_signal, or get_cluster_signal_matrix "
-            "for targeted evidence. Set detail='standard' or 'full' only after "
-            "narrowing to specific clusters/features or for explicit audit/debugging."
+        payload["detail_hint"] = (
+            "Use targeted evidence tools for routine loops; detail='full' is the "
+            "lossless audit payload."
         )
         return json.dumps(
             payload,
@@ -387,6 +446,11 @@ async def generate_cluster_dossier(
             indent=None if len(dossier.clusters) > 10 else 2,
         )
 
+    except SpectralClusterCutError as e:
+        logger.info("No stable spectral cluster cut: %s", e.diagnostics)
+        if response_format == "markdown":
+            return _spectral_cut_error_to_markdown(e)
+        return json.dumps(e.payload(detail=detail), indent=2)
     except Exception as e:
         logger.error(f"Error generating dossier: {e}")
         return mcp_error("generate_cluster_dossier", str(e))
@@ -408,8 +472,10 @@ async def get_cluster_profile(
         evidence_index, cluster_meta = _require_cluster_state(session)
         payload = {
             "status": "ok",
-            "cluster_result": cluster_meta,
-            "surface_labels": _SURFACE_LABELS,
+            "cluster_result": compact_cluster_result_payload(
+                cluster_meta,
+                include_full_sizes=detail == "full",
+            ),
             "detail": detail,
             "max_features": max_features,
             "cluster": cluster_profile_payload(
@@ -419,6 +485,10 @@ async def get_cluster_profile(
                 max_features=max_features,
             ),
         }
+        if detail == "full":
+            payload["surface_labels"] = _SURFACE_LABELS
+        else:
+            payload["surface_labels_ref"] = "get_workflow_guide"
         if response_format == "markdown":
             applied = cluster_meta.get("interpretation_edge_weight_threshold_applied")
             note = (
@@ -464,18 +534,30 @@ async def get_feature_signal(
     try:
         session = _get_session(ctx)
         evidence_index, cluster_meta = _require_cluster_state(session)
+        signals = feature_signal_payload(
+            evidence_index,
+            feature_names,
+            cluster_ids=cluster_ids,
+            detail=detail,
+            max_clusters=max_clusters,
+        )
         payload = {
             "status": "ok",
-            "cluster_result": cluster_meta,
-            "surface_labels": _SURFACE_LABELS,
-            "signals": feature_signal_payload(
-                evidence_index,
-                feature_names,
-                cluster_ids=cluster_ids,
-                detail=detail,
-                max_clusters=max_clusters,
+            "cluster_result": compact_cluster_result_payload(
+                cluster_meta,
+                include_full_sizes=detail == "full",
             ),
+            "cluster_selection": build_cluster_selection(
+                cluster_meta,
+                [c["cluster_id"] for c in signals.get("clusters", [])],
+                ranked_by="signal",
+            ),
+            "signals": signals,
         }
+        if detail == "full":
+            payload["surface_labels"] = _SURFACE_LABELS
+        else:
+            payload["surface_labels_ref"] = "get_workflow_guide"
         if response_format == "markdown":
             return feature_signal_payload_to_markdown(payload["signals"])
         return json.dumps(payload, indent=2)
@@ -504,20 +586,39 @@ async def get_cluster_signal_matrix(
     try:
         session = _get_session(ctx)
         evidence_index, cluster_meta = _require_cluster_state(session)
+        signal_matrix = signal_matrix_payload(
+            evidence_index,
+            cluster_ids=cluster_ids,
+            include_context_tier=include_context_tier,
+            max_clusters=max_clusters,
+            return_markdown=return_markdown,
+        )
+        omitted_ids = {
+            int(item["cluster_id"])
+            for item in signal_matrix.get("omitted_clusters", [])
+        }
+        universe = (
+            [int(c) for c in cluster_ids]
+            if cluster_ids is not None
+            else [int(c["cluster_id"]) for c in cluster_meta.get("cluster_sizes", [])]
+        )
+        cluster_selection = build_cluster_selection(
+            cluster_meta,
+            [cid for cid in universe if cid not in omitted_ids],
+            ranked_by="signal",
+        )
         payload = {
             "status": "ok",
-            "cluster_result": cluster_meta,
-            "surface_labels": _SURFACE_LABELS,
-            "signal_matrix": signal_matrix_payload(
-                evidence_index,
-                cluster_ids=cluster_ids,
-                include_context_tier=include_context_tier,
-                max_clusters=max_clusters,
-                return_markdown=return_markdown,
-            ),
+            "cluster_result": compact_cluster_result_payload(cluster_meta),
+            "surface_labels_ref": "get_workflow_guide",
+            "cluster_selection": cluster_selection,
+            "signal_matrix": signal_matrix,
         }
         if return_markdown:
-            return payload["signal_matrix"]["markdown_report"]
+            return (
+                cluster_selection_to_markdown(cluster_selection)
+                + payload["signal_matrix"]["markdown_report"]
+            )
         return json.dumps(payload, indent=2)
     except StaleClusterCacheError as e:
         return _stale_cluster_cache_error("get_cluster_signal_matrix", e)
@@ -525,7 +626,7 @@ async def get_cluster_signal_matrix(
         return mcp_error("get_cluster_signal_matrix", str(e))
 
 
-async def compare_clusters_tool(
+async def compare_clusters(
     cluster_a: int, cluster_b: int, ctx: Context = None
 ) -> str:
     """Pairwise statistical tests between two clusters."""
@@ -537,7 +638,7 @@ async def compare_clusters_tool(
         )
     if session.clusters_run_id != session.latest_run_id:
         return _stale_cluster_cache_error(
-            "compare_clusters_tool",
+            "compare_clusters",
             StaleClusterCacheError(
                 cached_run_id=session.clusters_run_id,
                 current_run_id=session.latest_run_id,
@@ -545,10 +646,10 @@ async def compare_clusters_tool(
         )
 
     try:
-        results = compare_clusters(session.data, session.clusters, cluster_a, cluster_b)
+        results = _compare_clusters(session.data, session.clusters, cluster_a, cluster_b)
         if not results:
             return mcp_error(
-                "compare_clusters_tool",
+                "compare_clusters",
                 f"No results for comparison between clusters {cluster_a} and {cluster_b}.",
             )
 
@@ -557,4 +658,4 @@ async def compare_clusters_tool(
 
     except Exception as e:
         logger.error(f"Error comparing clusters: {e}")
-        return mcp_error("compare_clusters_tool", str(e))
+        return mcp_error("compare_clusters", str(e))

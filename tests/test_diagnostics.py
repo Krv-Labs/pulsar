@@ -416,7 +416,8 @@ def test_graph_advisories_empty():
     empty = next(a for a in advisories if a["code"] == "EMPTY_GRAPH")
     assert empty["severity"] == "error"
     assert "message" in empty
-    assert "agent_action" in empty
+    assert "diagnostic_interpretation" in empty
+    assert "agent_action" not in empty
 
 
 def test_graph_advisories_high_singletons():
@@ -428,7 +429,8 @@ def test_graph_advisories_high_singletons():
     assert "HIGH_SINGLETONS" in codes
     high = next(a for a in advisories if a["code"] == "HIGH_SINGLETONS")
     assert high["severity"] == "warning"
-    assert high["agent_action"]
+    assert high["diagnostic_interpretation"]
+    assert "agent_action" not in high
 
 
 def test_graph_advisories_dominant_component():
@@ -440,7 +442,8 @@ def test_graph_advisories_dominant_component():
     assert "DOMINANT_COMPONENT" in codes
     dom = next(a for a in advisories if a["code"] == "DOMINANT_COMPONENT")
     assert dom["severity"] == "warning"
-    assert dom["agent_action"]
+    assert dom["diagnostic_interpretation"]
+    assert "agent_action" not in dom
 
 
 def test_graph_advisories_hairball_density():
@@ -452,7 +455,8 @@ def test_graph_advisories_hairball_density():
     assert "HAIRBALL_DENSITY" in codes
     hair = next(a for a in advisories if a["code"] == "HAIRBALL_DENSITY")
     assert hair["severity"] == "warning"
-    assert hair["agent_action"]
+    assert hair["diagnostic_interpretation"]
+    assert "agent_action" not in hair
 
 
 def test_graph_advisories_clean():
