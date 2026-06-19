@@ -136,6 +136,8 @@ class CosmicGraphSpec:
     # construction path; its value is a leverage-aware, epsilon-free O(n)-edge graph
     # that preserves spectrum/distances for downstream spectral analysis. See
     # ThemaRS.spectral_sparsify.
+    # WARNING: it is SLOW on large datasets (solves a preconditioned-CG system per
+    # JL sketch row) — do not enable it for routine structural analysis.
     sparsify: bool = False
     sparsify_epsilon: float = 1.0
     sparsify_seed: int = 42
@@ -365,6 +367,9 @@ sweep:
         steps: {len(cfg.ball_mapper.epsilons)}
 cosmic_graph:
   construction_threshold: {threshold_str}
+  # sparsify: opt-in spectral sparsifier. SLOW on large N (per-JL-sketch CG
+  # solves) and runs after the already-sparse graph is built — leave false
+  # unless you need a spectrum-preserving graph for downstream spectral analysis.
   sparsify: {str(cfg.cosmic_graph.sparsify).lower()}
   sparsify_epsilon: {cfg.cosmic_graph.sparsify_epsilon}
   sparsify_seed: {cfg.cosmic_graph.sparsify_seed}

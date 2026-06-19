@@ -28,17 +28,17 @@ from pulsar._pulsar import (
 )
 
 from pulsar.config import load_config
-from pulsar.hooks import cosmic_to_networkx
+from pulsar import cosmic_to_networkx
 from pulsar.pipeline import ThemaRS
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEMO_DIR = REPO_ROOT / "demos"
 CSV_PATH = DEMO_DIR / "us_coal_plants_dataset.csv"
-PARAMS_PATH = DEMO_DIR / "coal_params.yaml"
+PARAMS_PATH = DEMO_DIR / "energy" / "coal_params.yaml"
 DATA_URL = (
     "https://raw.githubusercontent.com/Krv-Labs/retire/main/"
     "retire/resources/us_coal_plants_dataset.csv"

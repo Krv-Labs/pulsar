@@ -39,12 +39,20 @@ Reveal the dataset's topology; do not force convenient clusters.
      before proceeding. If `finalization_gate.status` is `blocked`, run the
      suggested targeted resolution sweep or explicitly justify why the dominant
      component is clinically expected.
-   - GATE: When spectral sparsification is enabled (via `cosmic_graph.sparsify`,
-     off by default), density and edge counts are measured on the sparsified
-     graph, so they are far lower than raw co-membership and are NOT comparable
-     across sparsified vs. non-sparsified runs. Judge structure primarily by
-     `component_count` and `giant_fraction`; treat density extremes as a
-     refine-config signal (Step 2), not a target.
+   - GATE: Leave spectral sparsification OFF. `cosmic_graph.sparsify` is off by
+     default and should stay off for essentially all analysis. It is SLOW and
+     scales poorly with N (a Spielman-Srivastava sparsifier that solves a
+     preconditioned-CG system per JL sketch row), and it runs *after* the
+     already-sparse cosmic graph is built — pure additional construction cost
+     with no downstream speedup. It is a niche hook for preserving the graph
+     spectrum / effective resistances for downstream spectral analysis on small
+     graphs only; it is NOT a structural-analysis or performance tool. Do not
+     enable it to "clean up", "thin", or "speed up" a graph. When it IS enabled,
+     density and edge counts are measured on the sparsified graph, so they are
+     far lower than raw co-membership and are NOT comparable across sparsified
+     vs. non-sparsified runs — judge structure primarily by `component_count`
+     and `giant_fraction`, and treat density extremes as a refine-config signal
+     (Step 2), not a target.
    - GATE: component_count=1 is normal; do not force separation by
      narrowing epsilon.
 7. Compare: Use `get_experiment_history`, `compare_sweeps`, and
@@ -123,7 +131,8 @@ different stages. Do not confuse them.
   and `method="components"`, the default inherits the construction threshold
   so clustering operates on the same surface you diagnosed. For explicit
   `method="spectral"`, the default is `0.0` so spectral uses the full weighted
-  affinity matrix unless you deliberately sparsify it. Pass an explicit value
+  affinity matrix unless you deliberately sparsify it (rarely needed, and slow
+  on large N — prefer leaving `cosmic_graph.sparsify` off). Pass an explicit value
   to deliberately diverge. Use `diagnose_cosmic_graph` weight percentiles
   (weight_p25–p95) to pick a value when overriding. This changes
   interpretation-time connectivity and cluster fragmentation; it does not
