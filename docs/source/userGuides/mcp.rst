@@ -163,7 +163,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
      - Execute the full Pulsar pipeline: imputation → projection → Ball Mapper → cosmic graph, all from inline YAML config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
    * - **generate_cluster_dossier**
      - Deep statistical report per discovered cluster: trait profiles, homogeneity scores, separation metrics, concentration measures. Answers "What makes this cluster distinct?" and "How confident are we in the boundaries?"
-   * - **compare_clusters_tool**
+   * - **compare_clusters**
      - Pairwise statistical tests (Welch's t-test, Kolmogorov-Smirnov, Cohen's d, effect sizes) between clusters. Answers "Are these really different, or just noise?"
    * - **export_labeled_data**
      - Return your original dataframe with discovered cluster labels attached. Ready for downstream analysis, visualization, or handoff to domain experts.

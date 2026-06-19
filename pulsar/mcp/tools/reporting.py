@@ -237,8 +237,8 @@ async def probe_columns(
     response_format: Literal["markdown", "json"] = "markdown",
     ctx: Context = None,
 ) -> str:
-    """Detailed per-column profiles (sample values, distributions). Use after
-    the compact preview from `characterize_dataset`. Max 20 columns.
+    """Targeted column drilldown: sample values, missingness, and distributions.
+    Use after `characterize_dataset`; max 20 columns.
     """
     from pulsar.analysis.characterization import profile_column_details
 

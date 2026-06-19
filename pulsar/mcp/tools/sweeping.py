@@ -44,6 +44,13 @@ from pulsar.runtime.fingerprint import pca_fingerprint
 logger = logging.getLogger(__name__)
 
 
+def _projection_dimensions_from_config(cfg: dict) -> list[Any]:
+    sweep = cfg.get("sweep", {})
+    return sweep.get("projection", {}).get("dimensions", {}).get("values") or sweep.get(
+        "pca", {}
+    ).get("dimensions", {}).get("values", [])
+
+
 def _format_epsilon(cfg: dict) -> str:
     """Format epsilon config as a display string, handling both range and values shapes."""
     eps_node = cfg.get("sweep", {}).get("ball_mapper", {}).get("epsilon", {})
@@ -77,40 +84,114 @@ def _auto_save_config(cfg) -> str:
     return save_path
 
 
-async def get_experiment_history(ctx: Context) -> str:
-    """Markdown table of all sweeps run in this session."""
-    session = _get_session(ctx)
-    if not session.sweep_history:
-        return "No experiments run yet in this session.\n\n| Run | Projection Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |\n|---|---|---|---|---|---|---|"
-
-    lines = [
-        "| Run | Projection Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |"
-    ]
-    lines.append("|---|---|---|---|---|---|---|")
-
-    for i, record in enumerate(session.sweep_history):
+def _sweep_history_rows(history: list[SweepRecord]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for i, record in enumerate(history):
         cfg = yaml.safe_load(record.config_yaml)
-        pca = str(
-            cfg.get("sweep", {}).get("pca", {}).get("dimensions", {}).get("values", [])
+        metrics = record.metrics
+        rows.append(
+            {
+                "run_index": i + 1,
+                "dataset_id": record.dataset_id,
+                "projection_dimensions": _projection_dimensions_from_config(cfg),
+                "epsilon": _format_epsilon(cfg),
+                "nodes": metrics.get("n_nodes"),
+                "edges": metrics.get("n_edges"),
+                "components": metrics.get("component_count"),
+                "giant_fraction": metrics.get("giant_fraction", 0),
+            }
         )
-        eps = _format_epsilon(cfg)
+    return rows
 
-        m = record.metrics
+
+def _sweep_history_table(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        "| Run | Projection Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    if not rows:
+        return "\n".join(lines)
+
+    for row in rows:
         lines.append(
-            f"| {i + 1} | {pca} | {eps} | {m.get('n_nodes')} | {m.get('n_edges')} | {m.get('component_count')} | {m.get('giant_fraction', 0):.2%} |"
+            f"| {row['run_index']} | {row['projection_dimensions']} | {row['epsilon']} | "
+            f"{row['nodes']} | {row['edges']} | {row['components']} | "
+            f"{float(row['giant_fraction']):.2%} |"
         )
-
     return "\n".join(lines)
 
 
-async def summarize_sweep_history(ctx: Context = None) -> str:
-    """Synthesize patterns across the session's sweeps. Returns
-    `{n_runs, observations, rationale}`. Agent owns next-step decision.
-    Use `get_experiment_history` for the raw per-run table.
-    """
+async def get_sweep_history(
+    detail: Literal["table", "summary", "full"] = "table",
+    response_format: Literal["markdown", "json"] = "markdown",
+    ctx: Context = None,
+) -> str:
+    """Session sweep history. `table` returns the compact run table; `summary`
+    synthesizes patterns; `full` returns both rows and synthesis."""
     session = _get_session(ctx)
+    if detail not in {"table", "summary", "full"}:
+        return mcp_error(
+            "get_sweep_history",
+            "detail must be 'table', 'summary', or 'full'.",
+        )
+    if response_format not in {"markdown", "json"}:
+        return mcp_error(
+            "get_sweep_history",
+            "response_format must be 'markdown' or 'json'.",
+        )
+
+    rows = _sweep_history_rows(list(session.sweep_history))
     summary = summarize_history(list(session.sweep_history))
-    return json.dumps(summary, indent=2)
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "detail": detail,
+        "n_runs": len(rows),
+    }
+    if detail in {"table", "full"}:
+        payload["runs"] = rows
+    if detail in {"summary", "full"}:
+        payload["summary"] = summary
+
+    if response_format == "json":
+        return json.dumps(payload, indent=2)
+
+    if not rows:
+        return (
+            "No sweeps run yet in this session.\n\n"
+            + _sweep_history_table(rows)
+        )
+    if detail == "table":
+        return _sweep_history_table(rows)
+    if detail == "summary":
+        observations = summary.get("observations", [])
+        raw_rationale = summary.get("rationale", "")
+        rationale = (
+            raw_rationale
+            if isinstance(raw_rationale, list)
+            else [raw_rationale]
+            if raw_rationale
+            else []
+        )
+        lines = ["# Sweep History Summary", "", f"- Runs: {len(rows)}"]
+        if observations:
+            lines.extend(["", "## Observations"])
+            lines.extend(f"- {item}" for item in observations)
+        if rationale:
+            lines.extend(["", "## Rationale"])
+            lines.extend(f"- {item}" for item in rationale)
+        return "\n".join(lines).strip()
+
+    return "\n\n".join(
+        [
+            "# Sweep History",
+            _sweep_history_table(rows),
+            await get_sweep_history(
+                detail="summary",
+                response_format="markdown",
+                ctx=ctx,
+            ),
+        ]
+    ).strip()
 
 
 async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
@@ -138,7 +219,7 @@ async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
             "",
             "| Field | Run A | Run B |",
             "|---|---|---|",
-            f"| pca_dims | {cfg_a.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} | {cfg_b.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} |",
+            f"| projection_dimensions | {_projection_dimensions_from_config(cfg_a)} | {_projection_dimensions_from_config(cfg_b)} |",
             f"| epsilon | {_format_epsilon(cfg_a)} | {_format_epsilon(cfg_b)} |",
             f"| threshold | {cfg_a.get('cosmic_graph', {}).get('construction_threshold', 'auto')} | {cfg_b.get('cosmic_graph', {}).get('construction_threshold', 'auto')} |",
             f"| nodes | {metrics_a.get('n_nodes')} | {metrics_b.get('n_nodes')} |",
@@ -267,6 +348,16 @@ async def run_topological_sweep(
         current_metrics_obj = diagnose_model(model)
         current_metrics = dataclasses.asdict(current_metrics_obj)
         graph_summary = _build_graph_summary(model)
+        from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
+
+        # Blocking Rust stability analysis — keep it off the event loop, mirroring
+        # the to_thread wrapping used in get_threshold_stability_curve.
+        threshold_curve_summary = await asyncio.to_thread(
+            _threshold_curve_payload,
+            model,
+            detail="summary",
+            threshold_candidate_policy="balanced",
+        )
 
         # Build structured diff
         persisted_dataset_id = bound_dataset_id
@@ -276,20 +367,16 @@ async def run_topological_sweep(
             prev_cfg = yaml.safe_load(prev_record.config_yaml)
             curr_cfg = yaml.safe_load(current_yaml)
 
-            p_pca = (
-                prev_cfg.get("sweep", {})
-                .get("pca", {})
-                .get("dimensions", {})
-                .get("values", [])
-            )
-            c_pca = (
-                curr_cfg.get("sweep", {})
-                .get("pca", {})
-                .get("dimensions", {})
-                .get("values", [])
-            )
-            if str(p_pca) != str(c_pca):
-                diff.append({"field": "pca_dims", "previous": p_pca, "current": c_pca})
+            p_projection = _projection_dimensions_from_config(prev_cfg)
+            c_projection = _projection_dimensions_from_config(curr_cfg)
+            if str(p_projection) != str(c_projection):
+                diff.append(
+                    {
+                        "field": "projection_dimensions",
+                        "previous": p_projection,
+                        "current": c_projection,
+                    }
+                )
 
             p_eps = _format_epsilon(prev_cfg)
             c_eps = _format_epsilon(curr_cfg)
@@ -325,6 +412,7 @@ async def run_topological_sweep(
             metrics=current_metrics,
             resolved_construction_threshold=model.resolved_construction_threshold,
             graph_summary=graph_summary,
+            threshold_stability_summary=threshold_curve_summary,
         )
         session.latest_run_id = run_record.run_id
 
@@ -346,11 +434,12 @@ async def run_topological_sweep(
             "config_yaml_normalized": current_yaml,
             "data_shape": list(session.data.shape),
         }
-        graph_health, is_connected, recommended_next_action = _graph_health_summary(
-            current_metrics
-        )
+        graph_health, is_connected, _ = _graph_health_summary(current_metrics)
+        full_affinity = nx.Graph()
+        full_affinity.add_nodes_from(range(int(model.cosmic_rust.n)))
+        full_affinity.add_edges_from((i, j) for i, j, _ in model.weighted_edges(0.0))
         full_affinity_connected = bool(
-            nx.is_connected(nx.from_numpy_array((model.weighted_adjacency > 0)))
+            full_affinity.number_of_nodes() > 0 and nx.is_connected(full_affinity)
         )
         response["is_connected"] = is_connected
         response["constructed_graph_connected"] = is_connected
@@ -358,7 +447,8 @@ async def run_topological_sweep(
         response["singleton_fraction"] = current_metrics.get("singleton_fraction", 0.0)
         response["spectral_clustering_allowed"] = full_affinity_connected
         response["graph_health"] = graph_health
-        response["recommended_next_action"] = recommended_next_action
+        response["analysis_status"] = "diagnostics_required"
+        response["next_required_check"] = "diagnose_cosmic_graph(task=...)"
         response["finalization_gate"] = _finalization_gate(
             current_metrics,
             sweep_count=len(session.sweep_history),

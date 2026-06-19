@@ -211,6 +211,8 @@ _VALID_OVERRIDE_KEYS = frozenset(
         "run_name",
         "dataset_path",
         "projection_method",
+        "projection_dimensions",
+        "projection_seeds",
         "pca_dims",
         "pca_seeds",
         "epsilon_values",
@@ -245,6 +247,26 @@ def _set_dotted_path(raw: dict[str, Any], path: str, value: Any) -> Any:
     return old
 
 
+_MISSING = object()
+
+
+def _remove_dotted_path(raw: dict[str, Any], path: str) -> Any:
+    """Delete the leaf at dotted ``path``; return the removed value or ``_MISSING``.
+
+    Missing intermediate keys are a no-op (idempotent deletion). Unlike a
+    null-valued override, this removes the key entirely so callers can drop a
+    config entry (e.g. ``preprocessing.encode.species``) rather than null it.
+    """
+    parts = path.split(".")
+    cursor = raw
+    for part in parts[:-1]:
+        nxt = cursor.get(part)
+        if not isinstance(nxt, dict):
+            return _MISSING
+        cursor = nxt
+    return cursor.pop(parts[-1], _MISSING)
+
+
 def flatten_overrides(nested: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     flat = {}
     for k, v in nested.items():
@@ -259,9 +281,31 @@ def flatten_overrides(nested: dict[str, Any], prefix: str = "") -> dict[str, Any
 def apply_overrides(
     config_yaml: str, overrides: dict[str, Any]
 ) -> ConfigOverrideResult:
+    # remove_keys is a deletion list of dotted paths, not a mergeable override —
+    # pull it out before flattening so it bypasses the value-merge machinery.
+    remove_keys = overrides.get("remove_keys", [])
+    overrides = {k: v for k, v in overrides.items() if k != "remove_keys"}
+    if not isinstance(remove_keys, (list, tuple)):
+        raise ValueError(
+            "remove_keys must be a list of dotted config paths, e.g. "
+            "['preprocessing.encode.species']."
+        )
+    unknown_remove_roots = {
+        str(p).split(".", 1)[0]
+        for p in remove_keys
+        if str(p).split(".", 1)[0] not in _DOTTED_PATH_ROOTS
+    }
+    if unknown_remove_roots:
+        raise ValueError(
+            f"Unknown remove_keys root(s): {sorted(unknown_remove_roots)}. "
+            f"Valid roots: {sorted(_DOTTED_PATH_ROOTS)}."
+        )
+
     flat = flatten_overrides(overrides)
 
     prefix_map = {
+        "sweep.projection_dimensions": "projection_dimensions",
+        "sweep.projection_seeds": "projection_seeds",
         "sweep.pca_dims": "pca_dims",
         "sweep.pca_seeds": "pca_seeds",
         "sweep.projection_method": "projection_method",
@@ -322,8 +366,10 @@ def apply_overrides(
 
     flat_key_to_canonical = {
         "projection_method": "sweep.projection.method",
-        "pca_dims": "sweep.pca.dimensions.values",
-        "pca_seeds": "sweep.pca.seed.values",
+        "projection_dimensions": "sweep.projection.dimensions.values",
+        "projection_seeds": "sweep.projection.seed.values",
+        "pca_dims": "sweep.projection.dimensions.values",
+        "pca_seeds": "sweep.projection.seed.values",
         "epsilon_values": "sweep.ball_mapper.epsilon.values",
         "epsilon_range": "sweep.ball_mapper.epsilon.range",
         "construction_threshold": "cosmic_graph.construction_threshold",
@@ -368,6 +414,28 @@ def apply_overrides(
             "projection_method"
         ]
         _track("sweep.projection.method", old, overrides["projection_method"])
+    if "projection_dimensions" in overrides:
+        old = raw.get("sweep", {}).get("projection", {}).get("dimensions")
+        raw.setdefault("sweep", {}).setdefault("projection", {})["dimensions"] = {
+            "values": list(overrides["projection_dimensions"])
+        }
+        raw.setdefault("sweep", {}).setdefault("pca", {})["dimensions"] = {
+            "values": list(overrides["projection_dimensions"])
+        }
+        _track(
+            "sweep.projection.dimensions.values",
+            old,
+            list(overrides["projection_dimensions"]),
+        )
+    if "projection_seeds" in overrides:
+        old = raw.get("sweep", {}).get("projection", {}).get("seed")
+        raw.setdefault("sweep", {}).setdefault("projection", {})["seed"] = {
+            "values": list(overrides["projection_seeds"])
+        }
+        raw.setdefault("sweep", {}).setdefault("pca", {})["seed"] = {
+            "values": list(overrides["projection_seeds"])
+        }
+        _track("sweep.projection.seed.values", old, list(overrides["projection_seeds"]))
     if "pca_dims" in overrides:
         old = raw.get("sweep", {}).get("pca", {}).get("dimensions")
         raw.setdefault("sweep", {}).setdefault("pca", {})["dimensions"] = {
@@ -376,7 +444,7 @@ def apply_overrides(
         raw.setdefault("sweep", {}).setdefault("projection", {})["dimensions"] = {
             "values": list(overrides["pca_dims"])
         }
-        _track("sweep.pca.dimensions.values", old, list(overrides["pca_dims"]))
+        _track("sweep.projection.dimensions.values", old, list(overrides["pca_dims"]))
     if "pca_seeds" in overrides:
         old = raw.get("sweep", {}).get("pca", {}).get("seed")
         raw.setdefault("sweep", {}).setdefault("pca", {})["seed"] = {
@@ -385,7 +453,7 @@ def apply_overrides(
         raw.setdefault("sweep", {}).setdefault("projection", {})["seed"] = {
             "values": list(overrides["pca_seeds"])
         }
-        _track("sweep.pca.seed.values", old, list(overrides["pca_seeds"]))
+        _track("sweep.projection.seed.values", old, list(overrides["pca_seeds"]))
     if "epsilon_values" in overrides:
         old = raw.get("sweep", {}).get("ball_mapper", {}).get("epsilon")
         raw.setdefault("sweep", {}).setdefault("ball_mapper", {})["epsilon"] = {
@@ -435,6 +503,13 @@ def apply_overrides(
     if "raw" in overrides:
         _deep_merge(raw, overrides["raw"])
         _track("raw", "(deep merge)", overrides["raw"])
+
+    for path in remove_keys:
+        path = str(path)
+        old = _remove_dotted_path(raw, path)
+        if old is not _MISSING:
+            applied.append(f"-{path}")
+            diff.append({"path": path, "old": old, "new": None, "removed": True})
 
     cfg = load_config(raw)
     return ConfigOverrideResult(
@@ -895,6 +970,7 @@ sweep:
     seed:
       values: [42, 7, 13]
     center: true
+  # Legacy mirror for older configs. sweep.projection is authoritative.
   pca:
     dimensions:
       values: {pca_dims}

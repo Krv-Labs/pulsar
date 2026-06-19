@@ -68,7 +68,7 @@ We didn't just wrap our Python functions in JSON schemas. We built *Thick Tools*
 *   `run_topological_sweep`: Runs the heavy Rust pipeline. Takes inline YAML and returns structured JSON with metrics and experiment diff. Config persistence is opt-in via `save_config=True`.
 *   `diagnose_cosmic_graph`: Returns pure graph metrics (density, components, weight quantiles). The agent interprets these to decide what to adjust — e.g., "hairball" means high density, "shattered" means too many small components.
 *   `generate_cluster_dossier`: Returns structured JSON with per-cluster profiles (Z-scores, homogeneity, concentration) plus a Markdown summary. Includes clustering method metadata (method used, silhouette score).
-*   `compare_clusters_tool`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
+*   `compare_clusters`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
 *   `export_labeled_data`: Maps semantic names to the cluster IDs and dumps it to a CSV.
 
 ### Pitfalls & Annoyances
@@ -129,7 +129,7 @@ adj   = model.weighted_adjacency  # dense weighted adjacency, materialized lazil
 edges = model.weighted_edges()    # thresholded sparse edge list
 reps  = model.select_representatives()  # uses the configured default
 
-# Opt-in spectral sparsification hook: a leverage-aware, epsilon-free O(n)-edge graph
+# Opt-in spectral sparsification hook: a leverage-aware, epsilon-controlled graph
 # that preserves spectrum/distances (not topology). Useful for spectral analysis;
 # it is NOT a construction-time speedup. update=True refreshes model.cosmic_graph.
 model.spectral_sparsify(epsilon=0.8, seed=7, update=True)

@@ -23,13 +23,15 @@ _MEANINGFUL_NONTRIVIAL_DELTA = 0.03
 _SINGLETON_SPIKE_DELTA = 0.05
 
 
-def _extract_pca_dims(config_yaml: str) -> list[int]:
+def _extract_projection_dims(config_yaml: str) -> list[int]:
     try:
         cfg = yaml.safe_load(config_yaml) or {}
     except yaml.YAMLError:
         return []
-    pca = cfg.get("sweep", {}).get("pca", {}).get("dimensions", {})
-    values = pca.get("values", [])
+    sweep = cfg.get("sweep", {})
+    values = sweep.get("projection", {}).get("dimensions", {}).get("values")
+    if values is None:
+        values = sweep.get("pca", {}).get("dimensions", {}).get("values", [])
     if isinstance(values, list):
         return [int(v) for v in values if isinstance(v, (int, float))]
     return []
@@ -196,7 +198,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
         health = _health_label(metrics)
         health_counts[health] = health_counts.get(health, 0) + 1
 
-        for dim in _extract_pca_dims(config_yaml):
+        for dim in _extract_projection_dims(config_yaml):
             pca_dim_health.setdefault(dim, []).append(health)
 
         if (

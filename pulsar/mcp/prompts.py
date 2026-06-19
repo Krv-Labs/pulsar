@@ -39,15 +39,13 @@ Reveal the dataset's topology; do not force convenient clusters.
      before proceeding. If `finalization_gate.status` is `blocked`, run the
      suggested targeted resolution sweep or explicitly justify why the dominant
      component is clinically expected.
-   - GATE: Leave spectral sparsification OFF. `cosmic_graph.sparsify` is off by
-     default and should stay off for essentially all analysis. It is SLOW and
-     scales poorly with N (a Spielman-Srivastava sparsifier that solves a
-     preconditioned-CG system per JL sketch row), and it runs *after* the
-     already-sparse cosmic graph is built — pure additional construction cost
-     with no downstream speedup. It is a niche hook for preserving the graph
-     spectrum / effective resistances for downstream spectral analysis on small
-     graphs only; it is NOT a structural-analysis or performance tool. Do not
-     enable it to "clean up", "thin", or "speed up" a graph. When it IS enabled,
+   - GATE: Leave fit-time spectral sparsification OFF. `cosmic_graph.sparsify`
+     is off by default and should stay off for essentially all analysis. For
+     repeated spectral analysis, first call `diagnose_cosmic_graph` with
+     `task="spectral_analysis"`; if it recommends an artifact, call
+     `create_graph_artifact(estimate_only=true)` before paying the build cost.
+     Do not enable sparsification to "clean up", "thin", or "speed up" a graph.
+     When it IS enabled through the expert config path,
      density and edge counts are measured on the sparsified graph, so they are
      far lower than raw co-membership and are NOT comparable across sparsified
      vs. non-sparsified runs — judge structure primarily by `component_count`
@@ -55,11 +53,11 @@ Reveal the dataset's topology; do not force convenient clusters.
      (Step 2), not a target.
    - GATE: component_count=1 is normal; do not force separation by
      narrowing epsilon.
-7. Compare: Use `get_experiment_history`, `compare_sweeps`, and
-   `summarize_sweep_history` after each refinement. `summarize_sweep_history`
-   distills patterns (e.g., which projection dims collapsed structure) across the
-   session; you still own the next-config decision. Prefer 2-3 deliberate
-   sweeps over one brittle perfect-looking run.
+7. Compare: Use `get_sweep_history` and `compare_sweeps` after each
+   refinement. `get_sweep_history(detail="summary")` distills patterns (e.g.,
+   which projection dims collapsed structure) across the session; you still own
+   the next-config decision. Prefer 2-3 deliberate sweeps over one brittle
+   perfect-looking run.
 8. Inspect payloads summary-first. Use `generate_cluster_dossier(detail="summary")`
    for routine exploration. Treat `detail="standard"` and `detail="full"` as
    late-stage dossier modes. For graph structure, use
@@ -79,8 +77,8 @@ The default config returned by `create_config` is ONLY a baseline starting guess
 - **Stay in the KD-tree Envelope by Default**: `create_config` caps the generated
   projection grid at `16` dims so Ball Mapper can use KD-tree radius-query
   acceleration. To go wider when the user explicitly requests it, set the dims
-  via `refine_config` (`pca_dims`, uncapped); projections above 16 fall back to a
-  linear scan in Ball Mapper.
+  via `refine_config` (`projection_dimensions`, uncapped); projections above 16
+  fall back to a linear scan in Ball Mapper.
 - **"Widen and Shift" over "Narrow Down"**: Do not optimize by narrowing down to a single projection dimension. To find stable structures, maintain a wide multi-scale grid, but *shift* it away from degenerate areas. For example, if a baseline sweep of `[2, 3, 4, 5]` collapses into one dominant component (high `giant_fraction`), do not narrow to `[5]`. Instead, shift the grid upwards (e.g., to `[4, 6, 8, 10]` or `[5, 8, 12]`) to drop low-dimensional flat noise while preserving multi-scale consensus.
 - **The Projection Floor**: Avoid an ultra-low grid floor (1D/2D/3D) for complex high-dimensional data — it collapses structure and injects spurious consensus edges. Floor at or above the cumulative-variance elbow of the processed data (from `characterize_dataset`); e.g., if the elbow is at 5D, sweep `[5, 8, 12]`. This applies to both the JL default and the legacy `method: pca` path: the variance curve guides *which* dimensions to sweep, while the method only changes *how* points are projected onto them (JL preserves pairwise distances).
 - **The Epsilon Gates**: Keep epsilon inside the returned k-NN distance
@@ -131,8 +129,9 @@ different stages. Do not confuse them.
   and `method="components"`, the default inherits the construction threshold
   so clustering operates on the same surface you diagnosed. For explicit
   `method="spectral"`, the default is `0.0` so spectral uses the full weighted
-  affinity matrix unless you deliberately sparsify it (rarely needed, and slow
-  on large N — prefer leaving `cosmic_graph.sparsify` off). Pass an explicit value
+  affinity matrix. For repeated spectral analysis on a dense graph, ask
+  `diagnose_cosmic_graph(task="spectral_analysis")` whether a spectral artifact
+  is justified. Pass an explicit value
   to deliberately diverge. Use `diagnose_cosmic_graph` weight percentiles
   (weight_p25–p95) to pick a value when overriding. This changes
   interpretation-time connectivity and cluster fragmentation; it does not
