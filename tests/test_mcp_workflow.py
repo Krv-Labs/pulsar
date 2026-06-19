@@ -797,6 +797,75 @@ def test_recommend_preprocessing_surfaces_high_missingness_decisions(tmp_path):
     assert "## High Missingness Review" in markdown
 
 
+def test_recommend_preprocessing_surfaces_numeric_coded_categories(tmp_path):
+    rows = 24
+    path = tmp_path / "numeric_codes.csv"
+    pd.DataFrame(
+        {
+            "age": [40 + i for i in range(rows)],
+            "has_diabetes": [0, 1] * (rows // 2),
+            "severity_stage": [0, 1, 2, 3] * (rows // 4),
+            "lab_value": [float(i) + 0.25 for i in range(rows)],
+        }
+    ).to_csv(path, index=False)
+    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+
+    markdown = asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
+    payload = json.loads(
+        asyncio.run(
+            recommend_preprocessing(
+                dataset_id=dataset["dataset_id"],
+                response_format="json",
+                detail="full",
+            )
+        )
+    )
+
+    block = yaml.safe_load(payload["preprocessing_yaml"])["preprocessing"]
+    candidates = {
+        row["column"]: row
+        for row in payload["numeric_categorical_candidates_full"]
+    }
+    assert "has_diabetes" in candidates
+    assert "severity_stage" in candidates
+    assert "age" not in candidates
+    assert "lab_value" not in candidates
+    assert candidates["has_diabetes"]["supported_actions"] == [
+        "keep_numeric",
+        "one_hot_encode",
+        "drop",
+    ]
+    assert "StandardScaler" in candidates["has_diabetes"]["encoding_note"]
+    assert "has_diabetes" not in block["encode"]
+    assert payload["recommended_action"] == "accept"
+    assert payload["next_tool_call"]["tool"] == "create_config"
+    assert "value counts" in candidates["has_diabetes"]["evidence_available"]
+    assert any(
+        warning["code"] == "NUMERIC_CODED_CATEGORICAL_CANDIDATES"
+        and warning["severity"] == "info"
+        for warning in payload["warnings"]
+    )
+    assert "## Numeric-Coded Category Review" in markdown
+    assert "not a required next step" in markdown
+
+    probe = json.loads(
+        asyncio.run(
+            probe_columns(
+                dataset["dataset_id"],
+                list(candidates),
+                response_format="json",
+            )
+        )
+    )
+    has_diabetes = next(
+        profile
+        for profile in probe["column_profiles"]
+        if profile["name"] == "has_diabetes"
+    )
+    assert has_diabetes["is_numeric"] is True
+    assert has_diabetes["top_values"] == [["0", 12], ["1", 12]]
+
+
 def test_unknown_handles_return_stable_codes():
     dataset_report = json.loads(asyncio.run(create_config("ds_missing")))
     run_report = json.loads(asyncio.run(get_topological_skeleton("run_missing")))

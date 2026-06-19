@@ -96,6 +96,7 @@ async def recommend_preprocessing(
             expansion_estimate=expansion_estimate,
             dirty_numeric_detection=dirty_numeric_detection,
             dataset_id=dataset_id,
+            n_samples=n_samples,
             detail=detail,
             rationale_limit=rationale_limit,
         )
