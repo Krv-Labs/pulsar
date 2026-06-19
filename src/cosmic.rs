@@ -7,6 +7,7 @@ use rand::prelude::*;
 use rand_distr::StandardNormal;
 
 use crate::error::PulsarError;
+use crate::pseudolaplacian::SparsePseudoLaplacian;
 
 type WeightedEdge = (usize, usize, f64);
 
@@ -59,6 +60,37 @@ impl CosmicGraphInner {
             adj,
             n,
         }
+    }
+
+    /// Build a sparse CosmicGraph directly from a sparse pseudo-Laplacian, without
+    /// ever materializing the n×n matrix. Computes weights only for the nonzero
+    /// off-diagonal entries.
+    ///
+    /// Parity with [`from_pseudo_laplacian`]: with `l[i,j] = -count`, the dense
+    /// denominator `l[i,i] + l[j,j] + l[i,j]` equals `diag[i] + diag[j] - count`,
+    /// and `wadj[i,j] = -l[i,j]/denom = count/denom`. Pairs with no shared ball have
+    /// `count = 0` → weight 0 in the dense path, so iterating only nonzero entries
+    /// yields identical weights with no spurious edges. `denom > 0` always holds when
+    /// an entry exists (`count ≤ min(diag[i], diag[j])`). Pass `threshold = 0.0` to
+    /// reproduce the dense pre-threshold `weighted_adj` exactly.
+    pub fn from_pseudo_laplacian_sparse(
+        n: usize,
+        diag: &[i64],
+        offdiag: &[(usize, usize, i64)],
+        threshold: f64,
+    ) -> CosmicGraphInner {
+        let mut edges = Vec::with_capacity(offdiag.len());
+        for &(i, j, count) in offdiag {
+            let denom = diag[i] + diag[j] - count;
+            if denom > 0 {
+                let w = count as f64 / denom as f64;
+                if w > threshold {
+                    edges.push((i, j, w));
+                }
+            }
+        }
+        // `offdiag` is sorted by (i, j); `edges` preserves that order → deterministic.
+        CosmicGraphInner::Sparse { n, edges }
     }
 
     fn n(&self) -> usize {
@@ -133,6 +165,23 @@ impl CosmicGraph {
     ) -> PyResult<Self> {
         let arr = l.as_array().to_owned();
         let inner = CosmicGraphInner::from_pseudo_laplacian(&arr, threshold);
+        Ok(CosmicGraph { inner })
+    }
+
+    /// Build a CosmicGraph from a sparse pseudo-Laplacian (see
+    /// [`accumulate_pseudo_laplacians_sparse`]) without materializing an n×n matrix.
+    /// Pass `threshold = 0.0` for exact parity with the dense construction path.
+    #[staticmethod]
+    pub fn from_pseudo_laplacian_sparse(
+        spl: PyRef<SparsePseudoLaplacian>,
+        threshold: f64,
+    ) -> PyResult<Self> {
+        let inner = CosmicGraphInner::from_pseudo_laplacian_sparse(
+            spl.n,
+            &spl.diag,
+            &spl.offdiag,
+            threshold,
+        );
         Ok(CosmicGraph { inner })
     }
 

@@ -39,11 +39,12 @@ Reveal the dataset's topology; do not force convenient clusters.
      before proceeding. If `finalization_gate.status` is `blocked`, run the
      suggested targeted resolution sweep or explicitly justify why the dominant
      component is clinically expected.
-   - GATE: Density and edge counts are measured on the spectrally sparsified
-     graph (the default), so they are far lower than raw co-membership and are
-     NOT comparable across sparsified vs. non-sparsified runs. Judge structure
-     primarily by `component_count` and `giant_fraction`; treat density extremes
-     as a refine-config signal (Step 2), not a target.
+   - GATE: When spectral sparsification is enabled (via `cosmic_graph.sparsify`,
+     off by default), density and edge counts are measured on the sparsified
+     graph, so they are far lower than raw co-membership and are NOT comparable
+     across sparsified vs. non-sparsified runs. Judge structure primarily by
+     `component_count` and `giant_fraction`; treat density extremes as a
+     refine-config signal (Step 2), not a target.
    - GATE: component_count=1 is normal; do not force separation by
      narrowing epsilon.
 7. Compare: Use `get_experiment_history`, `compare_sweeps`, and

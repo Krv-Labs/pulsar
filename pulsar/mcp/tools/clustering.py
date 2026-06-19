@@ -50,8 +50,8 @@ _SURFACE_LABELS = {
     ),
     "clusters": (
         "Computed on the interpretation slice @ interpretation_edge_weight_threshold "
-        "of the sparsified, [0,1]-normalized weighted adjacency. Cluster counts and "
-        "membership reflect this slice, not the persisted graph."
+        "of the [0,1]-normalized weighted adjacency (sparsified only when enabled). "
+        "Cluster counts and membership reflect this slice, not the persisted graph."
     ),
 }
 
@@ -70,8 +70,8 @@ def _two_lever_markdown_note(
             f"({construction_threshold:.4f}).",
             f"- Cluster tables and per-cluster evidence describe the interpretation "
             f"slice @ interpretation_edge_weight_threshold "
-            f"({interpretation_threshold:.4f}) of the sparsified, [0,1]-normalized "
-            "weighted adjacency — not a dense affinity matrix.",
+            f"({interpretation_threshold:.4f}) of the [0,1]-normalized weighted "
+            "adjacency (sparsified only when enabled) — not a dense affinity matrix.",
             "",
         ]
     )
@@ -424,8 +424,8 @@ async def get_cluster_profile(
             note = (
                 "_Cluster membership and evidence are computed on the interpretation "
                 f"slice @ interpretation_edge_weight_threshold ({applied}) of the "
-                "sparsified weighted adjacency, not the persisted graph @ "
-                "construction_threshold._\n\n"
+                "[0,1]-normalized weighted adjacency (sparsified only when enabled), "
+                "not the persisted graph @ construction_threshold._\n\n"
             )
             return note + cluster_profile_payload_to_markdown(payload)
         return json.dumps(payload, indent=2)

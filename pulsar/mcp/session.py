@@ -62,8 +62,14 @@ class _PulsarSession:
             # Deep memory usage for Pandas (captures string objects etc)
             bytes_total += self.data.memory_usage(deep=True).sum()
 
-        if self.model is not None and self.model._weighted_adjacency is not None:
-            bytes_total += self.model._weighted_adjacency.nbytes
+        if self.model is not None:
+            if self.model._weighted_adjacency is not None:
+                # Dense view has been materialized (lazily, on first access).
+                bytes_total += self.model._weighted_adjacency.nbytes
+            elif self.model._cosmic_rust is not None:
+                # Hot path keeps the graph sparse; size the edge list instead of
+                # forcing an n×n densification just to report memory.
+                bytes_total += self.model._cosmic_rust.n_edges * 24
 
         if self.embeddings is not None:
             for emb in self.embeddings:

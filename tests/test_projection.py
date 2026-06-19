@@ -135,7 +135,9 @@ def test_projection_fingerprint_alias_and_method_sensitivity():
     assert projection_fingerprint(cfg_jl, 10) != projection_fingerprint(cfg_pca, 10)
 
 
-def test_pipeline_cosmic_graph_is_sparse_by_default():
+def test_pipeline_cosmic_graph_sparsified_when_enabled():
+    # Spectral sparsification is opt-in (sparsify=True below); it is no longer the
+    # default. With it enabled, cosmic_rust is the sparsified graph.
     import pandas as pd
 
     rng = np.random.default_rng(4)

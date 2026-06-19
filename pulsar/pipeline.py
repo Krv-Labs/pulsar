@@ -17,9 +17,9 @@ from pulsar._pulsar import (
     CosmicGraph,
     StabilityResult,
     StandardScaler,
-    accumulate_pseudo_laplacians,
+    accumulate_pseudo_laplacians_sparse,
     ball_mapper_grid,
-    find_stable_thresholds,
+    find_stable_thresholds_sparse,
     jl_grid,
     pca_grid,
 )
@@ -177,12 +177,14 @@ class ThemaRS:
         self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)
         _notify()  # ball_mapper
 
-        # 7. Accumulate pseudo-Laplacians (Rust parallel)
-        galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
+        # 7. Accumulate pseudo-Laplacians as a sparse COO (Rust parallel, no n×n alloc)
+        galactic_L = accumulate_pseudo_laplacians_sparse(self._ball_maps, n)
         _notify()  # laplacian
 
-        # 8. CosmicGraph: build the original graph, sparsify, then threshold.
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+        # 8. CosmicGraph: build the (sparse-backed) graph, sparsify if opted-in, threshold.
+        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
+            galactic_L, 0.0
+        )
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
         self._finalize_cosmic_graph(sparse, cfg.cosmic_graph.construction_threshold)
         _notify()  # cosmic (always last, always 1.0)
@@ -195,20 +197,26 @@ class ThemaRS:
         """Normalize the exposed CosmicGraph onto a [0, 1] weight scale, resolve
         the construction threshold, and build the NetworkX graph.
 
+        Operates entirely on the sparse edge list — the dense ``weighted_adjacency``
+        is never materialized here (it is built lazily on first property access).
         Spectral sparsification can reweight edges above 1.0, which would both
-        collapse those edges into one bin in ``find_stable_thresholds`` (it
+        collapse those edges into one bin in ``find_stable_thresholds_sparse`` (it
         quantizes over [0, 1]) and break the [0, 1] threshold contract that
         clustering/validation rely on. We rescale by ``max(1.0, max_weight)`` so
-        weights never exceed 1.0: a no-op for the dense / un-sparsified path
-        (max ≤ 1) and a fraction-of-max mapping otherwise.
+        weights never exceed 1.0: a no-op for the un-sparsified path (max ≤ 1) and a
+        fraction-of-max mapping otherwise.
         """
         self._cosmic_rust = cosmic_rust
-        raw_adj = np.array(cosmic_rust.weighted_adj)
-        max_w = float(raw_adj.max()) if raw_adj.size else 0.0
+        edges = cosmic_rust.weighted_edges()
+        max_w = max((w for _, _, w in edges), default=0.0)
         self._weight_scale = max(1.0, max_w)
-        self._weighted_adjacency = raw_adj / self._weight_scale
+        # Invalidate the lazy dense adjacency; rebuilt on demand by the property.
+        self._weighted_adjacency = None
         if threshold_cfg == "auto":
-            self._stability_result = find_stable_thresholds(self._weighted_adjacency)
+            norm_edges = [(i, j, w / self._weight_scale) for i, j, w in edges]
+            self._stability_result = find_stable_thresholds_sparse(
+                cosmic_rust.n, norm_edges
+            )
             self._resolved_construction_threshold = float(
                 self._stability_result.optimal_threshold
             )
@@ -310,7 +318,9 @@ class ThemaRS:
             progress_callback(label_override or label, frac)
 
         all_ball_maps: list[BallMapper] = []
-        galactic_L_accum: np.ndarray | None = None
+        # Sparse co-membership accumulator (SparsePseudoLaplacian), fused across
+        # datasets via merge_in_place — never allocates an n×n matrix.
+        galactic_L_accum: Any | None = None
         n: int | None = None
         ref_layout = None
 
@@ -340,7 +350,6 @@ class ThemaRS:
                 X = df.to_numpy(dtype=np.float64)
                 if n is None:
                     n = X.shape[0]
-                    galactic_L_accum = np.zeros((n, n), dtype=np.int64)
                 elif X.shape[0] != n:
                     raise ValueError(
                         f"Dataset {i} has {X.shape[0]} rows after preprocessing; "
@@ -367,13 +376,13 @@ class ThemaRS:
                     batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
                     if store_ball_maps:
                         all_ball_maps.extend(batch_ball_maps)
+                    batch_spl = accumulate_pseudo_laplacians_sparse(batch_ball_maps, n)
                     if galactic_L_accum is None:
-                        raise RuntimeError("galactic_L_accum not initialized")
-                    galactic_L_accum += np.array(
-                        accumulate_pseudo_laplacians(batch_ball_maps, n)
-                    )
+                        galactic_L_accum = batch_spl
+                    else:
+                        galactic_L_accum.merge_in_place(batch_spl)
                     # Release batch memory aggressively in notebook contexts
-                    del batch_ball_maps
+                    del batch_ball_maps, batch_spl
                     gc.collect()
 
                 # Drop per-dataset intermediates promptly
@@ -389,7 +398,9 @@ class ThemaRS:
         galactic_L = galactic_L_accum
         _notify()  # laplacian
 
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
+            galactic_L, 0.0
+        )
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
         self._finalize_cosmic_graph(sparse, cfg.cosmic_graph.construction_threshold)
         _notify()  # cosmic (always last, always 1.0)
@@ -412,22 +423,29 @@ class ThemaRS:
         """Dense n×n float64 weighted adjacency, normalized to [0, 1], pre-threshold.
 
         Weights are scaled by ``1 / max(1, max_weight)`` so the matrix stays
-        bounded by 1.0 even after spectral sparsification (which can reweight raw
-        edges above 1.0). This is the matrix threshold selection and clustering
-        operate on. The edge set is spectrally sparsified by default, so it has
-        far fewer non-zeros, but is still materialized densely. ``cosmic_rust``
-        exposes the raw, un-normalized Rust backing.
+        bounded by 1.0 (raw cosmic weights are already ≤ 1, but spectral
+        sparsification can reweight edges above 1.0). This is the matrix threshold
+        selection and clustering operate on. The cosmic graph backbone is kept
+        sparse end-to-end; this dense view is materialized lazily on first access
+        as a compatibility surface for diagnostics — prefer ``cosmic_rust`` /
+        ``weighted_edges()`` on the hot path. ``cosmic_rust`` exposes the raw,
+        un-normalized Rust backing.
         """
-        if self._weighted_adjacency is None:
+        if self._cosmic_rust is None:
             raise RuntimeError("Call fit() first")
+        if self._weighted_adjacency is None:
+            raw_adj = np.array(self._cosmic_rust.weighted_adj)
+            self._weighted_adjacency = raw_adj / self._weight_scale
         return self._weighted_adjacency
 
     @property
     def cosmic_rust(self) -> CosmicGraph:
-        """Rust CosmicGraph backing ``cosmic_graph``; sparse by default.
+        """Rust CosmicGraph backing ``cosmic_graph``.
 
-        Holds raw (un-normalized) weights; see :attr:`weighted_adjacency` for the
-        [0, 1]-normalized view used by thresholding and clustering.
+        Sparse-backed (edge-list) by default; spectral sparsification is opt-in
+        (see :meth:`spectral_sparsify`). Holds raw (un-normalized) weights; see
+        :attr:`weighted_adjacency` for the [0, 1]-normalized view used by
+        thresholding and clustering.
         """
         if self._cosmic_rust is None:
             raise RuntimeError("Call fit() first")
@@ -435,7 +453,12 @@ class ThemaRS:
 
     @property
     def dense_cosmic_rust(self) -> CosmicGraph:
-        """Original dense Rust CosmicGraph before default spectral sparsification."""
+        """The un-sparsified base CosmicGraph that :meth:`spectral_sparsify` consumes.
+
+        Named ``dense`` for historical reasons; it is now the sparse-backed cosmic
+        graph built directly from co-membership counts (no n×n materialization).
+        Identical to ``cosmic_rust`` unless spectral sparsification has been applied.
+        """
         if self._dense_cosmic_rust is None:
             raise RuntimeError("Call fit() first")
         return self._dense_cosmic_rust
@@ -472,7 +495,15 @@ class ThemaRS:
         max_iter: int = 1000,
         update: bool = False,
     ) -> CosmicGraph:
-        """Sparsify the original dense CosmicGraph.
+        """Spectrally sparsify the cosmic graph (opt-in hook).
+
+        This is NOT a construction-time speedup — it runs after the graph is
+        already built and is pure additional cost on that path. Its value is a
+        leverage-aware, epsilon-free sparsifier that produces an O(n)-edge graph
+        **preserving the spectrum / effective resistances (distances)**, not the
+        topology. Use it when you want a compact graph to run spectral algorithms
+        on (spectral embeddings/clustering) or to hand to downstream analysis,
+        where it is smarter than a naive low-weight edge filter.
 
         When ``update=True``, this also recomputes threshold selection on the
         sparsified graph and refreshes ``cosmic_graph`` / ``weighted_adjacency``.

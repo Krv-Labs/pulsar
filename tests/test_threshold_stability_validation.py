@@ -83,10 +83,10 @@ def test_dense_path_low_singleton():
     assert singleton_frac < 0.05
 
 
-def test_no_fragmentation_explosion_on_sparsified_default():
-    """On the default sparsified path the auto-threshold never explodes into a
-    singleton-dominated graph (the original bug), and it is seed-stable across
-    the random sparsification seed."""
+def test_no_fragmentation_explosion_on_sparsified_path():
+    """When spectral sparsification is enabled, the auto-threshold never explodes
+    into a singleton-dominated graph (the original bug), and it is seed-stable
+    across the random sparsification seed."""
     for seed in (1, 2, 3):
         ncomp, n, singleton_frac = _graph_health(
             _fit(eps=1.0, sparsify=True, seed=seed)

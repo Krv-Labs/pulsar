@@ -129,7 +129,12 @@ class BallMapperSpec:
 class CosmicGraphSpec:
     construction_threshold: float | Literal["auto"] = "auto"
     neighborhood: str = "node"
-    sparsify: bool = True
+    # Spectral sparsification is an opt-in hook, not a default. It runs *after* the
+    # (already sparse) cosmic graph is built, so it is pure additional cost on the
+    # construction path; its value is a leverage-aware, epsilon-free O(n)-edge graph
+    # that preserves spectrum/distances for downstream spectral analysis. See
+    # ThemaRS.spectral_sparsify.
+    sparsify: bool = False
     sparsify_epsilon: float = 1.0
     sparsify_seed: int = 42
     sparsify_sketch_dim: int | None = None
@@ -241,7 +246,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     cosmic_graph = CosmicGraphSpec(
         construction_threshold=construction_threshold,
         neighborhood=str(cg_raw.get("neighborhood", "node")),
-        sparsify=bool(cg_raw.get("sparsify", True)),
+        sparsify=bool(cg_raw.get("sparsify", False)),
         sparsify_epsilon=float(cg_raw.get("sparsify_epsilon", 1.0)),
         sparsify_seed=int(cg_raw.get("sparsify_seed", 42)),
         sparsify_sketch_dim=(

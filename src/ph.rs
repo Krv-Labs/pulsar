@@ -312,10 +312,84 @@ pub fn find_stable_thresholds(
         }
     }
 
+    Ok(stability_from_bins(n, bins, num_bins))
+}
+
+/// Find stable thresholds directly from a weighted edge list (sparse path), with
+/// no dense n×n scan. `edges` are `(i, j, weight)` with weights in `[0, 1]`; the
+/// orientation of `(i, j)` is irrelevant (union-find is symmetric).
+///
+/// Shares the exact quantization, sweep, plateau, and selection logic with the
+/// dense [`find_stable_thresholds`] via [`stability_from_bins`], so on the same
+/// graph both produce identical results.
+///
+/// # Errors
+/// Returns [`PulsarError::InvalidParameter`] if `num_bins == 0` or an edge endpoint
+/// is out of range.
+pub fn find_stable_thresholds_from_edges(
+    n: usize,
+    edges: &[(usize, usize, f64)],
+    num_bins: usize,
+) -> Result<StabilityResult, PulsarError> {
+    if num_bins == 0 {
+        return Err(PulsarError::InvalidParameter {
+            msg: "num_bins must be positive".to_string(),
+        });
+    }
+
+    // Degenerate cases mirror the dense path exactly.
+    if n == 0 {
+        return Ok(StabilityResult {
+            optimal_threshold: 0.5,
+            plateaus: vec![],
+            thresholds: vec![],
+            component_counts: vec![],
+        });
+    }
+    if n == 1 {
+        return Ok(StabilityResult {
+            optimal_threshold: 0.5,
+            plateaus: vec![Plateau {
+                start_threshold: 1.0,
+                end_threshold: 0.0,
+                component_count: 1,
+            }],
+            thresholds: vec![1.0, 0.0],
+            component_counts: vec![1, 1],
+        });
+    }
+
+    let mut bins: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_bins];
+    for &(i, j, w) in edges {
+        if i >= n || j >= n {
+            return Err(PulsarError::InvalidParameter {
+                msg: format!("edge endpoint out of range for n = {n}: ({i}, {j})"),
+            });
+        }
+        if w > 0.0 {
+            // Identical quantization to the dense Phase 1 — must stay byte-identical
+            // so plateau boundaries and the optimal threshold match.
+            let bin = ((w * num_bins as f64).floor() as usize).min(num_bins - 1);
+            bins[bin].push((i, j));
+        }
+    }
+
+    Ok(stability_from_bins(n, bins, num_bins))
+}
+
+/// Shared Phases 2–4: union-find sweep over quantized bins, plateau detection, and
+/// optimal-threshold selection. `bins[b]` holds the `(i, j)` endpoint pairs whose
+/// quantized weight equals `b`. Assumes `n >= 2` (degenerate cases are handled by
+/// the callers before binning).
+fn stability_from_bins(
+    n: usize,
+    bins: Vec<Vec<(usize, usize)>>,
+    num_bins: usize,
+) -> StabilityResult {
     // Check if graph has any edges
     let total_edges: usize = bins.iter().map(|b| b.len()).sum();
     if total_edges == 0 {
-        return Ok(StabilityResult {
+        return StabilityResult {
             optimal_threshold: 0.5,
             plateaus: vec![Plateau {
                 start_threshold: 1.0,
@@ -324,7 +398,7 @@ pub fn find_stable_thresholds(
             }],
             thresholds: vec![1.0, 0.0],
             component_counts: vec![n, n],
-        });
+        };
     }
 
     // -------------------------------------------------------------------------
@@ -431,12 +505,12 @@ pub fn find_stable_thresholds(
         }
     }
 
-    Ok(StabilityResult {
+    StabilityResult {
         optimal_threshold,
         plateaus,
         thresholds: dedup_thresholds,
         component_counts: dedup_counts,
-    })
+    }
 }
 
 // ============================================================================
@@ -617,6 +691,31 @@ pub fn py_find_stable_thresholds<'py>(
     let arr = weighted_adj.as_array().to_owned();
     let bins = num_bins.unwrap_or(DEFAULT_NUM_BINS);
     let result = find_stable_thresholds(&arr, bins)?;
+    Ok(PyStabilityResult { inner: result })
+}
+
+/// Find stable thresholds from a weighted edge list (sparse path), with no dense
+/// n×n scan. Shares all logic with [`find_stable_thresholds`] and produces
+/// identical results on the same graph.
+///
+/// # Parameters
+/// - `n` (`int`) — number of nodes.
+/// - `edges` (`list[tuple[int, int, float]]`) — `(i, j, weight)` with weights in
+///   `[0, 1]`. Orientation of `(i, j)` is irrelevant.
+/// - `num_bins` (`int`, optional) — quantization bins. Default: 256.
+///
+/// # Returns
+/// A `StabilityResult`, identical in shape to `find_stable_thresholds`.
+#[pyfunction]
+#[pyo3(name = "find_stable_thresholds_sparse", signature = (n, edges, num_bins=None))]
+pub fn py_find_stable_thresholds_sparse(
+    _py: Python<'_>,
+    n: usize,
+    edges: Vec<(usize, usize, f64)>,
+    num_bins: Option<usize>,
+) -> PyResult<PyStabilityResult> {
+    let bins = num_bins.unwrap_or(DEFAULT_NUM_BINS);
+    let result = find_stable_thresholds_from_edges(n, &edges, bins)?;
     Ok(PyStabilityResult { inner: result })
 }
 

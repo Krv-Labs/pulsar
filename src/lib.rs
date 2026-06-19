@@ -59,9 +59,14 @@ fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ballmapper::BallMapper>()?;
     m.add_function(wrap_pyfunction!(ballmapper::ball_mapper_grid, m)?)?;
 
-    // Pseudo-Laplacian (fused accumulation only)
+    // Pseudo-Laplacian (fused accumulation: dense + sparse paths)
     m.add_function(wrap_pyfunction!(
         pseudolaplacian::accumulate_pseudo_laplacians,
+        m
+    )?)?;
+    m.add_class::<pseudolaplacian::SparsePseudoLaplacian>()?;
+    m.add_function(wrap_pyfunction!(
+        pseudolaplacian::accumulate_pseudo_laplacians_sparse,
         m
     )?)?;
 
@@ -72,6 +77,7 @@ fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ph::PyPlateau>()?;
     m.add_class::<ph::PyStabilityResult>()?;
     m.add_function(wrap_pyfunction!(ph::py_find_stable_thresholds, m)?)?;
+    m.add_function(wrap_pyfunction!(ph::py_find_stable_thresholds_sparse, m)?)?;
 
     // Temporal Cosmic Graph
     m.add_function(wrap_pyfunction!(

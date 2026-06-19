@@ -125,11 +125,13 @@ from pulsar import ThemaRS
 model = ThemaRS("params.yaml").fit()
 
 graph = model.cosmic_graph        # sparse networkx.Graph with 'weight' edge attributes
-adj   = model.weighted_adjacency  # sparse weighted adjacency materialized as np.ndarray
+adj   = model.weighted_adjacency  # dense weighted adjacency, materialized lazily on access
 edges = model.weighted_edges()    # thresholded sparse edge list
 reps  = model.select_representatives()  # uses the configured default
 
-# Re-sparsify with custom parameters and refresh model.cosmic_graph
+# Opt-in spectral sparsification hook: a leverage-aware, epsilon-free O(n)-edge graph
+# that preserves spectrum/distances (not topology). Useful for spectral analysis;
+# it is NOT a construction-time speedup. update=True refreshes model.cosmic_graph.
 model.spectral_sparsify(epsilon=0.8, seed=7, update=True)
 ```
 
@@ -194,7 +196,7 @@ sweep:
       range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
 cosmic_graph:
   construction_threshold: auto
-  sparsify: true
+  sparsify: false # opt-in spectral sparsification hook (off by default)
   sparsify_epsilon: 1.0
   sparsify_seed: 42
 ```
