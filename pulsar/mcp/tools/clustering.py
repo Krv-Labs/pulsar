@@ -40,6 +40,42 @@ from pulsar.mcp.session import _get_session
 
 logger = logging.getLogger(__name__)
 
+# B3: explicit labels mapping each payload section to the graph/threshold lever
+# it is computed at, so agents cannot conflate construction-threshold graph
+# stats with the interpretation-threshold clustering slice.
+_SURFACE_LABELS = {
+    "graph_metrics": (
+        "Computed on the persisted cosmic graph @ construction_threshold "
+        "(the fitted graph). Components, density, and singletons describe this graph."
+    ),
+    "clusters": (
+        "Computed on the interpretation slice @ interpretation_edge_weight_threshold "
+        "of the sparsified, [0,1]-normalized weighted adjacency. Cluster counts and "
+        "membership reflect this slice, not the persisted graph."
+    ),
+}
+
+
+def _two_lever_markdown_note(
+    construction_threshold: float,
+    interpretation_threshold: float,
+) -> str:
+    """Concise two-lever clarification prepended to dossier markdown (B3)."""
+    return "\n".join(
+        [
+            "## Two Levers (do not conflate)",
+            "",
+            f"- Graph-level stats (components, density, singletons) describe the "
+            f"persisted cosmic graph @ construction_threshold "
+            f"({construction_threshold:.4f}).",
+            f"- Cluster tables and per-cluster evidence describe the interpretation "
+            f"slice @ interpretation_edge_weight_threshold "
+            f"({interpretation_threshold:.4f}) of the sparsified, [0,1]-normalized "
+            "weighted adjacency — not a dense affinity matrix.",
+            "",
+        ]
+    )
+
 
 def _validate_unit_threshold(value: float, *, name: str) -> float:
     threshold = float(value)
@@ -114,6 +150,40 @@ def _graph_metrics_payload(model: Any) -> dict[str, Any]:
         return {}
 
 
+class StaleClusterCacheError(Exception):
+    """Cached cluster state was computed from a prior run than the active model.
+
+    Raised when a newer sweep has advanced ``session.latest_run_id`` but the
+    cached clusters/feature evidence were computed from an earlier run. Serving
+    them would mix latest-run graph stats with stale cluster tables.
+    """
+
+    def __init__(self, *, cached_run_id: str | None, current_run_id: str | None):
+        self.cached_run_id = cached_run_id
+        self.current_run_id = current_run_id
+        super().__init__(
+            "Cached cluster state is stale: it was computed from run "
+            f"'{cached_run_id}', but the active fitted model is run "
+            f"'{current_run_id}'. A newer sweep has run since the last dossier."
+        )
+
+
+def _stale_cluster_cache_error(tool: str, exc: StaleClusterCacheError) -> str:
+    return mcp_error(
+        tool,
+        str(exc),
+        error_code="CLUSTER_CACHE_STALE",
+        agent_action=(
+            "Re-run generate_cluster_dossier() to recompute clusters against the "
+            "current fitted model before reading cluster evidence."
+        ),
+        details={
+            "cached_run_id": exc.cached_run_id,
+            "current_run_id": exc.current_run_id,
+        },
+    )
+
+
 def _require_cluster_state(
     session: Any,
 ) -> tuple[FeatureEvidenceIndex, dict[str, Any]]:
@@ -122,6 +192,14 @@ def _require_cluster_state(
     if session.clusters is None or session.feature_evidence_index is None:
         raise ToolError(
             "No cluster evidence found. Run generate_cluster_dossier() first."
+        )
+    # Run-state consistency: reject cluster caches stamped from a prior run.
+    # generate_cluster_dossier recomputes and refreshes the stamp, so this only
+    # fires when a sweep ran after the last dossier (latest_run_id advanced).
+    if session.clusters_run_id != session.latest_run_id:
+        raise StaleClusterCacheError(
+            cached_run_id=session.clusters_run_id,
+            current_run_id=session.latest_run_id,
         )
     return (
         session.feature_evidence_index,
@@ -195,6 +273,11 @@ async def generate_cluster_dossier(
             interpretation_edge_weight_threshold=resolved_interpretation_threshold,
         )
         session.clusters = result.labels
+        # Stamp the cluster cache with the run it was computed from so reads can
+        # detect when a newer sweep has advanced session.latest_run_id without
+        # recomputing clusters. generate_cluster_dossier recomputes here, so the
+        # stamp is always refreshed to the active fitted model's run.
+        session.clusters_run_id = session.latest_run_id
         session.report_exclude_columns = exclude_columns
 
         session.feature_evidence_cluster_meta = cluster_result_payload(result)
@@ -227,6 +310,7 @@ async def generate_cluster_dossier(
             payload["threshold_inherited"] = threshold_inherited
             payload["threshold_source"] = threshold_source
             payload["threshold_surface"] = threshold_surface
+            payload["surface_labels"] = _SURFACE_LABELS
             payload["recommended_next_tools"] = [
                 "get_cluster_profile",
                 "get_feature_signal",
@@ -241,10 +325,10 @@ async def generate_cluster_dossier(
                 "explicit audit/debugging."
             )
             if response_format == "markdown":
-                return _prepend_threshold_markdown(
-                    summary_evidence_payload_to_markdown(payload),
-                    threshold_surface,
-                )
+                body = _two_lever_markdown_note(
+                    construction_threshold, resolved_interpretation_threshold
+                ) + summary_evidence_payload_to_markdown(payload)
+                return _prepend_threshold_markdown(body, threshold_surface)
             return json.dumps(
                 payload,
                 separators=(",", ":") if len(payload["clusters"]) > 10 else None,
@@ -260,10 +344,10 @@ async def generate_cluster_dossier(
             evidence_index=evidence_index,
         )
         if response_format == "markdown":
-            return _prepend_threshold_markdown(
-                dossier_to_markdown(dossier),
-                threshold_surface,
-            )
+            body = _two_lever_markdown_note(
+                construction_threshold, resolved_interpretation_threshold
+            ) + dossier_to_markdown(dossier)
+            return _prepend_threshold_markdown(body, threshold_surface)
 
         payload = build_evidence_payload(
             dossier,
@@ -279,6 +363,7 @@ async def generate_cluster_dossier(
         payload["threshold_inherited"] = threshold_inherited
         payload["threshold_source"] = threshold_source
         payload["threshold_surface"] = threshold_surface
+        payload["surface_labels"] = _SURFACE_LABELS
         payload["recommended_next_tools"] = (
             [
                 "get_cluster_profile",
@@ -302,16 +387,6 @@ async def generate_cluster_dossier(
             indent=None if len(dossier.clusters) > 10 else 2,
         )
 
-    except ValueError as e:
-        if "Graph is disconnected" in str(e):
-            return mcp_error(
-                "generate_cluster_dossier",
-                "Spectral clustering requires a connected affinity graph. Your current threshold has disconnected the manifold.",
-                error_code="GRAPH_DISCONNECTED",
-                agent_action="Decrease interpretation_edge_weight_threshold or increase epsilon sweep range to connect the graph.",
-            )
-        logger.error(f"Error generating dossier: {e}")
-        return mcp_error("generate_cluster_dossier", str(e))
     except Exception as e:
         logger.error(f"Error generating dossier: {e}")
         return mcp_error("generate_cluster_dossier", str(e))
@@ -334,6 +409,7 @@ async def get_cluster_profile(
         payload = {
             "status": "ok",
             "cluster_result": cluster_meta,
+            "surface_labels": _SURFACE_LABELS,
             "detail": detail,
             "max_features": max_features,
             "cluster": cluster_profile_payload(
@@ -344,8 +420,17 @@ async def get_cluster_profile(
             ),
         }
         if response_format == "markdown":
-            return cluster_profile_payload_to_markdown(payload)
+            applied = cluster_meta.get("interpretation_edge_weight_threshold_applied")
+            note = (
+                "_Cluster membership and evidence are computed on the interpretation "
+                f"slice @ interpretation_edge_weight_threshold ({applied}) of the "
+                "sparsified weighted adjacency, not the persisted graph @ "
+                "construction_threshold._\n\n"
+            )
+            return note + cluster_profile_payload_to_markdown(payload)
         return json.dumps(payload, indent=2)
+    except StaleClusterCacheError as e:
+        return _stale_cluster_cache_error("get_cluster_profile", e)
     except KeyError:
         return mcp_error(
             "get_cluster_profile",
@@ -382,6 +467,7 @@ async def get_feature_signal(
         payload = {
             "status": "ok",
             "cluster_result": cluster_meta,
+            "surface_labels": _SURFACE_LABELS,
             "signals": feature_signal_payload(
                 evidence_index,
                 feature_names,
@@ -393,6 +479,8 @@ async def get_feature_signal(
         if response_format == "markdown":
             return feature_signal_payload_to_markdown(payload["signals"])
         return json.dumps(payload, indent=2)
+    except StaleClusterCacheError as e:
+        return _stale_cluster_cache_error("get_feature_signal", e)
     except Exception as e:
         return mcp_error("get_feature_signal", str(e))
 
@@ -419,6 +507,7 @@ async def get_cluster_signal_matrix(
         payload = {
             "status": "ok",
             "cluster_result": cluster_meta,
+            "surface_labels": _SURFACE_LABELS,
             "signal_matrix": signal_matrix_payload(
                 evidence_index,
                 cluster_ids=cluster_ids,
@@ -430,6 +519,8 @@ async def get_cluster_signal_matrix(
         if return_markdown:
             return payload["signal_matrix"]["markdown_report"]
         return json.dumps(payload, indent=2)
+    except StaleClusterCacheError as e:
+        return _stale_cluster_cache_error("get_cluster_signal_matrix", e)
     except Exception as e:
         return mcp_error("get_cluster_signal_matrix", str(e))
 
@@ -443,6 +534,14 @@ async def compare_clusters_tool(
     if session.data is None or session.clusters is None:
         raise ToolError(
             "No data or clusters found. Run generate_cluster_dossier() first."
+        )
+    if session.clusters_run_id != session.latest_run_id:
+        return _stale_cluster_cache_error(
+            "compare_clusters_tool",
+            StaleClusterCacheError(
+                cached_run_id=session.clusters_run_id,
+                current_run_id=session.latest_run_id,
+            ),
         )
 
     try:

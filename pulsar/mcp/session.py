@@ -48,6 +48,10 @@ class _PulsarSession:
     feature_evidence_index: FeatureEvidenceIndex | None = None
     feature_evidence_fingerprint: str | None = None
     feature_evidence_cluster_meta: dict[str, Any] | None = None
+    # run_id of the fitted model the cached cluster state was computed from.
+    # A newer sweep advances `latest_run_id` but does NOT recompute clusters,
+    # so this stamp lets reads detect (and reject) stale cluster caches.
+    clusters_run_id: str | None = None
     active_config_yaml: str | None = None
     active_config_dataset_id: str | None = None
 
@@ -208,6 +212,7 @@ def _invalidate_feature_evidence_cache(session: _PulsarSession) -> None:
     session.feature_evidence_fingerprint = None
     session.feature_evidence_cluster_meta = None
     session.clusters = None
+    session.clusters_run_id = None
 
 
 def _feature_evidence_fingerprint(

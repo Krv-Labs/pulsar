@@ -50,6 +50,12 @@ async def diagnose_cosmic_graph(ctx: Context) -> str:
     try:
         result = diagnose_model(session.model)
         payload = dataclasses.asdict(result)
+        # B3: these metrics describe the persisted graph @ construction_threshold,
+        # NOT any interpretation_edge_weight_threshold slice used for clustering.
+        payload["graph_surface"] = (
+            "persisted cosmic graph @ resolved_construction_threshold "
+            f"({result.resolved_construction_threshold:.4f})"
+        )
         if session.active_config_yaml:
             gate = _finalization_gate(
                 payload,
@@ -314,6 +320,11 @@ async def get_topological_skeleton(
             "dataset_id": record.dataset_id,
             "config_yaml_omitted": detail != "full",
             "resolved_construction_threshold": record.resolved_construction_threshold,
+            "graph_surface": (
+                "persisted cosmic graph @ resolved_construction_threshold "
+                f"({record.resolved_construction_threshold}); not an "
+                "interpretation_edge_weight_threshold slice"
+            ),
             "graph": _skeleton_graph_payload(
                 record.graph_summary,
                 detail=detail,

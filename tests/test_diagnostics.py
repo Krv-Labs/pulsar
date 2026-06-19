@@ -4,6 +4,8 @@ Tests for pulsar.mcp.diagnostics module.
 Tests graph quality metrics computation and diagnosis generation.
 """
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -213,7 +215,7 @@ def test_grid_adequacy_under_sampled(basic_config):
 
     assert result.n_ball_maps == 2
     assert result.grid_adequacy_status == "under_sampled"
-    assert "Add PCA dimensions" in result.grid_adequacy_note
+    assert "Add projection dimensions" in result.grid_adequacy_note
 
 
 def test_grid_adequacy_sample_count_ok():
@@ -386,14 +388,17 @@ def test_resolve_clusters_max_k(connected_spectral_model):
     assert len(result_high.labels.unique()) >= 2
 
 
-def test_resolve_clusters_spectral_disconnected_raises(
+def test_resolve_clusters_spectral_disconnected_degrades_gracefully(
     disconnected_spectral_model,
 ):
-    """Assert spectral method raises ValueError on a disconnected affinity graph."""
+    """Spectral clustering no longer hard-fails on a disconnected affinity graph;
+    it labels every node (giant component clustered, residual isolated). The
+    exhaustive disconnected-path assertions live in test_spectral_robustness.py."""
     from pulsar.mcp.interpreter import resolve_clusters
 
-    with pytest.raises(ValueError, match="disconnected"):
-        resolve_clusters(disconnected_spectral_model, method="spectral")
+    result = resolve_clusters(disconnected_spectral_model, method="spectral")
+    n = disconnected_spectral_model.weighted_adjacency.shape[0]
+    assert len(result.labels) == n
 
 
 # ---------------------------------------------------------------------------
@@ -456,3 +461,142 @@ def test_graph_advisories_clean():
         n_edges=50, singleton_fraction=0.1, giant_fraction=0.5, density=0.3
     )
     assert advisories == []
+
+
+# ---------------------------------------------------------------------------
+# B1: session run-state consistency for cached cluster state
+# ---------------------------------------------------------------------------
+
+
+def _two_block_spectral_session():
+    """Session with a connected two-block weighted adjacency suitable for the
+    spectral clustering path (mirrors test_mcp_workflow direct-session setup)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import networkx as nx
+
+    from pulsar.mcp.session import _sessions, _get_session
+
+    _sessions.clear()
+    session = _get_session(None)
+    weighted = np.full((30, 30), 0.4, dtype=float)
+    np.fill_diagonal(weighted, 0.0)
+    weighted[:15, :15] = 0.9
+    weighted[15:, 15:] = 0.9
+    np.fill_diagonal(weighted, 0.0)
+    session.model = SimpleNamespace(
+        weighted_adjacency=weighted,
+        cosmic_graph=nx.from_numpy_array((weighted > 0.2).astype(int)),
+        resolved_construction_threshold=0.2,
+    )
+    session.data = pd.DataFrame(
+        {
+            "x": np.r_[np.ones(15), np.zeros(15)],
+            "y": np.r_[np.zeros(15), np.ones(15)],
+        }
+    )
+    return asyncio, session
+
+
+def test_cluster_profile_stamps_run_and_serves_when_consistent():
+    """A dossier stamps clusters with the active run; a matching profile read
+    succeeds (no false-positive stale error)."""
+    from pulsar.mcp.tools.clustering import (
+        generate_cluster_dossier,
+        get_cluster_profile,
+    )
+
+    asyncio, session = _two_block_spectral_session()
+    session.latest_run_id = "run_first"
+
+    dossier = json.loads(
+        asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
+    )
+    assert dossier["status"] == "ok"
+    # The cache is stamped with the run it was computed from.
+    assert session.clusters_run_id == "run_first"
+
+    cluster_id = dossier["clusters"][0]["cluster_id"]
+    profile = json.loads(
+        asyncio.run(get_cluster_profile(cluster_id=cluster_id, response_format="json"))
+    )
+    assert profile["status"] == "ok"
+
+
+def test_cluster_profile_rejects_stale_cache_after_new_sweep():
+    """If a newer sweep advances latest_run_id without recomputing clusters,
+    get_cluster_profile must refuse to serve the stale cache and instruct a
+    re-run rather than returning mismatched data."""
+    from pulsar.mcp.tools.clustering import (
+        generate_cluster_dossier,
+        get_cluster_profile,
+    )
+
+    asyncio, session = _two_block_spectral_session()
+    session.latest_run_id = "run_first"
+
+    dossier = json.loads(
+        asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
+    )
+    assert dossier["status"] == "ok"
+    cluster_id = dossier["clusters"][0]["cluster_id"]
+
+    # Simulate a second sweep: latest_run_id advances and the fitted model is
+    # replaced, but clusters/feature_evidence are NOT recomputed (stale cache).
+    session.latest_run_id = "run_second"
+
+    profile = json.loads(
+        asyncio.run(get_cluster_profile(cluster_id=cluster_id, response_format="json"))
+    )
+
+    assert profile["status"] == "error"
+    assert profile["tool"] == "get_cluster_profile"
+    assert profile["error_code"] == "CLUSTER_CACHE_STALE"
+    assert "generate_cluster_dossier" in profile["agent_action"]
+    assert profile["details"]["cached_run_id"] == "run_first"
+    assert profile["details"]["current_run_id"] == "run_second"
+
+
+def test_cluster_signal_matrix_rejects_stale_cache_after_new_sweep():
+    """Run-state consistency also guards the cross-cluster signal matrix read."""
+    from pulsar.mcp.tools.clustering import (
+        generate_cluster_dossier,
+        get_cluster_signal_matrix,
+    )
+
+    asyncio, session = _two_block_spectral_session()
+    session.latest_run_id = "run_first"
+
+    asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
+    session.latest_run_id = "run_second"
+
+    result = json.loads(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTER_CACHE_STALE"
+
+
+def test_generate_cluster_dossier_refreshes_stale_stamp():
+    """Re-running the dossier after a new sweep refreshes the stamp, restoring
+    consistent reads — the documented recovery path."""
+    from pulsar.mcp.tools.clustering import (
+        generate_cluster_dossier,
+        get_cluster_profile,
+    )
+
+    asyncio, session = _two_block_spectral_session()
+    session.latest_run_id = "run_first"
+    asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
+
+    session.latest_run_id = "run_second"
+    dossier = json.loads(
+        asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
+    )
+    assert dossier["status"] == "ok"
+    assert session.clusters_run_id == "run_second"
+
+    cluster_id = dossier["clusters"][0]["cluster_id"]
+    profile = json.loads(
+        asyncio.run(get_cluster_profile(cluster_id=cluster_id, response_format="json"))
+    )
+    assert profile["status"] == "ok"

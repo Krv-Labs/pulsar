@@ -212,33 +212,30 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
     return None
 
 
-def _cluster_spectral(
-    adj: np.ndarray,
-    n: int,
+def _spectral_best_cut(
+    affinity_sub: np.ndarray,
     max_k: int,
-    interpretation_edge_weight_threshold: float = 0.0,
-) -> ClusterResult:
-    """Run spectral clustering on a weighted affinity matrix."""
-    G = nx.from_numpy_array((adj > 0).astype(np.int64))
-    if not nx.is_connected(G):
-        raise ValueError(
-            "Graph is disconnected — spectral clustering requires a connected affinity graph. "
-            "Use method='components' or increase epsilon to connect the graph."
-        )
+) -> tuple[np.ndarray | None, int, float]:
+    """Sweep k on a connected affinity submatrix; return best (labels, k, score).
+
+    Operates on a self-contained affinity matrix (no global node ids); callers
+    are responsible for mapping the returned local labels back to global
+    positions. Returns ``(None, _SPECTRAL_K_MIN, -1.0)`` when no cut with more
+    than one label could be scored.
+    """
+    sub_n = affinity_sub.shape[0]
 
     # Distance = 1 - affinity. Spectral sparsification can reweight edges above
     # 1.0, so clip only for the silhouette distance matrix.
-    affinity = adj.copy()
+    affinity = affinity_sub.copy()
     np.fill_diagonal(affinity, 1.0)
     distance = 1.0 - np.clip(affinity, 0.0, 1.0)
 
     best_score = -1.0
-    best_labels = None
+    best_labels: np.ndarray | None = None
     best_k = _SPECTRAL_K_MIN
-    k_range = range(_SPECTRAL_K_MIN, min(max_k + 1, n))
-    scores_by_k = {}
 
-    for k_test in k_range:
+    for k_test in range(_SPECTRAL_K_MIN, min(max_k + 1, sub_n)):
         sc = SpectralClustering(
             n_clusters=k_test,
             affinity="precomputed",
@@ -254,25 +251,88 @@ def _cluster_spectral(
 
         if len(np.unique(labels)) > 1:
             score = float(silhouette_score(distance, labels, metric="precomputed"))
-            scores_by_k[k_test] = score
             if score > best_score:
                 best_score = score
                 best_k = k_test
                 best_labels = labels
 
-    if best_labels is not None and best_score > 0.05:
-        return ClusterResult(
-            labels=pd.Series(best_labels, name="cluster"),
-            method_used="spectral",
-            n_clusters=best_k,
-            silhouette_score=best_score,
-            failure_reason=None,
-            interpretation_edge_weight_threshold_applied=(
-                interpretation_edge_weight_threshold
-            ),
-        )
+    return best_labels, best_k, best_score
 
-    raise ValueError("No stable cluster cut found.")
+
+def _cluster_spectral(
+    adj: np.ndarray,
+    n: int,
+    max_k: int,
+    interpretation_edge_weight_threshold: float = 0.0,
+) -> ClusterResult:
+    """Run spectral clustering on a weighted affinity matrix.
+
+    When the affinity graph is disconnected (the common case for real EHR data
+    with natural outliers/singletons), spectral clustering is run on the giant
+    (largest) connected component only. Every off-giant node — smaller
+    components and singletons — is then assigned its own cluster id continuing
+    the giant-component numbering, so each node receives a label and outliers
+    are surfaced as a residual rather than blocking the whole call. A fully
+    connected graph takes the original single-pass path with identical results.
+    """
+    G = nx.from_numpy_array((adj > 0).astype(np.int64))
+    components = sorted(nx.connected_components(G), key=len, reverse=True)
+
+    if len(components) <= 1:
+        # Connected graph: cluster all nodes directly (unchanged behavior).
+        best_labels, best_k, best_score = _spectral_best_cut(adj, max_k)
+        if best_labels is not None and best_score > 0.05:
+            return ClusterResult(
+                labels=pd.Series(best_labels, name="cluster"),
+                method_used="spectral",
+                n_clusters=best_k,
+                silhouette_score=best_score,
+                failure_reason=None,
+                interpretation_edge_weight_threshold_applied=(
+                    interpretation_edge_weight_threshold
+                ),
+            )
+        raise ValueError("No stable cluster cut found.")
+
+    # Disconnected graph: cluster the giant component, isolate the residual.
+    giant = sorted(components[0])
+    giant_idx = np.asarray(giant, dtype=int)
+    affinity_sub = adj[np.ix_(giant_idx, giant_idx)]
+
+    best_labels, best_k, best_score = _spectral_best_cut(affinity_sub, max_k)
+    if best_labels is None or best_score <= 0.05:
+        raise ValueError("No stable cluster cut found.")
+
+    labels = np.empty(n, dtype=int)
+    labels[giant_idx] = best_labels
+    # Off-giant nodes (smaller components + singletons) each get their own
+    # cluster id continuing the numbering. Keeping every off-giant node
+    # distinct (rather than collapsing them into one bucket) preserves the
+    # outlier structure for downstream profiling; the residual count below
+    # makes the split auditable.
+    next_id = best_k
+    residual_nodes = 0
+    for comp in components[1:]:
+        for node in sorted(comp):
+            labels[node] = next_id
+            next_id += 1
+            residual_nodes += 1
+
+    return ClusterResult(
+        labels=pd.Series(labels, name="cluster"),
+        method_used="spectral",
+        n_clusters=next_id,
+        silhouette_score=best_score,
+        failure_reason=(
+            f"Graph disconnected: clustered giant component "
+            f"({len(giant)} of {n} nodes) spectrally; "
+            f"{residual_nodes} residual node(s) in {len(components) - 1} "
+            f"smaller component(s) isolated as singleton clusters."
+        ),
+        interpretation_edge_weight_threshold_applied=(
+            interpretation_edge_weight_threshold
+        ),
+    )
 
 
 def _bh_fdr(p_values: list[float | None]) -> list[float | None]:
