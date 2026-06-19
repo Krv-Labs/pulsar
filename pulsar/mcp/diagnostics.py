@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import networkx as nx
 
+from pulsar.mcp.minhash_advisor import depth_profile
 from pulsar.mcp.payloads import size_summary
 from pulsar.mcp.thresholds import first_report_ready_candidate
 from pulsar.runtime.utils import generate_distribution_sparkline
@@ -47,6 +48,10 @@ class GraphMetrics:
     grid_adequacy_status: str = "unknown"
     grid_adequacy_note: str = ""
     advisories: list[dict] = field(default_factory=list)
+    # Realized accuracy of the MinHash-constructed weights at the depth `d` used:
+    # edge weights are unbiased Jaccard estimates with Var = J(1−J)/d. None if the
+    # construction depth could not be read from the model config.
+    minhash_profile: dict | None = None
 
 
 def _grid_adequacy(n_ball_maps: int) -> tuple[str, str]:
@@ -268,6 +273,11 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
         n_ball_maps=n_ball_maps,
         full_weight_edges=model.weighted_edges(threshold=0.0),
     )
+
+    cosmic_cfg = getattr(getattr(model, "config", None), "cosmic_graph", None)
+    minhash_d = getattr(cosmic_cfg, "minhash_d", None)
+    if minhash_d:
+        result.minhash_profile = depth_profile(int(minhash_d), result.n_nodes)
 
     logger.info(
         "diagnose_model: nodes=%d, edges=%d, components=%d, ball_maps=%d",

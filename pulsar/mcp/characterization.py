@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pulsar.mcp.minhash_advisor import massive_dataset_advisory
+
 
 _DEFAULT_PREVIEW_LIMIT = 20
 _COLUMN_NAME_PREVIEW_LIMIT = 20
@@ -24,10 +26,12 @@ def compact_characterization_payload(
     n_samples = int(geo.get("n_samples", 0) or 0)
     preview = _interesting_column_preview(column_profiles, n_samples, preview_limit)
     column_name_preview = _column_name_preview(column_profiles)
+    minhash_advisory = massive_dataset_advisory(n_samples)
 
     return {
         "status": "ok",
         "n_samples": geo.get("n_samples"),
+        "minhash_advisory": minhash_advisory,
         "n_features": geo.get("n_features"),
         "n_columns_total": geo.get("n_columns_total"),
         "missingness_pct": geo.get("missingness_pct"),
@@ -115,6 +119,26 @@ def characterization_payload_to_markdown(payload: dict[str, Any]) -> str:
     omitted_profiles = payload.get("omitted_column_profiles", 0)
     if omitted_profiles:
         lines.append(f"- Column profiles omitted from preview: {omitted_profiles}")
+
+    advisory = payload.get("minhash_advisory")
+    if advisory:
+        cur = advisory.get("current_profile", {})
+        sug = advisory.get("suggested_profile", {})
+        lines.extend(
+            [
+                "",
+                "## Cosmic Graph Construction (MinHash)",
+                "",
+                f"- {advisory.get('message')}",
+                f"- Current `minhash_d={advisory.get('current')}`: "
+                f"95% CI ±{cur.get('ci95_half_width_worst')}, "
+                f"signature {cur.get('signature_memory_human')}.",
+                f"- Suggested `minhash_d={advisory.get('suggested')}`: "
+                f"95% CI ±{sug.get('ci95_half_width_worst')}, "
+                f"signature {sug.get('signature_memory_human')}.",
+                "- Set via `refine_config(..., cosmic_graph.minhash_d=<value>)`.",
+            ]
+        )
 
     lines.extend(
         [
