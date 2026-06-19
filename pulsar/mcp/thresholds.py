@@ -29,7 +29,7 @@ class _PreparedThresholdGraph:
 
     @property
     def shape(self) -> tuple[int, int]:
-        return self.dense_adj.shape
+        return (self.n_nodes, self.n_nodes)
 
 
 ThresholdGraph = np.ndarray | _PreparedThresholdGraph
@@ -47,6 +47,28 @@ def prepare_threshold_graph(
     possible_edges = max(n_nodes * n_nodes, 1)
     return _PreparedThresholdGraph(
         dense_adj=dense_adj,
+        weighted_csr=weighted_csr,
+        n_nodes=n_nodes,
+        nnz=int(weighted_csr.nnz),
+        density=round(float(weighted_csr.nnz) / possible_edges, 6),
+    )
+
+
+def prepare_threshold_graph_from_edges(
+    n_nodes: int,
+    edges: list[tuple[int, int, float]],
+) -> _PreparedThresholdGraph:
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for i, j, weight in edges:
+        rows.extend([int(i), int(j)])
+        cols.extend([int(j), int(i)])
+        data.extend([float(weight), float(weight)])
+    weighted_csr = csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+    possible_edges = max(n_nodes * n_nodes, 1)
+    return _PreparedThresholdGraph(
+        dense_adj=np.empty((0, 0), dtype=float),
         weighted_csr=weighted_csr,
         n_nodes=n_nodes,
         nnz=int(weighted_csr.nnz),
@@ -198,6 +220,41 @@ def _mass_shape_metrics(profile: dict[str, Any]) -> dict[str, float | int]:
         ),
         "component_size_entropy": round(normalized_entropy, 4),
         "top_two_balance": round(balance, 4),
+    }
+
+
+def threshold_morphology_profile(
+    adj: ThresholdGraph,
+    threshold: float,
+    *,
+    top_k: int = 10,
+) -> dict[str, Any]:
+    """Compact mass-distribution row for one threshold cut.
+
+    This is intentionally descriptive, not prescriptive: downstream tools and
+    agents decide what to do with the shape in context.
+    """
+    profile = component_mass_profile(adj, threshold, top_k=top_k)
+    metrics = _mass_shape_metrics(profile)
+    top_sizes = [int(size) for size in profile["top_component_sizes"]]
+    giant_size = top_sizes[0] if top_sizes else 0
+    second_size = top_sizes[1] if len(top_sizes) > 1 else 0
+    second_largest_ratio = second_size / giant_size if giant_size else 0.0
+    return {
+        "threshold": float(threshold),
+        "component_count": int(profile["component_count"]),
+        "top_component_sizes": top_sizes,
+        "top_component_sizes_omitted": profile["top_component_sizes_omitted"],
+        "giant_fraction": profile["largest_component_fraction"],
+        "second_largest_ratio": round(second_largest_ratio, 4),
+        "singleton_count": int(profile["singleton_count"]),
+        "singleton_fraction": profile["singleton_fraction"],
+        "small_component_mass_fraction": profile["small_component_mass_fraction"],
+        "nontrivial_component_count": int(metrics["nontrivial_component_count"]),
+        "nontrivial_mass_fraction": metrics["nontrivial_mass_fraction"],
+        "multi_component_coverage": metrics["multi_component_coverage"],
+        "component_size_entropy": metrics["component_size_entropy"],
+        "interpretation_hint": mass_profile_hint(profile),
     }
 
 

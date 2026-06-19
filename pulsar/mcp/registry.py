@@ -51,6 +51,7 @@ class RunRecord:
     resolved_construction_threshold: float
     graph_summary: dict
     created_at: float
+    threshold_stability_summary: dict | None = None
 
 
 STALE_RUN_RECORD_MESSAGE = (
@@ -177,6 +178,7 @@ class MCPRegistry:
         metrics: dict,
         resolved_construction_threshold: float,
         graph_summary: dict,
+        threshold_stability_summary: dict | None = None,
     ) -> RunRecord:
         record = RunRecord(
             run_id=f"run_{uuid.uuid4().hex[:12]}",
@@ -186,6 +188,7 @@ class MCPRegistry:
             resolved_construction_threshold=resolved_construction_threshold,
             graph_summary=graph_summary,
             created_at=time.time(),
+            threshold_stability_summary=threshold_stability_summary,
         )
         with self._locked_registry():
             self._write_json(self._run_path(record.run_id), asdict(record))

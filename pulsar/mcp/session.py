@@ -31,6 +31,17 @@ class SweepRecord:
 
 
 @dataclass
+class GraphArtifact:
+    artifact_id: str
+    run_id: str
+    kind: str
+    created_at: float
+    params: dict[str, Any]
+    graph_summary: dict[str, Any]
+    metrics: dict[str, Any]
+
+
+@dataclass
 class _PulsarSession:
     """Session state for a single MCP client."""
 
@@ -54,6 +65,7 @@ class _PulsarSession:
     clusters_run_id: str | None = None
     active_config_yaml: str | None = None
     active_config_dataset_id: str | None = None
+    graph_artifacts: dict[str, GraphArtifact] = field(default_factory=dict)
 
     def calculate_memory_mb(self) -> float:
         """Estimate current session memory footprint in MB."""

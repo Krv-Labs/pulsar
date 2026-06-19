@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import networkx as nx
 
+from pulsar.mcp.payloads import size_summary
 from pulsar.runtime.utils import generate_distribution_sparkline
 
 if TYPE_CHECKING:
@@ -78,9 +79,9 @@ def _graph_advisories(
 ) -> list[dict]:
     """Advisory codes for degenerate graph regimes.
 
-    Advisories are data on the success payload — they do not raise. Each
-    carries an ``agent_action`` consistent with the ``mcp_error`` pattern so
-    agents can react with a single decision rule.
+    Advisories are descriptive data on the success payload — they do not raise
+    and they do not tell the agent what to do next. Tool-call directives live in
+    ``diagnose_cosmic_graph(task=...)`` recommendation blocks.
     """
     out: list[dict] = []
     if density > 0.8 and n_edges > 0:
@@ -89,10 +90,9 @@ def _graph_advisories(
                 "code": "HAIRBALL_DENSITY",
                 "severity": "warning",
                 "message": f"Graph density is {density:.0%} — most node pairs share an edge.",
-                "agent_action": (
-                    "Raise construction_threshold or shift the projection grid "
-                    "upward (drop low dims) before clustering. A near-fully-connected "
-                    "graph cannot express topological structure."
+                "diagnostic_interpretation": (
+                    "A near-fully-connected graph cannot express readable "
+                    "topological structure."
                 ),
             }
         )
@@ -102,9 +102,9 @@ def _graph_advisories(
                 "code": "EMPTY_GRAPH",
                 "severity": "error",
                 "message": "Construction threshold produced zero edges.",
-                "agent_action": (
-                    "Lower construction_threshold to a plateau midpoint from "
-                    "threshold_stability_summary, then re-run the sweep."
+                "diagnostic_interpretation": (
+                    "The constructed graph has no connectivity at the selected "
+                    "construction threshold."
                 ),
             }
         )
@@ -114,9 +114,9 @@ def _graph_advisories(
                 "code": "HIGH_SINGLETONS",
                 "severity": "warning",
                 "message": f"{singleton_fraction:.0%} of nodes are singletons.",
-                "agent_action": (
-                    "Lower construction_threshold, or pick a lower-θ plateau "
-                    "from threshold_stability_summary, then re-run the sweep."
+                "diagnostic_interpretation": (
+                    "Most points are isolated, so component labels are dominated "
+                    "by fragmentation."
                 ),
             }
         )
@@ -126,16 +126,125 @@ def _graph_advisories(
                 "code": "DOMINANT_COMPONENT",
                 "severity": "warning",
                 "message": f"One component covers {giant_fraction:.0%} of nodes.",
-                "agent_action": (
-                    "Do not treat this as final unless a targeted resolution "
-                    "sweep has already shown the giant component is stable. "
-                    "Use generate_cluster_dossier only after either refining "
-                    "the projection/epsilon grid or explicitly justifying that the "
-                    "dominant component is clinically expected."
+                "diagnostic_interpretation": (
+                    "The graph may be structurally real but has little visible "
+                    "component separation."
                 ),
             }
         )
     return out
+
+
+def _value_at_sparse_upper_index(
+    sorted_weights: list[float],
+    zero_count: int,
+    index: int,
+) -> float:
+    if index < zero_count:
+        return 0.0
+    offset = index - zero_count
+    if offset < 0 or offset >= len(sorted_weights):
+        return 0.0
+    return float(sorted_weights[offset])
+
+
+def _sparse_upper_percentile(
+    weights: list[float],
+    total_pairs: int,
+    percentile: float,
+) -> float:
+    if total_pairs <= 0:
+        return 0.0
+    sorted_weights = sorted(float(w) for w in weights if w > 0.0)
+    zero_count = max(total_pairs - len(sorted_weights), 0)
+    pos = (total_pairs - 1) * (percentile / 100.0)
+    lo = int(np.floor(pos))
+    hi = int(np.ceil(pos))
+    lo_v = _value_at_sparse_upper_index(sorted_weights, zero_count, lo)
+    hi_v = _value_at_sparse_upper_index(sorted_weights, zero_count, hi)
+    return float(lo_v + (hi_v - lo_v) * (pos - lo))
+
+
+def _sparse_upper_sample(weights: list[float], total_pairs: int) -> np.ndarray:
+    if total_pairs <= 0:
+        return np.array([], dtype=float)
+    sorted_weights = sorted(float(w) for w in weights if w > 0.0)
+    zero_count = max(total_pairs - len(sorted_weights), 0)
+    zero_sample = [0.0] * min(zero_count, 512)
+    if len(sorted_weights) <= 1536:
+        return np.asarray(zero_sample + sorted_weights, dtype=float)
+    idx = np.linspace(0, len(sorted_weights) - 1, num=1536).astype(int)
+    weight_sample = [sorted_weights[int(i)] for i in idx]
+    return np.asarray(zero_sample + weight_sample, dtype=float)
+
+
+def _graph_metrics_from_graph(
+    graph: nx.Graph,
+    *,
+    resolved_construction_threshold: float,
+    n_ball_maps: int = 0,
+    full_weight_edges: list[tuple[int, int, float]] | None = None,
+) -> GraphMetrics:
+    n = graph.number_of_nodes()
+    if n == 0:
+        raise RuntimeError(
+            "Empty graph: model may not have been fitted or data is empty"
+        )
+
+    n_edges = graph.number_of_edges()
+    max_pairs = n * (n - 1) // 2
+    density = float(n_edges / max_pairs) if max_pairs > 0 else 0.0
+    avg_degree = float(2 * n_edges / n) if n > 0 else 0.0
+
+    components = list(nx.connected_components(graph))
+    sizes = sorted((len(c) for c in components), reverse=True)
+    giant_fraction = float(sizes[0] / n) if sizes and n > 0 else 0.0
+    singleton_count = sum(1 for s in sizes if s == 1)
+    singleton_fraction = float(singleton_count / n) if n > 0 else 0.0
+    component_count = len(components)
+
+    if full_weight_edges is None:
+        weights = [
+            float(data.get("weight", 0.0)) for _, _, data in graph.edges(data=True)
+        ]
+    else:
+        weights = [float(w) for _, _, w in full_weight_edges]
+    nonzero_fraction = float(len(weights) / max_pairs) if max_pairs > 0 else 0.0
+    weight_p25 = _sparse_upper_percentile(weights, max_pairs, 25)
+    weight_p50 = _sparse_upper_percentile(weights, max_pairs, 50)
+    weight_p95 = _sparse_upper_percentile(weights, max_pairs, 95)
+    sample = _sparse_upper_sample(weights, max_pairs)
+    weight_dist_spark = generate_distribution_sparkline(sample) if len(sample) else ""
+
+    grid_status, grid_note = _grid_adequacy(n_ball_maps)
+    advisories = _graph_advisories(
+        n_edges=n_edges,
+        singleton_fraction=singleton_fraction,
+        giant_fraction=giant_fraction,
+        density=density,
+    )
+
+    return GraphMetrics(
+        n_nodes=n,
+        n_edges=n_edges,
+        density=density,
+        avg_degree=avg_degree,
+        giant_fraction=giant_fraction,
+        singleton_count=singleton_count,
+        singleton_fraction=singleton_fraction,
+        component_count=component_count,
+        resolved_construction_threshold=resolved_construction_threshold,
+        nonzero_fraction=nonzero_fraction,
+        weight_p25=weight_p25,
+        weight_p50=weight_p50,
+        weight_p95=weight_p95,
+        weight_distribution_sparkline=weight_dist_spark,
+        component_sizes=sizes,
+        n_ball_maps=n_ball_maps,
+        grid_adequacy_status=grid_status,
+        grid_adequacy_note=grid_note,
+        advisories=advisories,
+    )
 
 
 def diagnose_model(model: ThemaRS) -> GraphMetrics:
@@ -151,79 +260,32 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
     Raises:
         RuntimeError: If model has not been fitted
     """
-    G = model.cosmic_graph
-    W = model.weighted_adjacency
-    n = G.number_of_nodes()
-
-    if n == 0:
-        raise RuntimeError(
-            "Empty graph: model may not have been fitted or data is empty"
-        )
-
-    n_edges = G.number_of_edges()
-    max_pairs = n * (n - 1) // 2
-    density = float(n_edges / max_pairs) if max_pairs > 0 else 0.0
-    avg_degree = float(2 * n_edges / n) if n > 0 else 0.0
-
-    components = list(nx.connected_components(G))
-    sizes = sorted((len(c) for c in components), reverse=True)
-    giant_fraction = float(sizes[0] / n) if sizes and n > 0 else 0.0
-    singleton_count = sum(1 for s in sizes if s == 1)
-    singleton_fraction = float(singleton_count / n) if n > 0 else 0.0
-    component_count = len(components)
-
-    upper = W[np.triu_indices(n, k=1)]
-    nonzero = upper[upper > 0]
-    nonzero_fraction = float(len(nonzero) / len(upper)) if len(upper) > 0 else 0.0
-    weight_p25 = float(np.percentile(upper, 25)) if len(upper) > 0 else 0.0
-    weight_p50 = float(np.percentile(upper, 50)) if len(upper) > 0 else 0.0
-    weight_p95 = float(np.percentile(upper, 95)) if len(upper) > 0 else 0.0
-    weight_dist_spark = generate_distribution_sparkline(upper) if len(upper) > 0 else ""
     n_ball_maps = len(getattr(model, "_ball_maps", []) or [])
-    grid_status, grid_note = _grid_adequacy(n_ball_maps)
-    advisories = _graph_advisories(
-        n_edges=n_edges,
-        singleton_fraction=singleton_fraction,
-        giant_fraction=giant_fraction,
-        density=density,
+    result = _graph_metrics_from_graph(
+        model.cosmic_graph,
+        resolved_construction_threshold=model.resolved_construction_threshold,
+        n_ball_maps=n_ball_maps,
+        full_weight_edges=model.weighted_edges(threshold=0.0),
     )
 
     logger.info(
         "diagnose_model: nodes=%d, edges=%d, components=%d, ball_maps=%d",
-        n,
-        n_edges,
-        component_count,
+        result.n_nodes,
+        result.n_edges,
+        result.component_count,
         n_ball_maps,
     )
-
-    return GraphMetrics(
-        n_nodes=n,
-        n_edges=n_edges,
-        density=density,
-        avg_degree=avg_degree,
-        giant_fraction=giant_fraction,
-        singleton_count=singleton_count,
-        singleton_fraction=singleton_fraction,
-        component_count=component_count,
-        resolved_construction_threshold=model.resolved_construction_threshold,
-        nonzero_fraction=nonzero_fraction,
-        weight_p25=weight_p25,
-        weight_p50=weight_p50,
-        weight_p95=weight_p95,
-        weight_distribution_sparkline=weight_dist_spark,
-        component_sizes=sizes,
-        n_ball_maps=n_ball_maps,
-        grid_adequacy_status=grid_status,
-        grid_adequacy_note=grid_note,
-        advisories=advisories,
-    )
+    return result
 
 
 _MAX_EDGES_IN_SUMMARY = 500
 
 
-def _build_graph_summary(model: Any) -> dict[str, Any]:
-    graph = model.cosmic_graph
+def _build_graph_summary_from_graph(
+    graph: nx.Graph,
+    *,
+    resolved_construction_threshold: float,
+) -> dict[str, Any]:
     if graph.is_directed():
         components = list(nx.weakly_connected_components(graph))
     else:
@@ -312,7 +374,7 @@ def _build_graph_summary(model: Any) -> dict[str, Any]:
     return {
         "node_count": n_nodes,
         "edge_count": total_edges,
-        "resolved_construction_threshold": float(model.resolved_construction_threshold),
+        "resolved_construction_threshold": float(resolved_construction_threshold),
         "component_count": len(components),
         "component_sizes": component_sizes,
         "nodes": nodes,
@@ -321,6 +383,13 @@ def _build_graph_summary(model: Any) -> dict[str, Any]:
         "edges_shown": len(edges),
         "topological_summary": topological_summary,
     }
+
+
+def _build_graph_summary(model: Any) -> dict[str, Any]:
+    return _build_graph_summary_from_graph(
+        model.cosmic_graph,
+        resolved_construction_threshold=float(model.resolved_construction_threshold),
+    )
 
 
 def _skeleton_graph_payload(
@@ -344,7 +413,7 @@ def _skeleton_graph_payload(
         "edge_count": edge_count,
         "resolved_construction_threshold": graph.get("resolved_construction_threshold"),
         "component_count": graph.get("component_count"),
-        "component_sizes": graph.get("component_sizes", []),
+        "component_sizes_summary": size_summary(graph.get("component_sizes", [])),
         "detail": detail,
         "nodes_returned": len(nodes),
         "nodes_omitted": max(node_count - len(nodes), 0),
@@ -352,6 +421,8 @@ def _skeleton_graph_payload(
         "edges_omitted": max(edge_count - len(edges), 0),
         "source_edges_truncated": bool(graph.get("edges_truncated", False)),
     }
+    if detail == "full":
+        payload["component_sizes"] = graph.get("component_sizes", [])
     if detail == "nodes":
         payload["topological_summary"] = graph.get("topological_summary", {})
     if include_nodes:
@@ -383,8 +454,10 @@ def _finalization_gate(
         }
 
     cfg = yaml.safe_load(config_yaml) or {}
-    pca_dims = (
-        cfg.get("sweep", {}).get("pca", {}).get("dimensions", {}).get("values", [])
+    projection_dims = cfg.get("sweep", {}).get("projection", {}).get(
+        "dimensions", {}
+    ).get("values") or cfg.get("sweep", {}).get("pca", {}).get("dimensions", {}).get(
+        "values", []
     )
     return {
         "status": "blocked",
@@ -395,8 +468,8 @@ def _finalization_gate(
             "or the dominant component is explicitly justified as clinically expected."
         ),
         "suggested_refinement": {
-            "pca_dims": _suggest_resolution_pca_dims(pca_dims),
-            "pca_seeds": [42, 7, 13],
+            "projection_dimensions": _suggest_resolution_pca_dims(projection_dims),
+            "projection_seeds": [42, 7, 13],
             "epsilon_steps_min": 24,
             "strategy": (
                 "Zoom into the useful projection band with multiple seeds. "
@@ -415,17 +488,23 @@ def _threshold_stability_summary(
     Returns ``None`` when the run used a fixed construction_threshold (no
     stability analysis was performed).
     """
-    from pulsar.mcp.payloads import singleton_count_at_threshold
-
     stability = getattr(model, "_stability_result", None)
     if stability is None:
         return None
-    adj = model.weighted_adjacency
-    n_nodes = int(adj.shape[0])
+    n_nodes = int(model.cosmic_rust.n)
+    edges = model.weighted_edges(threshold=0.0)
+    row_max = [0.0] * n_nodes
+    for i, j, weight in edges:
+        row_max[int(i)] = max(row_max[int(i)], float(weight))
+        row_max[int(j)] = max(row_max[int(j)], float(weight))
+
+    def singleton_count_at(threshold: float) -> int:
+        return sum(1 for value in row_max if value <= threshold)
+
     top = stability.top_k_plateaus(3)
     plateaus = []
     for p in top:
-        singleton_count = singleton_count_at_threshold(adj, float(p.midpoint))
+        singleton_count = singleton_count_at(float(p.midpoint))
         plateaus.append(
             {
                 "start": float(p.start_threshold),
