@@ -44,7 +44,7 @@ from scipy import signal
 from scipy.stats import kurtosis, skew
 
 from pulsar.config import load_config
-from pulsar.hooks import cosmic_to_networkx
+from pulsar import cosmic_to_networkx
 
 # ---------------------------------------------------------------------------
 # ECG Feature Extraction
