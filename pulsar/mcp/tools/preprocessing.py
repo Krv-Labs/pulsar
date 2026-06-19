@@ -136,8 +136,8 @@ async def repair_preprocessing_config(
 
 
 async def validate_preprocessing_config(config_yaml: str, ctx: Context) -> str:
-    """Dry-run preprocessing only against session data (no PCA/BallMapper/sweep
-    cost). Requires prior `run_topological_sweep` or `characterize_dataset` to
+    """Dry-run preprocessing only against session data (no projection/BallMapper/
+    sweep cost). Requires prior `run_topological_sweep` or `characterize_dataset` to
     load data into the session. Returns PASS+schema summary or structured error.
     """
     session = _get_session(ctx)

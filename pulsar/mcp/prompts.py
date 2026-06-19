@@ -73,7 +73,7 @@ The default config returned by `create_config` is ONLY a baseline starting guess
   via `refine_config` (`pca_dims`, uncapped); projections above 16 fall back to a
   linear scan in Ball Mapper.
 - **"Widen and Shift" over "Narrow Down"**: Do not optimize by narrowing down to a single projection dimension. To find stable structures, maintain a wide multi-scale grid, but *shift* it away from degenerate areas. For example, if a baseline sweep of `[2, 3, 4, 5]` collapses into one dominant component (high `giant_fraction`), do not narrow to `[5]`. Instead, shift the grid upwards (e.g., to `[4, 6, 8, 10]` or `[5, 8, 12]`) to drop low-dimensional flat noise while preserving multi-scale consensus.
-- **The Projection Floor**: Avoid an ultra-low grid floor (1D/2D/3D) for complex high-dimensional data — it collapses structure and injects spurious consensus edges. The default JL projection has no variance curve, so floor at ~4D+ and rely on multi-scale persistence. For the legacy `method: pca` path, set the floor at or above the cumulative-variance elbow (e.g., if the elbow is at 5D, sweep `[5, 8, 12]`).
+- **The Projection Floor**: Avoid an ultra-low grid floor (1D/2D/3D) for complex high-dimensional data — it collapses structure and injects spurious consensus edges. Floor at or above the cumulative-variance elbow of the processed data (from `characterize_dataset`); e.g., if the elbow is at 5D, sweep `[5, 8, 12]`. This applies to both the JL default and the legacy `method: pca` path: the variance curve guides *which* dimensions to sweep, while the method only changes *how* points are projected onto them (JL preserves pairwise distances).
 - **The Epsilon Gates**: Keep epsilon inside the returned k-NN distance
   domain unless you have a diagnostic reason to test a boundary. If the graph is
   shattered, raise the upper epsilon bound. If one component dominates (high
@@ -84,8 +84,12 @@ The default config returned by `create_config` is ONLY a baseline starting guess
 
 ## NO HILL-CLIMBING OPTIMIZATION
 The cosmic graph is a stable representation, not a score to maximize.
-- **Do Not Optimize Graph Metrics**: Do not treat density, component count, or singleton fraction as quality metrics to optimize. They are descriptive indicators of scale, not success scores. 
+- **Do Not Optimize Graph Metrics**: Do not treat density, component count, or singleton fraction as quality metrics to optimize. They are descriptive indicators of scale, not success scores.
 - **Seek Structural Persistence**: A topological pattern is "real" if it persists across many combinations of epsilon, projection dimensions, and seeds. Look for structural invariants across sweeps rather than "tuning" for a single perfect-looking graph.
+
+## METHODOLOGY GUARDRAILS
+- **Do Not Reintroduce Proxies of the Target**: If the question is "do features X distinguish outcome Y?", do not add columns that are near-proxies of Y (e.g. a geographic field that almost perfectly maps to the class). Clean clusters obtained that way are the proxy leaking the label, not the features distinguishing it — it silently abandons the experiment. Drop proxies along with the label.
+- **Chaining, Not Threshold-Cranking**: When two genuinely overlapping groups are bridged by intermediate points, raising the construction threshold to force them apart shatters everything else into singletons (single-linkage chaining). Prefer `method="spectral"` or rely on multi-scale consensus across the sweep; a fragmentation explosion (tens of singletons on a few-hundred-row dataset) is over-filtered noise, not finer resolution.
 
 ## THRESHOLD MECHANICS
 Two independent levers operate on the same underlying weighted matrix at

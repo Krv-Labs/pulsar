@@ -81,10 +81,10 @@ async def get_experiment_history(ctx: Context) -> str:
     """Markdown table of all sweeps run in this session."""
     session = _get_session(ctx)
     if not session.sweep_history:
-        return "No experiments run yet in this session.\n\n| Run | PCA Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |\n|---|---|---|---|---|---|---|"
+        return "No experiments run yet in this session.\n\n| Run | Projection Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |\n|---|---|---|---|---|---|---|"
 
     lines = [
-        "| Run | PCA Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |"
+        "| Run | Projection Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |"
     ]
     lines.append("|---|---|---|---|---|---|---|")
 

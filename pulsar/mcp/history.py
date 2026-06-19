@@ -216,7 +216,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     )
     if hairball_dims:
         observations.append(
-            f"PCA dimensions {hairball_dims} appeared in hairball regimes in "
+            f"Projection dimensions {hairball_dims} appeared in hairball regimes in "
             f"the majority of runs containing them."
         )
 
@@ -228,7 +228,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     )
     if fragmented_dims:
         observations.append(
-            f"PCA dimensions {fragmented_dims} appeared in fragmented or empty "
+            f"Projection dimensions {fragmented_dims} appeared in fragmented or empty "
             f"graphs in the majority of runs containing them."
         )
 
@@ -251,11 +251,11 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     rationale_parts: list[str] = []
     if hairball_dims:
         rationale_parts.append(
-            "Low or extreme PCA dimensions correlate with over-connected hairballs."
+            "Low or extreme projection dimensions correlate with over-connected hairballs."
         )
     if fragmented_dims:
         rationale_parts.append(
-            "Some PCA dimensions consistently shatter the graph; consider shifting away from them."
+            "Some projection dimensions consistently shatter the graph; consider shifting away from them."
         )
     if thresholds_with_singletons:
         rationale_parts.append(

@@ -61,31 +61,36 @@ async def explain_suggestion(
 
         explanation = "### Parameter Reasoning\n\n"
 
-        # 1. Projection reasoning. Variance framing applies only to the legacy
-        # PCA path; JL random projection preserves pairwise distances, not variance.
-        pca_reasons = []
-        if method == "pca":
-            for dim in proj_dims:
-                var = cum_var_map.get(int(dim))
-                if var is not None:
-                    next_var = cum_var_map.get(int(dim) + 1)
-                    benefit = f" (+{next_var - var:.1%})" if next_var else ""
-                    pca_reasons.append(
-                        f"Dim {dim} captures {var:.1%} variance{benefit}."
-                    )
-
-        if pca_reasons:
-            explanation += f"- **PCA Dimensions {proj_dims}**: " + " ".join(pca_reasons)
-            explanation += " An array of dimensions is used rather than a single point estimate to prevent dimension collapse and ensure the CosmicGraph captures topology across varying geometric resolutions.\n"
-            if isinstance(n_samples, int) and proj_dims:
-                pts_per_dim = n_samples / max(proj_dims)
-                explanation += f" With N={n_samples}, this maintains ~{pts_per_dim:.1f} points per dimension, ensuring sufficient manifold density.\n"
-            else:
-                explanation += "\n"
-        elif method == "pca":
-            explanation += f"- **PCA Dimensions {proj_dims}**: Chosen as a multi-scale array around the variance curve elbow to aggregate varying topological resolutions (values not provided in geo summary).\n"
-        else:
-            explanation += f"- **JL Projection Dimensions {proj_dims}**: A multi-scale array of Johnson-Lindenstrauss random-projection dimensions chosen to preserve pairwise distances across resolutions (JL has no variance curve), kept within the KD-tree envelope (≤16) for accelerated Ball Mapper membership.\n"
+        # 1. Projection reasoning. Dimensions are selected from the data's PCA
+        # cumulative-variance structure (frontiers + elbow) regardless of method;
+        # the method only changes how points are projected onto those dimensions.
+        var_reasons = [
+            f"Dim {dim} sits at {cum_var_map[int(dim)]:.1%} cumulative variance."
+            for dim in proj_dims
+            if int(dim) in cum_var_map
+        ]
+        projection_clause = (
+            "projected onto the top principal components (PCA)"
+            if method == "pca"
+            else (
+                "projected via distance-preserving Johnson-Lindenstrauss random "
+                "projection (JL), kept within the KD-tree envelope (≤16)"
+            )
+        )
+        explanation += f"- **Projection Dimensions {proj_dims}** (method: {method}): "
+        if var_reasons:
+            explanation += " ".join(var_reasons) + " "
+        explanation += (
+            "Dimensions are selected from the processed data's cumulative-variance "
+            f"structure to span multiple resolutions, then {projection_clause}. "
+            "An array (not a single point) prevents dimension collapse.\n"
+        )
+        if isinstance(n_samples, int) and proj_dims:
+            pts_per_dim = n_samples / max(proj_dims)
+            explanation += (
+                f" With N={n_samples}, this keeps ~{pts_per_dim:.1f} points per "
+                "dimension.\n"
+            )
 
         # 2. Epsilon Reasoning
         if knn_mean:
@@ -107,9 +112,10 @@ async def explain_suggestion(
 
 
 async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) -> str:
-    """Canonical Pulsar YAML for an ingested dataset. Epsilon and PCA dims are
-    calibrated against the processed feature space (post drop/impute/encode/scale),
-    not raw columns."""
+    """Canonical Pulsar YAML for an ingested dataset. Epsilon and projection
+    dimensions are calibrated against the processed feature space (post
+    drop/impute/encode/scale), not raw columns. Dimensions are selected from the
+    data's cumulative-variance structure; the default projection method is JL."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id)
         from pulsar.analysis.characterization import characterize_dataset as _char
@@ -196,14 +202,17 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
             }
             response["calibration_note"] = (
                 "Geometry calibrated under recommended initial preprocessing policy. "
-                "Epsilon and PCA dimensions reflect the processed feature space "
-                "(after drop/impute/encode/scale), not raw columns. "
-                "knn_distance_percentiles show the valid epsilon domain — "
-                "epsilon values outside [p5, p95] will produce degenerate graphs."
+                "Epsilon and projection dimensions reflect the processed feature "
+                "space (after drop/impute/encode/scale), not raw columns. Dimensions "
+                "are selected from the cumulative-variance structure (frontiers + "
+                "elbow, capped at 16 for the KD-tree envelope); the default "
+                "projection is JL. knn_distance_percentiles show the valid epsilon "
+                "domain — epsilon values outside [p5, p95] will produce degenerate "
+                "graphs."
             )
         else:
             response["calibration_note"] = (
-                "Processed-space calibration unavailable; epsilon and PCA "
+                "Processed-space calibration unavailable; epsilon and projection "
                 "dimensions are calibrated against raw numeric columns only."
             )
 

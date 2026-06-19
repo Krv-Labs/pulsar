@@ -56,7 +56,7 @@ def _grid_adequacy(n_ball_maps: int) -> tuple[str, str]:
     if n_ball_maps < 15:
         return (
             "under_sampled",
-            "Grid has fewer than 15 ball maps. Add PCA dimensions, seeds, or epsilon steps before trusting structural persistence.",
+            "Grid has fewer than 15 ball maps. Add projection dimensions, seeds, or epsilon steps before trusting structural persistence.",
         )
     if n_ball_maps < 40:
         return (
@@ -90,8 +90,8 @@ def _graph_advisories(
                 "severity": "warning",
                 "message": f"Graph density is {density:.0%} — most node pairs share an edge.",
                 "agent_action": (
-                    "Raise construction_threshold or shift the PCA grid upward "
-                    "(drop low dims) before clustering. A near-fully-connected "
+                    "Raise construction_threshold or shift the projection grid "
+                    "upward (drop low dims) before clustering. A near-fully-connected "
                     "graph cannot express topological structure."
                 ),
             }
@@ -130,7 +130,7 @@ def _graph_advisories(
                     "Do not treat this as final unless a targeted resolution "
                     "sweep has already shown the giant component is stable. "
                     "Use generate_cluster_dossier only after either refining "
-                    "the PCA/epsilon grid or explicitly justifying that the "
+                    "the projection/epsilon grid or explicitly justifying that the "
                     "dominant component is clinically expected."
                 ),
             }
@@ -399,9 +399,9 @@ def _finalization_gate(
             "pca_seeds": [42, 7, 13],
             "epsilon_steps_min": 24,
             "strategy": (
-                "Zoom into the useful PCA band with multiple seeds. Shift/lower "
-                "epsilon if density remains high; avoid narrowing to a single "
-                "PCA dimension or single seed."
+                "Zoom into the useful projection band with multiple seeds. "
+                "Shift/lower epsilon if density remains high; avoid narrowing to "
+                "a single projection dimension or single seed."
             ),
         },
     }

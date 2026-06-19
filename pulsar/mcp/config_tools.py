@@ -810,9 +810,10 @@ def _build_initial_config_yaml(
 ) -> str:
     """Construct a canonical initial config from dataset geometry.
 
-    When *processed_profile* is provided, epsilon and PCA dimensions are
+    When *processed_profile* is provided, epsilon and projection dimensions are
     calibrated against the processed feature space (after preprocessing +
-    scaling).  Otherwise falls back to raw-space geometry.
+    scaling).  Otherwise falls back to raw-space geometry. Dimensions are picked
+    from the cumulative-variance structure; the emitted projection method is JL.
     """
     if processed_profile is not None:
         knn_mean = processed_profile.knn_k5_mean or 0.5
