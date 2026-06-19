@@ -5,7 +5,6 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rand::prelude::*;
 use rand_distr::StandardNormal;
-use sprs::{CsMat, TriMat};
 
 use crate::error::PulsarError;
 
@@ -189,7 +188,6 @@ impl CosmicGraph {
             })
             .max(1);
 
-        let _laplacian = sparse_laplacian(n, &edges);
         let mut resistances = vec![0.0; edges.len()];
         let diag = laplacian_diag(n, &edges);
 
@@ -302,17 +300,6 @@ impl CosmicGraph {
     pub fn n_edges(&self) -> usize {
         self.inner.weighted_edges().len()
     }
-}
-
-fn sparse_laplacian(n: usize, edges: &[WeightedEdge]) -> CsMat<f64> {
-    let mut tri = TriMat::<f64>::with_capacity((n, n), edges.len() * 4);
-    for &(u, v, w) in edges {
-        tri.add_triplet(u, u, w);
-        tri.add_triplet(v, v, w);
-        tri.add_triplet(u, v, -w);
-        tri.add_triplet(v, u, -w);
-    }
-    tri.to_csr()
 }
 
 fn laplacian_diag(n: usize, edges: &[WeightedEdge]) -> Vec<f64> {

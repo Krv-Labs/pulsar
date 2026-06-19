@@ -154,11 +154,19 @@ pub fn jl_grid<'py>(
         .into());
     }
 
-    let means = if center {
-        arr.mean_axis(Axis(0))
-            .expect("non-empty axis guaranteed above")
+    // Centering is invariant to seed and dimension, so do it once up front
+    // rather than cloning + re-centering inside every grid cell.
+    let source = if center {
+        let means = arr
+            .mean_axis(Axis(0))
+            .expect("non-empty axis guaranteed above");
+        let mut centered = arr;
+        for mut row in centered.rows_mut() {
+            row -= &means;
+        }
+        centered
     } else {
-        Array1::zeros(n_features)
+        arr
     };
 
     let embeddings: Vec<Vec<Array2<f64>>> = seeds
@@ -171,15 +179,7 @@ pub fn jl_grid<'py>(
                     let mut components = full_components.slice(s![.., ..dim]).to_owned();
                     let rescale = (max_dim as f64 / dim as f64).sqrt();
                     components.mapv_inplace(|x| x * rescale);
-                    if center {
-                        let mut centered = arr.clone();
-                        for mut row in centered.rows_mut() {
-                            row -= &means;
-                        }
-                        centered.dot(&components)
-                    } else {
-                        arr.dot(&components)
-                    }
+                    source.dot(&components)
                 })
                 .collect()
         })
