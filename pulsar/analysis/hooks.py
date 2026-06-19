@@ -98,17 +98,22 @@ def unclustered_points(ball_mapper, n: int) -> list[int]:
     return [i for i in range(n) if i not in covered]
 
 
-def cosmic_to_networkx(cg, threshold: float = 0.0) -> nx.Graph:
-    """Convert a CosmicGraph Rust object to a NetworkX graph with 'weight' attributes."""
+def cosmic_to_networkx(cg, threshold: float = 0.0, scale: float = 1.0) -> nx.Graph:
+    """Convert a CosmicGraph Rust object to a NetworkX graph with 'weight' attributes.
+
+    ``scale`` divides each edge weight before thresholding and storage, mapping
+    raw cosmic weights onto the [0, 1] fraction-of-max scale used for threshold
+    selection. Defaults to ``1.0`` (no rescaling).
+    """
     if hasattr(cg, "weighted_edges"):
         graph = nx.Graph()
         graph.add_nodes_from(range(cg.n))
         graph.add_weighted_edges_from(
-            (i, j, w) for i, j, w in cg.weighted_edges() if w > threshold
+            (i, j, w / scale) for i, j, w in cg.weighted_edges() if w / scale > threshold
         )
         return graph
     adj = np.array(cg.adj, dtype=np.float64)
-    wadj = np.array(cg.weighted_adj, dtype=np.float64)
+    wadj = np.array(cg.weighted_adj, dtype=np.float64) / scale
     if threshold > 0.0:
         return nx.from_numpy_array(np.where(wadj > threshold, wadj, 0.0))
     # Use np.where to vectorize weight assignment: keep wadj values where adj > 0, else 0.0

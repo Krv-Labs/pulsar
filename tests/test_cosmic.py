@@ -159,3 +159,18 @@ def test_cosmic_to_networkx_uses_weighted_edges():
     assert graph.number_of_edges() == cg.n_edges
     for i, j, w in cg.weighted_edges():
         assert graph[i][j]["weight"] == w
+
+
+def test_cosmic_to_networkx_scale_normalizes_weights_and_threshold():
+    # `scale` divides weights before thresholding, so the same threshold filters
+    # on the normalized scale. Here every raw weight halves; a 0.4 cut on the
+    # scaled weights keeps only edges whose raw weight exceeds 0.8.
+    L = make_simple_laplacian()
+    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
+    scale = 2.0
+    graph = cosmic_to_networkx(cg, threshold=0.4, scale=scale)
+
+    expected = {(i, j): w / scale for i, j, w in cg.weighted_edges() if w / scale > 0.4}
+    assert {tuple(sorted(e)) for e in graph.edges()} == set(expected)
+    for (i, j), w in expected.items():
+        assert graph[i][j]["weight"] == w
