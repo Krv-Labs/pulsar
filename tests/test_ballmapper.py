@@ -122,6 +122,36 @@ def test_linear_fallback_17d_remains_correct():
                 assert np.linalg.norm(pts_arr[i] - pts_arr[j]) <= 8.0 + 1e-9
 
 
+def test_kd_path_matches_linear_path_including_boundary():
+    # The KD-tree path (d<=16) and the linear-scan fallback (d>=17) must agree
+    # exactly. Zero-padding extra columns preserves Euclidean distances, so the
+    # only difference between the two fits is the code path. Point idx 1 sits at
+    # distance exactly eps from the first center, pinning the inclusive (`<=`)
+    # boundary: it must land in the center's ball under both implementations.
+    eps = 1.0
+    pts_low = np.array(
+        [
+            [0.0, 0.0],  # first greedy center
+            [1.0, 0.0],  # distance == eps -> must be included
+            [0.5, 0.0],  # inside
+            [5.0, 5.0],  # far -> its own center
+            [5.3, 5.0],  # inside the far center's ball
+        ],
+        dtype=np.float64,
+    )
+    pts_high = np.hstack([pts_low, np.zeros((pts_low.shape[0], 15))])
+    assert pts_high.shape[1] == 17  # forces the linear fallback path
+
+    bm_kd = BallMapper(eps=eps)
+    bm_kd.fit(pts_low)
+    bm_linear = BallMapper(eps=eps)
+    bm_linear.fit(pts_high)
+
+    assert bm_kd.nodes == bm_linear.nodes
+    assert bm_kd.edges == bm_linear.edges
+    assert 1 in bm_kd.nodes[0]  # boundary point included by the KD path
+
+
 def test_ball_mapper_grid_matches_individual_fits():
     embs = [make_grid_points(n=25, d=3, seed=20), make_grid_points(n=25, d=4, seed=21)]
     epsilons = [0.7, 1.1]
