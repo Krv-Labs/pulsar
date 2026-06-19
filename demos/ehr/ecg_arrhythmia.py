@@ -467,7 +467,7 @@ def main() -> None:
     # Build CosmicGraph
     t0 = time.perf_counter()
     cosmic = CosmicGraph.from_pseudo_laplacian(
-        galactic_L, config.cosmic_graph.threshold
+        galactic_L, config.cosmic_graph.construction_threshold
     )
     G = cosmic_to_networkx(cosmic)
     t_cosmic = time.perf_counter() - t0
