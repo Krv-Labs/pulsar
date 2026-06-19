@@ -44,7 +44,9 @@ def _fit(*, eps: float, sparsify: bool, seed: int = 1) -> ThemaRS:
                     "dimensions": {"values": [3, 4]},
                     "seed": {"values": [42, 7]},
                 },
-                "ball_mapper": {"epsilon": {"range": {"min": 0.5, "max": 2.5, "steps": 8}}},
+                "ball_mapper": {
+                    "epsilon": {"range": {"min": 0.5, "max": 2.5, "steps": 8}}
+                },
             },
             "cosmic_graph": {
                 "construction_threshold": "auto",
