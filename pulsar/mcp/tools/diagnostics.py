@@ -379,9 +379,7 @@ def _summary_structural_breakpoints(
 ) -> list[dict[str, Any]]:
     """Summary mode shows only non-dust component transitions."""
     return [
-        row
-        for row in breakpoints
-        if row.get("event") != "small_component_absorption"
+        row for row in breakpoints if row.get("event") != "small_component_absorption"
     ][:max_breakpoints]
 
 
@@ -508,7 +506,9 @@ def _threshold_curve_payload(
                 len(all_candidates) - len(candidates), 0
             ),
             "threshold_profiles": threshold_profiles,
-            "threshold_profiles_omitted": max(len(thresholds) - len(threshold_profiles), 0),
+            "threshold_profiles_omitted": max(
+                len(thresholds) - len(threshold_profiles), 0
+            ),
             "structural_breakpoints": summary_breakpoints,
             "structural_breakpoints_omitted": max(
                 len(breakpoints) - len(summary_breakpoints), 0
@@ -542,6 +542,14 @@ def _threshold_curve_payload(
         max_candidates=12,
     )
     all_candidates = threshold_options.get("candidates", [])
+    enriched_candidates = _candidate_rows(all_candidates)
+    # threshold_candidates is the canonical, morphology-enriched candidate list.
+    # Drop the duplicate raw `candidates` from agent_threshold_options so the same
+    # lenses are not shipped twice; selection_strategy and the other candidate
+    # families are retained for audit.
+    audit_threshold_options = {
+        key: value for key, value in threshold_options.items() if key != "candidates"
+    }
     return {
         "status": "ok",
         "detail": detail,
@@ -558,8 +566,8 @@ def _threshold_curve_payload(
             "treat it as a rerun candidate, not a change to the fitted graph."
         ),
         "h0_plateau_readout": _threshold_agent_readout(selected_profile, breakpoints),
-        "agent_threshold_options": threshold_options,
-        "threshold_candidates": _candidate_rows(all_candidates),
+        "agent_threshold_options": audit_threshold_options,
+        "threshold_candidates": enriched_candidates,
         "plateaus": plateaus,
         "structural_breakpoints": breakpoints,
         "structural_breakpoints_guidance": (
@@ -629,9 +637,7 @@ def _threshold_curve_to_markdown(payload: dict[str, Any]) -> str:
     )
     if profiles:
         for row in profiles:
-            lines.append(
-                _format_morphology_table_row(row)
-            )
+            lines.append(_format_morphology_table_row(row))
     else:
         lines.append("| - | - | - | - | - | - |")
     omitted = int(payload.get("threshold_profiles_omitted", 0) or 0)
@@ -667,7 +673,7 @@ def _threshold_curve_to_markdown(payload: dict[str, Any]) -> str:
                         str(morphology.get("component_count", "n/a")),
                         _format_top_sizes(morphology.get("top_component_sizes", [])),
                         _format_pct(morphology.get("giant_fraction")),
-                        _format_pct(morphology.get("second_largest_ratio")),
+                        _format_ratio(morphology.get("second_largest_ratio")),
                         _format_pct(morphology.get("singleton_fraction")),
                         _table_cell(row.get("why", "")),
                     ]
@@ -711,7 +717,9 @@ def _threshold_curve_to_markdown(payload: dict[str, Any]) -> str:
         ]
     )
     if payload.get("full_detail_available"):
-        lines.append(f"- `{payload['full_detail_available']}` for raw arrays and full rows.")
+        lines.append(
+            f"- `{payload['full_detail_available']}` for raw arrays and full rows."
+        )
     return "\n".join(lines).strip()
 
 
@@ -729,7 +737,7 @@ def _format_morphology_summary(row: dict[str, Any]) -> str:
         f"components={row.get('component_count', 'n/a')}, "
         f"top_sizes={_format_top_sizes(row.get('top_component_sizes', []))}, "
         f"giant={_format_pct(row.get('giant_fraction'))}, "
-        f"SLR={_format_pct(row.get('second_largest_ratio'))}, "
+        f"SLR={_format_ratio(row.get('second_largest_ratio'))}, "
         f"singletons={_format_pct(row.get('singleton_fraction'))}"
     )
 
@@ -743,7 +751,7 @@ def _format_morphology_table_row(row: dict[str, Any]) -> str:
                 str(row.get("component_count", "")),
                 _format_top_sizes(row.get("top_component_sizes", [])),
                 _format_pct(row.get("giant_fraction")),
-                _format_pct(row.get("second_largest_ratio")),
+                _format_ratio(row.get("second_largest_ratio")),
                 _format_pct(row.get("singleton_fraction")),
             ]
         )
@@ -756,6 +764,16 @@ def _format_pct(value: Any) -> str:
         return "n/a"
     try:
         return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_ratio(value: Any) -> str:
+    """Render a unit ratio (e.g. SLR = 2nd/largest) as a ratio, not a percent."""
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.2f}"
     except (TypeError, ValueError):
         return str(value)
 
@@ -804,19 +822,19 @@ def _threshold_next_tool_lines(payload: dict[str, Any]) -> list[str]:
 
     if giant >= 0.85 and slr < 0.05:
         return [
-            "- `generate_cluster_dossier(method=\"spectral\")` for latent structure inside the dominant component.",
-            "- `generate_cluster_dossier(method=\"components\")` only when the tail/outlier components are the object of study.",
+            '- `generate_cluster_dossier(method="spectral")` for latent structure inside the dominant component.',
+            '- `generate_cluster_dossier(method="components")` only when the tail/outlier components are the object of study.',
             "- `refine_config` if this giant-plus-tail topology is not expected for the dataset.",
         ]
     if singletons >= 0.25:
         return [
             "- `refine_config` first if the current construction threshold is too fragmented for the analysis goal.",
-            "- `generate_cluster_dossier(method=\"components\")` when singleton/tail components are the object of study.",
-            "- `generate_cluster_dossier(method=\"spectral\")` only after confirming the full weighted graph is connected enough for the question.",
+            '- `generate_cluster_dossier(method="components")` when singleton/tail components are the object of study.',
+            '- `generate_cluster_dossier(method="spectral")` only after confirming the full weighted graph is connected enough for the question.',
         ]
     return [
-        "- `generate_cluster_dossier(method=\"components\")` when hard disconnected components are the object of study.",
-        "- `generate_cluster_dossier(method=\"spectral\")` when the question is latent structure inside a dominant component.",
+        '- `generate_cluster_dossier(method="components")` when hard disconnected components are the object of study.',
+        '- `generate_cluster_dossier(method="spectral")` when the question is latent structure inside a dominant component.',
         "- `refine_config` when construction-time topology appears over- or under-connected.",
     ]
 
