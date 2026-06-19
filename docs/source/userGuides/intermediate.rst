@@ -165,22 +165,24 @@ Cosmic Graph Parameters
         construction_threshold: auto
 
 ``cosmic_graph.sparsify``
-   Whether Pulsar should sparsify the original unthresholded Cosmic Graph before
-   selecting and applying ``construction_threshold``. The default is ``true``.
+   Whether Pulsar should spectrally sparsify the unthresholded Cosmic Graph
+   before selecting and applying ``construction_threshold``. The default is
+   ``false``; leave it off for routine structural analysis.
 
    .. code-block:: yaml
 
       cosmic_graph:
         construction_threshold: auto
-        sparsify: true
+        sparsify: false
         sparsify_epsilon: 1.0
         sparsify_seed: 42
         sparsify_sketch_dim: null
         sparsify_sample_count: null
 
    With this default, ``model.cosmic_graph`` is a sparse ``networkx.Graph`` with
-   ``weight`` edge attributes. Set ``sparsify: false`` only when you explicitly
-   need dense graph behavior.
+   ``weight`` edge attributes. Enable sparsification only when you explicitly
+   need a compact, spectrum-preserving graph for downstream spectral algorithms;
+   it is not a construction-time speedup or a graph-cleaning step.
 
 ``cosmic_graph.neighborhood``
    The method used to compute normalized edge weights from the accumulated
@@ -193,9 +195,9 @@ Public Python hooks
 
    graph = model.cosmic_graph      # sparse NetworkX graph, threshold applied
    edges = model.weighted_edges()  # thresholded sparse edge list
-   dense = model.dense_cosmic_rust # original dense Rust graph
+   dense = model.dense_cosmic_rust # original Rust graph, exposed for compatibility
 
-   # Re-sparsify from the original dense graph and refresh model outputs.
+   # Opt-in spectral sparsification and refresh model outputs.
    model.spectral_sparsify(epsilon=0.8, seed=7, update=True)
 
 Output Parameters
@@ -241,7 +243,7 @@ Full Example
 
    cosmic_graph:
      construction_threshold: auto
-     sparsify: true
+     sparsify: false
      sparsify_epsilon: 1.0
      sparsify_seed: 42
 
