@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Changed
-- **Spectral sparsification is now opt-in (`cosmic_graph.sparsify: false` by default).** It runs after the cosmic graph is already built, so as a default it was pure additional cost on the construction path (and its only downstream consumer re-densified the graph anyway). It remains available as a hook (`ThemaRS.spectral_sparsify`) — a leverage-aware, epsilon-free O(n)-edge graph that preserves spectrum/effective-resistance (distances), not topology, for downstream spectral analysis.
+- **Spectral sparsification is now opt-in (`cosmic_graph.sparsify: false` by default).** It runs after the cosmic graph is already built, so as a default it was pure additional cost on the construction path (and its only downstream consumer re-densified the graph anyway). It remains available as a hook (`ThemaRS.spectral_sparsify`) — a leverage-aware, epsilon-controlled graph that preserves spectrum/effective-resistance (distances), not topology, for downstream spectral analysis.
 - `weighted_adjacency` is now materialized lazily on first access; the cosmic-graph backbone is kept sparse end-to-end so the hot path (`fit` → threshold → networkx) never allocates a dense n×n matrix.
 ### Added
 - Sparse cosmic-graph backbone in the Rust core: `accumulate_pseudo_laplacians_sparse` (COO co-membership accumulation, no n×n allocation), `CosmicGraph.from_pseudo_laplacian_sparse`, and `find_stable_thresholds_sparse` (edge-list threshold selection). Existing dense APIs are unchanged.

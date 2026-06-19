@@ -32,27 +32,27 @@ Reveal the dataset's topology; do not force convenient clusters.
 ## PHASE II: EXECUTE & VALIDATE
 5. Run: `run_topological_sweep`.
 6. Validate: `diagnose_cosmic_graph`.
-   - GATE: If `grid_adequacy_status` is `under_sampled` or `thin_grid`,
-     widen the grid before interpreting clusters.
-   - GATE: Inspect the `advisories` list. `EMPTY_GRAPH` and `HIGH_SINGLETONS`
-     require lowering the construction threshold or shifting the projection grid
-     before proceeding. If `finalization_gate.status` is `blocked`, run the
-     suggested targeted resolution sweep or explicitly justify why the dominant
-     component is clinically expected.
-   - GATE: Leave fit-time spectral sparsification OFF. `cosmic_graph.sparsify`
-     is off by default and should stay off for essentially all analysis. For
-     repeated spectral analysis, first call `diagnose_cosmic_graph` with
-     `task="spectral_analysis"`; if it recommends an artifact, call
-     `create_graph_artifact(estimate_only=true)` before paying the build cost.
-     Do not enable sparsification to "clean up", "thin", or "speed up" a graph.
-     When it IS enabled through the expert config path,
-     density and edge counts are measured on the sparsified graph, so they are
-     far lower than raw co-membership and are NOT comparable across sparsified
-     vs. non-sparsified runs — judge structure primarily by `component_count`
-     and `giant_fraction`, and treat density extremes as a refine-config signal
-     (Step 2), not a target.
-   - GATE: component_count=1 is normal; do not force separation by
-     narrowing epsilon.
+   - Read it as current graph-state measurement, not a directive. Use
+     `scale`, `component_morphology`, `sweep_support`, `observed_patterns`, and
+     `risk_factors` to judge the graph against the user's objective.
+   - If `sweep_support.grid_adequacy_status` is `under_sampled` or `thin_grid`,
+     treat structural claims as weak until a broader grid is checked.
+   - Inspect `risk_factors` for regimes such as `empty_graph`,
+     `singleton_heavy`, `dense_hairball`, or `dominant_component`.
+   - SPARSIFICATION CONTEXT: `cosmic_graph.sparsify` builds a spectral
+     sparsifier after the cosmic graph is already constructed. It is not a
+     construction-time speedup and it is not an H0/component-topology cleanup
+     tool. It preserves spectral/effective-resistance structure, not human-
+     readable component topology. Consider it for repeated spectral analysis,
+     compact graph handoff, approximation audits, memory-sensitive graph
+     analytics, or Laplacian/preconditioned numerical workflows; otherwise
+     diagnose the constructed graph directly.
+     When it is enabled, density and edge counts describe the sparsified graph
+     surface and are not directly comparable to non-sparsified runs.
+   - COMPONENT CONTEXT: `component_count=1` can be a valid topology. Do not
+     treat component count alone as a failure signal; compare it with density,
+     giant fraction, threshold stability, feature evidence, and the user's
+     objective.
 7. Compare: Use `get_sweep_history` and `compare_sweeps` after each
    refinement. `get_sweep_history(detail="summary")` distills patterns (e.g.,
    which projection dims collapsed structure) across the session; you still own
@@ -108,9 +108,9 @@ different stages. Do not confuse them.
   is still retained. Too high → singletons. Too low → over-connected hairball.
   Default `"auto"` runs persistent homology stability analysis
   (`threshold_stability_summary` in the sweep response) and picks the longest
-  stable plateau. Override only if `diagnose_cosmic_graph` returns an
-  `EMPTY_GRAPH` / `HIGH_SINGLETONS` advisory (lower it) or a `HAIRBALL_DENSITY`
-  advisory (raise it), then re-run the sweep.
+  stable plateau. Override only when `diagnose_cosmic_graph` measurements and
+  the user's objective show that the current construction surface is the wrong
+  scale, then re-run the sweep.
   Use `get_threshold_stability_curve` for threshold options. Its
   `threshold_candidate_policy` is an interpretation lens, not an optimization
   target:
@@ -129,10 +129,10 @@ different stages. Do not confuse them.
   and `method="components"`, the default inherits the construction threshold
   so clustering operates on the same surface you diagnosed. For explicit
   `method="spectral"`, the default is `0.0` so spectral uses the full weighted
-  affinity matrix. For repeated spectral analysis on a dense graph, ask
-  `diagnose_cosmic_graph(task="spectral_analysis")` whether a spectral artifact
-  is justified. Pass an explicit value
-  to deliberately diverge. Use `diagnose_cosmic_graph` weight percentiles
+  affinity matrix. For repeated spectral analysis on a dense graph, use
+  `diagnose_cosmic_graph` weight and scale fields to decide whether to estimate
+  a spectral artifact. Pass an explicit value to deliberately diverge. Use
+  `diagnose_cosmic_graph` weight percentiles
   (weight_p25–p95) to pick a value when overriding. This changes
   interpretation-time connectivity and cluster fragmentation; it does not
   rebuild the persisted cosmic graph.

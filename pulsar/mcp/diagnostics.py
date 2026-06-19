@@ -79,9 +79,9 @@ def _graph_advisories(
 ) -> list[dict]:
     """Advisory codes for degenerate graph regimes.
 
-    Advisories are descriptive data on the success payload — they do not raise
-    and they do not tell the agent what to do next. Tool-call directives live in
-    ``diagnose_cosmic_graph(task=...)`` recommendation blocks.
+    Advisories are descriptive data on the raw metrics object — they do not
+    raise and they do not tell the agent what to do next. The MCP tool reshapes
+    these into objective ``risk_factors`` for downstream policy decisions.
     """
     out: list[dict] = []
     if density > 0.8 and n_edges > 0:

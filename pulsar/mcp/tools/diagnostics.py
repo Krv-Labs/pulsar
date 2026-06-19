@@ -17,13 +17,11 @@ from pulsar.analysis import cosmic_to_networkx
 from pulsar.config import THRESHOLD_RANGE_MESSAGE
 from pulsar.mcp.diagnostics import (
     _build_graph_summary_from_graph,
-    _finalization_gate,
     _graph_metrics_from_graph,
     _skeleton_graph_payload,
     diagnose_model,
 )
 from pulsar.mcp.errors import mcp_error, unknown_handle_error
-from pulsar.mcp.payloads import size_summary
 from pulsar.mcp.registry import registry
 from pulsar.mcp.session import GraphArtifact, _get_session
 from pulsar.mcp.thresholds import (
@@ -34,6 +32,7 @@ from pulsar.mcp.thresholds import (
     prepare_threshold_graph_from_edges,
     structural_breakpoints,
     threshold_morphology_profile,
+    useful_component_size_floor,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,10 +43,6 @@ def _validate_unit_threshold(value: float, *, name: str) -> float:
     if not np.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
         raise ToolError(f"{name}: {THRESHOLD_RANGE_MESSAGE}")
     return threshold
-
-
-_DENSE_NODE_CAP = 2500
-_DEFAULT_MEMORY_BUDGET_MB = 512.0
 
 
 def _artifact_staleness(
@@ -80,18 +75,6 @@ def _estimate_sparsify_runtime_s(sketch_dim: int, edge_count: int) -> float:
     return round((sketch_dim * max(edge_count, 1)) / _SPARSIFY_OPS_PER_S, 2)
 
 
-def _dense_cost(n_nodes: int) -> dict[str, Any]:
-    peak_mem_mb = (n_nodes * n_nodes * 8) / (1024 * 1024)
-    # Dense affinity is a materialization, not the iterative sparsifier loop;
-    # runtime is memory-bound and dominated by the O(n^2) allocation.
-    return {
-        "runtime_s": round((n_nodes * n_nodes) / 2.5e8, 2),
-        "runtime_basis": "rough projection; dominated by O(n^2) dense materialization",
-        "peak_mem_mb": round(peak_mem_mb, 2),
-        "edge_count": n_nodes * (n_nodes - 1) // 2,
-    }
-
-
 def _artifact_estimate(n_nodes: int, edge_count: int, epsilon: float) -> dict[str, Any]:
     eps = max(float(epsilon), 1e-9)
     sketch_dim = max(
@@ -118,186 +101,199 @@ def _artifact_estimate(n_nodes: int, edge_count: int, epsilon: float) -> dict[st
     }
 
 
-def _advisory_codes(payload: dict[str, Any]) -> set[str]:
-    return {str(row.get("code")) for row in payload.get("advisories", [])}
-
-
-def _build_recommendation(
-    payload: dict[str, Any],
-    *,
-    task: str,
-    constraints: dict[str, Any] | None,
-) -> dict[str, Any]:
-    constraints = constraints or {}
-    n_nodes = int(payload.get("n_nodes", 0) or 0)
-    n_edges = int(payload.get("n_edges", 0) or 0)
-    codes = _advisory_codes(payload)
-    max_memory_mb = float(constraints.get("max_memory_mb", _DEFAULT_MEMORY_BUDGET_MB))
-    allow_dense = bool(constraints.get("allow_dense", True))
-    allow_artifacts = bool(constraints.get("allow_artifacts", True))
-    excluded: list[dict[str, Any]] = []
-
-    if {"HAIRBALL_DENSITY", "DOMINANT_COMPONENT"} & codes:
-        excluded.append(
-            {
-                "surface": "spectral_sparsifier",
-                "reason": (
-                    "Spectral sparsification preserves Laplacian quadratic forms, "
-                    "cuts, and effective-resistance structure; it will not separate "
-                    "a dominant component or de-hairball H0 topology."
-                ),
-            }
-        )
-        return {
-            "recommended_surface": "re_grid",
-            "why": (
-                "The constructed graph is over-connected. Use a stricter threshold "
-                "slice for interpretation or rerun a more discriminating projection/"
-                "epsilon grid; do not use spectral sparsification as the remedy."
-            ),
-            "estimated_cost": {
-                "runtime_s": None,
-                "peak_mem_mb": None,
-                "edge_count": n_edges,
-            },
-            "next_tool_call": {
-                "tool": "get_threshold_stability_curve",
-                "args": {"source": "persisted"},
-            },
-            "excluded": excluded,
-            "supported_future_surfaces": [
-                {
-                    "kind": "structural_backbone",
-                    "status": "planned, not callable",
-                    "use_when": "de-hairball while preserving visible 1-skeleton structure",
-                }
-            ],
-        }
-
-    if {"EMPTY_GRAPH", "HIGH_SINGLETONS"} & codes:
-        return {
-            "recommended_surface": "re_grid",
-            "why": (
-                "The constructed graph is fragmented. Lower the construction "
-                "threshold or broaden neighborhoods before interpreting clusters."
-            ),
-            "estimated_cost": {
-                "runtime_s": None,
-                "peak_mem_mb": None,
-                "edge_count": n_edges,
-            },
-            "next_tool_call": {
-                "tool": "get_threshold_stability_curve",
-                "args": {"source": "persisted"},
-            },
-            "excluded": excluded,
-            "supported_future_surfaces": [],
-        }
-
-    if task == "dense_affinity_required":
-        dense_cost = _dense_cost(n_nodes)
-        if (
-            allow_dense
-            and n_nodes <= _DENSE_NODE_CAP
-            and dense_cost["peak_mem_mb"] <= max_memory_mb
-        ):
-            return {
-                "recommended_surface": "dense_full_affinity",
-                "why": "The task explicitly requires exact dense affinity and fits the configured memory gate.",
-                "estimated_cost": dense_cost,
-                "next_tool_call": {
-                    "tool": "generate_cluster_dossier",
-                    "args": {"method": "spectral"},
-                },
-                "excluded": excluded,
-                "supported_future_surfaces": [],
-            }
-        excluded.append(
-            {
-                "surface": "dense_full_affinity",
-                "reason": "Dense n x n affinity exceeds node or memory gate.",
-            }
-        )
-
-    if task == "spectral_analysis" and allow_artifacts:
-        target = max(n_nodes * max(math.log(max(n_nodes, 2)), 1.0), 1.0)
-        if n_edges > 4 * target:
-            return {
-                "recommended_surface": "build_artifact",
-                "why": "Repeated spectral analysis on a graph with edges far above n log n can amortize a spectral sparsifier.",
-                "estimated_cost": _artifact_estimate(n_nodes, n_edges, 1.0),
-                "next_tool_call": {
-                    "tool": "create_graph_artifact",
-                    "args": {"kind": "spectral_sparsifier", "estimate_only": True},
-                },
-                "excluded": excluded,
-                "supported_future_surfaces": [],
-            }
-
-    if task in {"clustering", "reporting", "anomaly_mining"}:
-        return {
-            "recommended_surface": "threshold_slice",
-            "why": "Use the retained sparse weighted graph at an interpretation threshold for this analysis task.",
-            "estimated_cost": {
-                "runtime_s": None,
-                "peak_mem_mb": None,
-                "edge_count": n_edges,
-            },
-            "next_tool_call": {
-                "tool": "generate_cluster_dossier",
-                "args": {"detail": "summary"},
-            },
-            "excluded": excluded,
-            "supported_future_surfaces": [],
-        }
-
-    return {
-        "recommended_surface": "exact_sparse",
-        "why": "The constructed sparse cosmic graph is the right default surface for structural inspection.",
-        "estimated_cost": {
-            "runtime_s": None,
-            "peak_mem_mb": None,
-            "edge_count": n_edges,
-        },
-        "next_tool_call": {
-            "tool": "get_topological_skeleton",
-            "args": {"surface": "constructed"},
-        },
-        "excluded": excluded,
-        "supported_future_surfaces": [],
+def _component_morphology(metrics: dict[str, Any], *, detail: str) -> dict[str, Any]:
+    sizes = [int(size) for size in metrics.get("component_sizes", [])]
+    n_nodes = int(metrics.get("n_nodes", 0) or 0)
+    floor = useful_component_size_floor(n_nodes)
+    nontrivial = [size for size in sizes if size >= floor]
+    tail = [size for size in sizes if size < floor]
+    largest = sizes[0] if sizes else 0
+    second = sizes[1] if len(sizes) > 1 else 0
+    probs = np.asarray(sizes, dtype=float) / max(sum(sizes), 1)
+    entropy = float(-(probs * np.log(probs + 1e-12)).sum()) if len(probs) else 0.0
+    normalized_entropy = entropy / np.log(len(sizes)) if len(sizes) > 1 else 0.0
+    top_two_balance = (
+        1.0 - abs(largest - second) / max(largest + second, 1)
+        if second
+        else 0.0
+    )
+    out = {
+        "component_count": int(metrics.get("component_count", 0) or 0),
+        "top_component_sizes": sizes[:10],
+        "top_component_sizes_omitted": max(len(sizes) - 10, 0),
+        "largest_component_fraction": float(metrics.get("giant_fraction", 0.0) or 0.0),
+        "second_largest_ratio": round(second / largest if largest else 0.0, 4),
+        "singleton_count": int(metrics.get("singleton_count", 0) or 0),
+        "singleton_fraction": float(metrics.get("singleton_fraction", 0.0) or 0.0),
+        "nontrivial_component_floor": floor,
+        "nontrivial_component_count": len(nontrivial),
+        "nontrivial_mass_fraction": round(sum(nontrivial) / max(n_nodes, 1), 4),
+        "multi_component_coverage": round(sum(nontrivial[1:]) / max(n_nodes, 1), 4),
+        "tail_component_count": len(tail),
+        "tail_mass_fraction": round(sum(tail) / max(n_nodes, 1), 4),
+        "component_size_entropy": round(normalized_entropy, 4),
+        "top_two_balance": round(top_two_balance, 4),
     }
+    if detail == "full":
+        out["component_sizes"] = sizes
+    return out
+
+
+def _observed_patterns(metrics: dict[str, Any], morphology: dict[str, Any]) -> list[str]:
+    patterns: list[str] = []
+    if int(metrics.get("n_edges", 0) or 0) == 0:
+        patterns.append("empty_graph")
+    if morphology["nontrivial_component_count"] >= 2:
+        patterns.append("multiple_nontrivial_components")
+    if morphology["largest_component_fraction"] >= 0.95:
+        patterns.append("dominant_component")
+    else:
+        patterns.append("no_dominant_component")
+    if morphology["singleton_fraction"] >= 0.25:
+        patterns.append("singleton_residual_present")
+    else:
+        patterns.append("low_singleton_residual")
+    if morphology["top_two_balance"] >= 0.7:
+        patterns.append("high_top_component_balance")
+    if float(metrics.get("density", 0.0) or 0.0) > 0.8:
+        patterns.append("dense_connectivity")
+    grid_status = str(metrics.get("grid_adequacy_status", "unknown"))
+    if grid_status == "sample_count_ok":
+        patterns.append("adequate_grid_sample")
+    elif grid_status in {"under_sampled", "thin_grid"}:
+        patterns.append(grid_status)
+    return patterns
+
+
+def _risk_factors(metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    risks: list[dict[str, Any]] = []
+    n_edges = int(metrics.get("n_edges", 0) or 0)
+    density = float(metrics.get("density", 0.0) or 0.0)
+    singleton_fraction = float(metrics.get("singleton_fraction", 0.0) or 0.0)
+    giant_fraction = float(metrics.get("giant_fraction", 0.0) or 0.0)
+    grid_status = str(metrics.get("grid_adequacy_status", "unknown"))
+    if n_edges == 0:
+        risks.append({"code": "empty_graph", "severity": "error"})
+    if density > 0.8 and n_edges > 0:
+        risks.append({"code": "dense_hairball", "severity": "warning"})
+    if singleton_fraction > 0.8:
+        risks.append({"code": "singleton_heavy", "severity": "warning"})
+    if giant_fraction > 0.95:
+        risks.append({"code": "dominant_component", "severity": "warning"})
+    if grid_status in {"under_sampled", "thin_grid"}:
+        risks.append({"code": grid_status, "severity": "warning"})
+    return risks
+
+
+def _diagnosis_payload(
+    metrics: dict[str, Any],
+    *,
+    detail: str,
+    source: str,
+    run_id: str | None,
+    graph_surface: dict[str, Any],
+    artifact_staleness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    morphology = _component_morphology(metrics, detail=detail)
+    payload = {
+        "status": "ok",
+        "detail": detail,
+        "source": source,
+        "run_id": run_id,
+        "graph_surface": graph_surface,
+        "scale": {
+            "n_nodes": int(metrics.get("n_nodes", 0) or 0),
+            "n_edges": int(metrics.get("n_edges", 0) or 0),
+            "density": float(metrics.get("density", 0.0) or 0.0),
+            "avg_degree": float(metrics.get("avg_degree", 0.0) or 0.0),
+            "nonzero_fraction_full_weighted": float(
+                metrics.get("nonzero_fraction", 0.0) or 0.0
+            ),
+        },
+        "component_morphology": morphology,
+        "weight_distribution": {
+            "p25": float(metrics.get("weight_p25", 0.0) or 0.0),
+            "p50": float(metrics.get("weight_p50", 0.0) or 0.0),
+            "p95": float(metrics.get("weight_p95", 0.0) or 0.0),
+            "sparkline": metrics.get("weight_distribution_sparkline", ""),
+            "basis": "upper-triangle node-pair distribution; zeros include absent edges",
+        },
+        "sweep_support": {
+            "n_ball_maps": int(metrics.get("n_ball_maps", 0) or 0),
+            "grid_adequacy_status": metrics.get("grid_adequacy_status", "unknown"),
+            "grid_adequacy_note": metrics.get("grid_adequacy_note", ""),
+        },
+        "observed_patterns": _observed_patterns(metrics, morphology),
+        "risk_factors": _risk_factors(metrics),
+    }
+    if artifact_staleness is not None:
+        payload["artifact_staleness"] = artifact_staleness
+    return payload
+
+
+def _diagnosis_to_markdown(payload: dict[str, Any]) -> str:
+    surface = payload["graph_surface"]
+    scale = payload["scale"]
+    morph = payload["component_morphology"]
+    weights = payload["weight_distribution"]
+    support = payload["sweep_support"]
+    risk_codes = [row["code"] for row in payload["risk_factors"]]
+    lines = [
+        "# Cosmic Graph Diagnosis",
+        "",
+        f"- Source: {payload['source']}",
+        f"- Run ID: `{payload.get('run_id')}`",
+        f"- Surface: {surface['kind']} @ construction threshold "
+        f"{surface['construction_threshold']:.4f}",
+        f"- Nodes / edges: {scale['n_nodes']} / {scale['n_edges']}",
+        f"- Density: {scale['density']:.4f}",
+        f"- Components: {morph['component_count']}",
+        "- Top component sizes: "
+        + ", ".join(str(size) for size in morph["top_component_sizes"]),
+        f"- Largest component: {morph['largest_component_fraction']:.1%}",
+        f"- Singleton fraction: {morph['singleton_fraction']:.1%}",
+        f"- Nontrivial components: {morph['nontrivial_component_count']} "
+        f"(floor={morph['nontrivial_component_floor']})",
+        f"- Grid support: {support['grid_adequacy_status']} "
+        f"({support['n_ball_maps']} ball maps)",
+        f"- Weight p25/p50/p95: {weights['p25']:.4f} / "
+        f"{weights['p50']:.4f} / {weights['p95']:.4f}",
+        "- Observed patterns: " + ", ".join(payload["observed_patterns"]),
+        "- Risk factors: " + (", ".join(risk_codes) if risk_codes else "none"),
+    ]
+    return "\n".join(lines)
 
 
 async def diagnose_cosmic_graph(
     surface: Literal["constructed", "artifact"] = "constructed",
     artifact_id: str = "",
     detail: Literal["summary", "full"] = "summary",
-    task: Literal[
-        "structure",
-        "clustering",
-        "spectral_analysis",
-        "dense_affinity_required",
-        "reporting",
-        "anomaly_mining",
-    ]
-    | None = None,
-    constraints: dict[str, Any] | None = None,
+    response_format: Literal["json", "markdown"] = "json",
     ctx: Context = None,
 ) -> str:
-    """Graph health/gating for the fitted cosmic graph: density, components,
-    advisories, finalization gate, and optional task-specific surface advice."""
+    """Current graph-state observables for the fitted cosmic graph.
+
+    Returns grouped measurements for the constructed graph or a graph artifact:
+    scale, component morphology, weight distribution, sweep support, observed
+    patterns, and risk factors. The tool intentionally does not prescribe a next
+    action; downstream agents combine these measurements with user objectives.
+    """
     session = _get_session(ctx)
     if detail not in {"summary", "full"}:
         return mcp_error(
             "diagnose_cosmic_graph",
             "detail must be 'summary' or 'full'.",
         )
+    if response_format not in {"json", "markdown"}:
+        return mcp_error(
+            "diagnose_cosmic_graph",
+            "response_format must be 'json' or 'markdown'.",
+        )
 
     if surface == "constructed" and session.model is None:
         raise ToolError("No model found. Run run_topological_sweep() first.")
 
     try:
-        staleness = None
         if surface == "artifact":
             if not artifact_id:
                 raise ToolError("artifact_id is required when surface='artifact'.")
@@ -306,52 +302,42 @@ async def diagnose_cosmic_graph(
                 return unknown_handle_error(
                     "diagnose_cosmic_graph", "artifact_id", artifact_id
                 )
-            payload = dict(artifact.metrics)
             staleness = _artifact_staleness(artifact, session.latest_run_id)
-            payload["artifact_id"] = artifact.artifact_id
-            payload["artifact_kind"] = artifact.kind
-            payload["artifact_staleness"] = staleness
-            payload["graph_surface"] = f"graph artifact {artifact_id} ({artifact.kind})"
+            payload = _diagnosis_payload(
+                dict(artifact.metrics),
+                detail=detail,
+                source="artifact",
+                run_id=artifact.run_id,
+                graph_surface={
+                    "kind": artifact.kind,
+                    "artifact_id": artifact.artifact_id,
+                    "construction_threshold": float(
+                        artifact.metrics.get("resolved_construction_threshold", 0.0)
+                    ),
+                    "threshold_role": "artifact_construction",
+                    "preserves_current_fit": False,
+                },
+                artifact_staleness=staleness,
+            )
         else:
             result = diagnose_model(session.model)
-            payload = dataclasses.asdict(result)
-            # B3: these metrics describe the persisted graph @ construction_threshold,
-            # NOT any interpretation_edge_weight_threshold slice used for clustering.
-            payload["graph_surface"] = (
-                "persisted cosmic graph @ resolved_construction_threshold "
-                f"({result.resolved_construction_threshold:.4f})"
+            metrics = dataclasses.asdict(result)
+            payload = _diagnosis_payload(
+                metrics,
+                detail=detail,
+                source="live",
+                run_id=session.latest_run_id,
+                graph_surface={
+                    "kind": "constructed_cosmic_graph",
+                    "construction_threshold": float(
+                        result.resolved_construction_threshold
+                    ),
+                    "threshold_role": "construction",
+                    "preserves_current_fit": True,
+                },
             )
-
-        if detail == "summary":
-            component_sizes = list(payload.get("component_sizes", []) or [])
-            payload["component_sizes_summary"] = size_summary(component_sizes)
-            payload.pop("component_sizes", None)
-        payload["detail"] = detail
-
-        if surface == "constructed" and session.active_config_yaml:
-            gate = _finalization_gate(
-                payload,
-                sweep_count=len(session.sweep_history),
-                config_yaml=session.active_config_yaml,
-            )
-            payload["finalization_gate"] = gate
-            if gate["status"] == "blocked":
-                payload["advisories"].append(
-                    {
-                        "code": gate["code"],
-                        "severity": "warning",
-                        "message": gate["message"],
-                        "diagnostic_interpretation": gate["suggested_refinement"][
-                            "strategy"
-                        ],
-                    }
-                )
-        if task is not None:
-            payload["recommendation"] = _build_recommendation(
-                payload,
-                task=task,
-                constraints=constraints,
-            )
+        if response_format == "markdown":
+            return _diagnosis_to_markdown(payload)
         return json.dumps(payload, indent=2)
     except Exception as e:
         logger.error(f"Error diagnosing graph: {e}")

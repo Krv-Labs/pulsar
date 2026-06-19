@@ -66,7 +66,7 @@ We didn't just wrap our Python functions in JSON schemas. We built *Thick Tools*
 
 *   `create_config(dataset_id)`: The primary config generation tool. Analyzes k-NN distances and projection dimensions in the *processed* feature space (after preprocessing + scaling) to produce a calibrated YAML config. Never let the agent guess parameters.
 *   `run_topological_sweep`: Runs the heavy Rust pipeline. Takes inline YAML and returns structured JSON with metrics and experiment diff. Config persistence is opt-in via `save_config=True`.
-*   `diagnose_cosmic_graph`: Returns pure graph metrics (density, components, weight quantiles). The agent interprets these to decide what to adjust — e.g., "hairball" means high density, "shattered" means too many small components.
+*   `diagnose_cosmic_graph`: Returns current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets those measurements against the user's objective.
 *   `generate_cluster_dossier`: Returns structured JSON with per-cluster profiles (Z-scores, homogeneity, concentration) plus a Markdown summary. Includes clustering method metadata (method used, silhouette score).
 *   `compare_clusters`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
 *   `export_labeled_data`: Maps semantic names to the cluster IDs and dumps it to a CSV.
@@ -78,7 +78,7 @@ We try to make things foolproof, but some of you goofballs are going to try to b
 *   **Don't let the agent write YAML files manually.** 
     The tools pass YAML strings directly in memory (`suggested_params_yaml` -> `config_yaml`). If you watch the agent try to use `write_file` to save a `params.yaml` before running the sweep, stop it. If you make the agent do unnecessary file I/O you belong in prison.
 *   **Don't skip the diagnosis step.**
-    If the graph is a giant hairball, your clusters will be garbage. Use `diagnose_cosmic_graph` to get metrics, then `refine_config` to adjust epsilon or PCA dimensions based on what the metrics tell you.
+    If the graph is a giant hairball, your clusters will be garbage. Use `diagnose_cosmic_graph` to inspect graph-state measurements, then decide whether the user's objective calls for threshold inspection, config refinement, or a different interpretation surface.
 *   **Handle non-numeric data appropriately.**
     Pulsar is a geometric engine. It needs floats. `characterize_dataset` will automatically tell the agent which low-cardinality strings to one-hot encode and which high-cardinality strings to drop. Don't fight it.
 

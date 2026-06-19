@@ -36,7 +36,6 @@ from pulsar.mcp.thresholds import (
     structural_breakpoints,
 )
 from pulsar.mcp.tools.diagnostics import (
-    _build_recommendation,
     _summary_structural_breakpoints,
     _threshold_agent_readout,
     _threshold_next_tool_lines,
@@ -1314,7 +1313,7 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert "graph_health" in result
     assert "recommended_next_action" not in result
     assert result["analysis_status"] == "diagnostics_required"
-    assert result["next_required_check"] == "diagnose_cosmic_graph(task=...)"
+    assert result["next_required_check"] == "diagnose_cosmic_graph"
     assert result["pca_cached"] is False
     assert result["pca_cache_status"] == {
         "scope": "session",
@@ -1741,7 +1740,7 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
         assert "component_mass_profile" in first_plateau
 
 
-def test_diagnose_cosmic_graph_task_is_single_decider(tmp_path):
+def test_diagnose_cosmic_graph_returns_structured_observables(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
     dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
@@ -1765,21 +1764,35 @@ def test_diagnose_cosmic_graph_task_is_single_decider(tmp_path):
     )
 
     objective = json.loads(asyncio.run(diagnose_cosmic_graph()))
-    advised = json.loads(asyncio.run(diagnose_cosmic_graph(task="clustering")))
 
+    assert objective["status"] == "ok"
+    assert objective["source"] == "live"
+    assert objective["run_id"] is not None
+    assert objective["graph_surface"]["kind"] == "constructed_cosmic_graph"
+    assert objective["graph_surface"]["threshold_role"] == "construction"
+    assert objective["graph_surface"]["preserves_current_fit"] is True
+    assert "scale" in objective
+    assert "component_morphology" in objective
+    assert "weight_distribution" in objective
+    assert "sweep_support" in objective
+    assert "observed_patterns" in objective
+    assert "risk_factors" in objective
     assert "recommendation" not in objective
-    assert "component_sizes" not in objective
-    assert "component_sizes_summary" in objective
+    assert "finalization_gate" not in objective
+    assert "component_sizes" not in objective["component_morphology"]
+    morph = objective["component_morphology"]
+    assert morph["nontrivial_component_floor"] >= 1
+    assert 0.0 <= morph["nontrivial_mass_fraction"] <= 1.0
+    assert 0.0 <= morph["component_size_entropy"] <= 1.0
+    assert 0.0 <= morph["top_two_balance"] <= 1.0
+
     full = json.loads(asyncio.run(diagnose_cosmic_graph(detail="full")))
-    assert "component_sizes" in full
-    assert "component_sizes_summary" not in full
-    assert advised["recommendation"]["recommended_surface"] in {
-        "threshold_slice",
-        "re_grid",
-        "exact_sparse",
-    }
-    for advisory in advised["advisories"]:
-        assert "agent_action" not in advisory
+    assert "component_sizes" in full["component_morphology"]
+
+    markdown = asyncio.run(diagnose_cosmic_graph(response_format="markdown"))
+    assert markdown.startswith("# Cosmic Graph Diagnosis")
+    assert "Observed patterns:" in markdown
+    assert "Risk factors:" in markdown
 
 
 def test_graph_artifact_estimate_build_and_staleness(tmp_path):
@@ -1843,6 +1856,17 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
         )
     )
     assert artifact["artifact_staleness"]["stale"] is False
+    artifact_diagnosis = json.loads(
+        asyncio.run(
+            diagnose_cosmic_graph(
+                surface="artifact",
+                artifact_id=built["artifact_id"],
+            )
+        )
+    )
+    assert artifact_diagnosis["source"] == "artifact"
+    assert artifact_diagnosis["graph_surface"]["artifact_id"] == built["artifact_id"]
+    assert artifact_diagnosis["artifact_staleness"]["stale"] is False
 
     asyncio.run(
         run_topological_sweep(
@@ -2188,114 +2212,3 @@ def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):
         "status": "hit",
         "reason": "fingerprint_match",
     }
-
-
-def _rec_payload(*, n_nodes, n_edges, codes=()):
-    return {
-        "n_nodes": n_nodes,
-        "n_edges": n_edges,
-        "advisories": [{"code": c} for c in codes],
-    }
-
-
-def test_recommendation_excludes_spectral_for_hairball_even_when_asked():
-    """The footgun guard: a hairball/dominant graph must never be steered to
-    spectral sparsification, even when the task explicitly asks for spectral
-    analysis. It must re-grid and name why spectral is excluded."""
-    for code in ("HAIRBALL_DENSITY", "DOMINANT_COMPONENT"):
-        rec = _build_recommendation(
-            _rec_payload(n_nodes=400, n_edges=70000, codes=(code,)),
-            task="spectral_analysis",
-            constraints=None,
-        )
-        assert rec["recommended_surface"] == "re_grid"
-        excluded = {row["surface"] for row in rec["excluded"]}
-        assert "spectral_sparsifier" in excluded
-        reason = next(
-            r["reason"]
-            for r in rec["excluded"]
-            if r["surface"] == "spectral_sparsifier"
-        )
-        assert "effective-resistance" in reason or "cuts" in reason
-        future = {row["kind"] for row in rec["supported_future_surfaces"]}
-        assert "structural_backbone" in future
-
-
-def test_recommendation_re_grids_fragmented_graph():
-    for code in ("EMPTY_GRAPH", "HIGH_SINGLETONS"):
-        rec = _build_recommendation(
-            _rec_payload(n_nodes=200, n_edges=3, codes=(code,)),
-            task="clustering",
-            constraints=None,
-        )
-        assert rec["recommended_surface"] == "re_grid"
-
-
-def test_recommendation_dense_affinity_gate():
-    """dense_full_affinity is only offered for the explicit task within the
-    node/memory gate; otherwise it is excluded, not silently granted."""
-    # Small graph, dense affinity fits the gate.
-    ok = _build_recommendation(
-        _rec_payload(n_nodes=100, n_edges=400),
-        task="dense_affinity_required",
-        constraints=None,
-    )
-    assert ok["recommended_surface"] == "dense_full_affinity"
-    assert ok["estimated_cost"]["runtime_s"] is not None
-
-    # Node cap tripped -> excluded, falls back to sparse.
-    capped = _build_recommendation(
-        _rec_payload(n_nodes=3000, n_edges=9000),
-        task="dense_affinity_required",
-        constraints=None,
-    )
-    assert capped["recommended_surface"] != "dense_full_affinity"
-    assert any(r["surface"] == "dense_full_affinity" for r in capped["excluded"])
-
-    # Explicit memory constraint tripped -> excluded.
-    budget = _build_recommendation(
-        _rec_payload(n_nodes=1000, n_edges=9000),
-        task="dense_affinity_required",
-        constraints={"max_memory_mb": 1.0},
-    )
-    assert budget["recommended_surface"] != "dense_full_affinity"
-
-
-def test_recommendation_build_artifact_only_above_density_gate():
-    """Spectral artifact is recommended only when edges far exceed n log n; an
-    already-sparse graph with the same task gets the exact sparse surface."""
-    dense = _build_recommendation(
-        _rec_payload(n_nodes=200, n_edges=5000),
-        task="spectral_analysis",
-        constraints=None,
-    )
-    assert dense["recommended_surface"] == "build_artifact"
-    assert dense["estimated_cost"]["runtime_s"] is not None
-    assert dense["next_tool_call"]["args"]["estimate_only"] is True
-
-    sparse = _build_recommendation(
-        _rec_payload(n_nodes=200, n_edges=300),
-        task="spectral_analysis",
-        constraints=None,
-    )
-    assert sparse["recommended_surface"] == "exact_sparse"
-
-    # An agent may disable artifacts entirely via constraints.
-    blocked = _build_recommendation(
-        _rec_payload(n_nodes=200, n_edges=5000),
-        task="spectral_analysis",
-        constraints={"allow_artifacts": False},
-    )
-    assert blocked["recommended_surface"] != "build_artifact"
-
-
-def test_recommendation_defaults_by_task():
-    for task in ("clustering", "reporting", "anomaly_mining"):
-        rec = _build_recommendation(
-            _rec_payload(n_nodes=120, n_edges=300), task=task, constraints=None
-        )
-        assert rec["recommended_surface"] == "threshold_slice"
-    structure = _build_recommendation(
-        _rec_payload(n_nodes=120, n_edges=300), task="structure", constraints=None
-    )
-    assert structure["recommended_surface"] == "exact_sparse"

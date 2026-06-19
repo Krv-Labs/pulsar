@@ -448,7 +448,7 @@ async def run_topological_sweep(
         response["spectral_clustering_allowed"] = full_affinity_connected
         response["graph_health"] = graph_health
         response["analysis_status"] = "diagnostics_required"
-        response["next_required_check"] = "diagnose_cosmic_graph(task=...)"
+        response["next_required_check"] = "diagnose_cosmic_graph"
         response["finalization_gate"] = _finalization_gate(
             current_metrics,
             sweep_count=len(session.sweep_history),

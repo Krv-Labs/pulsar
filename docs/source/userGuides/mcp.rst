@@ -168,7 +168,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - **export_labeled_data**
      - Return your original dataframe with discovered cluster labels attached. Ready for downstream analysis, visualization, or handoff to domain experts.
    * - **diagnose_cosmic_graph**
-     - Health metrics on the graph structure: connected components, density, weight quantiles. Returns pure metrics — the agent interprets them to decide adjustments (e.g., high density → reduce epsilon, many singletons → increase epsilon).
+     - Current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets these measurements against the user's objective.
    * - **recommend_preprocessing**
      - Analyze column profiles and return a complete ``preprocessing:`` YAML block with per-column rationale. Call this before the first sweep to avoid hand-writing impute/encode rules from raw stats.
    * - **repair_preprocessing_config**
