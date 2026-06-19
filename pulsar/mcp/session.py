@@ -63,6 +63,7 @@ class _PulsarSession:
     # A newer sweep advances `latest_run_id` but does NOT recompute clusters,
     # so this stamp lets reads detect (and reject) stale cluster caches.
     clusters_run_id: str | None = None
+    cluster_assignment_id: str | None = None
     active_config_yaml: str | None = None
     active_config_dataset_id: str | None = None
     graph_artifacts: dict[str, GraphArtifact] = field(default_factory=dict)
@@ -231,6 +232,7 @@ def _invalidate_feature_evidence_cache(session: _PulsarSession) -> None:
     session.feature_evidence_cluster_meta = None
     session.clusters = None
     session.clusters_run_id = None
+    session.cluster_assignment_id = None
 
 
 def _feature_evidence_fingerprint(

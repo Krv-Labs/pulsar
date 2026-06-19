@@ -33,6 +33,7 @@ from pulsar.mcp.payloads import (
     build_cluster_selection,
     build_evidence_payload,
     build_summary_evidence_payload,
+    bounded_list,
     cluster_profile_payload_to_markdown,
     cluster_result_payload,
     cluster_selection_to_markdown,
@@ -41,6 +42,7 @@ from pulsar.mcp.payloads import (
     size_summary,
     summary_evidence_payload_to_markdown,
 )
+from pulsar.mcp.registry import registry
 from pulsar.mcp.session import _get_session
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,39 @@ def _two_lever_markdown_note(
             f"slice @ interpretation_edge_weight_threshold "
             f"({interpretation_threshold:.4f}) of the [0,1]-normalized weighted "
             "adjacency (sparsified only when enabled) — not a dense affinity matrix.",
+            "",
+        ]
+    )
+
+
+def _cluster_assignment_summary(record: Any) -> dict[str, Any]:
+    return {
+        "cluster_assignment_id": record.cluster_assignment_id,
+        "run_id": record.run_id,
+        "dataset_id": record.dataset_id,
+        "method": record.method,
+        "interpretation_edge_weight_threshold": (
+            record.interpretation_edge_weight_threshold
+        ),
+        "threshold_source": record.threshold_source,
+        "construction_threshold": record.construction_threshold,
+        "label_count": record.label_count,
+        "cluster_ids": bounded_list(record.cluster_ids),
+    }
+
+
+def _cluster_assignment_markdown(record: Any) -> str:
+    return "\n".join(
+        [
+            "## Cluster Assignment Artifact",
+            "",
+            f"- `cluster_assignment_id`: `{record.cluster_assignment_id}`",
+            f"- `run_id`: `{record.run_id}`",
+            f"- `dataset_id`: `{record.dataset_id}`",
+            (
+                "- Use this handle with `export_labeled_data` to export this "
+                "exact clustering, including its method and interpretation threshold."
+            ),
             "",
         ]
     )
@@ -327,6 +362,22 @@ async def generate_cluster_dossier(
         # (compacted header, cluster_selection ID universe, sibling tools).
         cluster_meta = cluster_result_payload(result)
         session.feature_evidence_cluster_meta = cluster_meta
+        assignment = registry.save_cluster_assignment(
+            run_id=session.latest_run_id,
+            # Only the dataset the current data was actually loaded from backs a
+            # durable export. session.dataset_id can linger from a prior ingest
+            # while session.data came from a raw data_path, so falling back to it
+            # would record a dataset that does not match these labels. None here
+            # correctly routes export_labeled_data to its in-session fallback.
+            dataset_id=session.data_dataset_id,
+            method=str(cluster_meta["method_used"]),
+            interpretation_edge_weight_threshold=resolved_interpretation_threshold,
+            threshold_source=threshold_source,
+            construction_threshold=construction_threshold,
+            labels=result.labels.astype(int).tolist(),
+        )
+        session.cluster_assignment_id = assignment.cluster_assignment_id
+        assignment_summary = _cluster_assignment_summary(assignment)
 
         # Safety cap: only characterize top N clusters to prevent O(K*F) hang
         # on shattered graphs. Small singletons/noise are omitted from profiling.
@@ -359,6 +410,8 @@ async def generate_cluster_dossier(
             payload["threshold_inherited"] = threshold_inherited
             payload["threshold_source"] = threshold_source
             payload["threshold_surface"] = threshold_surface
+            payload["cluster_assignment"] = assignment_summary
+            payload["cluster_assignment_id"] = assignment.cluster_assignment_id
             payload["cluster_selection"] = build_cluster_selection(
                 cluster_meta,
                 [c["cluster_id"] for c in payload["clusters"]],
@@ -379,6 +432,7 @@ async def generate_cluster_dossier(
                     _two_lever_markdown_note(
                         construction_threshold, resolved_interpretation_threshold
                     )
+                    + _cluster_assignment_markdown(assignment)
                     + cluster_selection_to_markdown(payload["cluster_selection"])
                     + summary_evidence_payload_to_markdown(payload)
                 )
@@ -400,7 +454,7 @@ async def generate_cluster_dossier(
         if response_format == "markdown":
             body = _two_lever_markdown_note(
                 construction_threshold, resolved_interpretation_threshold
-            ) + dossier_to_markdown(dossier)
+            ) + _cluster_assignment_markdown(assignment) + dossier_to_markdown(dossier)
             return _prepend_threshold_markdown(body, threshold_surface)
 
         payload = build_evidence_payload(
@@ -417,6 +471,8 @@ async def generate_cluster_dossier(
         payload["threshold_inherited"] = threshold_inherited
         payload["threshold_source"] = threshold_source
         payload["threshold_surface"] = threshold_surface
+        payload["cluster_assignment"] = assignment_summary
+        payload["cluster_assignment_id"] = assignment.cluster_assignment_id
         if detail != "full":
             payload["surface_labels_ref"] = "get_workflow_guide"
         else:
