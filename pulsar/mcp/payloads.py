@@ -90,6 +90,390 @@ def build_evidence_payload(
     return payload
 
 
+def build_summary_evidence_payload(
+    evidence_index: Any,
+    cluster_meta: dict[str, Any],
+    graph_metrics: dict[str, Any],
+    *,
+    max_clusters: int | None = 8,
+    feature_preview_limit: int = 5,
+) -> dict[str, Any]:
+    clusters = []
+    bundles = sorted(
+        evidence_index.cluster_bundles.values(),
+        key=lambda bundle: int(bundle["size"]),
+        reverse=True,
+    )
+    clusters_omitted = 0
+    if max_clusters is not None and len(bundles) > max_clusters:
+        clusters_omitted = len(bundles) - max_clusters
+        bundles = bundles[:max_clusters]
+
+    for bundle in bundles:
+        clusters.append(_cluster_payload_from_bundle(bundle, feature_preview_limit))
+
+    signal_matrix = evidence_index.signal_matrix or {}
+    return {
+        "status": "ok",
+        "cluster_result": cluster_meta,
+        "detail": "summary",
+        "graph_metrics": graph_metrics,
+        "clusters_returned": len(clusters),
+        "clusters_omitted": clusters_omitted,
+        "clusters": clusters,
+        "evidence_metadata_summary": _evidence_metadata_summary(
+            evidence_index.metadata
+        ),
+        "numeric_global_ranking_preview": evidence_index.numeric_global_ranking[:10],
+        "categorical_global_ranking_preview": evidence_index.categorical_global_ranking[
+            :10
+        ],
+        "signal_matrix_summary": {
+            "n_numeric_columns": len(signal_matrix.get("numeric_columns", [])),
+            "n_categorical_values": len(signal_matrix.get("categorical_values", [])),
+            "n_numeric_rows": len(signal_matrix.get("numeric_rows", [])),
+            "n_categorical_rows": len(signal_matrix.get("categorical_rows", [])),
+        },
+    }
+
+
+def summary_evidence_payload_to_markdown(payload: dict[str, Any]) -> str:
+    cluster_result = payload.get("cluster_result", {})
+    readiness = cluster_result.get("interpretation_readiness", {})
+    lines = [
+        "# Cluster Dossier Summary",
+        "",
+        f"- Method: {cluster_result.get('method_used', 'unknown')}",
+        f"- Clusters: {cluster_result.get('n_clusters', 0)}",
+        f"- Returned: {payload.get('clusters_returned', 0)}",
+        f"- Omitted: {payload.get('clusters_omitted', 0)}",
+    ]
+    if readiness:
+        lines.append(f"- Readiness: {readiness.get('status', 'unknown')}")
+        reason_codes = readiness.get("reason_codes") or []
+        if reason_codes:
+            lines.append(f"- Readiness reasons: {', '.join(reason_codes)}")
+        message = readiness.get("message")
+        if message:
+            lines.append(f"- Guidance: {message}")
+
+    signal_summary = payload.get("signal_matrix_summary", {})
+    lines.extend(
+        [
+            "",
+            "## Signal Inventory",
+            "",
+            f"- Numeric signal columns: {signal_summary.get('n_numeric_columns', 0)}",
+            f"- Categorical signal values: {signal_summary.get('n_categorical_values', 0)}",
+        ]
+    )
+
+    gated = payload.get("evidence_metadata_summary", {}).get(
+        "categorical_columns_gated", []
+    )
+    if gated:
+        gated_desc = ", ".join(
+            f"{g['column']} (cardinality {g['cardinality']})" for g in gated
+        )
+        lines.append(
+            f"- Categorical columns gated as high-cardinality noise: {gated_desc}"
+        )
+
+    lines.extend(["", "## Clusters", ""])
+
+    for cluster in payload.get("clusters", []):
+        lines.append(f"### Cluster {cluster['cluster_id']}: {cluster['semantic_name']}")
+        lines.append(f"- Size: {cluster['size']} ({cluster['size_pct']:.1f}%)")
+        lines.append(
+            "- Numeric tiers: "
+            + _format_tier_counts(cluster.get("numeric_tier_counts", {}))
+        )
+        lines.append(
+            "- Categorical tiers: "
+            + _format_tier_counts(cluster.get("categorical_tier_counts", {}))
+        )
+        preview = cluster.get("feature_preview", [])
+        if preview:
+            lines.append("- Feature preview (top capped signals):")
+            for row in preview:
+                lines.append(f"  - {_format_feature_preview(row)}")
+        else:
+            lines.append("- Feature preview: none in selected tiers")
+        lines.append(f"- Feature rows omitted: {cluster.get('features_omitted', 0)}")
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Next Tools",
+            "",
+            "- `get_cluster_profile` for one cluster's capped evidence rows.",
+            "- `get_feature_signal` for selected feature columns across clusters.",
+            "- `get_cluster_signal_matrix` for a compact cross-cluster matrix.",
+            "- `export_html_report` for a human-facing full report outside agent context.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def cluster_profile_payload_to_markdown(payload: dict[str, Any]) -> str:
+    cluster = payload["cluster"]
+    neighbor_text = (
+        ", ".join(
+            str(neighbor["cluster_id"]) for neighbor in cluster["topological_neighbors"]
+        )
+        or "None"
+    )
+    lines = [
+        "# Cluster Profile",
+        "",
+        f"## Cluster {cluster['cluster_id']}: {cluster['semantic_name']}",
+        f"- Size: {cluster['size']} ({cluster['size_pct']:.1f}%)",
+        f"- Topological neighbors: {neighbor_text}",
+        f"- Detail: {payload.get('detail', 'standard')}",
+        f"- Feature rows returned: {cluster['features_returned']['total']}",
+        f"- Feature rows omitted: {cluster['features_omitted']['total']}",
+        "",
+        "### Numeric signals",
+    ]
+    if not cluster["numeric_features"]:
+        lines.append("- None in selected tiers.")
+    for row in cluster["numeric_features"]:
+        lines.append(f"- {_format_numeric_signal(row)}")
+
+    lines.extend(["", "### Categorical signals"])
+    if not cluster["categorical_features"]:
+        lines.append("- None in selected tiers.")
+    for row in cluster["categorical_features"]:
+        lines.append(f"- {_format_categorical_signal(row)}")
+
+    lines.extend(
+        [
+            "",
+            "### Next Tools",
+            "- Use `get_feature_signal` to compare a listed feature across clusters.",
+            "- Use `compare_clusters_tool` for pairwise statistical comparison.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def feature_signal_payload_to_markdown(signals: dict[str, Any]) -> str:
+    lines = [
+        "# Feature Signal Summary",
+        "",
+        f"- Features: {', '.join(signals.get('feature_names', [])) or 'none'}",
+        f"- Detail: {signals.get('detail', 'summary')}",
+        f"- Clusters returned: {signals.get('clusters_returned', 0)}",
+        f"- Clusters omitted: {signals.get('clusters_omitted', 0)}",
+        "",
+    ]
+    if signals.get("clusters_omitted", 0):
+        lines.extend(
+            [
+                "> More clusters had matching signals. Pass explicit `cluster_ids` "
+                "or raise `max_clusters` only if you need the tail.",
+                "",
+            ]
+        )
+    for cluster in signals.get("clusters", []):
+        lines.append(f"## Cluster {cluster['cluster_id']}: {cluster['semantic_name']}")
+        lines.append(f"- Size: {cluster['cluster_size']}")
+        numeric = cluster.get("numeric_features", [])
+        categorical = cluster.get("categorical_features", [])
+        if numeric:
+            lines.append("- Numeric:")
+            for row in numeric:
+                lines.append(f"  - {_format_numeric_signal(row)}")
+        if categorical:
+            lines.append("- Categorical:")
+            for row in categorical:
+                lines.append(f"  - {_format_categorical_signal(row)}")
+        if not numeric and not categorical:
+            lines.append("- No selected feature signals.")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def build_sweep_summary_payload(
+    response: dict[str, Any],
+    *,
+    component_limit: int = 20,
+    include_config_yaml: bool = False,
+) -> dict[str, Any]:
+    metrics = response.get("metrics", {}) or {}
+    component_sizes = list(metrics.get("component_sizes", []) or [])
+    component_preview = component_sizes[:component_limit]
+    payload: dict[str, Any] = {
+        "status": response.get("status", "ok"),
+        "detail": "summary",
+        "run_id": response.get("run_id"),
+        "dataset_id": response.get("dataset_id"),
+        "data_shape": response.get("data_shape"),
+        "construction_threshold": response.get("construction_threshold"),
+        "graph_health": response.get("graph_health"),
+        "recommended_next_action": response.get("recommended_next_action"),
+        "finalization_gate": response.get("finalization_gate"),
+        "constructed_graph_connected": response.get("constructed_graph_connected"),
+        "full_affinity_connected": response.get("full_affinity_connected"),
+        "spectral_clustering_allowed": response.get("spectral_clustering_allowed"),
+        "key_metrics": _sweep_key_metrics(metrics),
+        "component_sizes_preview": component_preview,
+        "component_sizes_omitted": max(
+            len(component_sizes) - len(component_preview), 0
+        ),
+        "diff_summary": _sweep_diff_summary(response.get("diff", [])),
+        "threshold_stability_summary": response.get("threshold_stability_summary"),
+        "pca_cached": response.get("pca_cached"),
+        "pca_cache_status": response.get("pca_cache_status"),
+        "memory_usage_mb": response.get("memory_usage_mb"),
+        "config_advisory": response.get("config_advisory"),
+        "config_yaml_included": include_config_yaml,
+        "config_yaml_available_via": "get_runtime_context",
+        "next_tools": [
+            "diagnose_cosmic_graph",
+            "summarize_sweep_history",
+            "get_threshold_stability_curve",
+            "generate_cluster_dossier",
+        ],
+    }
+    if include_config_yaml:
+        payload["config_yaml_normalized"] = response.get("config_yaml_normalized")
+    if response.get("saved_config_path"):
+        payload["saved_config_path"] = response["saved_config_path"]
+    return payload
+
+
+def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
+    metrics = payload.get("key_metrics", {})
+    gate = payload.get("finalization_gate", {}) or {}
+    diff = payload.get("diff_summary", {})
+    lines = [
+        "# Sweep Run Complete",
+        "",
+        f"- Run ID: `{payload.get('run_id')}`",
+        f"- Dataset ID: `{payload.get('dataset_id')}`",
+        f"- Graph health: {payload.get('graph_health')}",
+        f"- Recommended next action: {payload.get('recommended_next_action')}",
+        f"- Finalization gate: {gate.get('status', 'unknown')}",
+    ]
+    if payload.get("config_advisory"):
+        lines.append(f"- Config advisory: {payload['config_advisory']}")
+    lines.extend(
+        [
+            "",
+            "## Key Metrics",
+            "",
+            "| Metric | Value |",
+            "|---|---:|",
+        ]
+    )
+    for key, value in metrics.items():
+        lines.append(f"| {key} | {_format_metric_value(value)} |")
+
+    metric_changes = diff.get("metric_changes", {})
+    if diff.get("parameter_changes") or metric_changes:
+        lines.extend(["", "## Diff From Previous Sweep", ""])
+        if diff.get("parameter_changes"):
+            lines.append(
+                "- Parameter changes: "
+                + ", ".join(f"`{item}`" for item in diff["parameter_changes"])
+            )
+        if metric_changes:
+            lines.extend(["", "| Metric | Previous | Current |", "|---|---:|---:|"])
+            for key, change in metric_changes.items():
+                lines.append(
+                    f"| {key} | {_format_metric_value(change.get('previous'))} | "
+                    f"{_format_metric_value(change.get('current'))} |"
+                )
+
+    stability = payload.get("threshold_stability_summary")
+    if stability:
+        lines.extend(
+            [
+                "",
+                "## Threshold Stability",
+                "",
+                f"- Selected threshold: {_format_metric_value(stability.get('selected_threshold'))}",
+            ]
+        )
+        if stability.get("warning"):
+            lines.append(f"- Warning: {stability['warning']}")
+
+    if gate.get("status") == "blocked":
+        lines.extend(
+            [
+                "",
+                "## Gate Advisory",
+                "",
+                f"- Code: `{gate.get('code')}`",
+                f"- Message: {gate.get('message')}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Component Sizes",
+            "",
+            "- Preview: "
+            + ", ".join(
+                str(value) for value in payload.get("component_sizes_preview", [])
+            ),
+        ]
+    )
+    omitted = payload.get("component_sizes_omitted", 0)
+    if omitted > 0:
+        lines.append(f"- Omitted: {omitted}")
+    lines.extend(
+        [
+            "",
+            "## Next Tools",
+            "",
+        ]
+    )
+    lines.extend(f"- `{tool}`" for tool in payload.get("next_tools", []))
+    return "\n".join(lines).strip()
+
+
+def _sweep_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "n_nodes",
+        "n_edges",
+        "density",
+        "component_count",
+        "giant_fraction",
+        "singleton_fraction",
+        "n_ball_maps",
+        "grid_adequacy_status",
+    ]
+    return {key: metrics.get(key) for key in keys if key in metrics}
+
+
+def _sweep_diff_summary(diff: list[dict[str, Any]]) -> dict[str, Any]:
+    field_map = {
+        "pca_dims": "sweep.pca.dimensions.values",
+        "epsilon": "cosmic_graph.epsilon",
+        "dataset_id": "dataset_id",
+    }
+    metric_fields = {"n_edges", "component_count", "giant_fraction"}
+    parameter_changes = []
+    metric_changes: dict[str, dict[str, Any]] = {}
+    for row in diff:
+        field = row.get("field")
+        if field in metric_fields:
+            metric_changes[field] = {
+                "previous": row.get("previous"),
+                "current": row.get("current"),
+            }
+        else:
+            parameter_changes.append(field_map.get(field, field))
+    return {
+        "parameter_changes": parameter_changes,
+        "metric_changes": metric_changes,
+        "changes_returned": len(parameter_changes) + len(metric_changes),
+    }
+
+
 def _cluster_fragmentation_payload(sizes: pd.Series, total: int) -> dict[str, Any]:
     values = sorted((int(value) for value in sizes.tolist()), reverse=True)
     if total <= 0 or not values:
@@ -194,6 +578,13 @@ def _tier_counts(tiers: dict[str, list]) -> dict[str, int]:
     return {tier: len(rows) for tier, rows in (tiers or {}).items()}
 
 
+def _tier_counts_from_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        tier: sum(1 for row in rows if row.get("signal_tier") == tier)
+        for tier in ("core", "supporting", "context", "noise")
+    }
+
+
 def _feature_preview_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
     out = {
         "kind": kind,
@@ -239,6 +630,105 @@ def _feature_preview_from_profile(profile: Any, limit: int) -> dict[str, Any]:
     }
 
 
+def _feature_preview_from_bundle(bundle: dict[str, Any], limit: int) -> dict[str, Any]:
+    numeric_rows = [
+        ("numeric", row)
+        for row in bundle.get("numeric", [])
+        if row.get("signal_tier") in {"core", "supporting"}
+    ]
+    categorical_rows = [
+        ("categorical", row)
+        for row in bundle.get("categorical", [])
+        if row.get("signal_tier") in {"core", "supporting"}
+    ]
+    ranked = sorted(
+        numeric_rows + categorical_rows,
+        key=lambda item: -abs(float(item[1].get("aggregate_score", 0.0))),
+    )
+    total_available = sum(
+        1
+        for row in [*bundle.get("numeric", []), *bundle.get("categorical", [])]
+        if row.get("signal_tier") in {"core", "supporting", "context"}
+    )
+    preview = [_feature_preview_row(row, kind) for kind, row in ranked[:limit]]
+    return {
+        "feature_preview": preview,
+        "feature_preview_limit": limit,
+        "features_previewed": len(preview),
+        "features_omitted": max(total_available - len(preview), 0),
+    }
+
+
+def _cluster_payload_from_bundle(
+    bundle: dict[str, Any], feature_preview_limit: int
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "cluster_id": int(bundle["cluster_id"]),
+        "size": int(bundle["size"]),
+        "size_pct": float(bundle["size_pct"]),
+        "semantic_name": str(bundle["semantic_name"]),
+        "topological_neighbors": list(bundle["topological_neighbors"]),
+        "numeric_tier_counts": _tier_counts_from_rows(bundle.get("numeric", [])),
+        "categorical_tier_counts": _tier_counts_from_rows(
+            bundle.get("categorical", [])
+        ),
+    }
+    entry.update(_feature_preview_from_bundle(bundle, feature_preview_limit))
+    return entry
+
+
+def _format_tier_counts(counts: dict[str, int]) -> str:
+    return ", ".join(
+        f"{tier}={int(counts.get(tier, 0))}"
+        for tier in ("core", "supporting", "context", "noise")
+    )
+
+
+def _format_feature_preview(row: dict[str, Any]) -> str:
+    score = row.get("aggregate_score")
+    score_text = f", score={float(score):.3f}" if score is not None else ""
+    if row.get("kind") == "numeric":
+        return (
+            f"{row.get('column')}: {row.get('direction', 'mixed')} "
+            f"({row.get('signal_tier', 'unknown')}{score_text})"
+        )
+    return (
+        f"{row.get('column')}={row.get('value')}: "
+        f"{row.get('signal_tier', 'unknown')} signal"
+        f"{score_text}"
+    )
+
+
+def _format_numeric_signal(row: dict[str, Any]) -> str:
+    z_score = row.get("z_score")
+    z_text = f", z={float(z_score):.2f}" if z_score is not None else ""
+    return (
+        f"{row['column']}: {row.get('direction', 'mixed')} "
+        f"({row.get('signal_tier', 'unknown')}{z_text}, "
+        f"score={float(row.get('aggregate_score', 0.0)):.3f})"
+    )
+
+
+def _format_categorical_signal(row: dict[str, Any]) -> str:
+    prevalence = row.get("prevalence_cluster", row.get("in_cluster_prevalence"))
+    prevalence_text = (
+        f", prevalence={float(prevalence):.1f}%" if prevalence is not None else ""
+    )
+    return (
+        f"{row['column']}={row['value']}: {row.get('signal_tier', 'unknown')} "
+        f"(lift={float(row.get('lift', 0.0)):.2f}{prevalence_text}, "
+        f"score={float(row.get('aggregate_score', 0.0)):.3f})"
+    )
+
+
+def _format_metric_value(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
+
+
 def _evidence_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
     stats_failures = metadata.get("stats_failures", {}) if metadata else {}
     return {
@@ -247,9 +737,8 @@ def _evidence_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
             for key, value in stats_failures.items()
         },
         "numeric_features_screened": metadata.get("numeric_features_screened", 0),
-        "categorical_features_screened": metadata.get(
-            "categorical_features_screened", 0
-        ),
+        "categorical_columns_screened": metadata.get("categorical_columns_screened", 0),
+        "categorical_columns_gated": metadata.get("categorical_columns_gated", []),
     }
 
 
@@ -277,3 +766,64 @@ def _cluster_payload_from_dossier(
             entry["central_rows"] = profile.central_rows
         payloads.append(entry)
     return payloads
+
+
+def _threshold_surface_payload(
+    *,
+    construction_threshold: float,
+    interpretation_threshold: float,
+    threshold_inherited: bool,
+    threshold_source: str,
+) -> dict[str, Any]:
+    import numpy as np
+
+    if threshold_source == "spectral_default_full_affinity":
+        status = "full_affinity_spectral"
+        guidance = (
+            "Spectral clustering used the full retained weighted affinity matrix. "
+            "The persisted diagnostic graph was not rebuilt."
+        )
+    elif threshold_inherited:
+        status = "matched"
+        guidance = "Interpretation inherited the constructed graph surface."
+    elif np.isclose(interpretation_threshold, construction_threshold):
+        status = "matched_explicit"
+        guidance = "Interpretation explicitly matches the constructed graph surface."
+    elif interpretation_threshold < construction_threshold:
+        status = "looser_than_construction"
+        guidance = (
+            "Interpretation uses a looser slice of the retained weighted matrix "
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
+        )
+    else:
+        status = "stricter_than_construction"
+        guidance = (
+            "Interpretation uses a stricter slice of the retained weighted matrix "
+            "than the persisted diagnostic graph. Cluster labels may not match "
+            "topological neighbor and centrality evidence from the persisted graph."
+        )
+    return {
+        "status": status,
+        "construction_threshold": construction_threshold,
+        "interpretation_edge_weight_threshold": interpretation_threshold,
+        "threshold_inherited": threshold_inherited,
+        "threshold_source": threshold_source,
+        "guidance": guidance,
+    }
+
+
+def _prepend_threshold_markdown(markdown: str, surface: dict[str, Any]) -> str:
+    header = "\n".join(
+        [
+            "# Threshold Surface",
+            "",
+            f"- Construction threshold: {surface['construction_threshold']:.4f}",
+            "- Interpretation edge weight threshold: "
+            f"{surface['interpretation_edge_weight_threshold']:.4f}",
+            f"- Status: {surface['status']}",
+            f"- Guidance: {surface['guidance']}",
+            "",
+        ]
+    )
+    return f"{header}\n{markdown}"
