@@ -36,8 +36,8 @@ async def recommend_preprocessing(
     rationale_limit: int = 20,
     ctx: Context = None,
 ) -> str:
-    """Preprocessing recommendations from column profiles. Returns
-    `preprocessing_yaml`, rationale, and expansion estimate.
+    """Preprocessing policy recommendation from column profiles. Returns
+    `preprocessing_yaml`, rationale, warnings, and expansion estimate.
     """
     if rationale_limit < 1:
         return mcp_error(
@@ -95,6 +95,7 @@ async def recommend_preprocessing(
             preprocessing_yaml=preprocessing_yaml,
             expansion_estimate=expansion_estimate,
             dirty_numeric_detection=dirty_numeric_detection,
+            dataset_id=dataset_id,
             detail=detail,
             rationale_limit=rationale_limit,
         )
