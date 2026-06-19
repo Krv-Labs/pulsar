@@ -46,11 +46,12 @@ async def explain_suggestion(
         geo = json.loads(dataset_geometry)
         config_dict = yaml.safe_load(config_yaml)
 
-        pca_dims = (
-            config_dict.get("sweep", {})
-            .get("pca", {})
-            .get("dimensions", {})
-            .get("values", [])
+        # sweep.projection is authoritative; sweep.pca is a legacy compat mirror.
+        sweep = config_dict.get("sweep", {})
+        projection = sweep.get("projection", {})
+        method = str(projection.get("method", "jl")).lower()
+        proj_dims = projection.get("dimensions", {}).get("values") or (
+            sweep.get("pca", {}).get("dimensions", {}).get("values", [])
         )
         eps_str = _format_epsilon(config_dict)
 
@@ -60,25 +61,29 @@ async def explain_suggestion(
 
         explanation = "### Parameter Reasoning\n\n"
 
-        # 1. PCA Reasoning
+        # 1. Projection reasoning. Variance framing applies only to the legacy
+        # PCA path; JL random projection preserves pairwise distances, not variance.
         pca_reasons = []
-        for dim in pca_dims:
-            var = cum_var_map.get(int(dim))
-            if var is not None:
-                next_var = cum_var_map.get(int(dim) + 1)
-                benefit = f" (+{next_var - var:.1%})" if next_var else ""
-                pca_reasons.append(f"Dim {dim} captures {var:.1%} variance{benefit}.")
+        if method == "pca":
+            for dim in proj_dims:
+                var = cum_var_map.get(int(dim))
+                if var is not None:
+                    next_var = cum_var_map.get(int(dim) + 1)
+                    benefit = f" (+{next_var - var:.1%})" if next_var else ""
+                    pca_reasons.append(f"Dim {dim} captures {var:.1%} variance{benefit}.")
 
         if pca_reasons:
-            explanation += f"- **PCA Dimensions {pca_dims}**: " + " ".join(pca_reasons)
+            explanation += f"- **PCA Dimensions {proj_dims}**: " + " ".join(pca_reasons)
             explanation += " An array of dimensions is used rather than a single point estimate to prevent dimension collapse and ensure the CosmicGraph captures topology across varying geometric resolutions.\n"
-            if isinstance(n_samples, int):
-                pts_per_dim = n_samples / max(pca_dims)
+            if isinstance(n_samples, int) and proj_dims:
+                pts_per_dim = n_samples / max(proj_dims)
                 explanation += f" With N={n_samples}, this maintains ~{pts_per_dim:.1f} points per dimension, ensuring sufficient manifold density.\n"
             else:
                 explanation += "\n"
+        elif method == "pca":
+            explanation += f"- **PCA Dimensions {proj_dims}**: Chosen as a multi-scale array around the variance curve elbow to aggregate varying topological resolutions (values not provided in geo summary).\n"
         else:
-            explanation += f"- **PCA Dimensions {pca_dims}**: Chosen as a multi-scale array around the variance curve elbow to aggregate varying topological resolutions (values not provided in geo summary).\n"
+            explanation += f"- **JL Projection Dimensions {proj_dims}**: A multi-scale array of Johnson-Lindenstrauss random-projection dimensions chosen to preserve pairwise distances across resolutions (JL has no variance curve), kept within the KD-tree envelope (≤16) for accelerated Ball Mapper membership.\n"
 
         # 2. Epsilon Reasoning
         if knn_mean:

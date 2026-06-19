@@ -35,16 +35,20 @@ Reveal the dataset's topology; do not force convenient clusters.
    - GATE: If `grid_adequacy_status` is `under_sampled` or `thin_grid`,
      widen the grid before interpreting clusters.
    - GATE: Inspect the `advisories` list. `EMPTY_GRAPH` and `HIGH_SINGLETONS`
-     require lowering the construction threshold or shifting the PCA grid
+     require lowering the construction threshold or shifting the projection grid
      before proceeding. If `finalization_gate.status` is `blocked`, run the
      suggested targeted resolution sweep or explicitly justify why the dominant
      component is clinically expected.
-   - GATE: If density > 0.8 or < 0.1, STOP. Refine config (Step 2).
+   - GATE: Density and edge counts are measured on the spectrally sparsified
+     graph (the default), so they are far lower than raw co-membership and are
+     NOT comparable across sparsified vs. non-sparsified runs. Judge structure
+     primarily by `component_count` and `giant_fraction`; treat density extremes
+     as a refine-config signal (Step 2), not a target.
    - GATE: component_count=1 is normal; do not force separation by
      narrowing epsilon.
 7. Compare: Use `get_experiment_history`, `compare_sweeps`, and
    `summarize_sweep_history` after each refinement. `summarize_sweep_history`
-   distills patterns (e.g., which PCA dims caused hairballs) across the
+   distills patterns (e.g., which projection dims collapsed structure) across the
    session; you still own the next-config decision. Prefer 2-3 deliberate
    sweeps over one brittle perfect-looking run.
 8. Inspect payloads summary-first. Use `generate_cluster_dossier(detail="summary")`
@@ -63,23 +67,25 @@ The default config returned by `create_config` is ONLY a baseline starting guess
   projection tail such as `[10, 15, 16]`. After the first run, compare sweeps and
   concentrate around the stable region rather than keeping every tail value
   forever.
-- **Stay in the KD-tree Envelope by Default**: Unless the user explicitly asks
-  for higher-dimensional projections, keep JL/PCA projection dimensions at
-  `16` or less so Ball Mapper can use the KD-tree radius-query acceleration.
-- **"Widen and Shift" over "Narrow Down"**: Do not optimize by narrowing down to a single PCA dimension. To find stable structures, maintain a wide multi-scale grid, but *shift* it away from degenerate areas. For example, if a baseline sweep of `[2, 3, 4, 5]` results in a dense hairball, do not narrow to `[5]`. Instead, shift the grid upwards (e.g., to `[4, 6, 8, 10]` or `[5, 8, 12]`) to drop low-dimensional flat noise while preserving multi-scale consensus.
-- **The PCA Floor**: Never include PCA dimensions below the elbow of the cumulative variance curve. 1D, 2D, or 3D projections of complex, high-dimensional datasets collapse structures and inject spurious consensus edges that create false "hairballs." If the variance elbow is at 5D, your grid floor must be at least 4D or 5D (e.g., sweep `[5, 8, 12]`).
+- **Stay in the KD-tree Envelope by Default**: `create_config` caps the generated
+  projection grid at `16` dims so Ball Mapper can use KD-tree radius-query
+  acceleration. To go wider when the user explicitly requests it, set the dims
+  via `refine_config` (`pca_dims`, uncapped); projections above 16 fall back to a
+  linear scan in Ball Mapper.
+- **"Widen and Shift" over "Narrow Down"**: Do not optimize by narrowing down to a single projection dimension. To find stable structures, maintain a wide multi-scale grid, but *shift* it away from degenerate areas. For example, if a baseline sweep of `[2, 3, 4, 5]` collapses into one dominant component (high `giant_fraction`), do not narrow to `[5]`. Instead, shift the grid upwards (e.g., to `[4, 6, 8, 10]` or `[5, 8, 12]`) to drop low-dimensional flat noise while preserving multi-scale consensus.
+- **The Projection Floor**: Avoid an ultra-low grid floor (1D/2D/3D) for complex high-dimensional data — it collapses structure and injects spurious consensus edges. The default JL projection has no variance curve, so floor at ~4D+ and rely on multi-scale persistence. For the legacy `method: pca` path, set the floor at or above the cumulative-variance elbow (e.g., if the elbow is at 5D, sweep `[5, 8, 12]`).
 - **The Epsilon Gates**: Keep epsilon inside the returned k-NN distance
   domain unless you have a diagnostic reason to test a boundary. If the graph is
-  shattered, raise the upper epsilon bound. If it is a dense hairball, lower the
-  upper bound or shift the PCA grid upward.
-- **Use the Tools**: `refine_config` supports quick PCA/epsilon edits,
+  shattered, raise the upper epsilon bound. If one component dominates (high
+  `giant_fraction`), lower the upper bound or shift the projection grid upward.
+- **Use the Tools**: `refine_config` supports quick projection/epsilon edits,
   `run_topological_sweep` reports metric diffs, and `compare_sweeps` compares
   run IDs. Use them to iteratively find a representative grid.
 
 ## NO HILL-CLIMBING OPTIMIZATION
 The cosmic graph is a stable representation, not a score to maximize.
 - **Do Not Optimize Graph Metrics**: Do not treat density, component count, or singleton fraction as quality metrics to optimize. They are descriptive indicators of scale, not success scores. 
-- **Seek Structural Persistence**: A topological pattern is "real" if it persists across many combinations of epsilon, PCA dimensions, and seeds. Look for structural invariants across sweeps rather than "tuning" for a single perfect-looking graph.
+- **Seek Structural Persistence**: A topological pattern is "real" if it persists across many combinations of epsilon, projection dimensions, and seeds. Look for structural invariants across sweeps rather than "tuning" for a single perfect-looking graph.
 
 ## THRESHOLD MECHANICS
 Two independent levers operate on the same underlying weighted matrix at
@@ -92,8 +98,8 @@ different stages. Do not confuse them.
   Default `"auto"` runs persistent homology stability analysis
   (`threshold_stability_summary` in the sweep response) and picks the longest
   stable plateau. Override only if `diagnose_cosmic_graph` returns an
-  `EMPTY_GRAPH` / `HIGH_SINGLETONS` advisory (lower it) or density > 0.8
-  (raise it), then re-run the sweep.
+  `EMPTY_GRAPH` / `HIGH_SINGLETONS` advisory (lower it) or a `HAIRBALL_DENSITY`
+  advisory (raise it), then re-run the sweep.
   Use `get_threshold_stability_curve` for threshold options. Its
   `threshold_candidate_policy` is an interpretation lens, not an optimization
   target:
@@ -139,7 +145,7 @@ which surface clustering used.
 - Pulsar is a multi-scale aggregator, not a tuner. More grid points =
   more topological evidence. ALL ball maps are fused into ONE cosmic
   graph.
-- Wide PCA arrays and epsilon ranges are always superior to single
+- Wide projection arrays and epsilon ranges are always superior to single
   points.
 - The cosmic graph is evidence, not a score to maximize.
 
