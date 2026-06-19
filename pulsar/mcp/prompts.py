@@ -60,7 +60,7 @@ The default config returned by `create_config` is ONLY a baseline starting guess
 
 - **Broad First, Then Concentrate**: Start with the broad baseline grid from
   `create_config`. On high-dimensional processed data this may include a wide
-  projection tail such as `[2, 5, 10, 15, 16]`. After the first run, compare sweeps and
+  projection tail such as `[10, 15, 16]`. After the first run, compare sweeps and
   concentrate around the stable region rather than keeping every tail value
   forever.
 - **Stay in the KD-tree Envelope by Default**: Unless the user explicitly asks
