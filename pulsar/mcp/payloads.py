@@ -526,16 +526,34 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
         if stability.get("warning"):
             lines.append(f"- Warning: {stability['warning']}")
 
-    if gate.get("status") == "blocked":
+    if gate.get("status") in {"blocked", "caution"}:
         lines.extend(
             [
                 "",
                 "## Gate Advisory",
                 "",
+                f"- Status: `{gate.get('status')}`",
                 f"- Code: `{gate.get('code')}`",
                 f"- Message: {gate.get('message')}",
             ]
         )
+        action = gate.get("recommended_action") or {}
+        if action:
+            threshold = action.get("interpretation_edge_weight_threshold")
+            command = (
+                f"{action.get('tool', 'generate_cluster_dossier')}"
+                f"(method=\"{action.get('method', 'components')}\""
+            )
+            if threshold is not None:
+                command += (
+                    ", interpretation_edge_weight_threshold="
+                    f"{_format_metric_value(threshold)}"
+                )
+            command += ")"
+            lines.append(f"- Recommended action: `{command}`")
+            reason = action.get("reason")
+            if reason:
+                lines.append(f"- Reason: {reason}")
 
     lines.extend(
         [

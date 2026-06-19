@@ -28,6 +28,7 @@ from pulsar.mcp.thresholds import (
     THRESHOLD_CANDIDATE_POLICIES,
     agent_threshold_options,
     component_mass_profile,
+    first_report_ready_candidate,
     mass_profile_hint,
     prepare_threshold_graph_from_edges,
     structural_breakpoints,
@@ -801,6 +802,21 @@ def _sparse_threshold_curve(
 
 
 def _threshold_next_tool_lines(payload: dict[str, Any]) -> list[str]:
+    candidate = first_report_ready_candidate(payload.get("threshold_candidates"))
+    if candidate is not None:
+        # Stable-plateau candidates store the (midpoint) cut under "threshold";
+        # only transition-adjacent candidates use "midpoint". Prefer "threshold"
+        # to match the rest of this module's key ordering.
+        threshold = candidate.get("threshold", candidate.get("midpoint"))
+        tier = candidate.get("interpretability_tier", "candidate")
+        return [
+            "- `generate_cluster_dossier(method=\"components\", "
+            f"interpretation_edge_weight_threshold={_format_threshold_value(threshold)})` "
+            f"for natural H0 components at the {tier} threshold lens.",
+            '- `generate_cluster_dossier(method="spectral")` only if the question is latent structure inside a still-continuous dominant component.',
+            "- `get_feature_signal` / `compare_clusters` to validate that the component slice is domain-relevant.",
+        ]
+
     current = payload.get("current_threshold_morphology") or {}
     giant = float(current.get("giant_fraction", 0.0) or 0.0)
     slr = float(current.get("second_largest_ratio", 0.0) or 0.0)

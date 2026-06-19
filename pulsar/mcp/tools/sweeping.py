@@ -453,6 +453,7 @@ async def run_topological_sweep(
             current_metrics,
             sweep_count=len(session.sweep_history),
             config_yaml=current_yaml,
+            threshold_curve_summary=threshold_curve_summary,
         )
         response["construction_threshold"] = float(
             model.resolved_construction_threshold

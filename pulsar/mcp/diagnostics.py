@@ -15,6 +15,7 @@ import numpy as np
 import networkx as nx
 
 from pulsar.mcp.payloads import size_summary
+from pulsar.mcp.thresholds import first_report_ready_candidate
 from pulsar.runtime.utils import generate_distribution_sparkline
 
 if TYPE_CHECKING:
@@ -437,6 +438,7 @@ def _finalization_gate(
     *,
     sweep_count: int,
     config_yaml: str,
+    threshold_curve_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     import yaml
     from pulsar.mcp.config_tools import _suggest_resolution_pca_dims
@@ -453,6 +455,32 @@ def _finalization_gate(
             "reason": "No dominant-component resolution gate triggered.",
         }
 
+    candidate = first_report_ready_candidate(
+        (threshold_curve_summary or {}).get("threshold_candidates")
+    )
+    if candidate is not None:
+        # Stable-plateau candidates store the (midpoint) cut under "threshold";
+        # only transition-adjacent candidates use "midpoint". Prefer "threshold"
+        # to match the candidate schema first_report_ready_candidate selects.
+        threshold = candidate.get("threshold", candidate.get("midpoint"))
+        return {
+            "status": "caution",
+            "code": "DOMINANT_COMPONENT_HAS_COMPONENT_LENS",
+            "message": (
+                f"giant_fraction={giant_fraction:.1%}, but threshold stability "
+                "found a stricter component lens suitable for cohort reading."
+            ),
+            "recommended_action": {
+                "tool": "generate_cluster_dossier",
+                "method": "components",
+                "interpretation_edge_weight_threshold": threshold,
+                "reason": (
+                    "Use the report-ready or balanced H0 component slice before "
+                    "falling back to spectral clustering."
+                ),
+            },
+        }
+
     cfg = yaml.safe_load(config_yaml) or {}
     projection_dims = cfg.get("sweep", {}).get("projection", {}).get(
         "dimensions", {}
@@ -465,7 +493,7 @@ def _finalization_gate(
         "message": (
             f"giant_fraction={giant_fraction:.1%} after {sweep_count} sweep(s). "
             "Do not finalize clusters until one targeted resolution sweep is run "
-            "or the dominant component is explicitly justified as clinically expected."
+            "or the dominant component is explicitly justified for this dataset."
         ),
         "suggested_refinement": {
             "projection_dimensions": _suggest_resolution_pca_dims(projection_dims),

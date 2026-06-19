@@ -96,7 +96,14 @@ The cosmic graph is a stable representation, not a score to maximize.
 
 ## METHODOLOGY GUARDRAILS
 - **Do Not Reintroduce Proxies of the Target**: If the question is "do features X distinguish outcome Y?", do not add columns that are near-proxies of Y (e.g. a geographic field that almost perfectly maps to the class). Clean clusters obtained that way are the proxy leaking the label, not the features distinguishing it — it silently abandons the experiment. Drop proxies along with the label.
-- **Chaining, Not Threshold-Cranking**: When two genuinely overlapping groups are bridged by intermediate points, raising the construction threshold to force them apart shatters everything else into singletons (single-linkage chaining). Prefer `method="spectral"` or rely on multi-scale consensus across the sweep; a fragmentation explosion (tens of singletons on a few-hundred-row dataset) is over-filtered noise, not finer resolution.
+- **Chaining vs. Clean H0 Slices**: Before using spectral clustering on a
+  dominant component, audit `get_threshold_stability_curve`. If a stricter
+  threshold candidate is `report_ready` or `balanced`, first run
+  `generate_cluster_dossier(method="components",
+  interpretation_edge_weight_threshold=<candidate>)` to read the natural H0
+  components. Use `method="spectral"` when stricter threshold climbing only
+  creates singleton/tiny-component dust, or when the question is latent
+  structure inside a genuinely continuous dominant component.
 
 ## THRESHOLD MECHANICS
 Two independent levers operate on the same underlying weighted matrix at

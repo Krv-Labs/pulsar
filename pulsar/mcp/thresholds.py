@@ -15,6 +15,17 @@ THRESHOLD_CANDIDATE_POLICIES = {
     "detail_seeking",
     "outlier_mining",
 }
+_COHORT_READY_TIERS = frozenset({"report_ready", "balanced"})
+
+
+def first_report_ready_candidate(
+    candidates: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Return the first candidate suitable for component-based cohort reading."""
+    for candidate in candidates or []:
+        if candidate.get("interpretability_tier") in _COHORT_READY_TIERS:
+            return candidate
+    return None
 
 
 @dataclass(frozen=True)

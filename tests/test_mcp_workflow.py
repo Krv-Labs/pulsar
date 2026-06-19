@@ -11,6 +11,7 @@ import yaml
 
 from pulsar.mcp.session import SweepRecord, _sessions, _get_session
 from pulsar.mcp.diagnostics import _finalization_gate
+from pulsar.mcp.payloads import sweep_payload_to_markdown
 from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
     begin_dataset_upload,
@@ -1998,6 +1999,54 @@ def test_threshold_next_tools_are_contextual_for_giant_tail():
     assert "only when the tail/outlier components" in lines[1]
 
 
+def test_threshold_next_tools_prefer_clean_component_lens():
+    lines = _threshold_next_tool_lines(
+        {
+            "current_threshold_morphology": {
+                "giant_fraction": 0.96,
+                "second_largest_ratio": 0.002,
+                "singleton_fraction": 0.04,
+            },
+            "threshold_candidates": [
+                {
+                    "interpretability_tier": "balanced",
+                    "threshold": 0.2246,
+                    "why": "Candidate exposes nontrivial components.",
+                }
+            ],
+        }
+    )
+
+    assert lines[0].startswith(
+        '- `generate_cluster_dossier(method="components", '
+        "interpretation_edge_weight_threshold=0.2246)`"
+    )
+    assert "natural H0 components" in lines[0]
+    assert "spectral" in lines[1]
+
+
+def test_threshold_next_tools_ignore_low_tier_candidates_for_giant_tail():
+    # Candidates exist but none clear the report_ready/balanced bar, so there is
+    # no clean component lens to recommend: guidance must fall through to the
+    # giant-tail branch (spectral first), not fabricate a components lens.
+    lines = _threshold_next_tool_lines(
+        {
+            "current_threshold_morphology": {
+                "giant_fraction": 0.96,
+                "second_largest_ratio": 0.002,
+                "singleton_fraction": 0.04,
+            },
+            "threshold_candidates": [
+                {"interpretability_tier": "giant_component_with_dust", "threshold": 0.31},
+                {"interpretability_tier": "exploratory", "threshold": 0.42},
+            ],
+        }
+    )
+
+    assert "method=\"spectral\"" in lines[0]
+    assert "only when the tail/outlier components" in lines[1]
+
+
 def test_prepared_threshold_graph_matches_dense_component_partitions():
     adj = np.array(
         [
@@ -2160,6 +2209,61 @@ sweep:
     assert gate["suggested_refinement"]["epsilon_steps_min"] == 24
 
 
+def test_finalization_gate_warns_when_clean_component_lens_exists():
+    gate = _finalization_gate(
+        {
+            "giant_fraction": 0.9724,
+            "density": 0.77,
+            "n_ball_maps": 32,
+        },
+        sweep_count=2,
+        config_yaml="sweep: {}",
+        threshold_curve_summary={
+            "threshold_candidates": [
+                {
+                    # Stable-plateau candidates carry their cut under "threshold",
+                    # not "midpoint" -- mirror the real candidate schema.
+                    "interpretability_tier": "report_ready",
+                    "threshold": 0.2246,
+                }
+            ]
+        },
+    )
+
+    assert gate["status"] == "caution"
+    assert gate["code"] == "DOMINANT_COMPONENT_HAS_COMPONENT_LENS"
+    action = gate["recommended_action"]
+    assert action["tool"] == "generate_cluster_dossier"
+    assert action["method"] == "components"
+    assert action["interpretation_edge_weight_threshold"] == 0.2246
+
+
+def test_finalization_gate_blocks_when_only_dusty_lens_exists():
+    # A giant-dominated slice that splits off only dust is tagged
+    # giant_component_with_dust, NOT report_ready/balanced. The tier itself is
+    # the (scale-invariant) substance floor, so such a candidate must NOT
+    # downgrade the hard block. Locks in that guarantee.
+    gate = _finalization_gate(
+        {
+            "giant_fraction": 0.9724,
+            "density": 0.77,
+            "n_ball_maps": 32,
+        },
+        sweep_count=2,
+        config_yaml="sweep: {}",
+        threshold_curve_summary={
+            "threshold_candidates": [
+                {"interpretability_tier": "giant_component_with_dust", "threshold": 0.31},
+                {"interpretability_tier": "weak_candidate", "threshold": 0.4},
+            ]
+        },
+    )
+
+    assert gate["status"] == "blocked"
+    assert gate["code"] == "UNRESOLVED_DOMINANT_COMPONENT"
+    assert "recommended_action" not in gate
+
+
 def test_finalization_gate_allows_resolved_dominant_component():
     gate = _finalization_gate(
         {
@@ -2172,6 +2276,36 @@ def test_finalization_gate_allows_resolved_dominant_component():
     )
 
     assert gate["status"] == "ok"
+
+
+def test_sweep_markdown_renders_caution_gate_recommendation():
+    markdown = sweep_payload_to_markdown(
+        {
+            "run_id": "run_test",
+            "dataset_id": "ds_test",
+            "finalization_gate": {
+                "status": "caution",
+                "code": "DOMINANT_COMPONENT_HAS_COMPONENT_LENS",
+                "message": "A stricter component lens is available.",
+                "recommended_action": {
+                    "tool": "generate_cluster_dossier",
+                    "method": "components",
+                    "interpretation_edge_weight_threshold": 0.2246,
+                    "reason": "Use the clean H0 component slice.",
+                },
+            },
+            "key_metrics": {},
+            "component_sizes_preview": [],
+            "next_tools": [],
+        }
+    )
+
+    assert "- Status: `caution`" in markdown
+    assert "- Code: `DOMINANT_COMPONENT_HAS_COMPONENT_LENS`" in markdown
+    assert (
+        '- Recommended action: `generate_cluster_dossier(method="components", '
+        "interpretation_edge_weight_threshold=0.2246)`"
+    ) in markdown
 
 
 def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):
