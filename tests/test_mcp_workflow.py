@@ -1442,6 +1442,10 @@ def test_dossier_inherits_construction_threshold(tmp_path):
     )
     assert "construction_threshold" in inherited
     assert "interpretation_edge_weight_threshold" in inherited
+    assert inherited["cluster_assignment_id"].startswith("ca_")
+    assert inherited["cluster_assignment"]["cluster_assignment_id"] == inherited[
+        "cluster_assignment_id"
+    ]
     assert inherited["threshold_inherited"] is True
     assert (
         inherited["interpretation_edge_weight_threshold"]

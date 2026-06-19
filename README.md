@@ -69,7 +69,7 @@ We didn't just wrap our Python functions in JSON schemas. We built *Thick Tools*
 *   `diagnose_cosmic_graph`: Returns current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets those measurements against the user's objective.
 *   `generate_cluster_dossier`: Returns structured JSON with per-cluster profiles (Z-scores, homogeneity, concentration) plus a Markdown summary. Includes clustering method metadata (method used, silhouette score).
 *   `compare_clusters`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
-*   `export_labeled_data`: Maps semantic names to the cluster IDs and dumps it to a CSV.
+*   `export_labeled_data`: Maps semantic names to a `cluster_assignment_id` from `generate_cluster_dossier` and dumps that exact clustering to a CSV.
 
 ### Pitfalls & Annoyances
 

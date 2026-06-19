@@ -166,7 +166,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - **compare_clusters**
      - Pairwise statistical tests (Welch's t-test, Kolmogorov-Smirnov, Cohen's d, effect sizes) between clusters. Answers "Are these really different, or just noise?"
    * - **export_labeled_data**
-     - Return your original dataframe with discovered cluster labels attached. Ready for downstream analysis, visualization, or handoff to domain experts.
+     - Return your original dataframe with labels from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. Ready for downstream analysis, visualization, or handoff to domain experts.
    * - **diagnose_cosmic_graph**
      - Current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets these measurements against the user's objective.
    * - **recommend_preprocessing**
