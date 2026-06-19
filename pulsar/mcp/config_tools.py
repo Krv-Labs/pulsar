@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,28 @@ from pulsar.mcp.preprocessing import (
     _recommend_preprocessing_block,
     _preprocessing_block_to_yaml,
 )
+
+
+SPARSIFY_WARNING_MESSAGE = (
+    "Spectral sparsification is enabled (cosmic_graph.sparsify: true). It is SLOW "
+    "on large datasets — a Spielman-Srivastava sparsifier that solves a "
+    "preconditioned-CG system per JL sketch row — and it runs after the "
+    "already-sparse cosmic graph is built, so it is pure additional construction "
+    "cost with no downstream speedup."
+)
+SPARSIFY_WARNING_SUGGESTION = (
+    "Set cosmic_graph.sparsify: false unless you specifically need a "
+    "spectrum/effective-resistance-preserving graph for downstream spectral "
+    "analysis on a small graph. It is not a structural-analysis or performance tool."
+)
+
+
+def _build_sparsify_warning() -> ValidationIssue:
+    return ValidationIssue(
+        path="cosmic_graph.sparsify",
+        message=SPARSIFY_WARNING_MESSAGE,
+        suggestion=SPARSIFY_WARNING_SUGGESTION,
+    )
 
 
 _ALLOWED_TOP_LEVEL = {"run", "preprocessing", "sweep", "cosmic_graph", "output"}
@@ -66,6 +88,9 @@ class ValidationReport:
     issues: list[ValidationIssue]
     error_code: str | None = None
     agent_action: str | None = None
+    # Non-blocking cautions. Unlike `issues`, warnings never set ok=False; they
+    # surface advice (e.g. an expensive opt-in knob is enabled) without failing.
+    warnings: list[ValidationIssue] = field(default_factory=list)
 
 
 @dataclass
@@ -93,6 +118,7 @@ def validate_config_yaml(
     dataset_path: str | None = None,
 ) -> ValidationReport:
     issues: list[ValidationIssue] = []
+    warnings: list[ValidationIssue] = []
 
     try:
         raw = parse_yaml_mapping(config_yaml)
@@ -111,7 +137,7 @@ def validate_config_yaml(
     _validate_run_section(raw.get("run"), issues)
     _validate_preprocessing(raw.get("preprocessing"), issues)
     _validate_sweep(raw.get("sweep"), issues)
-    _validate_cosmic_graph(raw.get("cosmic_graph"), issues)
+    _validate_cosmic_graph(raw.get("cosmic_graph"), issues, warnings)
     _validate_output(raw.get("output"), issues)
 
     if dataset_path:
@@ -155,6 +181,7 @@ def validate_config_yaml(
             issues=issues,
             error_code=error_code,
             agent_action=agent_action,
+            warnings=warnings,
         )
 
     try:
@@ -175,6 +202,7 @@ def validate_config_yaml(
         normalized_yaml=normalized_yaml,
         resolved_dataset_path=cfg.data,
         issues=[],
+        warnings=warnings,
     )
 
 
@@ -420,6 +448,8 @@ def render_validation_report(report: ValidationReport) -> str:
             "resolved_dataset_path": report.resolved_dataset_path,
             "issues": [asdict(issue) for issue in report.issues],
         }
+        if report.warnings:
+            details["warnings"] = [asdict(w) for w in report.warnings]
         if (
             report.error_code in {"HOST_PATH_NOT_VISIBLE", "FILE_NOT_FOUND"}
             and len(report.issues) == 1
@@ -443,6 +473,8 @@ def render_validation_report(report: ValidationReport) -> str:
         "resolved_dataset_path": report.resolved_dataset_path,
         "issues": [asdict(issue) for issue in report.issues],
     }
+    if report.warnings:
+        payload["warnings"] = [asdict(w) for w in report.warnings]
     if report.normalized_yaml is not None:
         payload["normalized_config_yaml"] = report.normalized_yaml
     return json.dumps(payload, indent=2)
@@ -639,7 +671,11 @@ def _validate_sweep(sweep: Any, issues: list[ValidationIssue]) -> None:
     )
 
 
-def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> None:
+def _validate_cosmic_graph(
+    cosmic_graph: Any,
+    issues: list[ValidationIssue],
+    warnings: list[ValidationIssue] | None = None,
+) -> None:
     if cosmic_graph is None:
         return
     if not isinstance(cosmic_graph, dict):
@@ -649,6 +685,8 @@ def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> 
             )
         )
         return
+    if warnings is not None and cosmic_graph.get("sparsify"):
+        warnings.append(_build_sparsify_warning())
     for key in cosmic_graph.keys():
         if key == LEGACY_COSMIC_GRAPH_THRESHOLD_KEY:
             issues.append(

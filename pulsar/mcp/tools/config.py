@@ -14,6 +14,7 @@ from pulsar.mcp.config_tools import (
     render_validation_report,
     validate_config_yaml,
     _build_initial_config_yaml,
+    _build_sparsify_warning,
 )
 from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.preprocessing import _calibrate_processed_space
@@ -254,6 +255,11 @@ async def refine_config(
             "diff": result.diff,
             "config_yaml": result.config_yaml,
         }
+        resolved = yaml.safe_load(result.config_yaml) or {}
+        if isinstance(resolved, dict) and (resolved.get("cosmic_graph") or {}).get(
+            "sparsify"
+        ):
+            payload["warnings"] = [dataclasses.asdict(_build_sparsify_warning())]
         if use_active:
             session.active_config_yaml = result.config_yaml
             payload["dataset_id"] = session.active_config_dataset_id
