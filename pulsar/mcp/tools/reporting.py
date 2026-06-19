@@ -139,7 +139,10 @@ async def export_labeled_data(
         # Read-only: export must never rebind session.data, which would
         # invalidate the active clusters/feature-evidence caches. Reuse the
         # in-memory frame only when it is already this exact dataset.
-        if session.data is not None and session.data_dataset_id == assignment.dataset_id:
+        if (
+            session.data is not None
+            and session.data_dataset_id == assignment.dataset_id
+        ):
             df = session.data
         else:
             df = await asyncio.to_thread(_read_dataset_file, dataset.path)

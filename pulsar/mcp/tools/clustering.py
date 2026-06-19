@@ -452,9 +452,13 @@ async def generate_cluster_dossier(
             evidence_index=evidence_index,
         )
         if response_format == "markdown":
-            body = _two_lever_markdown_note(
-                construction_threshold, resolved_interpretation_threshold
-            ) + _cluster_assignment_markdown(assignment) + dossier_to_markdown(dossier)
+            body = (
+                _two_lever_markdown_note(
+                    construction_threshold, resolved_interpretation_threshold
+                )
+                + _cluster_assignment_markdown(assignment)
+                + dossier_to_markdown(dossier)
+            )
             return _prepend_threshold_markdown(body, threshold_surface)
 
         payload = build_evidence_payload(
@@ -682,9 +686,7 @@ async def get_cluster_signal_matrix(
         return mcp_error("get_cluster_signal_matrix", str(e))
 
 
-async def compare_clusters(
-    cluster_a: int, cluster_b: int, ctx: Context = None
-) -> str:
+async def compare_clusters(cluster_a: int, cluster_b: int, ctx: Context = None) -> str:
     """Pairwise statistical tests between two clusters."""
     session = _get_session(ctx)
 
@@ -702,7 +704,9 @@ async def compare_clusters(
         )
 
     try:
-        results = _compare_clusters(session.data, session.clusters, cluster_a, cluster_b)
+        results = _compare_clusters(
+            session.data, session.clusters, cluster_a, cluster_b
+        )
         if not results:
             return mcp_error(
                 "compare_clusters",

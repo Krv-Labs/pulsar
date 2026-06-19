@@ -824,8 +824,7 @@ def test_recommend_preprocessing_surfaces_numeric_coded_categories(tmp_path):
 
     block = yaml.safe_load(payload["preprocessing_yaml"])["preprocessing"]
     candidates = {
-        row["column"]: row
-        for row in payload["numeric_categorical_candidates_full"]
+        row["column"]: row for row in payload["numeric_categorical_candidates_full"]
     }
     assert "has_diabetes" in candidates
     assert "severity_stage" in candidates
@@ -1466,9 +1465,10 @@ def test_dossier_inherits_construction_threshold(tmp_path):
     assert "construction_threshold" in inherited
     assert "interpretation_edge_weight_threshold" in inherited
     assert inherited["cluster_assignment_id"].startswith("ca_")
-    assert inherited["cluster_assignment"]["cluster_assignment_id"] == inherited[
-        "cluster_assignment_id"
-    ]
+    assert (
+        inherited["cluster_assignment"]["cluster_assignment_id"]
+        == inherited["cluster_assignment_id"]
+    )
     assert inherited["threshold_inherited"] is True
     assert (
         inherited["interpretation_edge_weight_threshold"]
@@ -1690,15 +1690,26 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
         asyncio.run(get_threshold_stability_curve(response_format="json"))
     )
     full = json.loads(
-        asyncio.run(get_threshold_stability_curve(detail="full", response_format="json"))
+        asyncio.run(
+            get_threshold_stability_curve(detail="full", response_format="json")
+        )
     )
 
     assert "# Threshold Stability" in markdown
     assert "## Threshold Morphology Sample" in markdown
-    assert "| Threshold | Components | Top sizes | Giant % | SLR | Singleton % |" in markdown
-    assert "| Threshold | Components | Top sizes | Giant % | SLR | Singleton % | State |" not in markdown
+    assert (
+        "| Threshold | Components | Top sizes | Giant % | SLR | Singleton % |"
+        in markdown
+    )
+    assert (
+        "| Threshold | Components | Top sizes | Giant % | SLR | Singleton % | State |"
+        not in markdown
+    )
     assert "## Candidate Lenses" in markdown
-    assert "| Threshold | Kind | Tier | Components | Top sizes | Giant % | SLR | Singleton % | Why |" in markdown
+    assert (
+        "| Threshold | Kind | Tier | Components | Top sizes | Giant % | SLR | Singleton % | Why |"
+        in markdown
+    )
     assert "- H0 longest plateau:" in markdown
     assert "- Current construction morphology:" in markdown
     assert "- H0 plateau morphology:" in markdown
@@ -2016,7 +2027,7 @@ def test_threshold_next_tools_are_contextual_for_giant_tail():
         }
     )
 
-    assert lines[0].startswith("- `generate_cluster_dossier(method=\"spectral\")`")
+    assert lines[0].startswith('- `generate_cluster_dossier(method="spectral")`')
     assert "dominant component" in lines[0]
     assert "only when the tail/outlier components" in lines[1]
 
@@ -2059,13 +2070,16 @@ def test_threshold_next_tools_ignore_low_tier_candidates_for_giant_tail():
                 "singleton_fraction": 0.04,
             },
             "threshold_candidates": [
-                {"interpretability_tier": "giant_component_with_dust", "threshold": 0.31},
+                {
+                    "interpretability_tier": "giant_component_with_dust",
+                    "threshold": 0.31,
+                },
                 {"interpretability_tier": "exploratory", "threshold": 0.42},
             ],
         }
     )
 
-    assert "method=\"spectral\"" in lines[0]
+    assert 'method="spectral"' in lines[0]
     assert "only when the tail/outlier components" in lines[1]
 
 
@@ -2275,7 +2289,10 @@ def test_finalization_gate_blocks_when_only_dusty_lens_exists():
         config_yaml="sweep: {}",
         threshold_curve_summary={
             "threshold_candidates": [
-                {"interpretability_tier": "giant_component_with_dust", "threshold": 0.31},
+                {
+                    "interpretability_tier": "giant_component_with_dust",
+                    "threshold": 0.31,
+                },
                 {"interpretability_tier": "weak_candidate", "threshold": 0.4},
             ]
         },

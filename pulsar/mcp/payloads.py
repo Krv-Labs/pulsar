@@ -542,7 +542,7 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
             threshold = action.get("interpretation_edge_weight_threshold")
             command = (
                 f"{action.get('tool', 'generate_cluster_dossier')}"
-                f"(method=\"{action.get('method', 'components')}\""
+                f'(method="{action.get("method", "components")}"'
             )
             if threshold is not None:
                 command += (

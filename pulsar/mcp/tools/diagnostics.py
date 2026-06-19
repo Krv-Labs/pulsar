@@ -114,9 +114,7 @@ def _component_morphology(metrics: dict[str, Any], *, detail: str) -> dict[str, 
     entropy = float(-(probs * np.log(probs + 1e-12)).sum()) if len(probs) else 0.0
     normalized_entropy = entropy / np.log(len(sizes)) if len(sizes) > 1 else 0.0
     top_two_balance = (
-        1.0 - abs(largest - second) / max(largest + second, 1)
-        if second
-        else 0.0
+        1.0 - abs(largest - second) / max(largest + second, 1) if second else 0.0
     )
     out = {
         "component_count": int(metrics.get("component_count", 0) or 0),
@@ -140,7 +138,9 @@ def _component_morphology(metrics: dict[str, Any], *, detail: str) -> dict[str, 
     return out
 
 
-def _observed_patterns(metrics: dict[str, Any], morphology: dict[str, Any]) -> list[str]:
+def _observed_patterns(
+    metrics: dict[str, Any], morphology: dict[str, Any]
+) -> list[str]:
     patterns: list[str] = []
     if int(metrics.get("n_edges", 0) or 0) == 0:
         patterns.append("empty_graph")
@@ -810,7 +810,7 @@ def _threshold_next_tool_lines(payload: dict[str, Any]) -> list[str]:
         threshold = candidate.get("threshold", candidate.get("midpoint"))
         tier = candidate.get("interpretability_tier", "candidate")
         return [
-            "- `generate_cluster_dossier(method=\"components\", "
+            '- `generate_cluster_dossier(method="components", '
             f"interpretation_edge_weight_threshold={_format_threshold_value(threshold)})` "
             f"for natural H0 components at the {tier} threshold lens.",
             '- `generate_cluster_dossier(method="spectral")` only if the question is latent structure inside a still-continuous dominant component.',

@@ -156,10 +156,7 @@ async def get_sweep_history(
         return json.dumps(payload, indent=2)
 
     if not rows:
-        return (
-            "No sweeps run yet in this session.\n\n"
-            + _sweep_history_table(rows)
-        )
+        return "No sweeps run yet in this session.\n\n" + _sweep_history_table(rows)
     if detail == "table":
         return _sweep_history_table(rows)
     if detail == "summary":
