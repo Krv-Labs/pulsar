@@ -331,6 +331,9 @@ sweep:
     seed:
       values: {list(cfg.projection.seeds)}
     center: {str(cfg.projection.center).lower()}
+  # Legacy mirror of sweep.projection (dims/seeds) for backward compatibility.
+  # sweep.projection is the source of truth; the loader ignores sweep.pca when
+  # sweep.projection is present. Kept in sync here — do not hand-edit only one.
   pca:
     dimensions:
       values: {list(cfg.projection.dimensions)}
