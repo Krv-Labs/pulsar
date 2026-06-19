@@ -70,7 +70,9 @@ async def explain_suggestion(
                 if var is not None:
                     next_var = cum_var_map.get(int(dim) + 1)
                     benefit = f" (+{next_var - var:.1%})" if next_var else ""
-                    pca_reasons.append(f"Dim {dim} captures {var:.1%} variance{benefit}.")
+                    pca_reasons.append(
+                        f"Dim {dim} captures {var:.1%} variance{benefit}."
+                    )
 
         if pca_reasons:
             explanation += f"- **PCA Dimensions {proj_dims}**: " + " ".join(pca_reasons)

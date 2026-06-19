@@ -109,7 +109,9 @@ def cosmic_to_networkx(cg, threshold: float = 0.0, scale: float = 1.0) -> nx.Gra
         graph = nx.Graph()
         graph.add_nodes_from(range(cg.n))
         graph.add_weighted_edges_from(
-            (i, j, w / scale) for i, j, w in cg.weighted_edges() if w / scale > threshold
+            (i, j, w / scale)
+            for i, j, w in cg.weighted_edges()
+            if w / scale > threshold
         )
         return graph
     adj = np.array(cg.adj, dtype=np.float64)

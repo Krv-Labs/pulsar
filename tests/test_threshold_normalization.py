@@ -17,7 +17,10 @@ from pulsar.pipeline import ThemaRS
 def _clustered_frame(seed: int = 7) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     pts = np.vstack(
-        [rng.normal(c, 0.3, (40, 4)) for c in ([0, 0, 0, 0], [8, 8, 8, 8], [16, 0, 16, 0])]
+        [
+            rng.normal(c, 0.3, (40, 4))
+            for c in ([0, 0, 0, 0], [8, 8, 8, 8], [16, 0, 16, 0])
+        ]
     )
     return pd.DataFrame(pts, columns=list("abcd"))
 
