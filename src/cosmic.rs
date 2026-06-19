@@ -6,7 +6,9 @@ use pyo3::prelude::*;
 use rand::prelude::*;
 use rand_distr::StandardNormal;
 
+use crate::ballmapper::BallMapper;
 use crate::error::PulsarError;
+use crate::minhash::{cosmic_edges_minhash, MinHashSignatures};
 use crate::pseudolaplacian::SparsePseudoLaplacian;
 
 type WeightedEdge = (usize, usize, f64);
@@ -185,6 +187,39 @@ impl CosmicGraph {
         Ok(CosmicGraph { inner })
     }
 
+    /// Build a CosmicGraph directly from ball memberships via MinHash + LSH, the
+    /// approximate construction path. Bypasses the exact pseudo-Laplacian (whose
+    /// Σ_c |B_c|² pair materialization is the real bottleneck): edge weights are
+    /// unbiased Jaccard estimates of the points' ball-sets with `Var = J(1−J)/d`.
+    ///
+    /// `d` is the signature depth (accuracy/speed knob; error is size-independent).
+    /// `seed` makes the (randomized) construction reproducible. Output is the same
+    /// sparse representation as [`from_pseudo_laplacian_sparse`], so the downstream
+    /// interpretation layer (threshold selection, components) is unchanged.
+    #[staticmethod]
+    #[pyo3(signature = (ball_maps, n, d=256, seed=42))]
+    pub fn from_ball_maps_minhash(
+        ball_maps: Vec<PyRef<BallMapper>>,
+        n: usize,
+        d: usize,
+        seed: u64,
+    ) -> PyResult<Self> {
+        if d == 0 {
+            return Err(PulsarError::InvalidParameter {
+                msg: "minhash signature depth d must be >= 1".to_string(),
+            }
+            .into());
+        }
+        let balls: Vec<&[usize]> = ball_maps
+            .iter()
+            .flat_map(|bm| bm.nodes.iter().map(|v| v.as_slice()))
+            .collect();
+        let edges = cosmic_edges_minhash(&balls, n, d, seed);
+        Ok(CosmicGraph {
+            inner: CosmicGraphInner::Sparse { n, edges },
+        })
+    }
+
     /// Spielman-Srivastava style spectral sparsifier using JL resistance sketches.
     #[pyo3(signature = (epsilon, seed=42, sketch_dim=None, sample_count=None, pcg_tol=1e-6, max_iter=1000))]
     pub fn spectral_sparsify(
@@ -348,6 +383,53 @@ impl CosmicGraph {
     #[getter]
     pub fn n_edges(&self) -> usize {
         self.inner.weighted_edges().len()
+    }
+}
+
+/// Streaming MinHash signature accumulator for memory-bounded multi-dataset
+/// construction (`fit_multi`). Folds batches of ball maps into a constant-size `d×n`
+/// signature via element-wise `min`, then builds the cosmic graph in one shot — the
+/// signature never grows with the number of ball maps, so batches can be discarded as
+/// they are consumed (matching the exact path's `merge_in_place` streaming).
+#[pyclass]
+pub struct MinHashAccumulator {
+    inner: MinHashSignatures,
+}
+
+#[pymethods]
+impl MinHashAccumulator {
+    #[new]
+    #[pyo3(signature = (n, d=256, seed=42))]
+    pub fn new(n: usize, d: usize, seed: u64) -> PyResult<Self> {
+        if d == 0 {
+            return Err(PulsarError::InvalidParameter {
+                msg: "minhash signature depth d must be >= 1".to_string(),
+            }
+            .into());
+        }
+        Ok(MinHashAccumulator {
+            inner: MinHashSignatures::new(n, d, seed),
+        })
+    }
+
+    /// Fold a batch of ball maps into the running signature.
+    pub fn accumulate(&mut self, ball_maps: Vec<PyRef<BallMapper>>) {
+        let balls: Vec<&[usize]> = ball_maps
+            .iter()
+            .flat_map(|bm| bm.nodes.iter().map(|v| v.as_slice()))
+            .collect();
+        self.inner.accumulate(&balls);
+    }
+
+    /// Build the cosmic graph (LSH banding + candidate weight estimation) from the
+    /// accumulated signature.
+    pub fn to_cosmic_graph(&self) -> CosmicGraph {
+        CosmicGraph {
+            inner: CosmicGraphInner::Sparse {
+                n: self.inner.n(),
+                edges: self.inner.edges(),
+            },
+        }
     }
 }
 
