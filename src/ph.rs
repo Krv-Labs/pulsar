@@ -397,8 +397,18 @@ pub fn find_stable_thresholds(
     // -------------------------------------------------------------------------
     // Phase 4: Select optimal threshold
     // -------------------------------------------------------------------------
+    // Prefer the longest *nontrivial* plateau (1 < components < n). The degenerate
+    // all-connected head (components == 1) and all-shattered tail (components == n,
+    // every node a singleton) carry no clustering structure. On spectrally-sparsified
+    // graphs the shattered tail is often the widest plateau, which would otherwise
+    // pick an all-singletons cut. Since `plateaus` is already sorted longest-first,
+    // the first nontrivial match is the longest one. Fall back to the longest overall
+    // only when no nontrivial plateau exists (genuinely fully connected or fully
+    // shattered at every threshold).
     let optimal_threshold = plateaus
-        .first()
+        .iter()
+        .find(|p| p.component_count > 1 && p.component_count < n)
+        .or_else(|| plateaus.first())
         .map(|p| p.midpoint())
         .unwrap_or(0.5);
 
@@ -694,6 +704,45 @@ mod tests {
 
         // Should also start with 3 components at high threshold
         assert!(result.component_counts.contains(&3));
+
+        // Fallback path: no nontrivial plateau (count is always 1 or n=3), so the
+        // selector falls back to the longest overall plateau. The result must still
+        // be a sane threshold strictly inside (0, 1).
+        assert!(result.optimal_threshold > 0.0);
+        assert!(result.optimal_threshold < 1.0);
+    }
+
+    #[test]
+    fn test_find_stable_thresholds_skips_shattered_tail() {
+        // 4 nodes where the widest plateau is the all-singleton (shattered) tail.
+        // All edges are weak and clustered near the low end so that nodes stay
+        // disconnected across most of the threshold range, then collapse abruptly.
+        // Edge (0,1)=0.15; every other pair=0.10.
+        //
+        // Component evolution as threshold τ decreases from 1.0:
+        //   τ > 0.15:        4 components (no edges admitted)     ← widest plateau (tail)
+        //   τ ∈ (0.10, 0.15]: 3 components (only 0-1 connected)   ← narrow nontrivial plateau
+        //   τ ≤ 0.10:        1 component (all weak edges admitted)
+        //
+        // The 4-component (== n) tail spans (0.15, 1.0] (~0.85 wide) and is by far
+        // the widest plateau, but it is degenerate (all singletons). The selector
+        // must skip it and land on the nontrivial 3-component plateau in (0.10, 0.15].
+        let w = arr2(&[
+            [0.0, 0.15, 0.10, 0.10],
+            [0.15, 0.0, 0.10, 0.10],
+            [0.10, 0.10, 0.0, 0.10],
+            [0.10, 0.10, 0.10, 0.0],
+        ]);
+
+        let result = find_stable_thresholds(&w, 100).unwrap();
+
+        // The all-singleton tail (component_count == n == 4) is the widest plateau.
+        assert_eq!(result.plateaus[0].component_count, 4);
+
+        // But the selected threshold must fall inside the nontrivial 3-component
+        // plateau (0.10, 0.15], not on the shattered tail above 0.15.
+        assert!(result.optimal_threshold > 0.10);
+        assert!(result.optimal_threshold <= 0.15);
     }
 
     #[test]

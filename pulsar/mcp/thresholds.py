@@ -220,14 +220,59 @@ def _plateau_tier(profile: dict[str, Any], metrics: dict[str, float | int]) -> s
     return "weak_candidate"
 
 
+# Fraction of the active (nontrivial) threshold range a plateau must span to be
+# considered fully "persistent". A plateau covering >= this fraction of the active
+# range saturates persistence at 1.0. Chosen at 0.25 so that roughly a quarter of
+# the meaningful threshold window is "very stable" -- this keeps persistence
+# scale-relative instead of tied to an absolute width, so spectral sparsification
+# (which compresses the meaningful window) no longer under-ranks the true plateau.
+_PERSISTENCE_ACTIVE_RANGE_FRACTION = 0.25
+
+
+def _active_threshold_range(
+    thresholds: list[float],
+    component_counts: list[int],
+) -> float:
+    """Span of thresholds over which the component count is nontrivial.
+
+    "Nontrivial" mirrors ``ph.rs`` optimal-threshold selection: a count strictly
+    between 1 (fully connected) and ``n`` (fully fragmented). The active range is
+    the width of the threshold window where ``1 < component_count < n``; the
+    cliff regions where everything is connected or everything is a singleton are
+    excluded. Returns 0.0 if no such window exists.
+    """
+    if not thresholds or not component_counts:
+        return 0.0
+    n_max = max(int(c) for c in component_counts)
+    nontrivial = [
+        float(t)
+        for t, c in zip(thresholds, component_counts, strict=False)
+        if 1 < int(c) < n_max
+    ]
+    if not nontrivial:
+        return 0.0
+    return abs(max(nontrivial) - min(nontrivial))
+
+
 def _rank_plateau_candidate(
     *,
     plateau_width: float,
     profile: dict[str, Any],
     metrics: dict[str, float | int],
     policy: str,
+    active_range: float | None = None,
 ) -> float:
-    persistence = min(max(float(plateau_width) / 0.05, 0.0), 1.0)
+    # Persistence is the plateau width as a fraction of the active threshold range
+    # (the window where structure is nontrivial), not a fixed absolute width. This
+    # keeps ranking scale-adaptive: after sparsification the active window narrows,
+    # so a clean-but-narrow plateau still scores as persistent. Falls back to the
+    # legacy absolute scale (0.05) only when the active range is unavailable/zero.
+    eps = 1e-9
+    if active_range and active_range > eps:
+        denom = max(float(active_range) * _PERSISTENCE_ACTIVE_RANGE_FRACTION, eps)
+    else:
+        denom = 0.05
+    persistence = min(max(float(plateau_width) / denom, 0.0), 1.0)
     balance = float(metrics["top_two_balance"])
     coverage = float(metrics["nontrivial_mass_fraction"])
     entropy = float(metrics["component_size_entropy"])
@@ -290,15 +335,42 @@ def _candidate_use_guidance(
     )
 
 
+def _active_range_from_plateaus(plateaus: list[Any], n_nodes: int) -> float:
+    """Approximate the active (nontrivial) threshold range from plateaus alone.
+
+    Used when explicit ``thresholds``/``component_counts`` are not threaded in.
+    Each plateau covers ``[end_threshold, start_threshold]`` with a constant
+    ``component_count``; we take the union span of plateaus whose count is
+    nontrivial (``1 < count < n``). This is an approximation of the per-threshold
+    computation in ``_active_threshold_range`` -- the fuller approach is to pass
+    the raw ``thresholds``/``component_counts`` (see ``agent_threshold_options``),
+    which avoids relying on plateau boundaries lining up with the true window.
+    """
+    bounds: list[float] = []
+    for plateau in plateaus:
+        count = int(plateau.component_count)
+        if 1 < count < max(n_nodes, 2):
+            bounds.append(float(plateau.start_threshold))
+            bounds.append(float(plateau.end_threshold))
+    if not bounds:
+        return 0.0
+    return abs(max(bounds) - min(bounds))
+
+
 def plateau_threshold_candidates(
     adj: ThresholdGraph,
     plateaus: list[Any],
     *,
     policy: str = "balanced",
     max_candidates: int = 3,
+    active_range: float | None = None,
 ) -> list[dict[str, Any]]:
     if policy not in THRESHOLD_CANDIDATE_POLICIES:
         raise ValueError(f"unknown threshold candidate policy: {policy}")
+
+    n_nodes = int(_threshold_graph_shape(adj)[0])
+    if active_range is None:
+        active_range = _active_range_from_plateaus(plateaus, n_nodes)
 
     candidates = []
     for plateau in plateaus:
@@ -312,6 +384,7 @@ def plateau_threshold_candidates(
             profile=profile,
             metrics=metrics,
             policy=policy,
+            active_range=active_range,
         )
         best_for, avoid_for, why = _candidate_use_guidance(
             tier,
@@ -538,11 +611,15 @@ def agent_threshold_options(
 ) -> dict[str, Any]:
     n_nodes = int(_threshold_graph_shape(adj)[0])
     stable_cap, transition_cap = _policy_caps(policy, max_candidates)
+    # Exact active (nontrivial) range from the raw component curve; threaded into
+    # plateau ranking so persistence is relative to the meaningful window.
+    active_range = _active_threshold_range(thresholds, component_counts)
     stable_candidates = plateau_threshold_candidates(
         adj,
         plateaus,
         policy=policy,
         max_candidates=stable_cap,
+        active_range=active_range,
     )
     transition_candidates = transition_adjacent_candidates(
         adj,
