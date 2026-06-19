@@ -27,6 +27,8 @@ ALLOWED_COSMIC_GRAPH_KEYS = frozenset(
         "sparsify_sample_count",
         "sparsify_pcg_tol",
         "sparsify_max_iter",
+        "minhash_d",
+        "minhash_seed",
     }
 )
 LEGACY_COSMIC_GRAPH_THRESHOLD_KEY = "threshold"
@@ -141,6 +143,15 @@ class CosmicGraphSpec:
     sparsify_sample_count: int | None = None
     sparsify_pcg_tol: float = 1e-6
     sparsify_max_iter: int = 1000
+    # MinHash/LSH approximate construction. The cosmic graph is built from MinHash
+    # signatures of each point's ball-set rather than exact co-occurrence counts,
+    # replacing the O(Σ|B_c|²) pair materialization with an O(d·M) sketch. Edge
+    # weights are unbiased Jaccard estimates with Var = J(1−J)/d. `minhash_d` is the
+    # signature depth (accuracy/speed/memory knob; error is size-independent — see
+    # pulsar.mcp.minhash_advisor); `minhash_seed` makes the randomized construction
+    # reproducible. Defaults need no tuning.
+    minhash_d: int = 256
+    minhash_seed: int = 42
 
 
 @dataclass
@@ -261,6 +272,8 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         ),
         sparsify_pcg_tol=float(cg_raw.get("sparsify_pcg_tol", 1e-6)),
         sparsify_max_iter=int(cg_raw.get("sparsify_max_iter", 1000)),
+        minhash_d=int(cg_raw.get("minhash_d", 256)),
+        minhash_seed=int(cg_raw.get("minhash_seed", 42)),
     )
 
     # output section
@@ -359,6 +372,8 @@ cosmic_graph:
   sparsify_sample_count: {sparsify_sample_count}
   sparsify_pcg_tol: {cfg.cosmic_graph.sparsify_pcg_tol}
   sparsify_max_iter: {cfg.cosmic_graph.sparsify_max_iter}
+  minhash_d: {cfg.cosmic_graph.minhash_d}
+  minhash_seed: {cfg.cosmic_graph.minhash_seed}
 output:
   n_reps: {cfg.n_reps}
 """

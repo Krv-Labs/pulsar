@@ -15,9 +15,9 @@ import pandas as pd
 from pulsar._pulsar import (
     BallMapper,
     CosmicGraph,
+    MinHashAccumulator,
     StabilityResult,
     StandardScaler,
-    accumulate_pseudo_laplacians_sparse,
     ball_mapper_grid,
     find_stable_thresholds_sparse,
     jl_grid,
@@ -177,14 +177,20 @@ class ThemaRS:
         self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)
         _notify()  # ball_mapper
 
-        # 7. Accumulate pseudo-Laplacians as a sparse COO (Rust parallel, no n×n alloc)
-        galactic_L = accumulate_pseudo_laplacians_sparse(self._ball_maps, n)
-        _notify()  # laplacian
-
-        # 8. CosmicGraph: build the (sparse-backed) graph, sparsify if opted-in, threshold.
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
-            galactic_L, 0.0
+        # 7. CosmicGraph construction via MinHash/LSH (Rust parallel). This bypasses
+        # the exact pseudo-Laplacian whose Σ|B_c|² pair materialization is the real
+        # bottleneck: edge weights are unbiased Jaccard estimates of each point's
+        # ball-set (Var = J(1−J)/d). The signature build + LSH carry the old
+        # "laplacian" stage budget; finalize/threshold carry the "cosmic" budget.
+        self._dense_cosmic_rust = CosmicGraph.from_ball_maps_minhash(
+            self._ball_maps,
+            n,
+            cfg.cosmic_graph.minhash_d,
+            cfg.cosmic_graph.minhash_seed,
         )
+        _notify("cosmic (minhash)")  # laplacian budget → minhash construction
+
+        # 8. Sparsify if opted-in, then resolve threshold and build the NetworkX graph.
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
         self._finalize_cosmic_graph(sparse, cfg.cosmic_graph.construction_threshold)
         _notify()  # cosmic (always last, always 1.0)
@@ -318,9 +324,10 @@ class ThemaRS:
             progress_callback(label_override or label, frac)
 
         all_ball_maps: list[BallMapper] = []
-        # Sparse co-membership accumulator (SparsePseudoLaplacian), fused across
-        # datasets via merge_in_place — never allocates an n×n matrix.
-        galactic_L_accum: Any | None = None
+        # Streaming MinHash signature accumulator, folded across datasets via
+        # element-wise min — constant d×n memory, never allocates an n×n matrix and
+        # never holds all ball maps. Created lazily once n is known.
+        minhash_accum: MinHashAccumulator | None = None
         n: int | None = None
         ref_layout = None
 
@@ -376,13 +383,15 @@ class ThemaRS:
                     batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
                     if store_ball_maps:
                         all_ball_maps.extend(batch_ball_maps)
-                    batch_spl = accumulate_pseudo_laplacians_sparse(batch_ball_maps, n)
-                    if galactic_L_accum is None:
-                        galactic_L_accum = batch_spl
-                    else:
-                        galactic_L_accum.merge_in_place(batch_spl)
+                    if minhash_accum is None:
+                        minhash_accum = MinHashAccumulator(
+                            n,
+                            cfg.cosmic_graph.minhash_d,
+                            cfg.cosmic_graph.minhash_seed,
+                        )
+                    minhash_accum.accumulate(batch_ball_maps)
                     # Release batch memory aggressively in notebook contexts
-                    del batch_ball_maps, batch_spl
+                    del batch_ball_maps
                     gc.collect()
 
                 # Drop per-dataset intermediates promptly
@@ -392,15 +401,15 @@ class ThemaRS:
 
         self._ball_maps = all_ball_maps if store_ball_maps else []
 
-        if galactic_L_accum is None or n is None:
+        if minhash_accum is None or n is None:
             raise RuntimeError("No datasets were processed")
 
-        galactic_L = galactic_L_accum
-        _notify()  # laplacian
+        # Build the cosmic graph from the accumulated MinHash signature (LSH banding +
+        # candidate weight estimation). The signature was folded in incrementally; this
+        # final step carries the old "laplacian" stage budget.
+        self._dense_cosmic_rust = minhash_accum.to_cosmic_graph()
+        _notify("cosmic (minhash)")  # laplacian budget → minhash LSH/estimate
 
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
-            galactic_L, 0.0
-        )
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
         self._finalize_cosmic_graph(sparse, cfg.cosmic_graph.construction_threshold)
         _notify()  # cosmic (always last, always 1.0)
