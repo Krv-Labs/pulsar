@@ -48,8 +48,12 @@ Reveal the dataset's topology; do not force convenient clusters.
    session; you still own the next-config decision. Prefer 2-3 deliberate
    sweeps over one brittle perfect-looking run.
 8. Inspect payloads summary-first. Use `generate_cluster_dossier(detail="summary")`
-   for routine exploration. Treat `detail="standard"`, `detail="full"`, and
-   `get_topological_skeleton(detail="full")` as late-stage inspection modes.
+   for routine exploration. Treat `detail="standard"` and `detail="full"` as
+   late-stage dossier modes. For graph structure, use
+   `get_topological_skeleton(detail="nodes")` for the compact hub/bridge summary,
+   `detail="edges"` for capped raw edges, `detail="full_nodes"` for capped raw
+   nodes, and `detail="full"` only when both raw graph arrays and config YAML are
+   needed.
 
 ## GRID GEOMETRY & EXPERT AGENT AUTONOMY
 The default config returned by `create_config` is ONLY a baseline starting guess. As the expert in the room, you have full autonomy—and the duty—to actively override, widen, and shift these parameters based on diagnostic feedback.
@@ -65,7 +69,7 @@ The default config returned by `create_config` is ONLY a baseline starting guess
   domain unless you have a diagnostic reason to test a boundary. If the graph is
   shattered, raise the upper epsilon bound. If it is a dense hairball, lower the
   upper bound or shift the PCA grid upward.
-- **Use the Tools**: `refine_active_config` supports quick PCA/epsilon edits,
+- **Use the Tools**: `refine_config` supports quick PCA/epsilon edits,
   `run_topological_sweep` reports metric diffs, and `compare_sweeps` compares
   run IDs. Use them to iteratively find a representative grid.
 
@@ -87,6 +91,17 @@ different stages. Do not confuse them.
   stable plateau. Override only if `diagnose_cosmic_graph` returns an
   `EMPTY_GRAPH` / `HIGH_SINGLETONS` advisory (lower it) or density > 0.8
   (raise it), then re-run the sweep.
+  Use `get_threshold_stability_curve` for threshold options. Its
+  `threshold_candidate_policy` is an interpretation lens, not an optimization
+  target:
+  - `balanced`: default MCP choice for general analysis.
+  - `report_ready`: use before final cohort naming or HTML report claims.
+  - `detail_seeking`: use when the user asks for more detailed clusters or
+    rare archetypes; singleton-heavy outputs are exploratory.
+  - `outlier_mining`: use only when the user asks for anomalies, frontier
+    cases, or singleton residuals.
+  Do not loop over policies to maximize a score; pick the policy from the
+  user's intent and validate with feature evidence.
 
 - **Interpretation threshold** (`interpretation_edge_weight_threshold` in
   `generate_cluster_dossier`): applied AFTER the graph is built. Slices the
@@ -113,8 +128,9 @@ which surface clustering used.
 9. Report: `export_html_report`. CRITICAL: YOU MUST pass synthesized,
    highly informative `cluster_names` based on Step 8. Names must be
    descriptive (e.g., 'Male Gentoos w/ Large Flippers'). Passing
-   `cluster_names` is the difference between a raw Data Dump and a
-   high-impact Research Paper.
+   `cluster_names` as a flat JSON object like
+   `{"0": "Male Gentoos w/ Large Flippers"}` is the difference between a raw
+   Data Dump and a high-impact Research Paper.
 
 ## PHILOSOPHY
 - Pulsar is a multi-scale aggregator, not a tuner. More grid points =
