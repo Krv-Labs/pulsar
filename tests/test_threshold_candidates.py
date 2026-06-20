@@ -229,6 +229,49 @@ def test_agent_threshold_options_threads_active_range():
     assert stable[0]["threshold"] == _CLEAN.midpoint
 
 
+def test_balanced_options_exclude_near_singleton_frontier_lenses():
+    n = 100
+    edges = _ring_edges(0, 49, 0.4)
+    edges += _ring_edges(49, 98, 0.4)
+    edges.append((98, 99, 0.98))
+    graph = prepare_threshold_graph_from_edges(n, edges)
+
+    singleton_frontier = FakePlateau(
+        start_threshold=1.0,
+        end_threshold=0.95,
+        component_count=99,
+    )
+    clean = FakePlateau(
+        start_threshold=0.45,
+        end_threshold=0.25,
+        component_count=3,
+    )
+    thresholds = [1.0, 0.98, 0.95, 0.45, 0.35, 0.25, 0.0]
+    component_counts = [100, 99, 99, 3, 3, 3, 1]
+
+    balanced = agent_threshold_options(
+        graph,
+        [singleton_frontier, clean],
+        thresholds,
+        component_counts,
+        policy="balanced",
+    )
+    assert all(
+        float(candidate["component_mass_profile"]["singleton_fraction"]) < 0.95
+        for candidate in balanced["candidates"]
+        if "component_mass_profile" in candidate
+    )
+    assert all(
+        candidate["threshold"] != singleton_frontier.midpoint
+        for candidate in balanced["candidates"]
+    )
+
+    assert any(
+        candidate["threshold"] == singleton_frontier.midpoint
+        for candidate in balanced["stable_plateau_candidates"]
+    )
+
+
 # --- significant_component_sizes: relative, gap-based significance --------------
 #
 # Replaces the old absolute size-floor (max(3, min(sqrt(n), 0.5%*n))) as the test

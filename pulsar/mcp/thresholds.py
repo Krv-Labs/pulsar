@@ -348,6 +348,7 @@ def _plateau_tier(profile: dict[str, Any], metrics: dict[str, float | int]) -> s
 # scale-relative instead of tied to an absolute width, so spectral sparsification
 # (which compresses the meaningful window) no longer under-ranks the true plateau.
 _PERSISTENCE_ACTIVE_RANGE_FRACTION = 0.25
+_SINGLETON_FRONTIER_FRACTION = 0.95
 
 
 def _active_threshold_range(
@@ -454,6 +455,18 @@ def _candidate_use_guidance(
         ["report_ready"],
         "Candidate has weak cohort structure; treat as a diagnostic lens only.",
     )
+
+
+def _candidate_singleton_fraction(candidate: dict[str, Any]) -> float:
+    if "component_mass_profile" in candidate:
+        return float(candidate["component_mass_profile"].get("singleton_fraction", 0.0))
+    return float(candidate.get("singleton_fraction", 0.0))
+
+
+def _candidate_eligible_for_policy(candidate: dict[str, Any], policy: str) -> bool:
+    if policy == "outlier_mining":
+        return True
+    return _candidate_singleton_fraction(candidate) < _SINGLETON_FRONTIER_FRACTION
 
 
 def _active_range_from_plateaus(plateaus: list[Any], n_nodes: int) -> float:
@@ -753,11 +766,19 @@ def agent_threshold_options(
     # Pre-deduplicate individual lists for cleaner sub-components
     stable_candidates = _deduplicate_candidates(stable_candidates, n_nodes)
     transition_candidates = _deduplicate_candidates(transition_candidates, n_nodes)
+    selectable_stable_candidates = [
+        row for row in stable_candidates if _candidate_eligible_for_policy(row, policy)
+    ]
+    selectable_transition_candidates = [
+        row
+        for row in transition_candidates
+        if _candidate_eligible_for_policy(row, policy)
+    ]
 
     if policy == "detail_seeking":
-        candidates = transition_candidates + [
+        candidates = selectable_transition_candidates + [
             row
-            for row in stable_candidates
+            for row in selectable_stable_candidates
             if row["interpretability_tier"]
             not in {"giant_component_with_dust", "weak_candidate"}
         ]
@@ -768,18 +789,22 @@ def agent_threshold_options(
     elif policy == "report_ready":
         candidates = [
             row
-            for row in stable_candidates
+            for row in selectable_stable_candidates
             if row["interpretability_tier"] in {"report_ready", "balanced"}
         ]
         strategy = "stable_plateau"
     else:
         useful_stable = [
             row
-            for row in stable_candidates
+            for row in selectable_stable_candidates
             if row["interpretability_tier"]
             not in {"giant_component_with_dust", "weak_candidate"}
         ]
-        candidates = useful_stable or transition_candidates[:2] or stable_candidates[:1]
+        candidates = (
+            useful_stable
+            or selectable_transition_candidates[:2]
+            or selectable_stable_candidates[:1]
+        )
         strategy = "stable_plateau" if useful_stable else "transition_adjacent"
 
     # Post-deduplicate merged recommendations list to ensure distinct options are presented
