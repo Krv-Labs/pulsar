@@ -303,14 +303,27 @@ async def run_topological_sweep(
             logger.info("Reusing cached PCA embeddings (fingerprint match)")
 
         loop = asyncio.get_running_loop()
+        progress_futures = []
+
+        async def report_progress(stage: str, fraction: float) -> None:
+            if ctx is None:
+                return
+            await ctx.report_progress(progress=fraction, total=1.0, message=stage)
 
         def progress_callback(stage: str, fraction: float) -> None:
             if ctx is None:
                 return
+            scaled_fraction = min(float(fraction), 1.0) * 0.9
             try:
-                asyncio.run_coroutine_threadsafe(
-                    ctx.report_progress(progress=fraction, total=1.0, message=stage),
-                    loop,
+                progress_futures.append(
+                    asyncio.run_coroutine_threadsafe(
+                        ctx.report_progress(
+                            progress=scaled_fraction,
+                            total=1.0,
+                            message=stage,
+                        ),
+                        loop,
+                    )
                 )
             except RuntimeError:
                 pass
@@ -320,6 +333,12 @@ async def run_topological_sweep(
             _precomputed_embeddings=precomputed,
             progress_callback=progress_callback,
         )
+        if progress_futures:
+            await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in progress_futures),
+                return_exceptions=True,
+            )
+        await report_progress("finalize session", 0.91)
 
         session.model = model
         bound_data_path = _normalize_data_path(cfg.data) if cfg.data else None
@@ -341,9 +360,11 @@ async def run_topological_sweep(
         saved_path = _auto_save_config(cfg) if save_config else None
 
         # Calculate metrics for diff
+        await report_progress("diagnostics", 0.92)
         current_metrics_obj = diagnose_model(model)
         current_metrics = dataclasses.asdict(current_metrics_obj)
         graph_summary = _build_graph_summary(model)
+        await report_progress("threshold stability summary", 0.95)
         from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
 
         # Blocking Rust stability analysis — keep it off the event loop, mirroring
@@ -354,6 +375,7 @@ async def run_topological_sweep(
             detail="summary",
             threshold_candidate_policy="balanced",
         )
+        await report_progress("build response", 0.97)
 
         # Build structured diff
         persisted_dataset_id = bound_dataset_id
@@ -402,6 +424,7 @@ async def run_topological_sweep(
                 dataset_id=persisted_dataset_id,
             )
         )
+        await report_progress("persist run", 0.98)
         run_record = registry.save_run(
             dataset_id=persisted_dataset_id,
             config_yaml=current_yaml,
@@ -411,6 +434,7 @@ async def run_topological_sweep(
             threshold_stability_summary=threshold_curve_summary,
         )
         session.latest_run_id = run_record.run_id
+        await report_progress("format response", 0.99)
 
         # Build configuration advisory message
         if save_config and saved_path:
@@ -472,7 +496,9 @@ async def run_topological_sweep(
                     component_limit=component_limit,
                     include_config_yaml=include_config_yaml,
                 )
+                await report_progress("complete", 1.0)
                 return sweep_payload_to_markdown(summary_payload)
+            await report_progress("complete", 1.0)
             return json.dumps(response, indent=2)
 
         summary_payload = build_sweep_summary_payload(
@@ -480,6 +506,7 @@ async def run_topological_sweep(
             component_limit=component_limit,
             include_config_yaml=include_config_yaml,
         )
+        await report_progress("complete", 1.0)
         if response_format == "markdown":
             return sweep_payload_to_markdown(summary_payload)
         return json.dumps(summary_payload, indent=2)

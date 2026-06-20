@@ -1370,6 +1370,62 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert not markdown.lstrip().startswith("{")
 
 
+def test_run_topological_sweep_reserves_progress_for_finalization(tmp_path):
+    """MCP progress should not hit 100% until post-fit finalization is done."""
+
+    class RecordingContext:
+        session_id = "progress-finalization"
+
+        def __init__(self):
+            self.updates: list[tuple[str, float]] = []
+
+        async def report_progress(self, *, progress, total, message):
+            assert total == 1.0
+            self.updates.append((message, progress))
+
+    _sessions.clear()
+    ctx = RecordingContext()
+    csv_path = _write_dataset(tmp_path)
+    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(create_config(dataset["dataset_id"]))
+    )
+    refined = json.loads(
+        asyncio.run(
+            refine_config(
+                config_yaml,
+                {
+                    "projection_method": "pca",
+                    "pca_dims": [2],
+                    "epsilon_values": [0.5],
+                    "construction_threshold": "auto",
+                    "n_reps": 1,
+                },
+            )
+        )
+    )["config_yaml"]
+
+    result = json.loads(
+        asyncio.run(
+            run_topological_sweep(
+                config_yaml=refined,
+                dataset_id=dataset["dataset_id"],
+                response_format="json",
+                ctx=ctx,
+            )
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert ctx.updates[-1] == ("complete", 1.0)
+    assert all(progress < 1.0 for _, progress in ctx.updates[:-1])
+    assert any(
+        message == "stability" and progress < 1.0 for message, progress in ctx.updates
+    )
+    assert "threshold stability summary" in [message for message, _ in ctx.updates]
+    assert "persist run" in [message for message, _ in ctx.updates]
+
+
 def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
