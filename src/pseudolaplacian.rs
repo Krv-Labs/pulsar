@@ -94,21 +94,93 @@ pub struct SparsePseudoLaplacian {
 /// dropping any pair whose total is zero. Produces a deterministic edge list.
 fn sort_and_merge(mut coo: Vec<(usize, usize, i64)>) -> Vec<(usize, usize, i64)> {
     coo.sort_unstable_by_key(|&(i, j, _)| (i, j));
-    let mut out: Vec<(usize, usize, i64)> = Vec::with_capacity(coo.len());
-    for (i, j, c) in coo {
-        match out.last_mut() {
-            Some(last) if last.0 == i && last.1 == j => last.2 += c,
-            _ => out.push((i, j, c)),
+    merge_sorted_in_place(coo)
+}
+
+fn merge_sorted_in_place(mut coo: Vec<(usize, usize, i64)>) -> Vec<(usize, usize, i64)> {
+    if coo.is_empty() {
+        return coo;
+    }
+
+    let mut write = 0;
+    for read in 1..coo.len() {
+        let (i, j, c) = coo[read];
+        if coo[write].0 == i && coo[write].1 == j {
+            coo[write].2 += c;
+        } else {
+            write += 1;
+            if write != read {
+                coo[write] = (i, j, c);
+            }
         }
     }
-    out.retain(|&(_, _, c)| c != 0);
+    coo.truncate(write + 1);
+    coo.retain(|&(_, _, c)| c != 0);
+    coo
+}
+
+fn push_merged_edge(out: &mut Vec<(usize, usize, i64)>, edge: (usize, usize, i64)) {
+    if edge.2 == 0 {
+        return;
+    }
+    match out.last_mut() {
+        Some(last) if last.0 == edge.0 && last.1 == edge.1 => {
+            last.2 += edge.2;
+            if last.2 == 0 {
+                out.pop();
+            }
+        }
+        _ => out.push(edge),
+    }
+}
+
+fn merge_sorted(
+    left: Vec<(usize, usize, i64)>,
+    right: Vec<(usize, usize, i64)>,
+) -> Vec<(usize, usize, i64)> {
+    if left.is_empty() {
+        return right;
+    }
+    if right.is_empty() {
+        return left;
+    }
+
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < left.len() && j < right.len() {
+        let l = left[i];
+        let r = right[j];
+        match (l.0, l.1).cmp(&(r.0, r.1)) {
+            std::cmp::Ordering::Less => {
+                push_merged_edge(&mut out, l);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                push_merged_edge(&mut out, r);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                push_merged_edge(&mut out, (l.0, l.1, l.2 + r.2));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    for &edge in &left[i..] {
+        push_merged_edge(&mut out, edge);
+    }
+    for &edge in &right[j..] {
+        push_merged_edge(&mut out, edge);
+    }
     out
 }
 
 /// Sparse counterpart of [`pseudo_laplacian_inner`]. Emits one `(i, j, 1)` per
 /// co-occurring pair (`i < j`) per ball and a `+1` diagonal bump per membership.
 /// Duplicate pairs (a pair sharing several balls within one map) are summed by
-/// the caller's merge.
+/// the local merge before returning.
 fn pseudo_laplacian_inner_sparse(nodes: &[Vec<usize>], n: usize) -> SparseLaplacianContribution {
     let mut diag = vec![0i64; n];
     let mut offdiag = Vec::new();
@@ -129,7 +201,10 @@ fn pseudo_laplacian_inner_sparse(nodes: &[Vec<usize>], n: usize) -> SparseLaplac
             }
         }
     }
-    SparseLaplacianContribution { diag, offdiag }
+    SparseLaplacianContribution {
+        diag,
+        offdiag: sort_and_merge(offdiag),
+    }
 }
 
 #[pymethods]
@@ -173,11 +248,10 @@ impl SparsePseudoLaplacian {
         for (acc, &add) in self.diag.iter_mut().zip(other.diag.iter()) {
             *acc += add;
         }
-        let mut combined =
-            Vec::with_capacity(self.offdiag.len() + other.offdiag.len());
-        combined.append(&mut self.offdiag);
-        combined.extend_from_slice(&other.offdiag);
-        self.offdiag = sort_and_merge(combined);
+        self.offdiag = merge_sorted(
+            std::mem::take(&mut self.offdiag),
+            other.offdiag.clone(),
+        );
         Ok(())
     }
 }
@@ -187,8 +261,9 @@ impl SparsePseudoLaplacian {
 /// O(n) diagonal, never allocating an n×n matrix.
 ///
 /// Reduce strategy: each ball map maps to a thread-local `(diag, offdiag)`
-/// contribution; the rayon reduce concatenates COO buffers (memcpy-cheap) and adds
-/// diagonals; a single final sort+merge dedups the off-diagonal deterministically.
+/// contribution; every contribution is sorted/merged locally, and the rayon reduce
+/// merges sorted COO buffers while adding diagonals. This avoids carrying raw
+/// duplicate co-membership pairs across the whole sweep.
 #[pyfunction]
 pub fn accumulate_pseudo_laplacians_sparse<'py>(
     _py: Python<'py>,
@@ -205,17 +280,17 @@ pub fn accumulate_pseudo_laplacians_sparse<'py>(
         })
         .reduce(
             || (vec![0i64; n], Vec::new()),
-            |mut acc, mut item| {
-                // Sum diagonals, concat off-diagonals (deduped once at the end).
+            |mut acc, item| {
+                // Sum diagonals and merge already-deduped off-diagonal buffers.
                 for (a, b) in acc.0.iter_mut().zip(item.0.iter()) {
                     *a += *b;
                 }
-                acc.1.append(&mut item.1);
+                acc.1 = merge_sorted(acc.1, item.1);
                 acc
             },
         );
 
-    let offdiag = sort_and_merge(raw_offdiag);
+    let offdiag = raw_offdiag;
     Ok(SparsePseudoLaplacian { n, diag, offdiag })
 }
 
