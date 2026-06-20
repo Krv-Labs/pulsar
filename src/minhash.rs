@@ -92,7 +92,7 @@ fn choose_bands(d: usize, tau: f64) -> (usize, usize) {
     let mut best_b = d;
     let mut best_score = f64::INFINITY;
     for r in 1..=d {
-        if d % r != 0 {
+        if !d.is_multiple_of(r) {
             continue;
         }
         let b = d / r;

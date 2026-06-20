@@ -56,19 +56,16 @@ def _assert_approximate_parity(model) -> None:
     est = {(i, j): w for i, j, w in model.dense_cosmic_rust.weighted_edges()}
 
     n = W.shape[0]
-    strong = [
-        (i, j)
-        for i in range(n)
-        for j in range(i + 1, n)
-        if W[i, j] >= _STRONG
-    ]
+    strong = [(i, j) for i in range(n) for j in range(i + 1, n) if W[i, j] >= _STRONG]
     assert strong, "expected some strong reference edges"
 
     recall = sum(1 for e in strong if e in est) / len(strong)
     assert recall >= _MIN_RECALL, f"recall {recall:.3f} < {_MIN_RECALL}"
 
     errs = [abs(est[(i, j)] - W[i, j]) for (i, j) in strong if (i, j) in est]
-    assert np.mean(errs) < _MAX_MEAN_WEIGHT_ERR, f"mean weight error {np.mean(errs):.4f}"
+    assert np.mean(errs) < _MAX_MEAN_WEIGHT_ERR, (
+        f"mean weight error {np.mean(errs):.4f}"
+    )
 
 
 def test_pipeline_minhash_approximates_dense_reference():
