@@ -1833,6 +1833,29 @@ def test_diagnose_cosmic_graph_returns_structured_observables(tmp_path):
     assert "Risk factors:" in markdown
 
 
+def test_component_morphology_counts_gap_separated_minority_in_large_graph():
+    # Regression: a 101-node minority cohort, cleanly gap-separated from the dust
+    # tail (101 -> 8), in a 100k-node graph. The old absolute floor (316 at n=100k)
+    # discarded it; relative gap-based significance keeps it as a real component.
+    from pulsar.mcp.tools.diagnostics import _component_morphology
+
+    metrics = {
+        "component_sizes": [83000, 101, 8, 8, 5, 4],
+        "n_nodes": 100000,
+        "component_count": 6,
+        "singleton_count": 0,
+        "singleton_fraction": 0.0,
+        "giant_fraction": 0.83,
+    }
+    morph = _component_morphology(metrics, detail="summary")
+    assert morph["nontrivial_component_count"] == 2  # giant + the 101-node mode
+    assert morph["tail_component_count"] == 4  # the 8/8/5/4 dust
+
+    # A smooth tail with no clean cliff stays dust: only the giant is nontrivial.
+    smooth = dict(metrics, component_sizes=[83000, 50, 48, 45, 43, 40])
+    assert _component_morphology(smooth, detail="summary")["nontrivial_component_count"] == 1
+
+
 def test_graph_artifact_estimate_build_and_staleness(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path, rows=24)

@@ -31,6 +31,7 @@ from pulsar.mcp.thresholds import (
     first_report_ready_candidate,
     mass_profile_hint,
     prepare_threshold_graph_from_edges,
+    significant_component_sizes,
     structural_breakpoints,
     threshold_morphology_profile,
     useful_component_size_floor,
@@ -103,11 +104,14 @@ def _artifact_estimate(n_nodes: int, edge_count: int, epsilon: float) -> dict[st
 
 
 def _component_morphology(metrics: dict[str, Any], *, detail: str) -> dict[str, Any]:
-    sizes = [int(size) for size in metrics.get("component_sizes", [])]
+    sizes = sorted((int(size) for size in metrics.get("component_sizes", [])), reverse=True)
     n_nodes = int(metrics.get("n_nodes", 0) or 0)
-    floor = useful_component_size_floor(n_nodes)
-    nontrivial = [size for size in sizes if size >= floor]
-    tail = [size for size in sizes if size < floor]
+    floor = useful_component_size_floor(n_nodes)  # descriptive context only
+    # Single source of truth for "real mode vs. dust": relative, gap-based
+    # significance (not the absolute n-scaled floor). significant is the size-
+    # ranked prefix, so the remainder is the dust tail.
+    nontrivial, _ = significant_component_sizes(sizes)
+    tail = sizes[len(nontrivial):]
     largest = sizes[0] if sizes else 0
     second = sizes[1] if len(sizes) > 1 else 0
     probs = np.asarray(sizes, dtype=float) / max(sum(sizes), 1)

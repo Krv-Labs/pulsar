@@ -25,7 +25,11 @@ from pulsar.mcp.thresholds import (
     _rank_plateau_candidate,
     agent_threshold_options,
     component_mass_profile,
+    first_report_ready_candidate,
     plateau_threshold_candidates,
+    prepare_threshold_graph_from_edges,
+    significant_component_sizes,
+    useful_component_size_floor,
 )
 
 
@@ -223,3 +227,137 @@ def test_agent_threshold_options_threads_active_range():
     assert stable, "expected at least one stable plateau candidate"
     # The auto/top stable candidate should be the clean plateau, not the tail.
     assert stable[0]["threshold"] == _CLEAN.midpoint
+
+
+# --- significant_component_sizes: relative, gap-based significance --------------
+#
+# Replaces the old absolute size-floor (max(3, min(sqrt(n), 0.5%*n))) as the test
+# for "is this component a real mode?". Significance is now relative to the size
+# *distribution* at the slice: a component counts when a clear multiplicative gap
+# separates the head modes from the dust tail. The motivating failure: a real
+# ~101-node minority cohort in a large (100k) graph fell below the 316-node floor
+# and was silently discarded. These cases pin the contract and its two knobs
+# (DOMINANCE=0.5, CLIFF_RATIO=3.0).
+
+
+def test_significance_rescues_minority_mode_under_giant():
+    # The headline regression: giant (83%) + a clearly gap-separated 101-node
+    # cohort (101 -> 8 is a >10x cliff) + dust. The old n-floor (316 at n=100k)
+    # dropped the 101; gap-based significance keeps it.
+    sizes = [83000, 101, 8, 8, 5, 4]
+    significant, _ = significant_component_sizes(sizes)
+    assert significant == [83000, 101]
+
+
+def test_significance_drops_pure_dust_under_giant():
+    # Same giant, but the tail is a smooth low ramp with no cliff: all dust.
+    sizes = [83000, 8, 8, 5, 4]
+    significant, _ = significant_component_sizes(sizes)
+    assert significant == [83000]
+
+
+def test_significance_treats_smooth_tail_as_dust():
+    # No internal cliff among the non-giant components -> no secondary mode,
+    # even though each tail component is well above any tiny absolute floor.
+    sizes = [83000, 50, 48, 45, 43, 40]
+    significant, _ = significant_component_sizes(sizes)
+    assert significant == [83000]
+
+
+def test_significance_keeps_coequal_clusters():
+    # No dominant blob (largest fraction < 0.5): genuine balanced multi-cluster
+    # structure -> every cluster is a real mode.
+    sizes = [200, 200, 200]
+    significant, _ = significant_component_sizes(sizes)
+    assert significant == [200, 200, 200]
+
+
+def test_significance_cuts_dust_in_coequal_regime():
+    # Co-equal head with a dust tail: the clean 200 -> 4 cliff separates modes
+    # from dust even when there is no single dominant component.
+    sizes = [200, 200, 200, 4, 4, 4]
+    significant, _ = significant_component_sizes(sizes)
+    assert significant == [200, 200, 200]
+
+
+def test_significance_keeps_multiple_minority_modes():
+    sizes = [83000, 500, 480, 7, 6]
+    significant, _ = significant_component_sizes(sizes)
+    assert significant == [83000, 500, 480]
+
+
+def test_significance_single_giant_is_one_component():
+    significant, _ = significant_component_sizes([14010])
+    assert significant == [14010]
+
+
+def test_significance_noise_gate_drops_specks_and_singletons():
+    # Tiny specks (size < 3) never count, regardless of how many there are.
+    sizes = [500, 2, 1, 1, 1]
+    significant, _ = significant_component_sizes(sizes)
+    assert significant == [500]
+
+
+def test_significance_empty_input():
+    significant, reason = significant_component_sizes([])
+    assert significant == []
+    assert isinstance(reason, str)
+
+
+# --- end-to-end: minority mode at scale on the real PH + candidate pipeline ----
+
+
+def _ring_edges(start, stop, weight, degree=4):
+    """Sparse high-weight ring+skip connectivity over nodes [start, stop)."""
+    edges, size = [], stop - start
+    for off in range(start, stop):
+        for d in range(1, degree + 1):
+            edges.append((off, start + ((off - start + d) % size), weight))
+    return edges
+
+
+def test_minority_mode_surfaces_at_scale_on_real_pipeline():
+    """A 101-node minority cohort, gap-separated from dust, must surface as a clean
+    component lens in a ~25k-node graph -- a scale where the OLD absolute floor
+    (max(3, min(sqrt(n), 0.005*n))) exceeds 101 and would have discarded it.
+
+    Drives the real find_stable_thresholds_sparse + agent_threshold_options path
+    (not synthetic metrics), so it guards the whole handoff, not just the helper.
+    """
+    from pulsar._pulsar import find_stable_thresholds_sparse
+
+    n_total, n_minority = 25000, 101
+    n_giant = int(n_total * 0.78)  # dominant but < 95%, so a mode can lift it to a lens
+
+    edges = _ring_edges(0, n_giant, 0.9)
+    edges += _ring_edges(n_giant, n_giant + n_minority, 0.9)  # intact minority
+    edges.append((0, n_giant, 0.15))  # weak giant<->minority bridge
+    nxt = n_giant + n_minority
+    while nxt + 1 < n_total:  # weak dust pairs fill the remainder
+        edges += [(0, nxt, 0.1), (nxt, nxt + 1, 0.9)]
+        nxt += 2
+
+    # Regression boundary: the legacy floor would have dropped the 101-node mode.
+    assert useful_component_size_floor(nxt) > n_minority
+
+    tg = prepare_threshold_graph_from_edges(nxt, edges)
+    stability = find_stable_thresholds_sparse(nxt, edges)
+    thresholds = [float(t) for t in stability.thresholds]
+    component_counts = [int(c) for c in stability.component_counts]
+
+    options = agent_threshold_options(
+        tg,
+        stability.top_k_plateaus(20),
+        thresholds,
+        component_counts,
+        policy="balanced",
+    )
+    clean = first_report_ready_candidate(options["candidates"])
+    assert clean is not None, "expected a report_ready/balanced component lens"
+
+    profile = component_mass_profile(tg, clean["threshold"], top_k=8)
+    significant, _ = significant_component_sizes(profile["top_component_sizes"])
+    assert any(abs(size - n_minority) <= 1 for size in significant), (
+        f"the {n_minority}-node minority must be a significant component; "
+        f"got {significant}"
+    )

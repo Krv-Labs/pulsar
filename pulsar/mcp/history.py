@@ -82,6 +82,11 @@ def _component_profile(metrics: dict[str, Any]) -> dict[str, Any]:
     sizes = sorted(sizes, reverse=True)
     giant_size = sizes[0]
     tail = sizes[1:]
+    # NOTE: this cross-run *trend* surface uses its own absolute non-giant floor
+    # and reports non-giant component counts only. It is intentionally separate
+    # from the gate/candidate significance path, which now uses the relative,
+    # gap-based thresholds.significant_component_sizes. Folding this onto that
+    # helper (preserving the non-giant framing) is a deferred consistency pass.
     nontrivial_min = max(10, math.ceil(n_total * 0.01))
     nontrivial = [size for size in tail if size >= nontrivial_min]
     small = [size for size in tail if size < nontrivial_min]

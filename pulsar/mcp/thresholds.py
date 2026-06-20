@@ -197,11 +197,64 @@ def useful_component_size_floor(n_nodes: int) -> int:
     return max(3, min(round(np.sqrt(n_nodes)), round(0.005 * n_nodes)))
 
 
+# A real cohort is defined by its position in the size *distribution* at the
+# slice, not by an absolute fraction of n. An n-scaled floor silently discards
+# genuine minority modes in large graphs (a 101-node cohort in a 100k graph), so
+# significance is purely relative: a >= this-many-fold drop between neighbouring
+# (descending) component sizes marks where the dust tail begins.
+_SIGNIFICANCE_CLIFF_RATIO = 3.0
+
+
+def significant_component_sizes(sizes: list[int]) -> tuple[list[int], str]:
+    """Components that are real modes vs. dust, judged relative to the split.
+
+    Significance is positional, not absolute. Over the descending sizes, the dust
+    tail is the contiguous run of small components at the bottom; it ends at the
+    *lowest* multiplicative cliff (a >= cliff-ratio drop between neighbours).
+    Everything above that cliff is a real mode, except a lone singleton (a single
+    node is never itself a mode). With no cliff, every component is a mode
+    (balanced / smoothly distributed structure).
+
+    The full size list -- including dust and singletons -- is scanned: the dust is
+    exactly the contrast that reveals where the modes end (a 101-node cohort sits
+    above a 2-node-dust cliff, but looks like dust if the dust is pre-filtered).
+
+    This replaces the old absolute ``useful_component_size_floor`` membership
+    test, which dropped genuine minority cohorts below an n-scaled line. It is
+    intentionally independent of ``n`` -- only the shape matters.
+
+    ``sizes`` is the top-k component sizes at one slice (any order). Real modes
+    are large, so the top-k captures them; truncating the dust tail is harmless.
+
+    Returns ``(significant_sizes_desc, reason)``. Note: a sole non-giant component
+    with no tail to contrast against reads as part of the giant (the safe "still
+    one blob" default). The fuller signal is per-component persistence across
+    neighbouring thresholds (see ``_PERSISTENCE_ACTIVE_RANGE_FRACTION``); deferred.
+    """
+    ordered = sorted((int(x) for x in sizes), reverse=True)
+    if not ordered:
+        return [], "no_components"
+
+    # Overwriting on each cliff leaves `cut` at the LOWEST (bottom-most) cliff,
+    # so only the contiguous small tail beneath it is shed as dust.
+    cut = len(ordered)
+    for i in range(len(ordered) - 1):
+        if ordered[i] / max(ordered[i + 1], 1) >= _SIGNIFICANCE_CLIFF_RATIO:
+            cut = i + 1
+    modes = [size for size in ordered[:cut] if size > 1]
+    if not modes:
+        return [], "no_modes"
+    return modes, "modes_above_dust_cliff" if cut < len(ordered) else "all_modes"
+
+
 def _mass_shape_metrics(profile: dict[str, Any]) -> dict[str, float | int]:
     n_nodes = int(profile["n_nodes"])
     top_sizes = [int(size) for size in profile["top_component_sizes"]]
+    # "Nontrivial" = a real mode by relative significance (gap to the dust tail),
+    # not an absolute n-scaled floor. useful_component_size_floor is retained only
+    # as descriptive context in the returned payload.
     floor = useful_component_size_floor(n_nodes)
-    nontrivial_sizes = [size for size in top_sizes if size >= floor]
+    nontrivial_sizes, _ = significant_component_sizes(top_sizes)
     nontrivial_mass = sum(nontrivial_sizes)
     multi_component_mass = sum(nontrivial_sizes[1:]) if len(nontrivial_sizes) > 1 else 0
 
