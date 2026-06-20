@@ -28,10 +28,9 @@ def compact_characterization_payload(
     column_name_preview = _column_name_preview(column_profiles)
     minhash_advisory = massive_dataset_advisory(n_samples)
 
-    return {
+    payload = {
         "status": "ok",
         "n_samples": geo.get("n_samples"),
-        "minhash_advisory": minhash_advisory,
         "n_features": geo.get("n_features"),
         "n_columns_total": geo.get("n_columns_total"),
         "missingness_pct": geo.get("missingness_pct"),
@@ -54,6 +53,10 @@ def compact_characterization_payload(
             "listed in column_profile_preview or named by the user."
         ),
     }
+    # Only present on massive datasets, so omit the key entirely otherwise.
+    if minhash_advisory:
+        payload["minhash_advisory"] = minhash_advisory
+    return payload
 
 
 def characterization_payload_to_markdown(payload: dict[str, Any]) -> str:

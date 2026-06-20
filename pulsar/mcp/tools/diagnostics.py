@@ -233,6 +233,12 @@ def _diagnosis_payload(
         "observed_patterns": _observed_patterns(metrics, morphology),
         "risk_factors": _risk_factors(metrics),
     }
+    # Realized accuracy of the MinHash-constructed weights at the depth used. Present
+    # only on the live constructed graph built via MinHash; describes the construction
+    # surface (distinct from the interpretation threshold above).
+    minhash_profile = metrics.get("minhash_profile")
+    if minhash_profile:
+        payload["minhash_profile"] = minhash_profile
     if artifact_staleness is not None:
         payload["artifact_staleness"] = artifact_staleness
     return payload
@@ -268,6 +274,12 @@ def _diagnosis_to_markdown(payload: dict[str, Any]) -> str:
         "- Observed patterns: " + ", ".join(payload["observed_patterns"]),
         "- Risk factors: " + (", ".join(risk_codes) if risk_codes else "none"),
     ]
+    mh = payload.get("minhash_profile")
+    if mh:
+        lines.append(
+            f"- MinHash construction (d={mh['d']}): 95% CI "
+            f"±{mh['ci95_half_width_worst']}, signature {mh['signature_memory_human']}"
+        )
     return "\n".join(lines)
 
 
@@ -282,8 +294,10 @@ async def diagnose_cosmic_graph(
 
     Returns grouped measurements for the constructed graph or a graph artifact:
     scale, component morphology, weight distribution, sweep support, observed
-    patterns, and risk factors. The tool intentionally does not prescribe a next
-    action; downstream agents combine these measurements with user objectives.
+    patterns, and risk factors. For MinHash-constructed graphs it also reports
+    ``minhash_profile`` — the realized weight accuracy (CI / signature memory) at the
+    depth used. The tool intentionally does not prescribe a next action; downstream
+    agents combine these measurements with user objectives.
     """
     session = _get_session(ctx)
     if detail not in {"summary", "full"}:
