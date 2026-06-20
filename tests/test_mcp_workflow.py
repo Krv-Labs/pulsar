@@ -1717,6 +1717,7 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
     assert not markdown.lstrip().startswith("{")
     assert summary["status"] == "ok"
     assert summary["detail"] == "summary"
+    assert "unthresholded_component_count" in summary
     assert "thresholds" not in summary
     assert "component_counts" not in summary
     assert "singleton_counts" not in summary

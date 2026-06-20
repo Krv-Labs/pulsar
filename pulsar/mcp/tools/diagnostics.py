@@ -502,6 +502,9 @@ def _threshold_curve_payload(
             "threshold_profiles_omitted": max(
                 len(thresholds) - len(threshold_profiles), 0
             ),
+            "unthresholded_component_count": (
+                int(component_counts[-1]) if component_counts else None
+            ),
             "structural_breakpoints": summary_breakpoints,
             "structural_breakpoints_omitted": max(
                 len(breakpoints) - len(summary_breakpoints), 0

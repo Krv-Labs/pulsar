@@ -8,7 +8,6 @@ import os
 import time
 from typing import Any, Literal
 
-import networkx as nx
 import yaml
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -432,11 +431,13 @@ async def run_topological_sweep(
             "data_shape": list(session.data.shape),
         }
         graph_health, is_connected, _ = _graph_health_summary(current_metrics)
-        full_affinity = nx.Graph()
-        full_affinity.add_nodes_from(range(int(model.cosmic_rust.n)))
-        full_affinity.add_edges_from((i, j) for i, j, _ in model.weighted_edges(0.0))
+        unthresholded_component_count = threshold_curve_summary.get(
+            "unthresholded_component_count"
+        )
         full_affinity_connected = bool(
-            full_affinity.number_of_nodes() > 0 and nx.is_connected(full_affinity)
+            int(model.cosmic_rust.n) > 0
+            and unthresholded_component_count is not None
+            and int(unthresholded_component_count) <= 1
         )
         response["is_connected"] = is_connected
         response["constructed_graph_connected"] = is_connected
