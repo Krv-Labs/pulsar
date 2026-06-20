@@ -18,13 +18,14 @@ from pulsar._pulsar import (
     MinHashAccumulator,
     StabilityResult,
     StandardScaler,
+    accumulate_pseudo_laplacians_sparse,
     ball_mapper_grid,
     find_stable_thresholds_sparse,
     jl_grid,
     pca_grid,
 )
 from pulsar.analysis import cosmic_to_networkx
-from pulsar.config import PulsarConfig, load_config
+from pulsar.config import CosmicGraphSpec, PulsarConfig, load_config
 from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.utils import (
     ProgressTracker,
@@ -52,6 +53,44 @@ def projection_grid(X_scaled: np.ndarray, cfg: PulsarConfig) -> list[np.ndarray]
     else:
         raise ValueError(f"Unsupported projection method: {method!r}")
     return [np.ascontiguousarray(emb) for emb in raw]
+
+
+class _CosmicBuilder:
+    """Streams ball maps into a CosmicGraph via the configured construction method.
+
+    Single source of truth for the construction-method choice, so ``fit`` and
+    ``fit_multi`` share one accumulation path. Both methods are constant-memory and
+    never allocate an n×n matrix:
+
+    - ``"minhash"`` (default): folds an unbiased MinHash Jaccard signature.
+    - ``"exact"``: merges sparse pseudo-Laplacian COO blocks in place — the
+      bit-identical backbone, for when exact co-occurrence weights are required.
+    """
+
+    def __init__(self, n: int, cfg: CosmicGraphSpec) -> None:
+        self._method = cfg.construction
+        self._n = n
+        self._minhash: MinHashAccumulator | None = (
+            MinHashAccumulator(n, cfg.minhash_d, cfg.minhash_seed)
+            if self._method == "minhash"
+            else None
+        )
+        self._exact: Any | None = None  # SparsePseudoLaplacian, lazily on first block
+
+    def accumulate(self, ball_maps: list[BallMapper]) -> None:
+        if self._minhash is not None:
+            self._minhash.accumulate(ball_maps)
+            return
+        block = accumulate_pseudo_laplacians_sparse(ball_maps, self._n)
+        if self._exact is None:
+            self._exact = block
+        else:
+            self._exact.merge_in_place(block)
+
+    def build(self) -> CosmicGraph:
+        if self._minhash is not None:
+            return self._minhash.to_cosmic_graph()
+        return CosmicGraph.from_pseudo_laplacian_sparse(self._exact, 0.0)
 
 
 class ThemaRS:
@@ -204,34 +243,29 @@ class ThemaRS:
             ]
         )
         self._ball_maps = []
-        minhash_accum: MinHashAccumulator | None = None
+        builder: _CosmicBuilder | None = None
         total_batches = len(batches)
         for batch_index, batch in enumerate(batches, start=1):
             batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
             self._ball_maps.extend(batch_ball_maps)
-            if minhash_accum is None:
-                minhash_accum = MinHashAccumulator(
-                    n,
-                    cfg.cosmic_graph.minhash_d,
-                    cfg.cosmic_graph.minhash_seed,
-                )
-            minhash_accum.accumulate(batch_ball_maps)
+            if builder is None:
+                builder = _CosmicBuilder(n, cfg.cosmic_graph)
+            builder.accumulate(batch_ball_maps)
             gc.collect()
             progress.update(
                 "sweep_batches",
                 batch_index / total_batches,
-                f"sweep batch {batch_index}/{total_batches}: ball_mapper + laplacian",
+                f"sweep batch {batch_index}/{total_batches}: ball_mapper + construction",
             )
 
-        if minhash_accum is None:
+        if builder is None:
             raise RuntimeError("No BallMapper batches were processed")
 
-        # 7–8. CosmicGraph construction via MinHash/LSH (Rust parallel). This bypasses
-        # the exact pseudo-Laplacian whose Σ|B_c|² pair materialization is the real
-        # bottleneck: edge weights are unbiased Jaccard estimates of each point's
-        # ball-set (Var = J(1−J)/d). The signature was folded in per batch above; this
-        # finalize step (LSH banding + weight estimation) builds the graph.
-        self._dense_cosmic_rust = minhash_accum.to_cosmic_graph()
+        # 7–8. Build the CosmicGraph from the streamed ball maps via the configured
+        # construction method (MinHash sketch by default; exact sparse pseudo-Laplacian
+        # backbone if cosmic_graph.construction == "exact"). Both are constant-memory
+        # and never densify; MinHash also bypasses the O(Σ|B_c|²) pair materialization.
+        self._dense_cosmic_rust = builder.build()
 
         # 8. Sparsify if opted-in, then resolve threshold and build the NetworkX graph.
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
@@ -389,10 +423,10 @@ class ThemaRS:
         progress = ProgressTracker(stages, progress_callback)
 
         all_ball_maps: list[BallMapper] = []
-        # Streaming MinHash signature accumulator, folded across datasets via
-        # element-wise min — constant d×n memory, never allocates an n×n matrix and
-        # never holds all ball maps. Created lazily once n is known.
-        minhash_accum: MinHashAccumulator | None = None
+        # Streaming cosmic-graph builder, folded across datasets in constant memory —
+        # never allocates an n×n matrix and never holds all ball maps. Created lazily
+        # once n is known (the first dataset's row count).
+        builder: _CosmicBuilder | None = None
         n: int | None = None
         ref_layout = None
 
@@ -450,13 +484,9 @@ class ThemaRS:
                     batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
                     if store_ball_maps:
                         all_ball_maps.extend(batch_ball_maps)
-                    if minhash_accum is None:
-                        minhash_accum = MinHashAccumulator(
-                            n,
-                            cfg.cosmic_graph.minhash_d,
-                            cfg.cosmic_graph.minhash_seed,
-                        )
-                    minhash_accum.accumulate(batch_ball_maps)
+                    if builder is None:
+                        builder = _CosmicBuilder(n, cfg.cosmic_graph)
+                    builder.accumulate(batch_ball_maps)
                     # Release batch memory aggressively in notebook contexts
                     del batch_ball_maps
                     gc.collect()
@@ -464,7 +494,7 @@ class ThemaRS:
                         f"{prefix}sweep_batches",
                         batch_index / total_batches,
                         f"{prefix}sweep batch {batch_index}/{total_batches}: "
-                        "ball_mapper + laplacian",
+                        "ball_mapper + construction",
                     )
 
                 # Drop per-dataset intermediates promptly
@@ -473,12 +503,12 @@ class ThemaRS:
 
         self._ball_maps = all_ball_maps if store_ball_maps else []
 
-        if minhash_accum is None or n is None:
+        if builder is None or n is None:
             raise RuntimeError("No datasets were processed")
 
-        # Build the cosmic graph from the accumulated MinHash signature (LSH banding +
-        # candidate weight estimation). The signature was folded in per batch above.
-        self._dense_cosmic_rust = minhash_accum.to_cosmic_graph()
+        # Build the cosmic graph from the streamed ball maps via the configured
+        # construction method (folded in per batch/dataset above).
+        self._dense_cosmic_rust = builder.build()
 
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
         progress.complete("cosmic_graph")

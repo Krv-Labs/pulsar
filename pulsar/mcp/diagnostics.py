@@ -274,9 +274,11 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
         full_weight_edges=model.weighted_edges(threshold=0.0),
     )
 
+    # Realized MinHash accuracy is only meaningful when the graph was built that way;
+    # the exact construction path has no estimation error to report.
     cosmic_cfg = getattr(getattr(model, "config", None), "cosmic_graph", None)
     minhash_d = getattr(cosmic_cfg, "minhash_d", None)
-    if minhash_d:
+    if getattr(cosmic_cfg, "construction", "minhash") == "minhash" and minhash_d:
         result.minhash_profile = depth_profile(int(minhash_d), result.n_nodes)
 
     logger.info(

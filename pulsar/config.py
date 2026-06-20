@@ -27,10 +27,12 @@ ALLOWED_COSMIC_GRAPH_KEYS = frozenset(
         "sparsify_sample_count",
         "sparsify_pcg_tol",
         "sparsify_max_iter",
+        "construction",
         "minhash_d",
         "minhash_seed",
     }
 )
+COSMIC_GRAPH_CONSTRUCTION_METHODS = ("minhash", "exact")
 LEGACY_COSMIC_GRAPH_THRESHOLD_KEY = "threshold"
 LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE = (
     "Unsupported legacy key cosmic_graph.threshold. "
@@ -89,6 +91,16 @@ def normalize_construction_threshold(value: Any) -> float | Literal["auto"]:
     return threshold
 
 
+def _normalize_construction(value: Any) -> Literal["minhash", "exact"]:
+    method = str(value)
+    if method not in COSMIC_GRAPH_CONSTRUCTION_METHODS:
+        raise ValueError(
+            f"cosmic_graph.construction must be one of "
+            f"{list(COSMIC_GRAPH_CONSTRUCTION_METHODS)}, got {value!r}."
+        )
+    return method  # type: ignore[return-value]
+
+
 # ---------------------------------------------------------------------------
 # Config dataclasses
 # ---------------------------------------------------------------------------
@@ -145,13 +157,17 @@ class CosmicGraphSpec:
     sparsify_sample_count: int | None = None
     sparsify_pcg_tol: float = 1e-6
     sparsify_max_iter: int = 1000
-    # MinHash/LSH approximate construction. The cosmic graph is built from MinHash
-    # signatures of each point's ball-set rather than exact co-occurrence counts,
-    # replacing the O(Σ|B_c|²) pair materialization with an O(d·M) sketch. Edge
-    # weights are unbiased Jaccard estimates with Var = J(1−J)/d. `minhash_d` is the
-    # signature depth (accuracy/speed/memory knob; error is size-independent — see
-    # pulsar.mcp.minhash_advisor); `minhash_seed` makes the randomized construction
-    # reproducible. Defaults need no tuning.
+    # Cosmic-graph construction method:
+    #   "minhash" (default) — approximate; edge weights are unbiased MinHash Jaccard
+    #     estimates of each point's ball-set, replacing the O(Σ|B_c|²) pair
+    #     materialization with an O(d·M) sketch. Sub-quadratic and constant-memory.
+    #   "exact" — the bit-identical sparse pseudo-Laplacian backbone. Choose it when
+    #     exact, reproducible co-occurrence weights matter more than speed/memory.
+    construction: Literal["minhash", "exact"] = "minhash"
+    # MinHash signature depth (only used when construction == "minhash"). Edge weights
+    # are unbiased Jaccard estimates with Var = J(1−J)/d, so accuracy is the only knob
+    # and is size-independent (see pulsar.mcp.minhash_advisor). `minhash_seed` makes the
+    # randomized construction reproducible. Defaults need no tuning.
     minhash_d: int = 256
     minhash_seed: int = 42
 
@@ -274,6 +290,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         ),
         sparsify_pcg_tol=float(cg_raw.get("sparsify_pcg_tol", 1e-6)),
         sparsify_max_iter=int(cg_raw.get("sparsify_max_iter", 1000)),
+        construction=_normalize_construction(cg_raw.get("construction", "minhash")),
         minhash_d=int(cg_raw.get("minhash_d", 256)),
         minhash_seed=int(cg_raw.get("minhash_seed", 42)),
     )
@@ -377,6 +394,9 @@ cosmic_graph:
   sparsify_sample_count: {sparsify_sample_count}
   sparsify_pcg_tol: {cfg.cosmic_graph.sparsify_pcg_tol}
   sparsify_max_iter: {cfg.cosmic_graph.sparsify_max_iter}
+  # construction: "minhash" (approximate, fast, constant-memory; default) or
+  # "exact" (bit-identical sparse pseudo-Laplacian backbone).
+  construction: {cfg.cosmic_graph.construction}
   minhash_d: {cfg.cosmic_graph.minhash_d}
   minhash_seed: {cfg.cosmic_graph.minhash_seed}
 output:

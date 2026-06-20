@@ -167,6 +167,10 @@ construction only has to faithfully approximate the weighted graph.
   realized error (`minhash_profile`) for the `d` actually used. Set with
   `refine_config(..., cosmic_graph.minhash_d=<value>)`. Runs are reproducible via
   `cosmic_graph.minhash_seed`.
+- For exact, bit-identical co-occurrence weights (at higher time/memory cost), set
+  `cosmic_graph.construction="exact"` — it builds the sparse pseudo-Laplacian backbone
+  directly with no estimation error (no `minhash_profile`). Default `"minhash"` is the
+  right choice for routine exploration.
 
 ## PHASE III: CONTRASTIVE INTERPRETATION
 7. Cluster: `generate_cluster_dossier`.

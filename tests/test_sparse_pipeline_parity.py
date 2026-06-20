@@ -21,7 +21,7 @@ _MIN_RECALL = 0.95
 _MAX_MEAN_WEIGHT_ERR = 0.05
 
 
-def _config():
+def _config(construction: str = "minhash"):
     return load_config(
         {
             "preprocessing": {},
@@ -33,7 +33,10 @@ def _config():
                 },
                 "ball_mapper": {"epsilon": {"values": [0.8, 1.2]}},
             },
-            "cosmic_graph": {"construction_threshold": "auto"},
+            "cosmic_graph": {
+                "construction_threshold": "auto",
+                "construction": construction,
+            },
         }
     )
 
@@ -104,3 +107,26 @@ def test_fit_multi_minhash_approximates_dense_reference():
     model = ThemaRS(cfg).fit_multi(ds, store_ball_maps=True)
     _assert_approximate_parity(model)
     assert 0.0 <= model.resolved_construction_threshold <= 1.0
+
+
+def test_exact_construction_matches_dense_oracle_bit_for_bit():
+    """cosmic_graph.construction="exact" must reproduce the dense oracle exactly —
+    this is the #17 sparse-backbone parity contract, reachable from config."""
+    from pulsar.mcp.diagnostics import diagnose_model
+
+    model = ThemaRS(_config("exact")).fit(data=_frame())
+    W = _dense_reference_jaccard(model)
+    est = {(i, j): w for i, j, w in model.dense_cosmic_rust.weighted_edges()}
+    ref = {
+        (i, j): W[i, j]
+        for i in range(W.shape[0])
+        for j in range(i + 1, W.shape[0])
+        if W[i, j] > 0
+    }
+    assert set(est) == set(ref), (
+        "exact construction must recover exactly the oracle edges"
+    )
+    for edge, weight in ref.items():
+        assert abs(est[edge] - weight) < 1e-12
+    # The exact path has no estimation error, so it reports no minhash_profile.
+    assert diagnose_model(model).minhash_profile is None
