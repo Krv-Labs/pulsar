@@ -5,6 +5,7 @@ Tests graph quality metrics computation and diagnosis generation.
 """
 
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,24 @@ from pulsar.mcp.diagnostics import (
     diagnose_model,
 )
 from pulsar.pipeline import ThemaRS
+
+
+class _DenseForbiddenSparseModel:
+    def __init__(self, n, edges, stability_result=None):
+        self.cosmic_rust = SimpleNamespace(n=n)
+        self.edges = edges
+        self.stability_result = stability_result
+
+    def weighted_edges(self, threshold=0.0):
+        return [
+            (i, j, weight)
+            for i, j, weight in self.edges
+            if float(weight) > float(threshold)
+        ]
+
+    @property
+    def weighted_adjacency(self):
+        raise AssertionError("weighted_adjacency should stay lazy")
 
 
 @pytest.fixture
@@ -343,6 +362,85 @@ def test_resolve_clusters_components_method(fitted_model):
     assert len(result.labels.unique()) >= 1
 
 
+def test_resolve_clusters_components_uses_sparse_edges_without_dense_adjacency():
+    """Sparse component clustering must not materialize weighted_adjacency."""
+    from pulsar.mcp.interpreter import resolve_clusters
+
+    model = _DenseForbiddenSparseModel(
+        5,
+        [(0, 1, 0.9), (1, 2, 0.8), (3, 4, 0.7)],
+    )
+
+    result = resolve_clusters(
+        model,
+        method="components",
+        interpretation_edge_weight_threshold=0.75,
+    )
+
+    assert result.method_used == "components"
+    assert result.n_clusters == 3
+    assert result.labels.tolist() == [0, 0, 0, 1, 2]
+
+
+def test_resolve_clusters_sparse_components_matches_dense_fallback():
+    """Sparse and legacy dense component paths should assign the same labels."""
+    from pulsar.mcp.interpreter import resolve_clusters
+
+    weighted = np.array(
+        [
+            [0.0, 0.9, 0.0, 0.0],
+            [0.9, 0.0, 0.8, 0.0],
+            [0.0, 0.8, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    dense = SimpleNamespace(weighted_adjacency=weighted)
+    sparse = _DenseForbiddenSparseModel(4, [(0, 1, 0.9), (1, 2, 0.8)])
+
+    dense_result = resolve_clusters(
+        dense,
+        method="components",
+        interpretation_edge_weight_threshold=0.5,
+    )
+    sparse_result = resolve_clusters(
+        sparse,
+        method="components",
+        interpretation_edge_weight_threshold=0.5,
+    )
+
+    assert sparse_result.n_clusters == dense_result.n_clusters
+    assert sparse_result.labels.tolist() == dense_result.labels.tolist()
+
+
+def test_resolve_clusters_threshold_stability_uses_sparse_edges_without_dense_adjacency():
+    """Sparse threshold-stability clustering must not materialize weighted_adjacency."""
+    from pulsar.mcp.interpreter import resolve_clusters
+
+    plateau = SimpleNamespace(
+        start_threshold=0.8,
+        end_threshold=0.2,
+        midpoint=0.5,
+        component_count=2,
+        length=0.6,
+    )
+    stability = SimpleNamespace(
+        plateaus=[plateau],
+        top_k_plateaus=lambda _k: [plateau],
+    )
+    model = _DenseForbiddenSparseModel(
+        4,
+        [(0, 1, 0.9), (2, 3, 0.9)],
+        stability_result=stability,
+    )
+
+    result = resolve_clusters(model, method="threshold_stability")
+
+    assert result.method_used == "threshold_stability"
+    assert result.n_clusters == 2
+    assert result.labels.tolist() == [0, 0, 1, 1]
+
+
 def test_resolve_clusters_spectral_method(connected_spectral_model):
     """Assert spectral method clusters deterministic connected affinity."""
     from pulsar.mcp.interpreter import resolve_clusters
@@ -397,8 +495,9 @@ def test_resolve_clusters_spectral_disconnected_degrades_gracefully(
     from pulsar.mcp.interpreter import resolve_clusters
 
     result = resolve_clusters(disconnected_spectral_model, method="spectral")
-    n = disconnected_spectral_model.weighted_adjacency.shape[0]
+    n = int(disconnected_spectral_model.cosmic_rust.n)
     assert len(result.labels) == n
+    assert disconnected_spectral_model._weighted_adjacency is None
 
 
 # ---------------------------------------------------------------------------
