@@ -34,11 +34,11 @@ from pulsar.mcp.session import (
     _get_session,
     _graph_health_summary,
     _normalize_data_path,
-    _pca_cache_status,
+    _projection_cache_status,
     _resolve_dataset_path,
 )
 from pulsar.pipeline import ThemaRS
-from pulsar.runtime.fingerprint import pca_fingerprint
+from pulsar.runtime.fingerprint import projection_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -298,9 +298,13 @@ async def run_topological_sweep(
 
         cfg = model.config
 
-        precomputed, pca_cache_status = _pca_cache_status(session, cfg)
+        projection_method = getattr(cfg.projection, "method", "jl")
+        precomputed, projection_cache_status = _projection_cache_status(session, cfg)
         if precomputed is not None:
-            logger.info("Reusing cached PCA embeddings (fingerprint match)")
+            logger.info(
+                "Reusing cached %s projection embeddings (fingerprint match)",
+                projection_method,
+            )
 
         loop = asyncio.get_running_loop()
         progress_futures = []
@@ -355,7 +359,10 @@ async def run_topological_sweep(
 
         if precomputed is None:
             session.embeddings = model._embeddings
-            session.pca_fingerprint = pca_fingerprint(cfg, len(model.data), model.data)
+            session.projection_fingerprint = projection_fingerprint(
+                cfg, len(model.data), model.data
+            )
+            session.pca_fingerprint = session.projection_fingerprint
 
         saved_path = _auto_save_config(cfg) if save_config else None
 
@@ -446,8 +453,11 @@ async def run_topological_sweep(
             "status": "ok",
             "run_id": run_record.run_id,
             "metrics": current_metrics,
+            "projection_method": projection_method,
+            "projection_cached": precomputed is not None,
+            "projection_cache_status": projection_cache_status,
             "pca_cached": precomputed is not None,
-            "pca_cache_status": pca_cache_status,
+            "pca_cache_status": projection_cache_status,
             "memory_usage_mb": session.calculate_memory_mb(),
             "diff": diff,
             "config_advisory": config_advisory,

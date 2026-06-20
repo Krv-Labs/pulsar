@@ -48,8 +48,9 @@ class _PulsarSession:
     model: ThemaRS | None = None
     data: pd.DataFrame | None = None
     clusters: pd.Series | None = None
-    embeddings: list | None = None  # cached PCA output from last fit
-    pca_fingerprint: str | None = None  # SHA256 of (data_path, dims, seeds, n_rows)
+    embeddings: list | None = None  # cached projection output from last fit
+    projection_fingerprint: str | None = None
+    pca_fingerprint: str | None = None  # Legacy alias for projection_fingerprint.
     sweep_history: list[SweepRecord] = field(default_factory=list)
     dataset_id: str | None = None
     latest_run_id: str | None = None
@@ -288,15 +289,18 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
     )
 
 
-def _pca_cache_status(
+def _projection_cache_status(
     session: _PulsarSession,
     cfg: Any,
 ) -> tuple[list | None, dict[str, Any]]:
-    """Return reusable PCA embeddings and an operational status payload."""
-    from pulsar.runtime.fingerprint import pca_fingerprint
+    """Return reusable projection embeddings and an operational status payload."""
+    from pulsar.runtime.fingerprint import projection_fingerprint
 
+    method = getattr(getattr(cfg, "projection", None), "method", "jl")
     status: dict[str, Any] = {
         "scope": "session",
+        "artifact": "projection_embeddings",
+        "method": method,
         "status": "miss",
         "reason": "no_cached_embeddings",
     }
@@ -305,12 +309,13 @@ def _pca_cache_status(
     if session.data is None:
         status["reason"] = "no_session_data"
         return None, status
-    if session.pca_fingerprint is None:
+    cached_fingerprint = session.projection_fingerprint or session.pca_fingerprint
+    if cached_fingerprint is None:
         status["reason"] = "no_cached_fingerprint"
         return None, status
 
-    fingerprint = pca_fingerprint(cfg, len(session.data), session.data)
-    if fingerprint != session.pca_fingerprint:
+    fingerprint = projection_fingerprint(cfg, len(session.data), session.data)
+    if fingerprint != cached_fingerprint:
         status["reason"] = "fingerprint_mismatch"
         return None, status
 
@@ -318,7 +323,17 @@ def _pca_cache_status(
         session.embeddings,
         {
             "scope": "session",
+            "artifact": "projection_embeddings",
+            "method": method,
             "status": "hit",
             "reason": "fingerprint_match",
         },
     )
+
+
+def _pca_cache_status(
+    session: _PulsarSession,
+    cfg: Any,
+) -> tuple[list | None, dict[str, Any]]:
+    """Compatibility alias for the projection embedding cache status."""
+    return _projection_cache_status(session, cfg)

@@ -100,7 +100,7 @@ class ThemaRS:
         2. Impute columns (Rust)
         3. Add imputation indicator flags (Python)
         4. Standard-scale (Rust)
-        5. PCA grid (Rust)
+        5. Projection grid (Rust)
         6. BallMapper grid (Rust, rayon-parallel)
         7. Accumulate pseudo-Laplacians (Rust + numpy)
         8. Build CosmicGraph (Rust)
@@ -111,8 +111,8 @@ class ThemaRS:
                 Called at the end of each pipeline stage with the stage name and
                 cumulative progress in [0.0, 1.0]. Exceptions in the callback
                 propagate and abort fit(). Pass None to disable (default).
-            _precomputed_embeddings: Internal — cached PCA embeddings from a prior
-                fit() call. Skips pca_grid() when provided.
+            _precomputed_embeddings: Internal — cached projection embeddings from a
+                prior fit() call. Skips projection_grid() when provided.
             ballmap_batch_size: Optional cap on how many embeddings to process per
                 BallMapper batch. Defaults to 1 to bound sparse accumulator peak RAM;
                 pass None to process the full grid in one Rust call.
@@ -323,15 +323,15 @@ class ThemaRS:
             datasets: List of DataFrames (same points, different representations).
             progress_callback: Optional ``(stage: str, fraction: float) -> None``.
                 Same semantics as in fit(). Stages are prefixed with dataset index
-                (e.g. "Dataset 1/3: pca").
+                (e.g. "Dataset 1/3: projection").
             store_ball_maps: If True, retain fitted BallMapper objects on self.
                 Defaults to False to lower memory; when False, BallMappers are
                 freed after their Laplacian contributions are accumulated.
-            ballmap_batch_size: Optional cap on how many PCA embeddings to process
+            ballmap_batch_size: Optional cap on how many projection embeddings to process
                 per BallMapper batch. Smaller batches reduce peak RAM at the cost
                 of more Rust crossings. None processes all embeddings together.
             rayon_workers: Optional cap for Rayon worker threads used inside Rust
-                ops (PCA grid, BallMapper grid, Laplacian accumulation). Defaults
+                ops (projection grid, BallMapper grid, Laplacian accumulation). Defaults
                 to the library setting when None.
 
         Returns self for method chaining.

@@ -100,8 +100,8 @@ def test_cached_pca_stage_label(basic_config, test_data):
     )
 
 
-def test_cached_pca_fractions_reach_one(basic_config, test_data):
-    """With cached PCA (zero weight), fractions must still renormalize to 1.0."""
+def test_cached_projection_fractions_reach_one(basic_config, test_data):
+    """With cached projections, fractions must still renormalize to 1.0."""
     cfg = load_config(basic_config)
     model1 = ThemaRS(cfg).fit(data=test_data)
 
@@ -113,7 +113,7 @@ def test_cached_pca_fractions_reach_one(basic_config, test_data):
     )
 
     assert fractions[-1] == 1.0, (
-        f"Final fraction with cached PCA is {fractions[-1]}, not 1.0"
+        f"Final fraction with cached projection is {fractions[-1]}, not 1.0"
     )
     assert fractions == sorted(fractions), f"Fractions not monotonic: {fractions}"
 

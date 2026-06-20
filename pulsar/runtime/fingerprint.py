@@ -8,7 +8,7 @@ import os
 
 def projection_fingerprint(cfg, n_rows: int, dataframe=None) -> str:
     """
-    Compute a fingerprint for PCA configuration and data shape.
+    Compute a fingerprint for projection configuration and data shape.
 
     Used to detect when cached projection embeddings can be reused.
     Includes data path metadata, preprocessing config, projection config, and raw

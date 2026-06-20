@@ -10,7 +10,7 @@ import numpy as np
 
 # Approximate wall-clock fraction per pipeline stage (estimates, not guarantees).
 # Order matters — stages are consumed sequentially by a cursor.
-# PCA weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
+# Projection weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
 STAGE_WEIGHTS: list[tuple[str, float]] = [
     ("load", 0.03),
     ("impute", 0.08),

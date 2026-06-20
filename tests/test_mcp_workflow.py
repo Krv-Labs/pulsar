@@ -1336,12 +1336,17 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert "recommended_next_action" not in result
     assert result["analysis_status"] == "diagnostics_required"
     assert result["next_required_check"] == "diagnose_cosmic_graph"
-    assert result["pca_cached"] is False
-    assert result["pca_cache_status"] == {
+    assert result["projection_method"] == "pca"
+    assert result["projection_cached"] is False
+    assert result["projection_cache_status"] == {
         "scope": "session",
+        "artifact": "projection_embeddings",
+        "method": "pca",
         "status": "miss",
         "reason": "no_cached_embeddings",
     }
+    assert result["pca_cached"] is result["projection_cached"]
+    assert result["pca_cache_status"] == result["projection_cache_status"]
 
     full = json.loads(
         asyncio.run(
@@ -2430,7 +2435,7 @@ def test_sweep_markdown_renders_caution_gate_recommendation():
     ) in markdown
 
 
-def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):
+def test_run_topological_sweep_reports_projection_cache_hit_on_repeat(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
     dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
@@ -2464,11 +2469,17 @@ def test_run_topological_sweep_reports_pca_cache_hit_on_repeat(tmp_path):
         )
     )
 
-    assert first["pca_cached"] is False
-    assert first["pca_cache_status"]["reason"] == "no_cached_embeddings"
-    assert second["pca_cached"] is True
-    assert second["pca_cache_status"] == {
+    assert first["projection_method"] == "jl"
+    assert first["projection_cached"] is False
+    assert first["projection_cache_status"]["reason"] == "no_cached_embeddings"
+    assert second["projection_method"] == "jl"
+    assert second["projection_cached"] is True
+    assert second["projection_cache_status"] == {
         "scope": "session",
+        "artifact": "projection_embeddings",
+        "method": "jl",
         "status": "hit",
         "reason": "fingerprint_match",
     }
+    assert second["pca_cached"] is second["projection_cached"]
+    assert second["pca_cache_status"] == second["projection_cache_status"]
