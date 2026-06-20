@@ -1853,7 +1853,10 @@ def test_component_morphology_counts_gap_separated_minority_in_large_graph():
 
     # A smooth tail with no clean cliff stays dust: only the giant is nontrivial.
     smooth = dict(metrics, component_sizes=[83000, 50, 48, 45, 43, 40])
-    assert _component_morphology(smooth, detail="summary")["nontrivial_component_count"] == 1
+    assert (
+        _component_morphology(smooth, detail="summary")["nontrivial_component_count"]
+        == 1
+    )
 
 
 def test_graph_artifact_estimate_build_and_staleness(tmp_path):
