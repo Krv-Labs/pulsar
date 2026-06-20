@@ -75,11 +75,9 @@ Create ``params.yaml``:
        category: {method: one_hot}
 
    sweep:
-     projection:
-       method: jl
+     pca:
        dimensions: {values: [2, 5, 10]}
        seed: {values: [42, 7, 13]}
-       center: true
      ball_mapper:
        epsilon: {range: {min: 0.1, max: 0.5, steps: 5}}
 
@@ -133,7 +131,7 @@ Pulsar executes these stages:
 
 1. **Impute**: Fill missing values in specified columns
 2. **Scale**: StandardScaler normalization
-3. **Projection sweep**: Project data to multiple dimensions with JL by default, or PCA when configured explicitly
+3. **PCA sweep**: Project data to multiple dimensions
 4. **Ball Mapper sweep**: Build neighborhood graphs at multiple epsilon values
 5. **Pseudo-Laplacians**: Compute graph Laplacians for each configuration
 6. **Cosmic graph**: Aggregate into a weighted similarity graph
@@ -142,7 +140,7 @@ Pulsar executes these stages:
 .. code-block:: python
 
    # Access intermediate results
-   print(f"Projection embeddings: {len(model._embeddings)}")
+   print(f"PCA configurations: {len(model.pca_results_)}")
    print(f"Ball Mapper graphs: {len(model.ball_mapper_graphs_)}")
    print(f"Weighted adjacency shape: {model.weighted_adjacency_.shape}")
 
@@ -156,7 +154,7 @@ Pulsar's Rust core provides significant speedups. For large datasets:
    # Reduce sweep resolution for faster iteration
    model = ThemaRS(
        data="large_data.csv",
-       pca_dims=[5],           # Compatibility alias for projection dimensions
+       pca_dims=[5],           # Single dimension
        epsilon_range=(0.2, 0.4, 3),  # Fewer epsilon steps
    )
 

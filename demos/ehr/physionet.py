@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from pulsar.config import load_config
-from pulsar import TemporalCosmicGraph
+from pulsar.temporal import TemporalCosmicGraph
 
 # ---------------------------------------------------------------------------
 # Simulated ICU Data Generator

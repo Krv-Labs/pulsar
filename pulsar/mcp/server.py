@@ -54,8 +54,8 @@ mcp = AgnosticFastMCP(
         "Manifold discovery and topological data analysis for tabular datasets. Call "
         "`get_workflow_guide` once for the end-to-end procedure and tool map.\n"
         "Shared params across tools: `detail` ('summary' default; 'full' for "
-        "audit/debug) and `response_format` ('json' for structured payloads; "
-        "'markdown' where a readable rendering is supported)."
+        "audit/debug) and `response_format` ('markdown' default; 'json' for "
+        "structured payloads)."
     ),
 )
 

@@ -1,6 +1,6 @@
 # Pulsar
 
-Rust-backed Python library for topological data analysis. Implements the Thema pipeline: imputation → scaling → projection → Ball Mapper → Cosmic Graph.
+Rust-backed Python library for topological data analysis. Implements the Thema pipeline: imputation → scaling → PCA → Ball Mapper → Cosmic Graph.
 
 Performance-critical algorithms are written in Rust (PyO3/maturin) and exposed as `pulsar._pulsar`. Python orchestrates the pipeline.
 
@@ -53,7 +53,7 @@ It's important you let the agent follow this exact sequence for a few reasons:
 Here is the exact loop the agent should run:
 
 1. **Ingest the dataset** to get a stable `dataset_id` handle.
-2. **Create a calibrated config** via `create_config(dataset_id)` — calibrates epsilon and projection dimensions against the processed feature space.
+2. **Create a calibrated config** via `create_config(dataset_id)` — calibrates epsilon and PCA against the processed feature space.
 3. **Sweep the topology** using that config.
 4. **Diagnose the graph** to see if it's a giant useless blob or actually balanced. Use the metrics to decide what to adjust, then iterate via `refine_config`.
 5. **Generate the dossier** to explain the clusters in plain English.
@@ -64,12 +64,12 @@ Here is the exact loop the agent should run:
 
 We didn't just wrap our Python functions in JSON schemas. We built *Thick Tools*—stateful, workflow-aware engines that pass configuration directly between each other so you don't have to watch the agent screw up file I/O.
 
-*   `create_config(dataset_id)`: The primary config generation tool. Analyzes k-NN distances and projection dimensions in the *processed* feature space (after preprocessing + scaling) to produce a calibrated YAML config. Never let the agent guess parameters.
+*   `create_config(dataset_id)`: The primary config generation tool. Analyzes k-NN distances and PCA variance in the *processed* feature space (after preprocessing + scaling) to produce a calibrated YAML config. Never let the agent guess parameters.
 *   `run_topological_sweep`: Runs the heavy Rust pipeline. Takes inline YAML and returns structured JSON with metrics and experiment diff. Config persistence is opt-in via `save_config=True`.
-*   `diagnose_cosmic_graph`: Returns current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets those measurements against the user's objective.
+*   `diagnose_cosmic_graph`: Returns pure graph metrics (density, components, weight quantiles). The agent interprets these to decide what to adjust — e.g., "hairball" means high density, "shattered" means too many small components.
 *   `generate_cluster_dossier`: Returns structured JSON with per-cluster profiles (Z-scores, homogeneity, concentration) plus a Markdown summary. Includes clustering method metadata (method used, silhouette score).
-*   `compare_clusters`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
-*   `export_labeled_data`: Maps semantic names to a `cluster_assignment_id` from `generate_cluster_dossier` and dumps that exact clustering to a CSV.
+*   `compare_clusters_tool`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
+*   `export_labeled_data`: Maps semantic names to the cluster IDs and dumps it to a CSV.
 
 ### Pitfalls & Annoyances
 
@@ -78,7 +78,7 @@ We try to make things foolproof, but some of you goofballs are going to try to b
 *   **Don't let the agent write YAML files manually.** 
     The tools pass YAML strings directly in memory (`suggested_params_yaml` -> `config_yaml`). If you watch the agent try to use `write_file` to save a `params.yaml` before running the sweep, stop it. If you make the agent do unnecessary file I/O you belong in prison.
 *   **Don't skip the diagnosis step.**
-    If the graph is a giant hairball, your clusters will be garbage. Use `diagnose_cosmic_graph` to inspect graph-state measurements, then decide whether the user's objective calls for threshold inspection, config refinement, or a different interpretation surface.
+    If the graph is a giant hairball, your clusters will be garbage. Use `diagnose_cosmic_graph` to get metrics, then `refine_config` to adjust epsilon or PCA dimensions based on what the metrics tell you.
 *   **Handle non-numeric data appropriately.**
     Pulsar is a geometric engine. It needs floats. `characterize_dataset` will automatically tell the agent which low-cardinality strings to one-hot encode and which high-cardinality strings to drop. Don't fight it.
 
@@ -124,15 +124,9 @@ from pulsar import ThemaRS
 
 model = ThemaRS("params.yaml").fit()
 
-graph = model.cosmic_graph        # sparse networkx.Graph with 'weight' edge attributes
-adj   = model.weighted_adjacency  # dense weighted adjacency, materialized lazily on access
-edges = model.weighted_edges()    # thresholded sparse edge list
+graph = model.cosmic_graph        # networkx.Graph with 'weight' edge attributes
+adj   = model.weighted_adjacency  # np.ndarray, shape (n, n)
 reps  = model.select_representatives()  # uses the configured default
-
-# Opt-in spectral sparsification hook: a leverage-aware, epsilon-controlled graph
-# that preserves spectrum/distances (not topology). Useful for spectral analysis;
-# it is NOT a construction-time speedup. update=True refreshes model.cosmic_graph.
-model.spectral_sparsify(epsilon=0.8, seed=7, update=True)
 ```
 
 Copy `params.yaml.sample` to `params.yaml` and edit it for your dataset.
@@ -184,21 +178,14 @@ preprocessing:
       seed: 7
 
 sweep:
-  projection:
-    method: jl # default; set to pca for legacy randomized PCA
+  pca:
     dimensions:
       values: [2, 3, 5]
     seed:
       values: [42, 7, 13]
-    center: true
   ball_mapper:
     epsilon:
       range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
-cosmic_graph:
-  construction_threshold: auto
-  sparsify: false # opt-in spectral sparsification hook (off by default)
-  sparsify_epsilon: 1.0
-  sparsify_seed: 42
 ```
 
 ## Development
@@ -207,5 +194,5 @@ cosmic_graph:
 uv run maturin develop        # debug build
 uv run maturin develop --release  # optimised build
 uv run pytest tests/ -v
-uv run pytest tests/test_benchmark_accelerations.py -s -v
 ```
+

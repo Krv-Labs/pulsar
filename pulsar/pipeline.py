@@ -17,41 +17,19 @@ from pulsar._pulsar import (
     CosmicGraph,
     StabilityResult,
     StandardScaler,
-    accumulate_pseudo_laplacians_sparse,
+    accumulate_pseudo_laplacians,
     ball_mapper_grid,
-    find_stable_thresholds_sparse,
-    jl_grid,
+    find_stable_thresholds,
     pca_grid,
 )
 from pulsar.analysis import cosmic_to_networkx
 from pulsar.config import PulsarConfig, load_config
 from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.utils import (
-    ProgressTracker,
+    STAGE_WEIGHTS,
+    build_cumulative_fractions,
     rayon_thread_override,
 )
-
-
-def projection_grid(X_scaled: np.ndarray, cfg: PulsarConfig) -> list[np.ndarray]:
-    projection = getattr(cfg, "projection", None)
-    if projection is None:
-        dimensions = cfg.pca.dimensions
-        seeds = cfg.pca.seeds
-        method = "jl"
-        center = True
-    else:
-        dimensions = projection.dimensions
-        seeds = projection.seeds
-        method = projection.method
-        center = projection.center
-
-    if method == "pca":
-        raw = pca_grid(X_scaled, dimensions, seeds)
-    elif method == "jl":
-        raw = jl_grid(X_scaled, dimensions, seeds, center=center)
-    else:
-        raise ValueError(f"Unsupported projection method: {method!r}")
-    return [np.ascontiguousarray(emb) for emb in raw]
 
 
 class ThemaRS:
@@ -75,8 +53,6 @@ class ThemaRS:
         self._cosmic_graph: nx.Graph | None = None
         self._weighted_adjacency: np.ndarray | None = None
         self._cosmic_rust: CosmicGraph | None = None
-        self._dense_cosmic_rust: CosmicGraph | None = None
-        self._weight_scale: float = 1.0
         self._data: pd.DataFrame | None = None
         self._preprocessed_data: pd.DataFrame | None = None
         self._stability_result: StabilityResult | None = None
@@ -92,7 +68,6 @@ class ThemaRS:
         *,
         progress_callback: Callable[[str, float], None] | None = None,
         _precomputed_embeddings: list | None = None,
-        ballmap_batch_size: int | None = 1,
     ) -> "ThemaRS":
         """
         Run the full pipeline:
@@ -100,7 +75,7 @@ class ThemaRS:
         2. Impute columns (Rust)
         3. Add imputation indicator flags (Python)
         4. Standard-scale (Rust)
-        5. Projection grid (Rust)
+        5. PCA grid (Rust)
         6. BallMapper grid (Rust, rayon-parallel)
         7. Accumulate pseudo-Laplacians (Rust + numpy)
         8. Build CosmicGraph (Rust)
@@ -111,19 +86,30 @@ class ThemaRS:
                 Called at the end of each pipeline stage with the stage name and
                 cumulative progress in [0.0, 1.0]. Exceptions in the callback
                 propagate and abort fit(). Pass None to disable (default).
-            _precomputed_embeddings: Internal — cached projection embeddings from a
-                prior fit() call. Skips projection_grid() when provided.
-            ballmap_batch_size: Optional cap on how many embeddings to process per
-                BallMapper batch. Defaults to 1 to bound sparse accumulator peak RAM;
-                pass None to process the full grid in one Rust call.
+            _precomputed_embeddings: Internal — cached PCA embeddings from a prior
+                fit() call. Skips pca_grid() when provided.
 
         Returns self for method chaining.
         """
         cfg = self.config
-        if ballmap_batch_size is not None and ballmap_batch_size <= 0:
-            raise ValueError("ballmap_batch_size must be positive when provided")
 
+        # Build cumulative progress schedule from stage weights.
+        # PCA weight is zeroed when embeddings are pre-computed; fractions renormalize.
         use_cached_pca = _precomputed_embeddings is not None
+        stages = [
+            (name, 0.0 if name == "pca" and use_cached_pca else weight)
+            for name, weight in STAGE_WEIGHTS
+        ]
+        schedule = build_cumulative_fractions(stages)
+        _cursor = 0
+
+        def _notify(label_override: str | None = None) -> None:
+            nonlocal _cursor
+            if progress_callback is None or _cursor >= len(schedule):
+                return
+            label, frac = schedule[_cursor]
+            _cursor += 1
+            progress_callback(label_override or label, frac)
 
         # 1. Load data
         if data is None:
@@ -134,42 +120,13 @@ class ThemaRS:
             else:
                 data = pd.read_csv(cfg.data)
 
-        projection_count = (
-            len(_precomputed_embeddings)
-            if _precomputed_embeddings is not None
-            else max(len(cfg.projection.dimensions) * len(cfg.projection.seeds), 1)
-        )
-        batch_count = (
-            1
-            if ballmap_batch_size is None
-            else max(
-                (projection_count + ballmap_batch_size - 1) // ballmap_batch_size, 1
-            )
-        )
-        progress = ProgressTracker(
-            [
-                ("load", 1.0),
-                ("preprocess", 1.0),
-                ("scale", 1.0),
-                ("projection", 0.1 if use_cached_pca else projection_count),
-                ("sweep_batches", batch_count * max(len(cfg.ball_mapper.epsilons), 1)),
-                ("cosmic_graph", 1.0 + (2.0 if cfg.cosmic_graph.sparsify else 0.0)),
-                (
-                    "stability",
-                    2.0 if cfg.cosmic_graph.construction_threshold == "auto" else 0.0,
-                ),
-                ("networkx_graph", 1.0),
-            ],
-            progress_callback,
-        )
-        progress.complete("load")
-
         self._data = data.copy()
 
         # 2–3. Preprocessing (drop, coerce, impute, encode, validate)
         df, _layout = preprocess_dataframe(data, cfg)
         self._preprocessed_data = df
-        progress.complete("preprocess")
+        _notify()  # load
+        _notify()  # impute
 
         # 4. Convert to float64 matrix and scale
         X = df.to_numpy(dtype=np.float64)
@@ -177,125 +134,54 @@ class ThemaRS:
 
         scaler = StandardScaler()
         X_scaled = np.array(scaler.fit_transform(X))
-        progress.complete("scale")
+        _notify()  # scale
 
-        # 5. Projection grid (JL by default; PCA retained as explicit legacy mode)
+        # 5. PCA grid (randomized SVD, parallelised across seeds)
         if _precomputed_embeddings is not None:
             assert all(
                 e.shape[0] == X_scaled.shape[0] for e in _precomputed_embeddings
             ), "Precomputed embedding row count does not match current data"
             embeddings = _precomputed_embeddings
         else:
-            embeddings = projection_grid(X_scaled, cfg)
+            embeddings = [
+                np.ascontiguousarray(emb)
+                for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
+            ]
         # Cache embeddings for MCP session reuse
         self._embeddings = embeddings
-        progress.complete(
-            "projection", "projection (cached)" if use_cached_pca else None
-        )
+        _notify("pca (cached)" if use_cached_pca else None)  # pca
 
-        # 6–7. BallMapper grid + sparse accumulation.
-        # Batch by embedding so large sweeps do not hold every raw pair buffer at once.
-        batches = (
-            [embeddings]
-            if ballmap_batch_size is None
-            else [
-                embeddings[j : j + ballmap_batch_size]
-                for j in range(0, len(embeddings), ballmap_batch_size)
-            ]
-        )
-        self._ball_maps = []
-        galactic_L: Any | None = None
-        total_batches = len(batches)
-        for batch_index, batch in enumerate(batches, start=1):
-            batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
-            self._ball_maps.extend(batch_ball_maps)
-            batch_spl = accumulate_pseudo_laplacians_sparse(batch_ball_maps, n)
-            if galactic_L is None:
-                galactic_L = batch_spl
-            else:
-                galactic_L.merge_in_place(batch_spl)
-            del batch_spl
-            gc.collect()
-            progress.update(
-                "sweep_batches",
-                batch_index / total_batches,
-                f"sweep batch {batch_index}/{total_batches}: ball_mapper + laplacian",
-            )
+        # 6. BallMapper grid (Rust parallel)
+        self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)
+        _notify()  # ball_mapper
 
-        if galactic_L is None:
-            raise RuntimeError("No BallMapper batches were processed")
+        # 7. Accumulate pseudo-Laplacians (Rust parallel)
+        galactic_L = np.array(accumulate_pseudo_laplacians(self._ball_maps, n))
+        _notify()  # laplacian
 
-        # 8. CosmicGraph: build the (sparse-backed) graph, sparsify if opted-in, threshold.
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
-            galactic_L, 0.0
-        )
-        sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
-        progress.complete("cosmic_graph")
-        self._finalize_cosmic_graph(
-            sparse,
-            cfg.cosmic_graph.construction_threshold,
-            progress=progress,
-        )
-
-        return self
-
-    def _finalize_cosmic_graph(
-        self,
-        cosmic_rust: CosmicGraph,
-        threshold_cfg: float | str,
-        *,
-        progress: ProgressTracker | None = None,
-    ) -> None:
-        """Normalize the exposed CosmicGraph onto a [0, 1] weight scale, resolve
-        the construction threshold, and build the NetworkX graph.
-
-        Operates entirely on the sparse edge list — the dense ``weighted_adjacency``
-        is never materialized here (it is built lazily on first property access).
-        Spectral sparsification can reweight edges above 1.0, which would both
-        collapse those edges into one bin in ``find_stable_thresholds_sparse`` (it
-        quantizes over [0, 1]) and break the [0, 1] threshold contract that
-        clustering/validation rely on. We rescale by ``max(1.0, max_weight)`` so
-        weights never exceed 1.0: a no-op for the un-sparsified path (max ≤ 1) and a
-        fraction-of-max mapping otherwise.
-        """
-        self._cosmic_rust = cosmic_rust
-        edges = cosmic_rust.weighted_edges()
-        max_w = max((w for _, _, w in edges), default=0.0)
-        self._weight_scale = max(1.0, max_w)
-        # Invalidate the lazy dense adjacency; rebuilt on demand by the property.
-        self._weighted_adjacency = None
-        if threshold_cfg == "auto":
-            norm_edges = [(i, j, w / self._weight_scale) for i, j, w in edges]
-            self._stability_result = find_stable_thresholds_sparse(
-                cosmic_rust.n, norm_edges
-            )
+        # 8. CosmicGraph (+ optional stability analysis)
+        threshold = cfg.cosmic_graph.construction_threshold
+        if threshold == "auto":
+            cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+            weighted_adj = np.array(cg_temp.weighted_adj)
+            self._stability_result = find_stable_thresholds(weighted_adj)
             self._resolved_construction_threshold = float(
                 self._stability_result.optimal_threshold
             )
-            if progress is not None:
-                progress.complete("stability")
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_construction_threshold
+            )
         else:
-            self._resolved_construction_threshold = float(threshold_cfg)
-        self._cosmic_graph = cosmic_to_networkx(
-            cosmic_rust,
-            threshold=self._resolved_construction_threshold,
-            scale=self._weight_scale,
-        )
-        if progress is not None:
-            progress.complete("networkx_graph")
+            self._resolved_construction_threshold = float(threshold)
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_construction_threshold
+            )
+            weighted_adj = np.array(self._cosmic_rust.weighted_adj)
+        self._weighted_adjacency = weighted_adj
+        self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
+        _notify()  # cosmic (always last, always 1.0)
 
-    def _apply_default_sparsification(self, cosmic: CosmicGraph) -> CosmicGraph:
-        spec = self.config.cosmic_graph
-        if not spec.sparsify:
-            return cosmic
-        return cosmic.spectral_sparsify(
-            spec.sparsify_epsilon,
-            seed=spec.sparsify_seed,
-            sketch_dim=spec.sparsify_sketch_dim,
-            sample_count=spec.sparsify_sample_count,
-            pcg_tol=spec.sparsify_pcg_tol,
-            max_iter=spec.sparsify_max_iter,
-        )
+        return self
 
     def fit_multi(
         self,
@@ -323,15 +209,15 @@ class ThemaRS:
             datasets: List of DataFrames (same points, different representations).
             progress_callback: Optional ``(stage: str, fraction: float) -> None``.
                 Same semantics as in fit(). Stages are prefixed with dataset index
-                (e.g. "Dataset 1/3: projection").
+                (e.g. "Dataset 1/3: pca").
             store_ball_maps: If True, retain fitted BallMapper objects on self.
                 Defaults to False to lower memory; when False, BallMappers are
                 freed after their Laplacian contributions are accumulated.
-            ballmap_batch_size: Optional cap on how many projection embeddings to process
+            ballmap_batch_size: Optional cap on how many PCA embeddings to process
                 per BallMapper batch. Smaller batches reduce peak RAM at the cost
                 of more Rust crossings. None processes all embeddings together.
             rayon_workers: Optional cap for Rayon worker threads used inside Rust
-                ops (projection grid, BallMapper grid, Laplacian accumulation). Defaults
+                ops (PCA grid, BallMapper grid, Laplacian accumulation). Defaults
                 to the library setting when None.
 
         Returns self for method chaining.
@@ -346,47 +232,35 @@ class ThemaRS:
         N = len(datasets)
         cfg = self.config
 
-        projection_count = max(
-            len(cfg.projection.dimensions) * len(cfg.projection.seeds), 1
-        )
-        batch_count = (
-            1
-            if ballmap_batch_size is None
-            else max(
-                (projection_count + ballmap_batch_size - 1) // ballmap_batch_size, 1
-            )
-        )
+        # Build stage schedule: per-dataset stages repeated N times, then shared stages.
+        _per_ds_weights = [
+            ("load", 0.03),
+            ("impute", 0.08),
+            ("scale", 0.01),
+            ("pca", 0.25),
+            ("ball_mapper", 0.42),
+        ]
         stages: list[tuple[str, float]] = []
         for i in range(N):
             prefix = f"Dataset {i + 1}/{N}: "
-            stages.extend(
-                [
-                    (f"{prefix}load", 1.0),
-                    (f"{prefix}preprocess", 1.0),
-                    (f"{prefix}scale", 1.0),
-                    (f"{prefix}projection", projection_count),
-                    (
-                        f"{prefix}sweep_batches",
-                        batch_count * max(len(cfg.ball_mapper.epsilons), 1),
-                    ),
-                ]
-            )
-        stages.extend(
-            [
-                ("cosmic_graph", 1.0 + (2.0 if cfg.cosmic_graph.sparsify else 0.0)),
-                (
-                    "stability",
-                    2.0 if cfg.cosmic_graph.construction_threshold == "auto" else 0.0,
-                ),
-                ("networkx_graph", 1.0),
-            ]
-        )
-        progress = ProgressTracker(stages, progress_callback)
+            for name, weight in _per_ds_weights:
+                stages.append((f"{prefix}{name}", weight))
+        stages.append(("laplacian", 0.15))
+        stages.append(("cosmic", 0.06))
+
+        schedule = build_cumulative_fractions(stages)
+        _cursor = 0
+
+        def _notify(label_override: str | None = None) -> None:
+            nonlocal _cursor
+            if progress_callback is None or _cursor >= len(schedule):
+                return
+            label, frac = schedule[_cursor]
+            _cursor += 1
+            progress_callback(label_override or label, frac)
 
         all_ball_maps: list[BallMapper] = []
-        # Sparse co-membership accumulator (SparsePseudoLaplacian), fused across
-        # datasets via merge_in_place — never allocates an n×n matrix.
-        galactic_L_accum: Any | None = None
+        galactic_L_accum: np.ndarray | None = None
         n: int | None = None
         ref_layout = None
 
@@ -402,8 +276,6 @@ class ThemaRS:
 
         with rayon_thread_override(rayon_workers):
             for i, data in enumerate(datasets):
-                prefix = f"Dataset {i + 1}/{N}: "
-                progress.complete(f"{prefix}load")
                 df, layout = preprocess_dataframe(
                     data,
                     cfg,
@@ -412,11 +284,13 @@ class ThemaRS:
                 )
                 if ref_layout is None:
                     ref_layout = layout
-                progress.complete(f"{prefix}preprocess")
+                _notify()  # Dataset i: load
+                _notify()  # Dataset i: impute
 
                 X = df.to_numpy(dtype=np.float64)
                 if n is None:
                     n = X.shape[0]
+                    galactic_L_accum = np.zeros((n, n), dtype=np.int64)
                 elif X.shape[0] != n:
                     raise ValueError(
                         f"Dataset {i} has {X.shape[0]} rows after preprocessing; "
@@ -425,10 +299,13 @@ class ThemaRS:
 
                 scaler = StandardScaler()
                 X_scaled = np.array(scaler.fit_transform(X))
-                progress.complete(f"{prefix}scale")
+                _notify()  # Dataset i: scale
 
-                embeddings = projection_grid(X_scaled, cfg)
-                progress.complete(f"{prefix}projection")
+                embeddings = [
+                    np.ascontiguousarray(emb)
+                    for emb in pca_grid(X_scaled, cfg.pca.dimensions, cfg.pca.seeds)
+                ]
+                _notify()  # Dataset i: pca
 
                 batches = (
                     [embeddings]
@@ -439,29 +316,23 @@ class ThemaRS:
                     ]
                 )
 
-                total_batches = len(batches)
-                for batch_index, batch in enumerate(batches, start=1):
+                for batch in batches:
                     batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
                     if store_ball_maps:
                         all_ball_maps.extend(batch_ball_maps)
-                    batch_spl = accumulate_pseudo_laplacians_sparse(batch_ball_maps, n)
                     if galactic_L_accum is None:
-                        galactic_L_accum = batch_spl
-                    else:
-                        galactic_L_accum.merge_in_place(batch_spl)
-                    # Release batch memory aggressively in notebook contexts
-                    del batch_ball_maps, batch_spl
-                    gc.collect()
-                    progress.update(
-                        f"{prefix}sweep_batches",
-                        batch_index / total_batches,
-                        f"{prefix}sweep batch {batch_index}/{total_batches}: "
-                        "ball_mapper + laplacian",
+                        raise RuntimeError("galactic_L_accum not initialized")
+                    galactic_L_accum += np.array(
+                        accumulate_pseudo_laplacians(batch_ball_maps, n)
                     )
+                    # Release batch memory aggressively in notebook contexts
+                    del batch_ball_maps
+                    gc.collect()
 
                 # Drop per-dataset intermediates promptly
                 del embeddings, X_scaled, X, df
                 gc.collect()
+                _notify()  # Dataset i: ball_mapper
 
         self._ball_maps = all_ball_maps if store_ball_maps else []
 
@@ -469,17 +340,29 @@ class ThemaRS:
             raise RuntimeError("No datasets were processed")
 
         galactic_L = galactic_L_accum
+        _notify()  # laplacian
 
-        self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
-            galactic_L, 0.0
-        )
-        sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
-        progress.complete("cosmic_graph")
-        self._finalize_cosmic_graph(
-            sparse,
-            cfg.cosmic_graph.construction_threshold,
-            progress=progress,
-        )
+        threshold = cfg.cosmic_graph.construction_threshold
+        if threshold == "auto":
+            cg_temp = CosmicGraph.from_pseudo_laplacian(galactic_L, 0.0)
+            weighted_adj = np.array(cg_temp.weighted_adj)
+            self._stability_result = find_stable_thresholds(weighted_adj)
+            self._resolved_construction_threshold = float(
+                self._stability_result.optimal_threshold
+            )
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_construction_threshold
+            )
+        else:
+            self._resolved_construction_threshold = float(threshold)
+            self._cosmic_rust = CosmicGraph.from_pseudo_laplacian(
+                galactic_L, self._resolved_construction_threshold
+            )
+            weighted_adj = np.array(self._cosmic_rust.weighted_adj)
+
+        self._weighted_adjacency = weighted_adj
+        self._cosmic_graph = cosmic_to_networkx(self._cosmic_rust)
+        _notify()  # cosmic (always last, always 1.0)
 
         return self
 
@@ -496,107 +379,10 @@ class ThemaRS:
 
     @property
     def weighted_adjacency(self) -> np.ndarray:
-        """Dense n×n float64 weighted adjacency, normalized to [0, 1], pre-threshold.
-
-        Weights are scaled by ``1 / max(1, max_weight)`` so the matrix stays
-        bounded by 1.0 (raw cosmic weights are already ≤ 1, but spectral
-        sparsification can reweight edges above 1.0). This is the matrix threshold
-        selection and clustering operate on. The cosmic graph backbone is kept
-        sparse end-to-end; this dense view is materialized lazily on first access
-        as a compatibility surface for diagnostics — prefer ``cosmic_rust`` /
-        ``weighted_edges()`` on the hot path. ``cosmic_rust`` exposes the raw,
-        un-normalized Rust backing.
-        """
-        if self._cosmic_rust is None:
-            raise RuntimeError("Call fit() first")
+        """n×n float64 weighted adjacency matrix."""
         if self._weighted_adjacency is None:
-            raw_adj = np.array(self._cosmic_rust.weighted_adj)
-            self._weighted_adjacency = raw_adj / self._weight_scale
+            raise RuntimeError("Call fit() first")
         return self._weighted_adjacency
-
-    @property
-    def cosmic_rust(self) -> CosmicGraph:
-        """Rust CosmicGraph backing ``cosmic_graph``.
-
-        Sparse-backed (edge-list) by default; spectral sparsification is opt-in
-        (see :meth:`spectral_sparsify`). Holds raw (un-normalized) weights; see
-        :attr:`weighted_adjacency` for the [0, 1]-normalized view used by
-        thresholding and clustering.
-        """
-        if self._cosmic_rust is None:
-            raise RuntimeError("Call fit() first")
-        return self._cosmic_rust
-
-    @property
-    def dense_cosmic_rust(self) -> CosmicGraph:
-        """The un-sparsified base CosmicGraph that :meth:`spectral_sparsify` consumes.
-
-        Named ``dense`` for historical reasons; it is now the sparse-backed cosmic
-        graph built directly from co-membership counts (no n×n materialization).
-        Identical to ``cosmic_rust`` unless spectral sparsification has been applied.
-        """
-        if self._dense_cosmic_rust is None:
-            raise RuntimeError("Call fit() first")
-        return self._dense_cosmic_rust
-
-    def weighted_edges(
-        self, threshold: float | None = None
-    ) -> list[tuple[int, int, float]]:
-        """Weighted edge list from the exposed Cosmic graph, weights in [0, 1].
-
-        Weights are normalized by the same ``max(1, max_weight)`` scale as
-        :attr:`weighted_adjacency`. Defaults to the model's resolved construction
-        threshold.
-        """
-        cutoff = (
-            self.resolved_construction_threshold
-            if threshold is None
-            else float(threshold)
-        )
-        scale = self._weight_scale
-        return [
-            (i, j, w / scale)
-            for i, j, w in self.cosmic_rust.weighted_edges()
-            if w / scale > cutoff
-        ]
-
-    def spectral_sparsify(
-        self,
-        epsilon: float = 1.0,
-        *,
-        seed: int = 42,
-        sketch_dim: int | None = None,
-        sample_count: int | None = None,
-        pcg_tol: float = 1e-6,
-        max_iter: int = 1000,
-        update: bool = False,
-    ) -> CosmicGraph:
-        """Spectrally sparsify the cosmic graph (opt-in hook).
-
-        This is NOT a construction-time speedup — it runs after the graph is
-        already built and is pure additional cost on that path. Its value is a
-        leverage-aware, epsilon-controlled sparsifier that produces a compact graph
-        **preserving the spectrum / effective resistances (distances)**, not the
-        topology. Use it when you want a compact graph to run spectral algorithms
-        on (spectral embeddings/clustering) or to hand to downstream analysis,
-        where it is smarter than a naive low-weight edge filter.
-
-        When ``update=True``, this also recomputes threshold selection on the
-        sparsified graph and refreshes ``cosmic_graph`` / ``weighted_adjacency``.
-        """
-        sparse = self.dense_cosmic_rust.spectral_sparsify(
-            epsilon,
-            seed=seed,
-            sketch_dim=sketch_dim,
-            sample_count=sample_count,
-            pcg_tol=pcg_tol,
-            max_iter=max_iter,
-        )
-        if update:
-            self._finalize_cosmic_graph(
-                sparse, self.config.cosmic_graph.construction_threshold
-            )
-        return sparse
 
     @property
     def ball_maps(self) -> list[BallMapper]:

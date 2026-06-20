@@ -227,7 +227,7 @@ With real PhysioNet data:
 **Deep Dive**
 
 - Script: `demos/ehr/ecg_arrhythmia.py <https://github.com/Krv-Labs/pulsar/tree/main/demos/ehr>`_
-- Configuration: Hardcoded in the script; adjust projection dimensions and epsilon range as needed
+- Configuration: Hardcoded in the script; adjust PCA dimensions and epsilon range as needed
 
 ---
 
@@ -303,6 +303,6 @@ Next Steps
 Once you've explored a demo:
 
 1. **Use with Claude AI**: Set up the :ref:`mcp` server and point Claude at your own data. The AI will handle parameter tuning and generate statistical dossiers.
-2. **Adapt for your data**: Copy the nearest demo's YAML config and adjust for your feature scales and desired projection dimensions.
+2. **Adapt for your data**: Copy the nearest demo's YAML config and adjust for your feature scales and desired PCA dimensions.
 3. **Deep dive on parameters**: See :ref:`intermediate` for guidance on tuning epsilon ranges and dimension selection.
 4. **Deploy to production**: The coal demo shows how to instrument timing and validation. See :ref:`intermediate` for configuration and parameter guidance.

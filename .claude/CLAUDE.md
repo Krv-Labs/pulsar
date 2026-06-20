@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Pulsar is a **Rust-backed Python library** implementing the **Thema pipeline** for topological data analysis (TDA) of tabular datasets across domains and sizes. Performance-critical algorithms are in Rust (via PyO3/maturin); Python orchestrates the pipeline.
+Pulsar is a **Rust-backed Python library** implementing the **Thema pipeline** for topological data analysis (TDA) of large datasets (primarily EHR). Performance-critical algorithms are in Rust (via PyO3/maturin); Python orchestrates the pipeline.
 
 ## Commands
 
@@ -128,22 +128,6 @@ Before optimizing, profile and **prove** the bottleneck. Common false leads in t
 
 - **Cache expensive invariant computations**: PCA embeddings are invariant to epsilon changes. Cache them with a fingerprint (SHA256 of `{data_path, dimensions, seeds, n_rows}`) and reuse across retries. See `pulsar/mcp/server.py::_pca_fingerprint`.
 
-## MCP Surface Standards
-
-The MCP server is a general-purpose topology workbench, not an EHR-only or domain-specific assistant. It must work on datasets from any domain and at any scale the runtime can support. The agent and user are the domain experts; Pulsar provides calibrated topology, statistical evidence, provenance, and risk context without inventing domain meaning.
-
-- **Expose measurements, not conclusions**: Tool outputs should describe geometry, preprocessing effects, graph state, threshold surfaces, cluster evidence, risk factors, and candidate lenses. Do not bake medical/business/scientific interpretations into generic tools. Domain naming belongs in agent synthesis and explicit user-facing report inputs such as `cluster_names`.
-- **Keep prompts opt-in and compact**: `FastMCP(instructions=...)` stays a terse tool map. The longer workflow belongs in `pulsar/mcp/prompts.py::WORKFLOW_PROMPT` and is returned by `get_workflow_guide`. Update prompt guidance when contracts change, but avoid duplicating bulky domain teaching in every session.
-- **Default to summary-first payloads**: Summary modes must be native compact payloads, not full objects trimmed after construction. Never put raw O(rows), O(columns), O(edges), O(thresholds), or O(clusters) lists in default responses. Use previews, `bounded_list`, `size_summary`, omitted counts, truncation flags, and explicit `detail="full"` or targeted tools for audit/deep reads.
-- **Compress into decision-shaped slices**: Good summaries preserve the useful shape of a large object from several angles. `get_threshold_stability_curve` is the model: it condenses a full H0 threshold curve into a headline comparison, an evenly spaced morphology sample, top candidate lenses with `why` / `best_for` / `avoid_for`, filtered structural breakpoints, omitted counts, and compatible next tools. Prefer these dense, labeled snippets over either raw arrays or vague prose summaries.
-- **Make outputs rich but bounded**: Include the context an agent needs to decide the next step: dataset shape, raw-vs-processed calibration, k-NN/epsilon domain, projected feature count, estimated ball maps, grid adequacy, threshold provenance, graph surface, component morphology, weight distribution, finalization gates, and recommended next tools. Prefer a compact decision packet over a raw dump.
-- **Preserve agent autonomy**: `create_config` returns a broad baseline, not the answer. `diagnose_cosmic_graph` is measurement, not a directive. Threshold policies are interpretation lenses, not scores to maximize. Avoid wording that encourages metric hill-climbing, single-run perfection, or automatic rejection of valid one-component / giant-plus-tail topologies.
-- **Use drill-down tools intentionally**: The normal loop is `get_workflow_guide` -> `characterize_dataset` -> `create_config` -> `run_topological_sweep` -> `diagnose_cosmic_graph` -> `generate_cluster_dossier(detail="summary")`, followed by narrow calls such as `probe_columns`, `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix`, `get_threshold_stability_curve`, or `get_topological_skeleton` only when the current question needs them.
-- **Label graph surfaces precisely**: Always distinguish construction threshold vs. interpretation threshold, persisted constructed graph vs. full weighted affinity, live model vs. persisted run, and constructed graph vs. sparsified artifact. If a payload mixes these surfaces, include explicit labels and threshold fields near the top.
-- **Scale costs must be visible**: Any expensive or potentially large operation should expose enough cost context for the agent to choose deliberately: estimated ball maps, runtime/memory tier, preview limits, returned/omitted counts, and whether a graph artifact is an estimate or a built object. Heavy modes and exports should be opt-in.
-- **Errors should unblock agents**: MCP errors should use structured envelopes with an error code, the failed tool, relevant handle/path context, and a concrete `agent_action`. Do not return opaque stack traces or benign-looking defaults when a statistical test, config validation, stale handle, or sandbox path failed.
-- **Tests and docs move with the surface**: When changing MCP contracts, update the corresponding tool docstrings, `WORKFLOW_PROMPT`, payload helpers, and focused workflow tests. A tool behavior change is incomplete if the prompt still teaches the old detail mode, threshold meaning, or next-tool path.
-
 ## Async / MCP Patterns
 
 When integrating `async def` MCP tools with blocking Python code:
@@ -179,6 +163,6 @@ await asyncio.to_thread(model.fit, progress_callback=progress_callback)
 ## Key Architectural Decisions
 
 - **`CosmicGraph.from_pseudo_laplacian` requires `int64`**: The pseudo-Laplacian accumulator expects integer counts. If constructing test inputs in Python, use `np.ascontiguousarray(L, dtype=np.int64)`.
-- **`construction_threshold: "auto"` is the safe generic default for exploratory MCP runs**: Do not default to `"0.0"` or a fixed value for high-dimensional or unknown-domain data — it often produces a maximally connected, structureless graph. The H₀ persistent homology stability analysis exists precisely to choose a data-relative construction surface.
+- **`construction_threshold: "auto"` is always correct for EHR/high-dim data**: Do not default to `"0.0"` or a fixed value for high-dimensional data — it produces a maximally connected, structureless graph. The H₀ persistent homology stability analysis exists precisely for this case.
 - **Randomized SVD introduces small variance approximation error**: PCA via Halko et al. 2011 gives approximate, not exact, singular values. Document this in characterization code; do not treat approximate variance ratios as ground truth.
 - **MCP session state lives in `_PulsarSession`**: Embeddings, fingerprint, and model are stored per-session. Read/write session state in the `async` context (before/after `to_thread`), not inside the thread.

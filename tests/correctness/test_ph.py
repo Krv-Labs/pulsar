@@ -150,14 +150,9 @@ def py_find_stable_thresholds(weighted_adj, num_bins=256):
     # Sort by length (descending)
     plateaus.sort(key=lambda p: p[0] - p[1], reverse=True)
 
-    # Optimal threshold: longest plateau with a nontrivial component count
-    # (1 < count < n), falling back to the longest plateau overall. Mirrors the
-    # trivial-plateau guard in find_stable_thresholds so this reference reflects
-    # intended behavior (skips the all-connected head / all-singleton tail).
-    nontrivial = next((p for p in plateaus if 1 < p[2] < n), None)
-    chosen = nontrivial or (plateaus[0] if plateaus else None)
-    if chosen is not None:
-        optimal_threshold = (chosen[0] + chosen[1]) / 2
+    # Optimal threshold
+    if plateaus:
+        optimal_threshold = (plateaus[0][0] + plateaus[0][1]) / 2
     else:
         optimal_threshold = 0.5
 

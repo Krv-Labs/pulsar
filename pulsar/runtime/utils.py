@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from contextlib import contextmanager
 
 import numpy as np
 
 # Approximate wall-clock fraction per pipeline stage (estimates, not guarantees).
 # Order matters — stages are consumed sequentially by a cursor.
-# Projection weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
+# PCA weight is zeroed when _precomputed_embeddings is used; fractions are renormalized.
 STAGE_WEIGHTS: list[tuple[str, float]] = [
     ("load", 0.03),
     ("impute", 0.08),
@@ -35,42 +34,6 @@ def build_cumulative_fractions(
     if result:
         result[-1] = (result[-1][0], 1.0)
     return result
-
-
-class ProgressTracker:
-    """Map stage-local progress updates onto a single monotonic 0..1 span."""
-
-    def __init__(
-        self,
-        stages: list[tuple[str, float]],
-        callback: Callable[[str, float], None] | None,
-    ):
-        self._callback = callback
-        self._spans: dict[str, tuple[float, float]] = {}
-        self._last = 0.0
-
-        total = sum(max(weight, 0.0) for _, weight in stages) or 1.0
-        cursor = 0.0
-        for label, weight in stages:
-            start = cursor
-            cursor += max(weight, 0.0) / total
-            self._spans[label] = (start, cursor)
-
-    def update(
-        self, stage: str, local_fraction: float, label: str | None = None
-    ) -> None:
-        if self._callback is None:
-            return
-        start, end = self._spans[stage]
-        local = max(0.0, min(1.0, local_fraction))
-        fraction = round(start + (end - start) * local, 6)
-        if fraction <= self._last and fraction < 1.0:
-            return
-        self._last = fraction
-        self._callback(label or stage, fraction)
-
-    def complete(self, stage: str, label: str | None = None) -> None:
-        self.update(stage, 1.0, label=label)
 
 
 @contextmanager

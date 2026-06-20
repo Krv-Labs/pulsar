@@ -20,36 +20,6 @@ logger = logging.getLogger(__name__)
 
 _DIRTY_NUMERIC_SAMPLE_SIZE = 10
 _PREPROCESSING_EXPANSION_WARNING_THRESHOLD = 50
-_HIGH_MISSINGNESS_REVIEW_PCT = 60.0
-_HIGH_MISSINGNESS_DROP_PCT = 80.0
-_NUMERIC_CATEGORY_REVIEW_MAX_UNIQUE = 10
-_NUMERIC_CATEGORY_REVIEW_MIN_ROWS = 8
-_PROTECTED_COLUMN_HINTS = (
-    "target",
-    "outcome",
-    "label",
-    "response",
-    "status",
-    "diagnosis",
-    "diagnostic",
-    "phenotype",
-    "endpoint",
-)
-_NUMERIC_CATEGORY_NAME_HINTS = (
-    "binary",
-    "flag",
-    "indicator",
-    "status",
-    "stage",
-    "grade",
-    "class",
-    "type",
-    "code",
-    "group",
-    "category",
-    "sex",
-    "gender",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -134,16 +104,6 @@ def _looks_like_dirty_numeric(sample_values: list[str]) -> bool:
         return False
     parseable = sum(1 for v in sample_values if _try_float(v))
     return parseable / len(sample_values) > 0.5
-
-
-def _looks_domain_protected(name: str) -> bool:
-    lowered = name.lower()
-    return any(hint in lowered for hint in _PROTECTED_COLUMN_HINTS)
-
-
-def _looks_categorical_name(name: str) -> bool:
-    lowered = name.lower()
-    return any(hint in lowered for hint in _NUMERIC_CATEGORY_NAME_HINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -281,27 +241,7 @@ def _recommend_preprocessing_block(
             continue
 
         # Numeric column
-        if missing_pct >= _HIGH_MISSINGNESS_DROP_PCT and not _looks_domain_protected(
-            name
-        ):
-            drop.append(name)
-            rationale.append(
-                (
-                    name,
-                    "drop",
-                    f"Numeric, {missing_pct:.0f}% missing — default drop; probe if missingness encodes a domain response",
-                )
-            )
-        elif missing_pct >= _HIGH_MISSINGNESS_REVIEW_PCT:
-            impute[name] = {"method": "sample_normal", "seed": 42}
-            rationale.append(
-                (
-                    name,
-                    "review: impute sample_normal",
-                    f"Numeric, {missing_pct:.0f}% missing — kept with missingness flag; domain review/probe recommended before final analysis",
-                )
-            )
-        elif missing_pct >= 30:
+        if missing_pct >= 30:
             impute[name] = {"method": "sample_normal", "seed": 42}
             rationale.append(
                 (
@@ -400,8 +340,6 @@ def build_preprocessing_recommendation_payload(
     preprocessing_yaml: str,
     expansion_estimate: int,
     dirty_numeric_detection: dict[str, Any],
-    dataset_id: str | None = None,
-    n_samples: int | None = None,
     detail: str = "summary",
     rationale_limit: int = 20,
 ) -> dict[str, Any]:
@@ -410,38 +348,10 @@ def build_preprocessing_recommendation_payload(
         for col, decision, reason in rationale
     ]
     counts = _decision_counts(rows)
-    high_missingness = _high_missingness_columns(
-        column_profiles,
-        drop=drop,
-        impute=impute,
-        encode=encode,
-        rationale_rows=rows,
-    )
-    high_missingness_preview = high_missingness[:rationale_limit]
-    numeric_categorical = _numeric_categorical_candidates(
-        column_profiles,
-        n_samples=n_samples,
-        drop=drop,
-        impute=impute,
-        encode=encode,
-    )
-    numeric_categorical_preview = numeric_categorical[:rationale_limit]
     rationale_preview = rows[:rationale_limit]
-    recommended_action = "probe_columns_first" if high_missingness else "accept"
-    next_tool_call = {"tool": "create_config", "args": {"dataset_id": dataset_id}}
-    if high_missingness:
-        next_tool_call = {
-            "tool": "probe_columns",
-            "args": {
-                "dataset_id": dataset_id,
-                "columns": [row["column"] for row in high_missingness_preview],
-            },
-        }
     payload: dict[str, Any] = {
         "status": "ok",
         "detail": detail,
-        "recommended_action": recommended_action,
-        "next_tool_call": next_tool_call,
         "preprocessing_yaml": preprocessing_yaml,
         "decision_counts": counts,
         "expansion_estimate": expansion_estimate,
@@ -450,7 +360,6 @@ def build_preprocessing_recommendation_payload(
             rationale_rows=rows,
             expansion_estimate=expansion_estimate,
             dirty_numeric_detection=dirty_numeric_detection,
-            numeric_categorical_candidates=numeric_categorical,
         ),
         "dirty_numeric_detection": dirty_numeric_detection,
         "actioned_columns_preview": {
@@ -458,14 +367,6 @@ def build_preprocessing_recommendation_payload(
             "impute": list(impute)[:rationale_limit],
             "encode": list(encode)[:rationale_limit],
         },
-        "high_missingness_columns": high_missingness_preview,
-        "high_missingness_columns_omitted": max(
-            len(high_missingness) - len(high_missingness_preview), 0
-        ),
-        "numeric_categorical_candidates": numeric_categorical_preview,
-        "numeric_categorical_candidates_omitted": max(
-            len(numeric_categorical) - len(numeric_categorical_preview), 0
-        ),
         "rationale_preview": rationale_preview,
         "rationale_omitted": max(len(rows) - len(rationale_preview), 0),
         "recommended_next_tools": [
@@ -477,8 +378,6 @@ def build_preprocessing_recommendation_payload(
     if detail == "full":
         payload["rationale"] = rows
         payload["column_decisions"] = _column_decisions(rows)
-        payload["high_missingness_columns_full"] = high_missingness
-        payload["numeric_categorical_candidates_full"] = numeric_categorical
         payload["profile_source"] = {
             "columns_profiled": len(column_profiles),
             "dirty_numeric_detection": dirty_numeric_detection,
@@ -495,12 +394,8 @@ def preprocessing_recommendation_to_markdown(payload: dict[str, Any]) -> str:
         f"- Drop: {counts.get('drop', 0)}",
         f"- Impute: {counts.get('impute', 0)}",
         f"- Encode: {counts.get('encode', 0)}",
-        f"- Review: {counts.get('review', 0)}",
-        "- Numeric-coded category candidates: "
-        f"{len(payload.get('numeric_categorical_candidates', [])) + int(payload.get('numeric_categorical_candidates_omitted', 0) or 0)}",
         f"- No action: {counts.get('no_action', 0)}",
         f"- Expansion estimate: {payload.get('expansion_estimate', 0)}",
-        f"- Recommended action: `{payload.get('recommended_action', 'accept')}`",
         "",
     ]
     warnings = payload.get("warnings", [])
@@ -524,69 +419,6 @@ def preprocessing_recommendation_to_markdown(payload: dict[str, Any]) -> str:
             payload.get("preprocessing_yaml", ""),
             "```",
             "",
-        ]
-    )
-    high_missingness = payload.get("high_missingness_columns", [])
-    if high_missingness:
-        lines.extend(
-            [
-                "## High Missingness Review",
-                "",
-                "| Column | Missing | Type | Default decision | Reason |",
-                "|---|---:|---|---|---|",
-            ]
-        )
-        for row in high_missingness:
-            lines.append(
-                f"| `{row['column']}` | {float(row['missing_pct']):.1f}% | "
-                f"{row['type']} | {row['default_decision']} | {row['reason']} |"
-            )
-        omitted_high_missingness = payload.get("high_missingness_columns_omitted", 0)
-        if omitted_high_missingness:
-            lines.append(
-                f"\n{omitted_high_missingness} high-missingness columns omitted. "
-                "Use `detail='full'` for audit."
-            )
-        next_call = payload.get("next_tool_call", {})
-        if next_call:
-            lines.append(
-                f"\nNext targeted call: `{next_call.get('tool')}` with "
-                f"`{next_call.get('args', {})}`"
-            )
-        lines.append("")
-
-    numeric_categorical = payload.get("numeric_categorical_candidates", [])
-    if numeric_categorical:
-        lines.extend(
-            [
-                "## Numeric-Coded Category Review",
-                "",
-                "| Column | Unique | Missing | Default decision | Supported actions | Reason |",
-                "|---|---:|---:|---|---|---|",
-            ]
-        )
-        for row in numeric_categorical:
-            lines.append(
-                f"| `{row['column']}` | {int(row['n_unique'])} | "
-                f"{float(row['missing_pct']):.1f}% | {row['default_decision']} | "
-                f"{', '.join(row.get('supported_actions', []))} | {row['reason']} |"
-            )
-        lines.append(
-            "\nValue counts for these columns are available from `probe_columns`; "
-            "this is evidence for agent/domain review, not a required next step."
-        )
-        omitted_numeric_categorical = payload.get(
-            "numeric_categorical_candidates_omitted", 0
-        )
-        if omitted_numeric_categorical:
-            lines.append(
-                f"\n{omitted_numeric_categorical} numeric-coded category candidates "
-                "omitted. Use `detail='full'` for audit."
-            )
-        lines.append("")
-
-    lines.extend(
-        [
             "## Rationale Preview",
             "",
         ]
@@ -619,9 +451,8 @@ def preprocessing_recommendation_to_markdown(payload: dict[str, Any]) -> str:
 def _decision_counts(rows: list[dict[str, str]]) -> dict[str, int]:
     return {
         "drop": sum(1 for row in rows if row["decision"] == "drop"),
-        "impute": sum(1 for row in rows if "impute" in row["decision"]),
-        "encode": sum(1 for row in rows if "encode" in row["decision"]),
-        "review": sum(1 for row in rows if row["decision"].startswith("review")),
+        "impute": sum(1 for row in rows if row["decision"].startswith("impute")),
+        "encode": sum(1 for row in rows if row["decision"].startswith("encode")),
         "no_action": sum(1 for row in rows if row["decision"] == "no action"),
     }
 
@@ -639,44 +470,8 @@ def _preprocessing_warnings(
     rationale_rows: list[dict[str, str]],
     expansion_estimate: int,
     dirty_numeric_detection: dict[str, Any],
-    numeric_categorical_candidates: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
-    numeric_categorical_candidates = numeric_categorical_candidates or []
-    if numeric_categorical_candidates:
-        warnings.append(
-            {
-                "code": "NUMERIC_CODED_CATEGORICAL_CANDIDATES",
-                "severity": "info",
-                "message": (
-                    f"{len(numeric_categorical_candidates)} numeric column(s) have "
-                    "low cardinality and may be binary/ordinal/category codes; "
-                    "value counts can help a domain agent decide how to treat them."
-                ),
-            }
-        )
-    high_missingness_rows = [
-        row
-        for row in rationale_rows
-        if "missing" in row["reason"] and "domain review/probe" in row["reason"]
-    ]
-    high_missingness_drops = [
-        row
-        for row in rationale_rows
-        if row["column"] in drop and "default drop" in row["reason"]
-    ]
-    if high_missingness_rows or high_missingness_drops:
-        warnings.append(
-            {
-                "code": "HIGH_MISSINGNESS_COLUMNS",
-                "severity": "warning",
-                "message": (
-                    f"{len(high_missingness_rows) + len(high_missingness_drops)} "
-                    "column(s) have >=60% missingness; probe before assuming "
-                    "imputation or dropping is domain-correct."
-                ),
-            }
-        )
     if expansion_estimate > _PREPROCESSING_EXPANSION_WARNING_THRESHOLD:
         warnings.append(
             {
@@ -740,107 +535,6 @@ def _preprocessing_warnings(
             }
         )
     return warnings
-
-
-def _high_missingness_columns(
-    column_profiles: list[Any],
-    *,
-    drop: list[str],
-    impute: dict[str, Any],
-    encode: dict[str, Any],
-    rationale_rows: list[dict[str, str]],
-) -> list[dict[str, Any]]:
-    rationale_by_column = {row["column"]: row["reason"] for row in rationale_rows}
-    rows: list[dict[str, Any]] = []
-    for raw_cp in column_profiles:
-        cp = _normalize_profile(raw_cp)
-        missing_pct = float(cp["missing_pct"])
-        if missing_pct < _HIGH_MISSINGNESS_REVIEW_PCT:
-            continue
-        name = str(cp["name"])
-        if name in drop:
-            default_decision = "drop"
-        elif name in impute and name in encode:
-            default_decision = "impute+encode"
-        elif name in impute:
-            default_decision = "impute"
-        elif name in encode:
-            default_decision = "encode"
-        else:
-            default_decision = "review"
-        rows.append(
-            {
-                "column": name,
-                "type": "numeric" if cp["is_numeric"] else "categorical",
-                "missing_pct": round(missing_pct, 2),
-                "n_missing": int(cp["n_missing"]),
-                "default_decision": default_decision,
-                "protected_name_hint": _looks_domain_protected(name),
-                "reason": rationale_by_column.get(
-                    name,
-                    "High missingness can encode domain-specific null response semantics.",
-                ),
-            }
-        )
-    return sorted(rows, key=lambda row: float(row["missing_pct"]), reverse=True)
-
-
-def _numeric_categorical_candidates(
-    column_profiles: list[Any],
-    *,
-    n_samples: int | None,
-    drop: list[str],
-    impute: dict[str, Any],
-    encode: dict[str, Any],
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    total = int(n_samples or 0)
-    for raw_cp in column_profiles:
-        cp = _normalize_profile(raw_cp)
-        if not cp["is_numeric"]:
-            continue
-        name = str(cp["name"])
-        if name in drop or name in encode:
-            continue
-        n_unique = int(cp["n_unique"])
-        if n_unique < 2 or n_unique > _NUMERIC_CATEGORY_REVIEW_MAX_UNIQUE:
-            continue
-        non_missing = max(total - int(cp["n_missing"]), 0) if total else 0
-        if total and total < _NUMERIC_CATEGORY_REVIEW_MIN_ROWS:
-            continue
-        is_binary = n_unique == 2
-        name_hint = _looks_categorical_name(name)
-        sparse_levels = bool(non_missing and n_unique / max(non_missing, 1) <= 0.3)
-        if not (is_binary or name_hint or sparse_levels):
-            continue
-        if name in impute:
-            default_decision = "impute+kept_numeric"
-        else:
-            default_decision = "kept_numeric"
-        rows.append(
-            {
-                "column": name,
-                "n_unique": n_unique,
-                "missing_pct": round(float(cp["missing_pct"]), 2),
-                "default_decision": default_decision,
-                "name_hint": name_hint,
-                "supported_actions": ["keep_numeric", "one_hot_encode", "drop"],
-                "encoding_note": (
-                    "one_hot is supported, but encoded dummy columns still enter "
-                    "the global StandardScaler with all other features."
-                ),
-                "evidence_available": (
-                    "Use probe_columns for value counts before deciding whether "
-                    "this numeric field is continuous, ordinal, categorical, or noise."
-                ),
-                "reason": (
-                    "Numeric low-cardinality column may encode a binary, ordinal, "
-                    "or categorical variable; domain review should decide whether "
-                    "to keep numeric, encode, or drop."
-                ),
-            }
-        )
-    return sorted(rows, key=lambda row: (row["n_unique"], row["column"]))
 
 
 # ---------------------------------------------------------------------------

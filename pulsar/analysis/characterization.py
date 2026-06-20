@@ -266,9 +266,6 @@ def profile_column_details(
         std = round(float(non_null.std()), 4) if len(non_null) > 1 else None
         min_val = round(float(non_null.min()), 4)
         max_val = round(float(non_null.max()), 4)
-        if n_unique <= 20:
-            vc = series.value_counts().head(10)
-            top_values = [(str(k), int(v)) for k, v in vc.items()]
     elif not is_numeric:
         vc = series.value_counts().head(10)
         top_values = [(str(k), int(v)) for k, v in vc.items()]

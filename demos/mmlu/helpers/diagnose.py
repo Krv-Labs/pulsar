@@ -322,9 +322,7 @@ def render_graph_summary(summary: GraphSummary) -> None:
     table.add_column("Value")
     table.add_row("Nodes", f"{summary.n_nodes:,}")
     table.add_row("Edges", f"{summary.n_edges:,} ({summary.density:.2%} density)")
-    table.add_row(
-        "Resolved threshold", f"{summary.resolved_construction_threshold:.6f}"
-    )
+    table.add_row("Resolved threshold", f"{summary.resolved_construction_threshold:.6f}")
     table.add_row(
         "Non-zero pairs",
         f"{summary.nonzero_pairs:,} / {summary.total_pairs:,} ({summary.nonzero_fraction:.2%})",

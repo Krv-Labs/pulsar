@@ -312,84 +312,10 @@ pub fn find_stable_thresholds(
         }
     }
 
-    Ok(stability_from_bins(n, bins, num_bins))
-}
-
-/// Find stable thresholds directly from a weighted edge list (sparse path), with
-/// no dense n×n scan. `edges` are `(i, j, weight)` with weights in `[0, 1]`; the
-/// orientation of `(i, j)` is irrelevant (union-find is symmetric).
-///
-/// Shares the exact quantization, sweep, plateau, and selection logic with the
-/// dense [`find_stable_thresholds`] via [`stability_from_bins`], so on the same
-/// graph both produce identical results.
-///
-/// # Errors
-/// Returns [`PulsarError::InvalidParameter`] if `num_bins == 0` or an edge endpoint
-/// is out of range.
-pub fn find_stable_thresholds_from_edges(
-    n: usize,
-    edges: &[(usize, usize, f64)],
-    num_bins: usize,
-) -> Result<StabilityResult, PulsarError> {
-    if num_bins == 0 {
-        return Err(PulsarError::InvalidParameter {
-            msg: "num_bins must be positive".to_string(),
-        });
-    }
-
-    // Degenerate cases mirror the dense path exactly.
-    if n == 0 {
-        return Ok(StabilityResult {
-            optimal_threshold: 0.5,
-            plateaus: vec![],
-            thresholds: vec![],
-            component_counts: vec![],
-        });
-    }
-    if n == 1 {
-        return Ok(StabilityResult {
-            optimal_threshold: 0.5,
-            plateaus: vec![Plateau {
-                start_threshold: 1.0,
-                end_threshold: 0.0,
-                component_count: 1,
-            }],
-            thresholds: vec![1.0, 0.0],
-            component_counts: vec![1, 1],
-        });
-    }
-
-    let mut bins: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_bins];
-    for &(i, j, w) in edges {
-        if i >= n || j >= n {
-            return Err(PulsarError::InvalidParameter {
-                msg: format!("edge endpoint out of range for n = {n}: ({i}, {j})"),
-            });
-        }
-        if w > 0.0 {
-            // Identical quantization to the dense Phase 1 — must stay byte-identical
-            // so plateau boundaries and the optimal threshold match.
-            let bin = ((w * num_bins as f64).floor() as usize).min(num_bins - 1);
-            bins[bin].push((i, j));
-        }
-    }
-
-    Ok(stability_from_bins(n, bins, num_bins))
-}
-
-/// Shared Phases 2–4: union-find sweep over quantized bins, plateau detection, and
-/// optimal-threshold selection. `bins[b]` holds the `(i, j)` endpoint pairs whose
-/// quantized weight equals `b`. Assumes `n >= 2` (degenerate cases are handled by
-/// the callers before binning).
-fn stability_from_bins(
-    n: usize,
-    bins: Vec<Vec<(usize, usize)>>,
-    num_bins: usize,
-) -> StabilityResult {
     // Check if graph has any edges
     let total_edges: usize = bins.iter().map(|b| b.len()).sum();
     if total_edges == 0 {
-        return StabilityResult {
+        return Ok(StabilityResult {
             optimal_threshold: 0.5,
             plateaus: vec![Plateau {
                 start_threshold: 1.0,
@@ -398,7 +324,7 @@ fn stability_from_bins(
             }],
             thresholds: vec![1.0, 0.0],
             component_counts: vec![n, n],
-        };
+        });
     }
 
     // -------------------------------------------------------------------------
@@ -471,18 +397,8 @@ fn stability_from_bins(
     // -------------------------------------------------------------------------
     // Phase 4: Select optimal threshold
     // -------------------------------------------------------------------------
-    // Prefer the longest *nontrivial* plateau (1 < components < n). The degenerate
-    // all-connected head (components == 1) and all-shattered tail (components == n,
-    // every node a singleton) carry no clustering structure. On spectrally-sparsified
-    // graphs the shattered tail is often the widest plateau, which would otherwise
-    // pick an all-singletons cut. Since `plateaus` is already sorted longest-first,
-    // the first nontrivial match is the longest one. Fall back to the longest overall
-    // only when no nontrivial plateau exists (genuinely fully connected or fully
-    // shattered at every threshold).
     let optimal_threshold = plateaus
-        .iter()
-        .find(|p| p.component_count > 1 && p.component_count < n)
-        .or_else(|| plateaus.first())
+        .first()
         .map(|p| p.midpoint())
         .unwrap_or(0.5);
 
@@ -505,12 +421,12 @@ fn stability_from_bins(
         }
     }
 
-    StabilityResult {
+    Ok(StabilityResult {
         optimal_threshold,
         plateaus,
         thresholds: dedup_thresholds,
         component_counts: dedup_counts,
-    }
+    })
 }
 
 // ============================================================================
@@ -694,31 +610,6 @@ pub fn py_find_stable_thresholds<'py>(
     Ok(PyStabilityResult { inner: result })
 }
 
-/// Find stable thresholds from a weighted edge list (sparse path), with no dense
-/// n×n scan. Shares all logic with [`find_stable_thresholds`] and produces
-/// identical results on the same graph.
-///
-/// # Parameters
-/// - `n` (`int`) — number of nodes.
-/// - `edges` (`list[tuple[int, int, float]]`) — `(i, j, weight)` with weights in
-///   `[0, 1]`. Orientation of `(i, j)` is irrelevant.
-/// - `num_bins` (`int`, optional) — quantization bins. Default: 256.
-///
-/// # Returns
-/// A `StabilityResult`, identical in shape to `find_stable_thresholds`.
-#[pyfunction]
-#[pyo3(name = "find_stable_thresholds_sparse", signature = (n, edges, num_bins=None))]
-pub fn py_find_stable_thresholds_sparse(
-    _py: Python<'_>,
-    n: usize,
-    edges: Vec<(usize, usize, f64)>,
-    num_bins: Option<usize>,
-) -> PyResult<PyStabilityResult> {
-    let bins = num_bins.unwrap_or(DEFAULT_NUM_BINS);
-    let result = find_stable_thresholds_from_edges(n, &edges, bins)?;
-    Ok(PyStabilityResult { inner: result })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,45 +694,6 @@ mod tests {
 
         // Should also start with 3 components at high threshold
         assert!(result.component_counts.contains(&3));
-
-        // Fallback path: no nontrivial plateau (count is always 1 or n=3), so the
-        // selector falls back to the longest overall plateau. The result must still
-        // be a sane threshold strictly inside (0, 1).
-        assert!(result.optimal_threshold > 0.0);
-        assert!(result.optimal_threshold < 1.0);
-    }
-
-    #[test]
-    fn test_find_stable_thresholds_skips_shattered_tail() {
-        // 4 nodes where the widest plateau is the all-singleton (shattered) tail.
-        // All edges are weak and clustered near the low end so that nodes stay
-        // disconnected across most of the threshold range, then collapse abruptly.
-        // Edge (0,1)=0.15; every other pair=0.10.
-        //
-        // Component evolution as threshold τ decreases from 1.0:
-        //   τ > 0.15:        4 components (no edges admitted)     ← widest plateau (tail)
-        //   τ ∈ (0.10, 0.15]: 3 components (only 0-1 connected)   ← narrow nontrivial plateau
-        //   τ ≤ 0.10:        1 component (all weak edges admitted)
-        //
-        // The 4-component (== n) tail spans (0.15, 1.0] (~0.85 wide) and is by far
-        // the widest plateau, but it is degenerate (all singletons). The selector
-        // must skip it and land on the nontrivial 3-component plateau in (0.10, 0.15].
-        let w = arr2(&[
-            [0.0, 0.15, 0.10, 0.10],
-            [0.15, 0.0, 0.10, 0.10],
-            [0.10, 0.10, 0.0, 0.10],
-            [0.10, 0.10, 0.10, 0.0],
-        ]);
-
-        let result = find_stable_thresholds(&w, 100).unwrap();
-
-        // The all-singleton tail (component_count == n == 4) is the widest plateau.
-        assert_eq!(result.plateaus[0].component_count, 4);
-
-        // But the selected threshold must fall inside the nontrivial 3-component
-        // plateau (0.10, 0.15], not on the shattered tail above 0.15.
-        assert!(result.optimal_threshold > 0.10);
-        assert!(result.optimal_threshold <= 0.15);
     }
 
     #[test]

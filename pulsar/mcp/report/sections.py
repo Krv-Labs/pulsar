@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 
-from pulsar._pulsar import find_stable_thresholds, find_stable_thresholds_sparse
+from pulsar._pulsar import find_stable_thresholds
 from pulsar.mcp.interpreter import ClusterProfile, TopologicalDossier
 from pulsar.mcp.report.formatting import (
     _cluster_trait_summary,
@@ -21,7 +21,6 @@ from pulsar.mcp.thresholds import (
     agent_threshold_options,
     component_mass_profile,
     prepare_threshold_graph,
-    prepare_threshold_graph_from_edges,
     structural_breakpoints,
 )
 
@@ -273,20 +272,11 @@ def _threshold_report_payload(model: ThemaRS | None) -> dict[str, Any] | None:
     if model is None:
         return None
     try:
-        weighted_edges = getattr(model, "weighted_edges", None)
-        if callable(weighted_edges):
-            n_nodes = int(model.cosmic_rust.n)
-            edges = weighted_edges(threshold=0.0)
-            threshold_graph = prepare_threshold_graph_from_edges(n_nodes, edges)
-            stability = getattr(model, "stability_result", None)
-            if stability is None:
-                stability = find_stable_thresholds_sparse(n_nodes, edges)
-        else:
-            adj = model.weighted_adjacency
-            threshold_graph = prepare_threshold_graph(adj)
-            stability = getattr(model, "stability_result", None)
-            if stability is None:
-                stability = find_stable_thresholds(adj)
+        adj = np.asarray(model.weighted_adjacency)
+        threshold_graph = prepare_threshold_graph(adj)
+        stability = getattr(model, "stability_result", None)
+        if stability is None:
+            stability = find_stable_thresholds(adj)
         thresholds = [float(t) for t in stability.thresholds]
         component_counts = [int(c) for c in stability.component_counts]
         resolved_threshold = float(model.resolved_construction_threshold)

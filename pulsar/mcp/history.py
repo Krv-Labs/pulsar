@@ -23,15 +23,13 @@ _MEANINGFUL_NONTRIVIAL_DELTA = 0.03
 _SINGLETON_SPIKE_DELTA = 0.05
 
 
-def _extract_projection_dims(config_yaml: str) -> list[int]:
+def _extract_pca_dims(config_yaml: str) -> list[int]:
     try:
         cfg = yaml.safe_load(config_yaml) or {}
     except yaml.YAMLError:
         return []
-    sweep = cfg.get("sweep", {})
-    values = sweep.get("projection", {}).get("dimensions", {}).get("values")
-    if values is None:
-        values = sweep.get("pca", {}).get("dimensions", {}).get("values", [])
+    pca = cfg.get("sweep", {}).get("pca", {}).get("dimensions", {})
+    values = pca.get("values", [])
     if isinstance(values, list):
         return [int(v) for v in values if isinstance(v, (int, float))]
     return []
@@ -82,11 +80,6 @@ def _component_profile(metrics: dict[str, Any]) -> dict[str, Any]:
     sizes = sorted(sizes, reverse=True)
     giant_size = sizes[0]
     tail = sizes[1:]
-    # NOTE: this cross-run *trend* surface uses its own absolute non-giant floor
-    # and reports non-giant component counts only. It is intentionally separate
-    # from the gate/candidate significance path, which now uses the relative,
-    # gap-based thresholds.significant_component_sizes. Folding this onto that
-    # helper (preserving the non-giant framing) is a deferred consistency pass.
     nontrivial_min = max(10, math.ceil(n_total * 0.01))
     nontrivial = [size for size in tail if size >= nontrivial_min]
     small = [size for size in tail if size < nontrivial_min]
@@ -203,7 +196,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
         health = _health_label(metrics)
         health_counts[health] = health_counts.get(health, 0) + 1
 
-        for dim in _extract_projection_dims(config_yaml):
+        for dim in _extract_pca_dims(config_yaml):
             pca_dim_health.setdefault(dim, []).append(health)
 
         if (
@@ -223,7 +216,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     )
     if hairball_dims:
         observations.append(
-            f"Projection dimensions {hairball_dims} appeared in hairball regimes in "
+            f"PCA dimensions {hairball_dims} appeared in hairball regimes in "
             f"the majority of runs containing them."
         )
 
@@ -235,7 +228,7 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     )
     if fragmented_dims:
         observations.append(
-            f"Projection dimensions {fragmented_dims} appeared in fragmented or empty "
+            f"PCA dimensions {fragmented_dims} appeared in fragmented or empty "
             f"graphs in the majority of runs containing them."
         )
 
@@ -258,11 +251,11 @@ def summarize_history(history: list[Any]) -> dict[str, Any]:
     rationale_parts: list[str] = []
     if hairball_dims:
         rationale_parts.append(
-            "Low or extreme projection dimensions correlate with over-connected hairballs."
+            "Low or extreme PCA dimensions correlate with over-connected hairballs."
         )
     if fragmented_dims:
         rationale_parts.append(
-            "Some projection dimensions consistently shatter the graph; consider shifting away from them."
+            "Some PCA dimensions consistently shatter the graph; consider shifting away from them."
         )
     if thresholds_with_singletons:
         rationale_parts.append(

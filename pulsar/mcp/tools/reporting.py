@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 import logging
@@ -21,7 +20,6 @@ from pulsar.mcp.registry import registry
 from pulsar.mcp.session import (
     _get_session,
     _load_session_dataframe,
-    _read_dataset_file,
     _resolve_dataset_path,
 )
 
@@ -103,92 +101,17 @@ def _normalize_cluster_names(
 
 
 async def export_labeled_data(
-    cluster_assignment_id: str,
-    cluster_names: dict[str, str],
-    output_path: str,
-    ctx: Context = None,
+    cluster_names: dict[str, str], output_path: str, ctx: Context
 ) -> str:
-    """Assign semantic names to a persisted cluster assignment and export CSV."""
+    """Assign semantic names to clusters and export labeled dataset to CSV."""
     session = _get_session(ctx)
-    assignment = registry.get_cluster_assignment(cluster_assignment_id)
-    if assignment is None:
-        return unknown_handle_error(
-            "export_labeled_data",
-            "cluster_assignment_id",
-            cluster_assignment_id,
+
+    if session.data is None or session.clusters is None:
+        raise ToolError(
+            "No data or clusters found. Run generate_cluster_dossier() first."
         )
 
-    if assignment.dataset_id:
-        dataset = registry.get_dataset(assignment.dataset_id)
-        if dataset is None or not registry.dataset_matches_disk(dataset):
-            return mcp_error(
-                "export_labeled_data",
-                "The dataset backing this cluster assignment is gone or has "
-                "changed since the labels were computed, so the labels no longer "
-                "align with its rows.",
-                error_code="CLUSTER_ASSIGNMENT_DATASET_STALE",
-                agent_action=(
-                    "Re-ingest the dataset and rerun generate_cluster_dossier, "
-                    "then export with the new cluster_assignment_id."
-                ),
-                details={
-                    "cluster_assignment_id": cluster_assignment_id,
-                    "dataset_id": assignment.dataset_id,
-                },
-            )
-        # Read-only: export must never rebind session.data, which would
-        # invalidate the active clusters/feature-evidence caches. Reuse the
-        # in-memory frame only when it is already this exact dataset.
-        if (
-            session.data is not None
-            and session.data_dataset_id == assignment.dataset_id
-        ):
-            df = session.data
-        else:
-            df = await asyncio.to_thread(_read_dataset_file, dataset.path)
-    elif (
-        session.data is not None
-        and session.latest_run_id == assignment.run_id
-        and len(session.data) == assignment.label_count
-    ):
-        df = session.data
-    else:
-        return mcp_error(
-            "export_labeled_data",
-            "Cluster assignment has no durable dataset_id and the matching data is "
-            "not loaded in this session.",
-            error_code="CLUSTER_ASSIGNMENT_DATA_UNAVAILABLE",
-            agent_action=(
-                "Use a cluster_assignment_id emitted from a dossier generated after "
-                "ingest_dataset/run_topological_sweep(dataset_id=...), or regenerate "
-                "the dossier with the source data loaded in this MCP session."
-            ),
-            details={
-                "cluster_assignment_id": cluster_assignment_id,
-                "run_id": assignment.run_id,
-                "dataset_id": assignment.dataset_id,
-                "label_count": assignment.label_count,
-            },
-        )
-
-    if len(df) != assignment.label_count:
-        return mcp_error(
-            "export_labeled_data",
-            "Cluster assignment label count does not match the dataset row count.",
-            error_code="CLUSTER_ASSIGNMENT_ROW_MISMATCH",
-            agent_action=(
-                "Regenerate generate_cluster_dossier for the dataset you want to "
-                "export and use the new cluster_assignment_id."
-            ),
-            details={
-                "cluster_assignment_id": cluster_assignment_id,
-                "dataset_id": assignment.dataset_id,
-                "label_count": assignment.label_count,
-                "row_count": len(df),
-            },
-        )
-
-    actual_ids = {int(cluster_id) for cluster_id in assignment.cluster_ids}
+    actual_ids = {int(cluster_id) for cluster_id in session.clusters.unique().tolist()}
     names_map = _normalize_cluster_names(
         cluster_names,
         valid_cluster_ids=actual_ids,
@@ -196,22 +119,11 @@ async def export_labeled_data(
     )
 
     try:
-        df = df.copy()
-        df["topological_cluster_id"] = assignment.labels
+        df = session.data.copy()
+        df["topological_cluster_id"] = session.clusters
         df["topological_cluster_name"] = df["topological_cluster_id"].map(names_map)
         df.to_csv(output_path, index=False)
-        return json.dumps(
-            {
-                "status": "ok",
-                "output_path": output_path,
-                "cluster_assignment_id": cluster_assignment_id,
-                "run_id": assignment.run_id,
-                "dataset_id": assignment.dataset_id,
-                "row_count": len(df),
-                "cluster_ids": assignment.cluster_ids,
-            },
-            indent=2,
-        )
+        return f"Successfully exported labeled data to {output_path}"
 
     except Exception as e:
         logger.error(f"Error exporting data: {e}")
@@ -325,8 +237,8 @@ async def probe_columns(
     response_format: Literal["markdown", "json"] = "markdown",
     ctx: Context = None,
 ) -> str:
-    """Targeted column drilldown: sample values, missingness, and distributions.
-    Use after `characterize_dataset`; max 20 columns.
+    """Detailed per-column profiles (sample values, distributions). Use after
+    the compact preview from `characterize_dataset`. Max 20 columns.
     """
     from pulsar.analysis.characterization import profile_column_details
 

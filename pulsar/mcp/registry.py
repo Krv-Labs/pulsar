@@ -17,7 +17,6 @@ _DATASETS_PATH = _CACHE_DIR / "datasets.json"
 _DATASET_FILES_DIR = _CACHE_DIR / "datasets"
 _UPLOADS_DIR = _CACHE_DIR / "uploads"
 _RUNS_DIR = _CACHE_DIR / "runs"
-_CLUSTER_ASSIGNMENTS_DIR = _CACHE_DIR / "cluster_assignments"
 _LOCK_PATH = _CACHE_DIR / ".registry.lock"
 _PROCESS_LOCK = threading.RLock()
 _UTF8_BOM = b"\xef\xbb\xbf"
@@ -52,30 +51,6 @@ class RunRecord:
     resolved_construction_threshold: float
     graph_summary: dict
     created_at: float
-    threshold_stability_summary: dict | None = None
-
-
-@dataclass
-class ClusterAssignmentRecord:
-    # `labels` is the per-row cluster vector and is the only unbounded field
-    # (length == dataset rows). We persist it as JSON because the fitted model
-    # is in-memory only, so export_labeled_data cannot recompute it later. This
-    # is a deliberate trade-off: storage grows ~O(rows) per dossier in the
-    # tmpdir-based cache, on par with the existing run/upload records and reaped
-    # by the OS. If profiling ever shows this dominates for very large n, move
-    # `labels` to a compressed .npy sidecar keyed by cluster_assignment_id and
-    # keep the rest of the record as JSON metadata.
-    cluster_assignment_id: str
-    run_id: str | None
-    dataset_id: str | None
-    method: str
-    interpretation_edge_weight_threshold: float
-    threshold_source: str
-    construction_threshold: float
-    label_count: int
-    cluster_ids: list[int]
-    labels: list[int]
-    created_at: float
 
 
 STALE_RUN_RECORD_MESSAGE = (
@@ -102,7 +77,6 @@ class MCPRegistry:
         _DATASET_FILES_DIR.mkdir(parents=True, exist_ok=True)
         _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         _RUNS_DIR.mkdir(parents=True, exist_ok=True)
-        _CLUSTER_ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
         _LOCK_PATH.touch(exist_ok=True)
 
     @property
@@ -195,21 +169,6 @@ class MCPRegistry:
             return None
         return DatasetRecord(**raw)
 
-    def dataset_matches_disk(self, record: DatasetRecord) -> bool:
-        """True if the file backing a dataset still matches its registered stamp.
-
-        ``register_dataset`` stamps ``size_bytes``/``mtime_ns`` into the record
-        (and folds them into the ``dataset_id`` digest), so an edited file
-        produces a *new* dataset_id and leaves this record's stamp stale --
-        which is exactly the drift we detect. Used to guarantee that labels
-        persisted against a dataset still align positionally with its rows.
-        """
-        try:
-            stat = Path(record.path).stat()
-        except OSError:
-            return False
-        return stat.st_size == record.size_bytes and stat.st_mtime_ns == record.mtime_ns
-
     def save_run(
         self,
         *,
@@ -218,7 +177,6 @@ class MCPRegistry:
         metrics: dict,
         resolved_construction_threshold: float,
         graph_summary: dict,
-        threshold_stability_summary: dict | None = None,
     ) -> RunRecord:
         record = RunRecord(
             run_id=f"run_{uuid.uuid4().hex[:12]}",
@@ -228,7 +186,6 @@ class MCPRegistry:
             resolved_construction_threshold=resolved_construction_threshold,
             graph_summary=graph_summary,
             created_at=time.time(),
-            threshold_stability_summary=threshold_stability_summary,
         )
         with self._locked_registry():
             self._write_json(self._run_path(record.run_id), asdict(record))
@@ -243,48 +200,6 @@ class MCPRegistry:
             raise ValueError(STALE_RUN_RECORD_MESSAGE)
         return RunRecord(**raw)
 
-    def save_cluster_assignment(
-        self,
-        *,
-        run_id: str | None,
-        dataset_id: str | None,
-        method: str,
-        interpretation_edge_weight_threshold: float,
-        threshold_source: str,
-        construction_threshold: float,
-        labels: list[int],
-    ) -> ClusterAssignmentRecord:
-        label_values = [int(label) for label in labels]
-        record = ClusterAssignmentRecord(
-            cluster_assignment_id=f"ca_{uuid.uuid4().hex[:12]}",
-            run_id=run_id,
-            dataset_id=dataset_id,
-            method=method,
-            interpretation_edge_weight_threshold=float(
-                interpretation_edge_weight_threshold
-            ),
-            threshold_source=threshold_source,
-            construction_threshold=float(construction_threshold),
-            label_count=len(label_values),
-            cluster_ids=sorted(set(label_values)),
-            labels=label_values,
-            created_at=time.time(),
-        )
-        with self._locked_registry():
-            self._write_json(
-                self._cluster_assignment_path(record.cluster_assignment_id),
-                asdict(record),
-            )
-        return record
-
-    def get_cluster_assignment(
-        self, cluster_assignment_id: str
-    ) -> ClusterAssignmentRecord | None:
-        path = self._cluster_assignment_path(cluster_assignment_id)
-        if not path.exists():
-            return None
-        return ClusterAssignmentRecord(**json.loads(path.read_text()))
-
     def _load_datasets(self) -> dict[str, dict]:
         with self._locked_registry():
             return self._load_datasets_unlocked()
@@ -296,9 +211,6 @@ class MCPRegistry:
 
     def _run_path(self, run_id: str) -> Path:
         return _RUNS_DIR / f"{run_id}.json"
-
-    def _cluster_assignment_path(self, cluster_assignment_id: str) -> Path:
-        return _CLUSTER_ASSIGNMENTS_DIR / f"{cluster_assignment_id}.json"
 
     def _upload_meta_path(self, upload_id: str) -> Path:
         return _UPLOADS_DIR / f"{upload_id}.json"

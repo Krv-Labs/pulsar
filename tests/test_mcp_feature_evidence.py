@@ -1,7 +1,6 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from typing import Any
 
 import networkx as nx
 import numpy as np
@@ -16,7 +15,6 @@ from pulsar.mcp.tools.clustering import (
 )
 from pulsar.mcp.interpreter import FeatureEvidenceIndex, build_feature_evidence_index
 from pulsar.mcp.interpreter import signal_matrix_payload
-from pulsar.mcp.payloads import build_cluster_selection
 
 
 def _make_disconnected_model(size_per_cluster: int = 3) -> SimpleNamespace:
@@ -187,12 +185,6 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert "categorical_global_ranking" not in summary
     assert "numeric_global_ranking_preview" in summary
     assert "categorical_global_ranking_preview" in summary
-    assert len(summary["numeric_global_ranking_preview"]) <= 5
-    assert len(summary["categorical_global_ranking_preview"]) <= 5
-    assert "component_sizes" not in summary["graph_metrics"]
-    assert "component_sizes_summary" in summary["graph_metrics"]
-    assert "cluster_sizes" not in summary["cluster_result"]
-    assert "cluster_sizes_summary" in summary["cluster_result"]
     for cluster in summary["clusters"]:
         assert "numeric_features" not in cluster
         assert "categorical_features" not in cluster
@@ -202,7 +194,6 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
         assert "numeric_tier_counts" in cluster
         assert "feature_preview" in cluster
         assert cluster["features_previewed"] <= cluster["feature_preview_limit"]
-        assert cluster["feature_preview_limit"] <= 3
     # Full mode still ships everything
     assert "signal_matrix" in full
     full_cluster = full["clusters"][0]
@@ -210,11 +201,9 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     assert "categorical_features" in full_cluster
     assert "numeric_tiers" in full_cluster
     assert "central_rows" in full_cluster
-    assert "cluster_sizes" in full["cluster_result"]
     assert summary["recommended_next_tools"][0] == "get_cluster_profile"
-    assert "detail='full'" in summary["detail_hint"]
+    assert "cluster map" in summary["payload_guidance"]
     assert cluster_profile["cluster"]["cluster_id"] == 0
-    assert "cluster_sizes" not in cluster_profile["cluster_result"]
     assert cluster_profile["max_features"] == 16
     assert cluster_profile["cluster"]["feature_limit"] == 16
     assert cluster_profile["cluster"]["numeric_features"]
@@ -669,148 +658,3 @@ def test_signal_matrix_defensive_safe_casting():
     payload = signal_matrix_payload(evidence, max_clusters=1, return_markdown=False)
     assert payload["clusters_returned"] == 1
     assert payload["clusters_omitted"] == 0
-
-
-def test_build_cluster_selection_discloses_basis_and_stable_ids():
-    """The shared disclosure block names the ranking basis, totals, and shown/
-    omitted IDs, and asserts cross-tool ID stability."""
-    meta = {
-        "n_clusters": 4,
-        "cluster_sizes": [
-            {"cluster_id": cid, "n": 1, "pct": 25.0} for cid in (0, 1, 2, 3)
-        ],
-    }
-    sel = build_cluster_selection(meta, [2, 0], ranked_by="signal")
-    assert sel["total_clusters"] == 4
-    assert sel["ranked_by"] == "signal"
-    # Canonical bounded-list shape: {total, preview, omitted}, no duplicate fields.
-    assert sel["shown_ids"] == {"total": 2, "preview": [0, 2], "omitted": 0}
-    assert sel["omitted_ids"] == {"total": 2, "preview": [1, 3], "omitted": 0}
-    assert set(sel) == {
-        "total_clusters",
-        "ranked_by",
-        "shown_ids",
-        "omitted_ids",
-        "note",
-    }
-    assert "stable" in sel["note"].lower()
-    assert "signal" in sel["note"]
-
-
-def test_sibling_tools_share_partition_but_disclose_different_ranking():
-    """Regression for the post-mortem misdiagnosis: the dossier (by size) and the
-    signal matrix (by signal) report the SAME total over the SAME ID universe;
-    only the displayed subset and the disclosed ranking basis differ."""
-    _sessions.clear()
-    session = _get_session(None)
-    session.model = _make_disconnected_model()
-    session.data = _make_small_server_dataset()
-    session.latest_run_id = "run_synthetic"
-
-    dossier = json.loads(
-        asyncio.run(
-            generate_cluster_dossier(
-                method="auto", detail="summary", response_format="json"
-            )
-        )
-    )
-    matrix = json.loads(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
-    features = json.loads(
-        asyncio.run(get_feature_signal(["f1"], response_format="json"))
-    )
-
-    d_sel = dossier["cluster_selection"]
-    m_sel = matrix["cluster_selection"]
-    f_sel = features["cluster_selection"]
-
-    # Same partition: identical totals and identical ID universe across tools.
-    assert d_sel["total_clusters"] == m_sel["total_clusters"] == f_sel["total_clusters"]
-    d_universe = set(d_sel["shown_ids"]["preview"]) | set(
-        d_sel["omitted_ids"]["preview"]
-    )
-    m_universe = set(m_sel["shown_ids"]["preview"]) | set(
-        m_sel["omitted_ids"]["preview"]
-    )
-    assert d_universe == m_universe
-
-    # Disclosed ranking basis differs and is explicit — the thing that was opaque.
-    assert d_sel["ranked_by"] == "size"
-    assert m_sel["ranked_by"] == "signal"
-    assert f_sel["ranked_by"] == "signal"
-
-
-def test_build_cluster_selection_caps_large_id_lists():
-    meta = {
-        "n_clusters": 35,
-        "cluster_sizes": [{"cluster_id": cid, "n": 1, "pct": 0.0} for cid in range(35)],
-    }
-    sel = build_cluster_selection(meta, list(range(3)), ranked_by="size")
-    assert sel["total_clusters"] == 35
-    assert sel["shown_ids"]["total"] == 3
-    # Bounded preview caps at 20 with the exact omitted count and true total.
-    assert len(sel["omitted_ids"]["preview"]) == 20
-    assert sel["omitted_ids"]["omitted"] == 12
-    assert sel["omitted_ids"]["total"] == 32
-
-
-def _make_many_cluster_model(pairs: int = 30) -> SimpleNamespace:
-    """A shattered graph: ``pairs`` disconnected size-2 components."""
-    n = pairs * 2
-    weighted = np.zeros((n, n), dtype=float)
-    for k in range(pairs):
-        i, j = 2 * k, 2 * k + 1
-        weighted[i, j] = weighted[j, i] = 0.8
-    graph = nx.from_numpy_array((weighted > 0).astype(int))
-    return SimpleNamespace(
-        cosmic_graph=graph,
-        weighted_adjacency=weighted,
-        resolved_construction_threshold=0.0,
-    )
-
-
-def _max_list_len(obj: Any, cap_path: str = "$") -> tuple[int, str]:
-    """Largest list length anywhere in a nested payload, with its path."""
-    if isinstance(obj, list):
-        worst = (len(obj), cap_path)
-        for idx, item in enumerate(obj):
-            worst = max(worst, _max_list_len(item, f"{cap_path}[{idx}]"))
-        return worst
-    if isinstance(obj, dict):
-        worst = (0, cap_path)
-        for key, value in obj.items():
-            worst = max(worst, _max_list_len(value, f"{cap_path}.{key}"))
-        return worst
-    return (0, cap_path)
-
-
-def test_dossier_summary_has_no_unbounded_arrays_on_shattered_graph():
-    """Regression guard (not the fix): on a shattered partition every 'preview'
-    field must stay bounded. A raw O(n) array sneaking back into a summary
-    fails here, where small previews are most likely to silently become O(n)."""
-    _sessions.clear()
-    session = _get_session(None)
-    session.model = _make_many_cluster_model(pairs=30)
-    session.data = pd.DataFrame(
-        {
-            "f1": ([3.0] * 30) + ([0.0] * 30),
-            "f2": list(np.linspace(-3.0, 3.0, 60)),
-            "segment": (["a"] * 30) + (["b"] * 30),
-        }
-    )
-    session.latest_run_id = "run_shattered"
-
-    summary = json.loads(
-        asyncio.run(
-            generate_cluster_dossier(
-                method="components", detail="summary", response_format="json"
-            )
-        )
-    )
-
-    # The shattered condition must actually be exercised.
-    assert summary["cluster_result"]["n_clusters"] >= 20
-    assert "cluster_sizes" not in summary["cluster_result"]
-    assert "cluster_sizes_summary" in summary["cluster_result"]
-
-    longest, where = _max_list_len(summary)
-    assert longest <= 25, f"Unbounded array in summary at {where}: len={longest}"

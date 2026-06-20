@@ -28,17 +28,17 @@ from pulsar._pulsar import (
 )
 
 from pulsar.config import load_config
-from pulsar import cosmic_to_networkx
+from pulsar.hooks import cosmic_to_networkx
 from pulsar.pipeline import ThemaRS
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = REPO_ROOT / "demos"
 CSV_PATH = DEMO_DIR / "us_coal_plants_dataset.csv"
-PARAMS_PATH = DEMO_DIR / "energy" / "coal_params.yaml"
+PARAMS_PATH = DEMO_DIR / "coal_params.yaml"
 DATA_URL = (
     "https://raw.githubusercontent.com/Krv-Labs/retire/main/"
     "retire/resources/us_coal_plants_dataset.csv"
@@ -278,9 +278,7 @@ def main() -> None:
                 f"{best_plateau.end_threshold:.3f} ({best_plateau.component_count} components)"
             )
     else:
-        print(
-            f"[threshold] using manual threshold: {model._resolved_construction_threshold:.4f}"
-        )
+        print(f"[threshold] using manual threshold: {model._resolved_construction_threshold:.4f}")
 
     print(
         f"[run]    cosmic graph: {model.cosmic_graph.number_of_nodes()} nodes,"

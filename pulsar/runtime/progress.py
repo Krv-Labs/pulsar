@@ -23,8 +23,7 @@ def fit_with_progress(
     """Run model.fit() with a transient rich progress bar.
 
     The bar disappears on completion, keeping notebook output clean.
-    Uses the model's progress_callback mechanism, including Python-side batch updates
-    around heavy Rust stages.
+    Uses the model's progress_callback mechanism — zero overhead on Rust stages.
 
     Args:
         model: Unfitted ThemaRS instance.

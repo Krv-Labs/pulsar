@@ -9,18 +9,19 @@ from pulsar.mcp.tools.ingestion import (
     finalize_dataset_upload,
 )
 from pulsar.mcp.tools.config import (
+    explain_suggestion,
     create_config,
     refine_config,
     validate_config,
 )
 from pulsar.mcp.tools.sweeping import (
-    get_sweep_history,
+    get_experiment_history,
+    summarize_sweep_history,
     compare_sweeps,
     run_topological_sweep,
 )
 from pulsar.mcp.tools.diagnostics import (
     diagnose_cosmic_graph,
-    create_graph_artifact,
     get_threshold_stability_curve,
     get_topological_skeleton,
 )
@@ -29,7 +30,7 @@ from pulsar.mcp.tools.clustering import (
     get_cluster_profile,
     get_feature_signal,
     get_cluster_signal_matrix,
-    compare_clusters,
+    compare_clusters_tool,
 )
 from pulsar.mcp.tools.reporting import (
     export_labeled_data,
@@ -59,16 +60,17 @@ ALL_TOOLS_LIST = [
         else []
     ),
     # Config
+    explain_suggestion,
     create_config,
     refine_config,
     validate_config,
     # Sweeping
-    get_sweep_history,
+    get_experiment_history,
+    summarize_sweep_history,
     compare_sweeps,
     run_topological_sweep,
     # Diagnostics
     diagnose_cosmic_graph,
-    create_graph_artifact,
     get_threshold_stability_curve,
     get_topological_skeleton,
     # Clustering
@@ -76,7 +78,7 @@ ALL_TOOLS_LIST = [
     get_cluster_profile,
     get_feature_signal,
     get_cluster_signal_matrix,
-    compare_clusters,
+    compare_clusters_tool,
     # Reporting
     export_labeled_data,
     export_html_report,
@@ -97,21 +99,22 @@ __all__ = [
     "begin_dataset_upload",
     "append_dataset_chunk",
     "finalize_dataset_upload",
+    "explain_suggestion",
     "create_config",
     "refine_config",
     "validate_config",
-    "get_sweep_history",
+    "get_experiment_history",
+    "summarize_sweep_history",
     "compare_sweeps",
     "run_topological_sweep",
     "diagnose_cosmic_graph",
-    "create_graph_artifact",
     "get_threshold_stability_curve",
     "get_topological_skeleton",
     "generate_cluster_dossier",
     "get_cluster_profile",
     "get_feature_signal",
     "get_cluster_signal_matrix",
-    "compare_clusters",
+    "compare_clusters_tool",
     "export_labeled_data",
     "export_html_report",
     "probe_columns",
