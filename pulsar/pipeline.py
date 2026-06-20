@@ -27,8 +27,7 @@ from pulsar.analysis import cosmic_to_networkx
 from pulsar.config import PulsarConfig, load_config
 from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.utils import (
-    STAGE_WEIGHTS,
-    build_cumulative_fractions,
+    ProgressTracker,
     rayon_thread_override,
 )
 
@@ -93,6 +92,7 @@ class ThemaRS:
         *,
         progress_callback: Callable[[str, float], None] | None = None,
         _precomputed_embeddings: list | None = None,
+        ballmap_batch_size: int | None = 1,
     ) -> "ThemaRS":
         """
         Run the full pipeline:
@@ -113,28 +113,17 @@ class ThemaRS:
                 propagate and abort fit(). Pass None to disable (default).
             _precomputed_embeddings: Internal — cached PCA embeddings from a prior
                 fit() call. Skips pca_grid() when provided.
+            ballmap_batch_size: Optional cap on how many embeddings to process per
+                BallMapper batch. Defaults to 1 to bound sparse accumulator peak RAM;
+                pass None to process the full grid in one Rust call.
 
         Returns self for method chaining.
         """
         cfg = self.config
+        if ballmap_batch_size is not None and ballmap_batch_size <= 0:
+            raise ValueError("ballmap_batch_size must be positive when provided")
 
-        # Build cumulative progress schedule from stage weights.
-        # PCA weight is zeroed when embeddings are pre-computed; fractions renormalize.
         use_cached_pca = _precomputed_embeddings is not None
-        stages = [
-            (name, 0.0 if name == "pca" and use_cached_pca else weight)
-            for name, weight in STAGE_WEIGHTS
-        ]
-        schedule = build_cumulative_fractions(stages)
-        _cursor = 0
-
-        def _notify(label_override: str | None = None) -> None:
-            nonlocal _cursor
-            if progress_callback is None or _cursor >= len(schedule):
-                return
-            label, frac = schedule[_cursor]
-            _cursor += 1
-            progress_callback(label_override or label, frac)
 
         # 1. Load data
         if data is None:
@@ -145,13 +134,42 @@ class ThemaRS:
             else:
                 data = pd.read_csv(cfg.data)
 
+        projection_count = (
+            len(_precomputed_embeddings)
+            if _precomputed_embeddings is not None
+            else max(len(cfg.projection.dimensions) * len(cfg.projection.seeds), 1)
+        )
+        batch_count = (
+            1
+            if ballmap_batch_size is None
+            else max(
+                (projection_count + ballmap_batch_size - 1) // ballmap_batch_size, 1
+            )
+        )
+        progress = ProgressTracker(
+            [
+                ("load", 1.0),
+                ("preprocess", 1.0),
+                ("scale", 1.0),
+                ("projection", 0.1 if use_cached_pca else projection_count),
+                ("sweep_batches", batch_count * max(len(cfg.ball_mapper.epsilons), 1)),
+                ("cosmic_graph", 1.0 + (2.0 if cfg.cosmic_graph.sparsify else 0.0)),
+                (
+                    "stability",
+                    2.0 if cfg.cosmic_graph.construction_threshold == "auto" else 0.0,
+                ),
+                ("networkx_graph", 1.0),
+            ],
+            progress_callback,
+        )
+        progress.complete("load")
+
         self._data = data.copy()
 
         # 2–3. Preprocessing (drop, coerce, impute, encode, validate)
         df, _layout = preprocess_dataframe(data, cfg)
         self._preprocessed_data = df
-        _notify()  # load
-        _notify()  # impute
+        progress.complete("preprocess")
 
         # 4. Convert to float64 matrix and scale
         X = df.to_numpy(dtype=np.float64)
@@ -159,7 +177,7 @@ class ThemaRS:
 
         scaler = StandardScaler()
         X_scaled = np.array(scaler.fit_transform(X))
-        _notify()  # scale
+        progress.complete("scale")
 
         # 5. Projection grid (JL by default; PCA retained as explicit legacy mode)
         if _precomputed_embeddings is not None:
@@ -171,28 +189,62 @@ class ThemaRS:
             embeddings = projection_grid(X_scaled, cfg)
         # Cache embeddings for MCP session reuse
         self._embeddings = embeddings
-        _notify("pca (cached)" if use_cached_pca else None)  # pca
+        progress.complete(
+            "projection", "projection (cached)" if use_cached_pca else None
+        )
 
-        # 6. BallMapper grid (Rust parallel)
-        self._ball_maps = ball_mapper_grid(embeddings, cfg.ball_mapper.epsilons)
-        _notify()  # ball_mapper
+        # 6–7. BallMapper grid + sparse accumulation.
+        # Batch by embedding so large sweeps do not hold every raw pair buffer at once.
+        batches = (
+            [embeddings]
+            if ballmap_batch_size is None
+            else [
+                embeddings[j : j + ballmap_batch_size]
+                for j in range(0, len(embeddings), ballmap_batch_size)
+            ]
+        )
+        self._ball_maps = []
+        galactic_L: Any | None = None
+        total_batches = len(batches)
+        for batch_index, batch in enumerate(batches, start=1):
+            batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
+            self._ball_maps.extend(batch_ball_maps)
+            batch_spl = accumulate_pseudo_laplacians_sparse(batch_ball_maps, n)
+            if galactic_L is None:
+                galactic_L = batch_spl
+            else:
+                galactic_L.merge_in_place(batch_spl)
+            del batch_spl
+            gc.collect()
+            progress.update(
+                "sweep_batches",
+                batch_index / total_batches,
+                f"sweep batch {batch_index}/{total_batches}: ball_mapper + laplacian",
+            )
 
-        # 7. Accumulate pseudo-Laplacians as a sparse COO (Rust parallel, no n×n alloc)
-        galactic_L = accumulate_pseudo_laplacians_sparse(self._ball_maps, n)
-        _notify()  # laplacian
+        if galactic_L is None:
+            raise RuntimeError("No BallMapper batches were processed")
 
         # 8. CosmicGraph: build the (sparse-backed) graph, sparsify if opted-in, threshold.
         self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
             galactic_L, 0.0
         )
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
-        self._finalize_cosmic_graph(sparse, cfg.cosmic_graph.construction_threshold)
-        _notify()  # cosmic (always last, always 1.0)
+        progress.complete("cosmic_graph")
+        self._finalize_cosmic_graph(
+            sparse,
+            cfg.cosmic_graph.construction_threshold,
+            progress=progress,
+        )
 
         return self
 
     def _finalize_cosmic_graph(
-        self, cosmic_rust: CosmicGraph, threshold_cfg: float | str
+        self,
+        cosmic_rust: CosmicGraph,
+        threshold_cfg: float | str,
+        *,
+        progress: ProgressTracker | None = None,
     ) -> None:
         """Normalize the exposed CosmicGraph onto a [0, 1] weight scale, resolve
         the construction threshold, and build the NetworkX graph.
@@ -220,6 +272,8 @@ class ThemaRS:
             self._resolved_construction_threshold = float(
                 self._stability_result.optimal_threshold
             )
+            if progress is not None:
+                progress.complete("stability")
         else:
             self._resolved_construction_threshold = float(threshold_cfg)
         self._cosmic_graph = cosmic_to_networkx(
@@ -227,6 +281,8 @@ class ThemaRS:
             threshold=self._resolved_construction_threshold,
             scale=self._weight_scale,
         )
+        if progress is not None:
+            progress.complete("networkx_graph")
 
     def _apply_default_sparsification(self, cosmic: CosmicGraph) -> CosmicGraph:
         spec = self.config.cosmic_graph
@@ -290,32 +346,42 @@ class ThemaRS:
         N = len(datasets)
         cfg = self.config
 
-        # Build stage schedule: per-dataset stages repeated N times, then shared stages.
-        _per_ds_weights = [
-            ("load", 0.03),
-            ("impute", 0.08),
-            ("scale", 0.01),
-            ("pca", 0.25),
-            ("ball_mapper", 0.42),
-        ]
+        projection_count = max(
+            len(cfg.projection.dimensions) * len(cfg.projection.seeds), 1
+        )
+        batch_count = (
+            1
+            if ballmap_batch_size is None
+            else max(
+                (projection_count + ballmap_batch_size - 1) // ballmap_batch_size, 1
+            )
+        )
         stages: list[tuple[str, float]] = []
         for i in range(N):
             prefix = f"Dataset {i + 1}/{N}: "
-            for name, weight in _per_ds_weights:
-                stages.append((f"{prefix}{name}", weight))
-        stages.append(("laplacian", 0.15))
-        stages.append(("cosmic", 0.06))
-
-        schedule = build_cumulative_fractions(stages)
-        _cursor = 0
-
-        def _notify(label_override: str | None = None) -> None:
-            nonlocal _cursor
-            if progress_callback is None or _cursor >= len(schedule):
-                return
-            label, frac = schedule[_cursor]
-            _cursor += 1
-            progress_callback(label_override or label, frac)
+            stages.extend(
+                [
+                    (f"{prefix}load", 1.0),
+                    (f"{prefix}preprocess", 1.0),
+                    (f"{prefix}scale", 1.0),
+                    (f"{prefix}projection", projection_count),
+                    (
+                        f"{prefix}sweep_batches",
+                        batch_count * max(len(cfg.ball_mapper.epsilons), 1),
+                    ),
+                ]
+            )
+        stages.extend(
+            [
+                ("cosmic_graph", 1.0 + (2.0 if cfg.cosmic_graph.sparsify else 0.0)),
+                (
+                    "stability",
+                    2.0 if cfg.cosmic_graph.construction_threshold == "auto" else 0.0,
+                ),
+                ("networkx_graph", 1.0),
+            ]
+        )
+        progress = ProgressTracker(stages, progress_callback)
 
         all_ball_maps: list[BallMapper] = []
         # Sparse co-membership accumulator (SparsePseudoLaplacian), fused across
@@ -336,6 +402,8 @@ class ThemaRS:
 
         with rayon_thread_override(rayon_workers):
             for i, data in enumerate(datasets):
+                prefix = f"Dataset {i + 1}/{N}: "
+                progress.complete(f"{prefix}load")
                 df, layout = preprocess_dataframe(
                     data,
                     cfg,
@@ -344,8 +412,7 @@ class ThemaRS:
                 )
                 if ref_layout is None:
                     ref_layout = layout
-                _notify()  # Dataset i: load
-                _notify()  # Dataset i: impute
+                progress.complete(f"{prefix}preprocess")
 
                 X = df.to_numpy(dtype=np.float64)
                 if n is None:
@@ -358,10 +425,10 @@ class ThemaRS:
 
                 scaler = StandardScaler()
                 X_scaled = np.array(scaler.fit_transform(X))
-                _notify()  # Dataset i: scale
+                progress.complete(f"{prefix}scale")
 
                 embeddings = projection_grid(X_scaled, cfg)
-                _notify()  # Dataset i: pca
+                progress.complete(f"{prefix}projection")
 
                 batches = (
                     [embeddings]
@@ -372,7 +439,8 @@ class ThemaRS:
                     ]
                 )
 
-                for batch in batches:
+                total_batches = len(batches)
+                for batch_index, batch in enumerate(batches, start=1):
                     batch_ball_maps = ball_mapper_grid(batch, cfg.ball_mapper.epsilons)
                     if store_ball_maps:
                         all_ball_maps.extend(batch_ball_maps)
@@ -384,11 +452,16 @@ class ThemaRS:
                     # Release batch memory aggressively in notebook contexts
                     del batch_ball_maps, batch_spl
                     gc.collect()
+                    progress.update(
+                        f"{prefix}sweep_batches",
+                        batch_index / total_batches,
+                        f"{prefix}sweep batch {batch_index}/{total_batches}: "
+                        "ball_mapper + laplacian",
+                    )
 
                 # Drop per-dataset intermediates promptly
                 del embeddings, X_scaled, X, df
                 gc.collect()
-                _notify()  # Dataset i: ball_mapper
 
         self._ball_maps = all_ball_maps if store_ball_maps else []
 
@@ -396,14 +469,17 @@ class ThemaRS:
             raise RuntimeError("No datasets were processed")
 
         galactic_L = galactic_L_accum
-        _notify()  # laplacian
 
         self._dense_cosmic_rust = CosmicGraph.from_pseudo_laplacian_sparse(
             galactic_L, 0.0
         )
         sparse = self._apply_default_sparsification(self._dense_cosmic_rust)
-        self._finalize_cosmic_graph(sparse, cfg.cosmic_graph.construction_threshold)
-        _notify()  # cosmic (always last, always 1.0)
+        progress.complete("cosmic_graph")
+        self._finalize_cosmic_graph(
+            sparse,
+            cfg.cosmic_graph.construction_threshold,
+            progress=progress,
+        )
 
         return self
 

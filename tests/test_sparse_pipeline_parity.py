@@ -70,6 +70,20 @@ def test_pipeline_sparse_matches_dense_reference():
     np.testing.assert_allclose(got_w, ref_w, atol=1e-12)
 
 
+def test_fit_batched_matches_all_at_once():
+    data = _frame()
+    batched = ThemaRS(_config()).fit(data=data)
+    all_at_once = ThemaRS(_config()).fit(data=data, ballmap_batch_size=None)
+
+    assert batched.resolved_construction_threshold == (
+        all_at_once.resolved_construction_threshold
+    )
+    np.testing.assert_allclose(
+        batched.weighted_adjacency, all_at_once.weighted_adjacency, atol=1e-12
+    )
+    assert set(batched.cosmic_graph.edges()) == set(all_at_once.cosmic_graph.edges())
+
+
 def test_weighted_adjacency_is_lazy():
     model = ThemaRS(_config()).fit(data=_frame())
     # Not materialized right after fit.
