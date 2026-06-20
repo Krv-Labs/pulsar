@@ -278,7 +278,9 @@ def _component_labels_from_edges(
 
     if sort_by_size and n_components > 1:
         sizes = np.bincount(labels, minlength=n_components)
-        order = sorted(range(n_components), key=lambda label: sizes[label], reverse=True)
+        order = sorted(
+            range(n_components), key=lambda label: sizes[label], reverse=True
+        )
         remap = np.empty(n_components, dtype=int)
         for new_label, old_label in enumerate(order):
             remap[old_label] = new_label
@@ -361,7 +363,8 @@ def _cluster_spectral_from_edges(
         )
 
     components = [
-        set(np.flatnonzero(labels == component_id)) for component_id in range(n_components)
+        set(np.flatnonzero(labels == component_id))
+        for component_id in range(n_components)
     ]
     giant = sorted(components[0])
     giant_lookup = {node: idx for idx, node in enumerate(giant)}
