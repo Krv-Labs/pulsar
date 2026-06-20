@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 from typing import Any
@@ -25,10 +25,33 @@ from pulsar.mcp.preprocessing import (
 )
 
 
+SPARSIFY_WARNING_MESSAGE = (
+    "Spectral sparsification is enabled (cosmic_graph.sparsify: true). It is SLOW "
+    "on large datasets — a Spielman-Srivastava sparsifier that solves a "
+    "preconditioned-CG system per JL sketch row — and it runs after the "
+    "already-sparse cosmic graph is built, so it is pure additional construction "
+    "cost with no downstream speedup."
+)
+SPARSIFY_WARNING_SUGGESTION = (
+    "Set cosmic_graph.sparsify: false unless you specifically need a "
+    "spectrum/effective-resistance-preserving graph for downstream spectral "
+    "analysis on a small graph. It is not a structural-analysis or performance tool."
+)
+
+
+def _build_sparsify_warning() -> ValidationIssue:
+    return ValidationIssue(
+        path="cosmic_graph.sparsify",
+        message=SPARSIFY_WARNING_MESSAGE,
+        suggestion=SPARSIFY_WARNING_SUGGESTION,
+    )
+
+
 _ALLOWED_TOP_LEVEL = {"run", "preprocessing", "sweep", "cosmic_graph", "output"}
 _ALLOWED_PREPROCESSING = {"drop_columns", "impute", "encode"}
-_ALLOWED_SWEEP = {"pca", "ball_mapper"}
+_ALLOWED_SWEEP = {"projection", "pca", "ball_mapper"}
 _ALLOWED_PCA = {"dimensions", "seed"}
+_ALLOWED_PROJECTION = {"method", "dimensions", "seed", "center"}
 _ALLOWED_BALL_MAPPER = {"epsilon"}
 _ALLOWED_OUTPUT = {"n_reps"}
 _ALLOWED_COSMIC_GRAPH = ALLOWED_COSMIC_GRAPH_KEYS
@@ -65,6 +88,9 @@ class ValidationReport:
     issues: list[ValidationIssue]
     error_code: str | None = None
     agent_action: str | None = None
+    # Non-blocking cautions. Unlike `issues`, warnings never set ok=False; they
+    # surface advice (e.g. an expensive opt-in knob is enabled) without failing.
+    warnings: list[ValidationIssue] = field(default_factory=list)
 
 
 @dataclass
@@ -92,6 +118,7 @@ def validate_config_yaml(
     dataset_path: str | None = None,
 ) -> ValidationReport:
     issues: list[ValidationIssue] = []
+    warnings: list[ValidationIssue] = []
 
     try:
         raw = parse_yaml_mapping(config_yaml)
@@ -110,7 +137,7 @@ def validate_config_yaml(
     _validate_run_section(raw.get("run"), issues)
     _validate_preprocessing(raw.get("preprocessing"), issues)
     _validate_sweep(raw.get("sweep"), issues)
-    _validate_cosmic_graph(raw.get("cosmic_graph"), issues)
+    _validate_cosmic_graph(raw.get("cosmic_graph"), issues, warnings)
     _validate_output(raw.get("output"), issues)
 
     if dataset_path:
@@ -154,6 +181,7 @@ def validate_config_yaml(
             issues=issues,
             error_code=error_code,
             agent_action=agent_action,
+            warnings=warnings,
         )
 
     try:
@@ -174,6 +202,7 @@ def validate_config_yaml(
         normalized_yaml=normalized_yaml,
         resolved_dataset_path=cfg.data,
         issues=[],
+        warnings=warnings,
     )
 
 
@@ -181,6 +210,9 @@ _VALID_OVERRIDE_KEYS = frozenset(
     {
         "run_name",
         "dataset_path",
+        "projection_method",
+        "projection_dimensions",
+        "projection_seeds",
         "pca_dims",
         "pca_seeds",
         "epsilon_values",
@@ -215,6 +247,26 @@ def _set_dotted_path(raw: dict[str, Any], path: str, value: Any) -> Any:
     return old
 
 
+_MISSING = object()
+
+
+def _remove_dotted_path(raw: dict[str, Any], path: str) -> Any:
+    """Delete the leaf at dotted ``path``; return the removed value or ``_MISSING``.
+
+    Missing intermediate keys are a no-op (idempotent deletion). Unlike a
+    null-valued override, this removes the key entirely so callers can drop a
+    config entry (e.g. ``preprocessing.encode.species``) rather than null it.
+    """
+    parts = path.split(".")
+    cursor = raw
+    for part in parts[:-1]:
+        nxt = cursor.get(part)
+        if not isinstance(nxt, dict):
+            return _MISSING
+        cursor = nxt
+    return cursor.pop(parts[-1], _MISSING)
+
+
 def flatten_overrides(nested: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     flat = {}
     for k, v in nested.items():
@@ -229,11 +281,34 @@ def flatten_overrides(nested: dict[str, Any], prefix: str = "") -> dict[str, Any
 def apply_overrides(
     config_yaml: str, overrides: dict[str, Any]
 ) -> ConfigOverrideResult:
+    # remove_keys is a deletion list of dotted paths, not a mergeable override —
+    # pull it out before flattening so it bypasses the value-merge machinery.
+    remove_keys = overrides.get("remove_keys", [])
+    overrides = {k: v for k, v in overrides.items() if k != "remove_keys"}
+    if not isinstance(remove_keys, (list, tuple)):
+        raise ValueError(
+            "remove_keys must be a list of dotted config paths, e.g. "
+            "['preprocessing.encode.species']."
+        )
+    unknown_remove_roots = {
+        str(p).split(".", 1)[0]
+        for p in remove_keys
+        if str(p).split(".", 1)[0] not in _DOTTED_PATH_ROOTS
+    }
+    if unknown_remove_roots:
+        raise ValueError(
+            f"Unknown remove_keys root(s): {sorted(unknown_remove_roots)}. "
+            f"Valid roots: {sorted(_DOTTED_PATH_ROOTS)}."
+        )
+
     flat = flatten_overrides(overrides)
 
     prefix_map = {
+        "sweep.projection_dimensions": "projection_dimensions",
+        "sweep.projection_seeds": "projection_seeds",
         "sweep.pca_dims": "pca_dims",
         "sweep.pca_seeds": "pca_seeds",
+        "sweep.projection_method": "projection_method",
         "sweep.epsilon_values": "epsilon_values",
         "sweep.epsilon_range": "epsilon_range",
         "cosmic_graph.construction_threshold": "construction_threshold",
@@ -290,8 +365,11 @@ def apply_overrides(
     diff: list[dict[str, Any]] = []
 
     flat_key_to_canonical = {
-        "pca_dims": "sweep.pca.dimensions.values",
-        "pca_seeds": "sweep.pca.seed.values",
+        "projection_method": "sweep.projection.method",
+        "projection_dimensions": "sweep.projection.dimensions.values",
+        "projection_seeds": "sweep.projection.seed.values",
+        "pca_dims": "sweep.projection.dimensions.values",
+        "pca_seeds": "sweep.projection.seed.values",
         "epsilon_values": "sweep.ball_mapper.epsilon.values",
         "epsilon_range": "sweep.ball_mapper.epsilon.range",
         "construction_threshold": "cosmic_graph.construction_threshold",
@@ -315,6 +393,9 @@ def apply_overrides(
 
     for path, value in dotted_overrides.items():
         old = _set_dotted_path(raw, path, value)
+        if path.startswith("sweep.pca."):
+            projection_path = path.replace("sweep.pca.", "sweep.projection.", 1)
+            _set_dotted_path(raw, projection_path, value)
         _track(path, old, value)
 
     overrides = flat_overrides
@@ -327,18 +408,52 @@ def apply_overrides(
         old = raw.get("run", {}).get("data")
         raw.setdefault("run", {})["data"] = overrides["dataset_path"]
         _track("run.data", old, overrides["dataset_path"])
+    if "projection_method" in overrides:
+        old = raw.get("sweep", {}).get("projection", {}).get("method")
+        raw.setdefault("sweep", {}).setdefault("projection", {})["method"] = overrides[
+            "projection_method"
+        ]
+        _track("sweep.projection.method", old, overrides["projection_method"])
+    if "projection_dimensions" in overrides:
+        old = raw.get("sweep", {}).get("projection", {}).get("dimensions")
+        raw.setdefault("sweep", {}).setdefault("projection", {})["dimensions"] = {
+            "values": list(overrides["projection_dimensions"])
+        }
+        raw.setdefault("sweep", {}).setdefault("pca", {})["dimensions"] = {
+            "values": list(overrides["projection_dimensions"])
+        }
+        _track(
+            "sweep.projection.dimensions.values",
+            old,
+            list(overrides["projection_dimensions"]),
+        )
+    if "projection_seeds" in overrides:
+        old = raw.get("sweep", {}).get("projection", {}).get("seed")
+        raw.setdefault("sweep", {}).setdefault("projection", {})["seed"] = {
+            "values": list(overrides["projection_seeds"])
+        }
+        raw.setdefault("sweep", {}).setdefault("pca", {})["seed"] = {
+            "values": list(overrides["projection_seeds"])
+        }
+        _track("sweep.projection.seed.values", old, list(overrides["projection_seeds"]))
     if "pca_dims" in overrides:
         old = raw.get("sweep", {}).get("pca", {}).get("dimensions")
         raw.setdefault("sweep", {}).setdefault("pca", {})["dimensions"] = {
             "values": list(overrides["pca_dims"])
         }
-        _track("sweep.pca.dimensions.values", old, list(overrides["pca_dims"]))
+        raw.setdefault("sweep", {}).setdefault("projection", {})["dimensions"] = {
+            "values": list(overrides["pca_dims"])
+        }
+        _track("sweep.projection.dimensions.values", old, list(overrides["pca_dims"]))
     if "pca_seeds" in overrides:
         old = raw.get("sweep", {}).get("pca", {}).get("seed")
         raw.setdefault("sweep", {}).setdefault("pca", {})["seed"] = {
             "values": list(overrides["pca_seeds"])
         }
-        _track("sweep.pca.seed.values", old, list(overrides["pca_seeds"]))
+        raw.setdefault("sweep", {}).setdefault("projection", {})["seed"] = {
+            "values": list(overrides["pca_seeds"])
+        }
+        _track("sweep.projection.seed.values", old, list(overrides["pca_seeds"]))
     if "epsilon_values" in overrides:
         old = raw.get("sweep", {}).get("ball_mapper", {}).get("epsilon")
         raw.setdefault("sweep", {}).setdefault("ball_mapper", {})["epsilon"] = {
@@ -389,6 +504,13 @@ def apply_overrides(
         _deep_merge(raw, overrides["raw"])
         _track("raw", "(deep merge)", overrides["raw"])
 
+    for path in remove_keys:
+        path = str(path)
+        old = _remove_dotted_path(raw, path)
+        if old is not _MISSING:
+            applied.append(f"-{path}")
+            diff.append({"path": path, "old": old, "new": None, "removed": True})
+
     cfg = load_config(raw)
     return ConfigOverrideResult(
         config_yaml=config_to_yaml(cfg), applied_overrides=applied, diff=diff
@@ -401,6 +523,8 @@ def render_validation_report(report: ValidationReport) -> str:
             "resolved_dataset_path": report.resolved_dataset_path,
             "issues": [asdict(issue) for issue in report.issues],
         }
+        if report.warnings:
+            details["warnings"] = [asdict(w) for w in report.warnings]
         if (
             report.error_code in {"HOST_PATH_NOT_VISIBLE", "FILE_NOT_FOUND"}
             and len(report.issues) == 1
@@ -424,6 +548,8 @@ def render_validation_report(report: ValidationReport) -> str:
         "resolved_dataset_path": report.resolved_dataset_path,
         "issues": [asdict(issue) for issue in report.issues],
     }
+    if report.warnings:
+        payload["warnings"] = [asdict(w) for w in report.warnings]
     if report.normalized_yaml is not None:
         payload["normalized_config_yaml"] = report.normalized_yaml
     return json.dumps(payload, indent=2)
@@ -596,7 +722,7 @@ def _validate_sweep(sweep: Any, issues: list[ValidationIssue]) -> None:
                 ValidationIssue(
                     path=f"sweep.{legacy_key}",
                     message=f"Unsupported sweep key '{legacy_key}'",
-                    expected="Use sweep.pca and sweep.ball_mapper.epsilon",
+                    expected="Use sweep.projection and sweep.ball_mapper.epsilon",
                 )
             )
     for key in sweep.keys():
@@ -610,11 +736,21 @@ def _validate_sweep(sweep: Any, issues: list[ValidationIssue]) -> None:
             )
     _validate_nested_section(sweep.get("pca"), "sweep.pca", _ALLOWED_PCA, issues)
     _validate_nested_section(
+        sweep.get("projection"),
+        "sweep.projection",
+        _ALLOWED_PROJECTION,
+        issues,
+    )
+    _validate_nested_section(
         sweep.get("ball_mapper"), "sweep.ball_mapper", _ALLOWED_BALL_MAPPER, issues
     )
 
 
-def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> None:
+def _validate_cosmic_graph(
+    cosmic_graph: Any,
+    issues: list[ValidationIssue],
+    warnings: list[ValidationIssue] | None = None,
+) -> None:
     if cosmic_graph is None:
         return
     if not isinstance(cosmic_graph, dict):
@@ -624,6 +760,8 @@ def _validate_cosmic_graph(cosmic_graph: Any, issues: list[ValidationIssue]) -> 
             )
         )
         return
+    if warnings is not None and cosmic_graph.get("sparsify"):
+        warnings.append(_build_sparsify_warning())
     for key in cosmic_graph.keys():
         if key == LEGACY_COSMIC_GRAPH_THRESHOLD_KEY:
             issues.append(
@@ -761,7 +899,10 @@ def _initial_pca_grid(
     elbow. Each dim lands on signal-rich geometry rather than arbitrary integers.
     """
     points = sorted((int(d), float(v)) for d, v in pca_cum_var)
-    ceiling = min(int(pca_knee), int(n_features))
+    ceiling = min(int(pca_knee), int(n_features), 16)
+    if ceiling <= 0:
+        return []
+    floor = min(_PCA_FLOOR, ceiling)
 
     def dim_at(target: float) -> int | None:
         for dim, var in points:
@@ -772,8 +913,21 @@ def _initial_pca_grid(
     dims = [d for d in (dim_at(t) for t in _VARIANCE_FRONTIER_TARGETS) if d is not None]
     dims.append(ceiling)
 
-    clipped = [max(_PCA_FLOOR, min(int(d), ceiling)) for d in dims if d >= 2]
-    return sorted(set(clipped))
+    clipped = [max(floor, min(int(d), ceiling)) for d in dims if d >= 2]
+    grid = sorted(set(clipped))
+    target_count = min(3, max(1, ceiling - floor + 1))
+    if len(grid) >= target_count:
+        return grid
+
+    if ceiling <= 4:
+        return sorted(set(grid + list(range(floor, ceiling + 1))))
+
+    fallback = {
+        max(floor, ceiling // 2),
+        max(floor, round(ceiling * 0.75)),
+        ceiling,
+    }
+    return sorted(set(grid + list(fallback)))
 
 
 def _build_initial_config_yaml(
@@ -785,9 +939,10 @@ def _build_initial_config_yaml(
 ) -> str:
     """Construct a canonical initial config from dataset geometry.
 
-    When *processed_profile* is provided, epsilon and PCA dimensions are
+    When *processed_profile* is provided, epsilon and projection dimensions are
     calibrated against the processed feature space (after preprocessing +
-    scaling).  Otherwise falls back to raw-space geometry.
+    scaling).  Otherwise falls back to raw-space geometry. Dimensions are picked
+    from the cumulative-variance structure; the emitted projection method is JL.
     """
     if processed_profile is not None:
         knn_mean = processed_profile.knn_k5_mean or 0.5
@@ -824,6 +979,14 @@ def _build_initial_config_yaml(
   data: {data_path}
 {preprocessing_block}
 sweep:
+  projection:
+    method: jl
+    dimensions:
+      values: {pca_dims}
+    seed:
+      values: [42, 7, 13]
+    center: true
+  # Legacy mirror for older configs. sweep.projection is authoritative.
   pca:
     dimensions:
       values: {pca_dims}
@@ -845,15 +1008,17 @@ output:
 def _suggest_resolution_pca_dims(pca_dims: list[Any]) -> list[int]:
     dims = sorted({int(dim) for dim in pca_dims if int(dim) > 1})
     if not dims:
-        return [5, 8, 12, 16, 20]
+        return [5, 8, 12, 16]
     if len(dims) == 1:
-        center = dims[0]
-        return sorted({max(2, center - 4), max(2, center - 2), center, center + 2})
+        center = min(dims[0], 16)
+        return sorted(
+            {max(2, center - 4), max(2, center - 2), center, min(16, center + 2)}
+        )
 
-    low, high = dims[0], dims[-1]
+    low, high = dims[0], min(dims[-1], 16)
     if high <= low:
         return dims
     step = max(1, round((high - low) / 5))
-    if high - low >= 8:
+    if high - low >= 6:
         step = max(2, step)
     return list(range(low, high + 1, step))[:6]

@@ -44,7 +44,7 @@ from scipy import signal
 from scipy.stats import kurtosis, skew
 
 from pulsar.config import load_config
-from pulsar.hooks import cosmic_to_networkx
+from pulsar import cosmic_to_networkx
 
 # ---------------------------------------------------------------------------
 # ECG Feature Extraction
@@ -467,7 +467,7 @@ def main() -> None:
     # Build CosmicGraph
     t0 = time.perf_counter()
     cosmic = CosmicGraph.from_pseudo_laplacian(
-        galactic_L, config.cosmic_graph.threshold
+        galactic_L, config.cosmic_graph.construction_threshold
     )
     G = cosmic_to_networkx(cosmic)
     t_cosmic = time.perf_counter() - t0

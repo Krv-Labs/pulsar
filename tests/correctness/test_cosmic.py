@@ -14,7 +14,12 @@ normalize_cosmicGraph:
 
 import numpy as np
 
-from pulsar._pulsar import CosmicGraph, BallMapper, accumulate_pseudo_laplacians
+from pulsar._pulsar import (
+    CosmicGraph,
+    BallMapper,
+    accumulate_pseudo_laplacians,
+    accumulate_pseudo_laplacians_sparse,
+)
 from tests.conftest import pseudo_laplacian_py
 
 
@@ -143,3 +148,34 @@ def test_matches_reference_on_accumulated_laplacian():
     cg = CosmicGraph.from_pseudo_laplacian(galactic_L, threshold)
     np.testing.assert_allclose(np.array(cg.weighted_adj), expected_W, atol=1e-12)
     np.testing.assert_array_equal(np.array(cg.adj), expected_adj)
+
+
+def test_from_pseudo_laplacian_sparse_matches_dense():
+    """The sparse constructor must produce identical weights/edges to the dense
+    path on the same input (threshold 0.0)."""
+    rng = np.random.default_rng(3)
+    pts = rng.standard_normal((70, 3)).astype(np.float64)
+    n = len(pts)
+
+    ball_maps = []
+    for eps in [0.5, 0.9, 1.4]:
+        bm = BallMapper(eps=eps)
+        bm.fit(pts)
+        ball_maps.append(bm)
+
+    dense_L = np.array(accumulate_pseudo_laplacians(ball_maps, n))
+    cg_dense = CosmicGraph.from_pseudo_laplacian(dense_L, 0.0)
+
+    spl = accumulate_pseudo_laplacians_sparse(ball_maps, n)
+    cg_sparse = CosmicGraph.from_pseudo_laplacian_sparse(spl, 0.0)
+
+    # weighted_adj parity (and symmetry / zero diagonal preserved)
+    Wd = np.array(cg_dense.weighted_adj)
+    Ws = np.array(cg_sparse.weighted_adj)
+    np.testing.assert_allclose(Ws, Wd, atol=1e-12)
+    np.testing.assert_allclose(Ws, Ws.T, atol=1e-12)
+    np.testing.assert_array_equal(np.diag(Ws), 0.0)
+
+    # Edge-list parity
+    assert cg_sparse.n_edges == cg_dense.n_edges
+    assert sorted(cg_sparse.weighted_edges()) == sorted(cg_dense.weighted_edges())

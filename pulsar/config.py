@@ -16,7 +16,19 @@ import numpy as np
 import yaml
 
 
-ALLOWED_COSMIC_GRAPH_KEYS = frozenset({"construction_threshold", "neighborhood"})
+ALLOWED_COSMIC_GRAPH_KEYS = frozenset(
+    {
+        "construction_threshold",
+        "neighborhood",
+        "sparsify",
+        "sparsify_epsilon",
+        "sparsify_seed",
+        "sparsify_sketch_dim",
+        "sparsify_sample_count",
+        "sparsify_pcg_tol",
+        "sparsify_max_iter",
+    }
+)
 LEGACY_COSMIC_GRAPH_THRESHOLD_KEY = "threshold"
 LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE = (
     "Unsupported legacy key cosmic_graph.threshold. "
@@ -101,6 +113,14 @@ class PCASpec:
 
 
 @dataclass
+class ProjectionSpec:
+    method: Literal["jl", "pca"] = "jl"
+    dimensions: list[int] = field(default_factory=lambda: [2])
+    seeds: list[int] = field(default_factory=lambda: [42])
+    center: bool = True
+
+
+@dataclass
 class BallMapperSpec:
     epsilons: list[float] = field(default_factory=lambda: [0.5])
 
@@ -109,6 +129,20 @@ class BallMapperSpec:
 class CosmicGraphSpec:
     construction_threshold: float | Literal["auto"] = "auto"
     neighborhood: str = "node"
+    # Spectral sparsification is an opt-in hook, not a default. It runs *after* the
+    # (already sparse) cosmic graph is built, so it is pure additional cost on the
+    # construction path; its value is a leverage-aware, epsilon-controlled graph
+    # that preserves spectrum/distances for downstream spectral analysis. See
+    # ThemaRS.spectral_sparsify.
+    # WARNING: it is SLOW on large datasets (solves a preconditioned-CG system per
+    # JL sketch row) — do not enable it for routine structural analysis.
+    sparsify: bool = False
+    sparsify_epsilon: float = 1.0
+    sparsify_seed: int = 42
+    sparsify_sketch_dim: int | None = None
+    sparsify_sample_count: int | None = None
+    sparsify_pcg_tol: float = 1e-6
+    sparsify_max_iter: int = 1000
 
 
 @dataclass
@@ -117,11 +151,22 @@ class PulsarConfig:
     impute: dict[str, ImputeSpec]
     encode: dict[str, EncodeSpec]
     drop_columns: list[str]
-    pca: PCASpec
-    ball_mapper: BallMapperSpec
-    cosmic_graph: CosmicGraphSpec
+    pca: PCASpec = field(default_factory=PCASpec)
+    projection: ProjectionSpec = field(default_factory=ProjectionSpec)
+    ball_mapper: BallMapperSpec = field(default_factory=BallMapperSpec)
+    cosmic_graph: CosmicGraphSpec = field(default_factory=CosmicGraphSpec)
     n_reps: int = 4
     run_name: str = ""
+
+    def __post_init__(self) -> None:
+        default_projection = ProjectionSpec()
+        if self.projection == default_projection and self.pca != PCASpec():
+            self.projection = ProjectionSpec(
+                method="jl",
+                dimensions=list(self.pca.dimensions),
+                seeds=list(self.pca.seeds),
+                center=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +210,29 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     # sweep section
     sweep = raw.get("sweep", {})
 
+    projection_raw = sweep.get("projection")
     pca_raw = sweep.get("pca", {})
+    if projection_raw is None:
+        projection_raw = {
+            "method": "jl",
+            "dimensions": pca_raw.get("dimensions", [2]),
+            "seed": pca_raw.get("seed", [42]),
+            "center": True,
+        }
+    method = str(projection_raw.get("method", "jl")).lower()
+    if method not in {"jl", "pca"}:
+        raise ValueError("sweep.projection.method must be 'jl' or 'pca'")
+    projection = ProjectionSpec(
+        method=method,  # type: ignore[arg-type]
+        dimensions=[
+            int(d) for d in _expand_param(projection_raw.get("dimensions", [2]))
+        ],
+        seeds=[int(s) for s in _expand_param(projection_raw.get("seed", [42]))],
+        center=bool(projection_raw.get("center", True)),
+    )
     pca = PCASpec(
-        dimensions=[int(d) for d in _expand_param(pca_raw.get("dimensions", [2]))],
-        seeds=[int(s) for s in _expand_param(pca_raw.get("seed", [42]))],
+        dimensions=list(projection.dimensions),
+        seeds=list(projection.seeds),
     )
 
     bm_raw = sweep.get("ball_mapper", {})
@@ -184,6 +248,21 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     cosmic_graph = CosmicGraphSpec(
         construction_threshold=construction_threshold,
         neighborhood=str(cg_raw.get("neighborhood", "node")),
+        sparsify=bool(cg_raw.get("sparsify", False)),
+        sparsify_epsilon=float(cg_raw.get("sparsify_epsilon", 1.0)),
+        sparsify_seed=int(cg_raw.get("sparsify_seed", 42)),
+        sparsify_sketch_dim=(
+            None
+            if cg_raw.get("sparsify_sketch_dim") is None
+            else int(cg_raw.get("sparsify_sketch_dim"))
+        ),
+        sparsify_sample_count=(
+            None
+            if cg_raw.get("sparsify_sample_count") is None
+            else int(cg_raw.get("sparsify_sample_count"))
+        ),
+        sparsify_pcg_tol=float(cg_raw.get("sparsify_pcg_tol", 1e-6)),
+        sparsify_max_iter=int(cg_raw.get("sparsify_max_iter", 1000)),
     )
 
     # output section
@@ -196,6 +275,7 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         encode=encode,
         drop_columns=drop_columns,
         pca=pca,
+        projection=projection,
         ball_mapper=ball_mapper,
         cosmic_graph=cosmic_graph,
         n_reps=n_reps,
@@ -234,6 +314,16 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
         if construction_threshold == "auto"
         else str(construction_threshold)
     )
+    sparsify_sketch_dim = (
+        "null"
+        if cfg.cosmic_graph.sparsify_sketch_dim is None
+        else str(cfg.cosmic_graph.sparsify_sketch_dim)
+    )
+    sparsify_sample_count = (
+        "null"
+        if cfg.cosmic_graph.sparsify_sample_count is None
+        else str(cfg.cosmic_graph.sparsify_sample_count)
+    )
 
     return f"""run:
   name: {cfg.run_name or "experiment"}
@@ -241,11 +331,21 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
 preprocessing:
   drop_columns: {drop_line}{impute_block}{encode_block}
 sweep:
+  projection:
+    method: {cfg.projection.method}
+    dimensions:
+      values: {list(cfg.projection.dimensions)}
+    seed:
+      values: {list(cfg.projection.seeds)}
+    center: {str(cfg.projection.center).lower()}
+  # Legacy mirror of sweep.projection (dims/seeds) for backward compatibility.
+  # sweep.projection is the source of truth; the loader ignores sweep.pca when
+  # sweep.projection is present. Kept in sync here — do not hand-edit only one.
   pca:
     dimensions:
-      values: {list(cfg.pca.dimensions)}
+      values: {list(cfg.projection.dimensions)}
     seed:
-      values: {list(cfg.pca.seeds)}
+      values: {list(cfg.projection.seeds)}
   ball_mapper:
     epsilon:
       range:
@@ -254,6 +354,16 @@ sweep:
         steps: {len(cfg.ball_mapper.epsilons)}
 cosmic_graph:
   construction_threshold: {threshold_str}
+  # sparsify: opt-in spectral sparsifier. SLOW on large N (per-JL-sketch CG
+  # solves) and runs after the already-sparse graph is built — leave false
+  # unless you need a spectrum-preserving graph for downstream spectral analysis.
+  sparsify: {str(cfg.cosmic_graph.sparsify).lower()}
+  sparsify_epsilon: {cfg.cosmic_graph.sparsify_epsilon}
+  sparsify_seed: {cfg.cosmic_graph.sparsify_seed}
+  sparsify_sketch_dim: {sparsify_sketch_dim}
+  sparsify_sample_count: {sparsify_sample_count}
+  sparsify_pcg_tol: {cfg.cosmic_graph.sparsify_pcg_tol}
+  sparsify_max_iter: {cfg.cosmic_graph.sparsify_max_iter}
 output:
   n_reps: {cfg.n_reps}
 """

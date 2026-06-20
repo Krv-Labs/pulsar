@@ -12,7 +12,7 @@ The Problem
 When analyzing data, you face many preprocessing choices:
 
 - Which imputation strategy?
-- How many PCA dimensions?
+- Which projection method and dimensions?
 - What neighborhood size for graph construction?
 
 Each combination produces a different representation. Pulsar explores this space systematically and uses topological methods to identify representative configurations.
@@ -35,7 +35,7 @@ Pulsar combines Python ergonomics with Rust performance:
 
       subgraph "Rust Core (PyO3)"
          D["Imputation"]
-         E["PCA computation"]
+         E["JL/PCA projection"]
          F["Ball Mapper"]
          G["Laplacian accumulation"]
       end
@@ -68,13 +68,13 @@ Pipeline Stages
 
 Load tabular data and fill missing values with configurable strategies (mean, median, or custom). Multiple imputation seeds generate diverse candidates.
 
-**2. Scaling & PCA Sweep**
+**2. Scaling & Projection Sweep**
 
-StandardScaler normalization followed by PCA projection. Pulsar sweeps across multiple dimension settings to explore different embedding spaces.
+StandardScaler normalization followed by Johnson-Lindenstrauss (JL) random projection by default. Pulsar sweeps across multiple dimension settings and seeds to explore different embedding spaces. Set ``sweep.projection.method: pca`` to use the legacy randomized PCA path.
 
 **3. Ball Mapper Graph Construction**
 
-For each PCA projection, build Ball Mapper graphs at multiple epsilon values. This captures local structure at different scales.
+For each projection, build Ball Mapper graphs at multiple epsilon values. Low-dimensional embeddings (1-16 dimensions) use a KD-tree radius query for membership assignment; wider embeddings fall back to the linear scan path.
 
 **4. Pseudo-Laplacian Accumulation**
 
@@ -83,6 +83,8 @@ Compute graph Laplacians for each Ball Mapper configuration and aggregate them i
 **5. Cosmic Graph Assembly**
 
 Combine pseudo-Laplacians into a weighted graph where edges represent similarity between configurations.
+
+By default, Pulsar sparsifies the original unthresholded Cosmic Graph with effective-resistance sampling, then selects/applies the construction threshold on that sparse weighted graph. ``model.cosmic_graph`` is therefore a sparse ``networkx.Graph`` with ``weight`` attributes. Dense compatibility getters remain available when needed.
 
 **6. Representative Selection**
 
@@ -107,8 +109,11 @@ Pulsar uses a hierarchical configuration:
 
    sweep:
      pca:
-       dimensions: {values: [2, 5, 10, 20]}
+     projection:
+       method: jl
+       dimensions: {values: [2, 5, 10, 16]}
        seed: {values: [42, 7, 13]}
+       center: true
      ball_mapper:
        epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 
@@ -123,7 +128,7 @@ Output                    Description
 ========================= ========================================================
 ``cosmic_graph``          NetworkX graph with weighted edges
 ``weighted_adjacency``    Dense similarity matrix
-``pca_results_``          List of PCA projections
+``_embeddings``           List of projection embeddings
 ``ball_mapper_graphs_``   List of Ball Mapper graphs
 ``stability_result``      Threshold selection diagnostics (if ``auto``)
 ========================= ========================================================
@@ -133,9 +138,10 @@ Performance
 
 The Rust core provides significant speedups:
 
-- **10-100x faster** Ball Mapper construction
-- **Parallel** PCA computation across configurations
+- **10-100x faster** Ball Mapper construction, with KD-tree acceleration for 1-16D embeddings
+- **Parallel** JL/PCA projection computation across configurations
 - **Memory efficient** Laplacian accumulation
+- **Sparse** CosmicGraph spectral sparsification for smaller graph outputs
 
 For large datasets (>10k rows) or extensive sweeps (>100 configurations), Pulsar's Rust implementation is essential.
 

@@ -182,6 +182,37 @@ def test_dossier_to_html_renders_research_report_shell_and_graph_state():
     assert "male" in html
 
 
+def test_dossier_to_html_threshold_payload_uses_sparse_edges_without_dense_adjacency():
+    class SparseModel:
+        cosmic_rust = SimpleNamespace(n=6)
+        stability_result = None
+        resolved_construction_threshold = 0.5
+
+        def __init__(self):
+            self.cosmic_graph = nx.Graph()
+            self.cosmic_graph.add_weighted_edges_from(
+                [(0, 1, 0.9), (2, 3, 0.88), (4, 5, 0.87)]
+            )
+
+        def weighted_edges(self, threshold=0.0):
+            return [
+                (0, 1, 0.9),
+                (0, 2, 0.6),
+                (2, 3, 0.88),
+                (3, 4, 0.55),
+                (4, 5, 0.87),
+            ]
+
+        @property
+        def weighted_adjacency(self):
+            raise AssertionError("weighted_adjacency should stay lazy")
+
+    html = dossier_to_html(_sample_dossier(), model=SparseModel())
+
+    assert "Threshold transition map" in html
+    assert "threshold-split-dot" in html
+
+
 def test_build_dossier_reports_prevalence_and_global_recall_for_categories():
     data = pd.DataFrame(
         {

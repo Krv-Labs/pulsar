@@ -13,6 +13,122 @@ def singleton_count_at_threshold(adj: np.ndarray, threshold: float) -> int:
     return int((row_max <= threshold).sum())
 
 
+_CLUSTER_ID_STABILITY_NOTE = (
+    "Cluster IDs are stable across tools; subsets differ only by ranking basis. "
+    "ID lists are capped previews with exact omitted counts."
+)
+
+
+def bounded_list(items: Any, *, preview_limit: int = 20) -> dict[str, Any]:
+    """Canonical bounded collection: ``{total, preview, omitted}``.
+
+    The single shape for any collection too large to inline in a summary
+    payload. Size collections extend this core via ``size_summary``; never
+    serialize a raw O(n) list into a summary.
+    """
+    seq = list(items)
+    preview = seq[:preview_limit]
+    return {
+        "total": len(seq),
+        "preview": preview,
+        "omitted": max(len(seq) - len(preview), 0),
+    }
+
+
+def size_summary(sizes: list[int], *, preview_limit: int = 20) -> dict[str, Any]:
+    """Bounded size telemetry: the :func:`bounded_list` core plus size stats.
+
+    Summaries must not leak O(n) component/cluster size arrays on shattered
+    graphs. This keeps exact counts while exposing the shape agents need.
+    """
+    values = [int(size) for size in sizes if int(size) > 0]
+    sorted_values = sorted(values, reverse=True)
+    singleton_count = sum(1 for size in values if size == 1)
+    summary = bounded_list(sorted_values, preview_limit=preview_limit)
+    summary.update(
+        {
+            "largest": sorted_values[:5],
+            "singleton_count": singleton_count,
+            "size_buckets": {
+                "1": singleton_count,
+                "2-5": sum(1 for size in values if 2 <= size <= 5),
+                "6-20": sum(1 for size in values if 6 <= size <= 20),
+                ">20": sum(1 for size in values if size > 20),
+            },
+        }
+    )
+    return summary
+
+
+def compact_cluster_result_payload(
+    cluster_meta: dict[str, Any],
+    *,
+    include_full_sizes: bool = False,
+) -> dict[str, Any]:
+    """Cluster-result header with bounded size telemetry by default."""
+    out = dict(cluster_meta)
+    cluster_sizes = list(cluster_meta.get("cluster_sizes", []) or [])
+    size_values = [int(row.get("n", 0)) for row in cluster_sizes]
+    out["cluster_sizes_summary"] = size_summary(size_values)
+    if not include_full_sizes:
+        out.pop("cluster_sizes", None)
+        stability_plateaus = out.get("stability_plateaus")
+        if stability_plateaus is None:
+            out.pop("stability_plateaus", None)
+    return out
+
+
+def build_cluster_selection(
+    cluster_meta: dict[str, Any],
+    shown_ids: Any,
+    *,
+    ranked_by: str,
+) -> dict[str, Any]:
+    """Uniform disclosure of which clusters a truncated view actually shows.
+
+    Sibling interpretation tools truncate the same partition by different
+    criteria (size vs. signal). This block makes the ranking basis, the total,
+    and the shown/omitted IDs explicit so a partial view is never mistaken for a
+    divergent partition. IDs are shared across tools — only the displayed subset
+    differs.
+    """
+    all_ids = [int(c["cluster_id"]) for c in cluster_meta.get("cluster_sizes", [])]
+    total = int(cluster_meta.get("n_clusters", len(all_ids)))
+    shown = sorted({int(c) for c in shown_ids})
+    shown_set = set(shown)
+    omitted = sorted(cid for cid in all_ids if cid not in shown_set)
+    return {
+        "total_clusters": total,
+        "ranked_by": ranked_by,
+        "shown_ids": bounded_list(shown),
+        "omitted_ids": bounded_list(omitted),
+        "note": (
+            f"Showing {len(shown)} of {total} clusters, ranked by {ranked_by}. "
+            + _CLUSTER_ID_STABILITY_NOTE
+        ),
+    }
+
+
+def cluster_selection_to_markdown(selection: dict[str, Any]) -> str:
+    """Compact, prominent markdown header for a cluster-selection disclosure."""
+    shown = selection.get("shown_ids", {})
+    omitted = selection.get("omitted_ids", {})
+    return "\n".join(
+        [
+            "## Cluster Selection",
+            "",
+            f"- Showing {shown.get('total', 0)} of "
+            f"{selection.get('total_clusters', 0)} clusters, ranked by "
+            f"`{selection.get('ranked_by', 'unknown')}`",
+            f"- Shown IDs: {shown.get('preview', [])} (+{shown.get('omitted', 0)} more)",
+            f"- Omitted IDs: {omitted.get('preview', [])} "
+            f"(+{omitted.get('omitted', 0)} more)",
+            f"- {selection.get('note', '')}",
+            "",
+        ]
+    )
+
+
 def cluster_result_payload(result: Any) -> dict[str, Any]:
     sizes = result.labels.value_counts().sort_index()
     total = len(result.labels)
@@ -54,7 +170,10 @@ def build_evidence_payload(
     evidence_metadata = dossier.global_stats.get("evidence_metadata", {})
     payload: dict[str, Any] = {
         "status": "ok",
-        "cluster_result": cluster_meta,
+        "cluster_result": compact_cluster_result_payload(
+            cluster_meta,
+            include_full_sizes=detail == "full",
+        ),
         "detail": dossier.global_stats.get("detail", "standard"),
         "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
         "clusters_returned": len(clusters),
@@ -97,6 +216,7 @@ def build_summary_evidence_payload(
     *,
     max_clusters: int | None = 8,
     feature_preview_limit: int = 5,
+    global_preview_limit: int = 5,
 ) -> dict[str, Any]:
     clusters = []
     bundles = sorted(
@@ -115,7 +235,7 @@ def build_summary_evidence_payload(
     signal_matrix = evidence_index.signal_matrix or {}
     return {
         "status": "ok",
-        "cluster_result": cluster_meta,
+        "cluster_result": compact_cluster_result_payload(cluster_meta),
         "detail": "summary",
         "graph_metrics": graph_metrics,
         "clusters_returned": len(clusters),
@@ -124,9 +244,11 @@ def build_summary_evidence_payload(
         "evidence_metadata_summary": _evidence_metadata_summary(
             evidence_index.metadata
         ),
-        "numeric_global_ranking_preview": evidence_index.numeric_global_ranking[:10],
+        "numeric_global_ranking_preview": evidence_index.numeric_global_ranking[
+            :global_preview_limit
+        ],
         "categorical_global_ranking_preview": evidence_index.categorical_global_ranking[
-            :10
+            :global_preview_limit
         ],
         "signal_matrix_summary": {
             "n_numeric_columns": len(signal_matrix.get("numeric_columns", [])),
@@ -251,7 +373,7 @@ def cluster_profile_payload_to_markdown(payload: dict[str, Any]) -> str:
             "",
             "### Next Tools",
             "- Use `get_feature_signal` to compare a listed feature across clusters.",
-            "- Use `compare_clusters_tool` for pairwise statistical comparison.",
+            "- Use `compare_clusters` for pairwise statistical comparison.",
         ]
     )
     return "\n".join(lines).strip()
@@ -311,7 +433,8 @@ def build_sweep_summary_payload(
         "data_shape": response.get("data_shape"),
         "construction_threshold": response.get("construction_threshold"),
         "graph_health": response.get("graph_health"),
-        "recommended_next_action": response.get("recommended_next_action"),
+        "analysis_status": response.get("analysis_status"),
+        "next_required_check": response.get("next_required_check"),
         "finalization_gate": response.get("finalization_gate"),
         "constructed_graph_connected": response.get("constructed_graph_connected"),
         "full_affinity_connected": response.get("full_affinity_connected"),
@@ -323,6 +446,9 @@ def build_sweep_summary_payload(
         ),
         "diff_summary": _sweep_diff_summary(response.get("diff", [])),
         "threshold_stability_summary": response.get("threshold_stability_summary"),
+        "projection_method": response.get("projection_method"),
+        "projection_cached": response.get("projection_cached"),
+        "projection_cache_status": response.get("projection_cache_status"),
         "pca_cached": response.get("pca_cached"),
         "pca_cache_status": response.get("pca_cache_status"),
         "memory_usage_mb": response.get("memory_usage_mb"),
@@ -331,7 +457,7 @@ def build_sweep_summary_payload(
         "config_yaml_available_via": "get_runtime_context",
         "next_tools": [
             "diagnose_cosmic_graph",
-            "summarize_sweep_history",
+            "get_sweep_history",
             "get_threshold_stability_curve",
             "generate_cluster_dossier",
         ],
@@ -352,8 +478,12 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- Run ID: `{payload.get('run_id')}`",
         f"- Dataset ID: `{payload.get('dataset_id')}`",
-        f"- Graph health: {payload.get('graph_health')}",
-        f"- Recommended next action: {payload.get('recommended_next_action')}",
+        f"- Graph health status: {_format_graph_health_status(payload)}",
+        f"- Constructed graph connected: {payload.get('constructed_graph_connected')}",
+        f"- Construction threshold (edge-weight cut): "
+        f"{_format_metric_value(payload.get('construction_threshold'))}",
+        f"- Analysis status: {payload.get('analysis_status')}",
+        f"- Next required check: `{payload.get('next_required_check')}`",
         f"- Finalization gate: {gate.get('status', 'unknown')}",
     ]
     if payload.get("config_advisory"):
@@ -399,16 +529,34 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
         if stability.get("warning"):
             lines.append(f"- Warning: {stability['warning']}")
 
-    if gate.get("status") == "blocked":
+    if gate.get("status") in {"blocked", "caution"}:
         lines.extend(
             [
                 "",
                 "## Gate Advisory",
                 "",
+                f"- Status: `{gate.get('status')}`",
                 f"- Code: `{gate.get('code')}`",
                 f"- Message: {gate.get('message')}",
             ]
         )
+        action = gate.get("recommended_action") or {}
+        if action:
+            threshold = action.get("interpretation_edge_weight_threshold")
+            command = (
+                f"{action.get('tool', 'generate_cluster_dossier')}"
+                f'(method="{action.get("method", "components")}"'
+            )
+            if threshold is not None:
+                command += (
+                    ", interpretation_edge_weight_threshold="
+                    f"{_format_metric_value(threshold)}"
+                )
+            command += ")"
+            lines.append(f"- Recommended action: `{command}`")
+            reason = action.get("reason")
+            if reason:
+                lines.append(f"- Reason: {reason}")
 
     lines.extend(
         [
@@ -435,6 +583,22 @@ def sweep_payload_to_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _format_graph_health_status(payload: dict[str, Any]) -> str:
+    health = payload.get("graph_health")
+    metrics = payload.get("key_metrics", {}) or {}
+    giant = float(metrics.get("giant_fraction", 0.0) or 0.0)
+    components = int(metrics.get("component_count", 0) or 0)
+    singletons = float(metrics.get("singleton_fraction", 0.0) or 0.0)
+
+    if health == "connected" and components > 1:
+        if giant >= 0.85:
+            return "usable_giant_component_with_tail"
+        return "usable_multicomponent"
+    if health == "fragmented" and singletons >= 0.25:
+        return "fragmented_singleton_heavy"
+    return str(health)
+
+
 def _sweep_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "n_nodes",
@@ -451,7 +615,8 @@ def _sweep_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
 
 def _sweep_diff_summary(diff: list[dict[str, Any]]) -> dict[str, Any]:
     field_map = {
-        "pca_dims": "sweep.pca.dimensions.values",
+        "pca_dims": "sweep.projection.dimensions.values",
+        "projection_dimensions": "sweep.projection.dimensions.values",
         "epsilon": "cosmic_graph.epsilon",
         "dataset_id": "dataset_id",
     }
@@ -565,7 +730,7 @@ def _interpretation_readiness(fragmentation: dict[str, Any]) -> dict[str, Any]:
         "basis": "advisory_from_relative_cluster_mass; not a hard quality threshold",
         "message": message,
         "allowed_next_steps": [
-            "summarize_sweep_history",
+            "get_sweep_history",
             "get_threshold_stability_curve",
             "get_cluster_profile",
             "get_feature_signal",

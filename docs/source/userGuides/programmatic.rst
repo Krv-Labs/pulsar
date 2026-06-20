@@ -20,7 +20,12 @@ feeding a dataframe.
            "drop_columns": []
        },
        "sweep": {
-           "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
+           "projection": {
+               "method": "jl",
+               "dimensions": {"values": [2]},
+               "seed": {"values": [42]},
+               "center": True,
+           },
            "ball_mapper": {"epsilon": {"values": [0.5]}}
        },
        "cosmic_graph": {"construction_threshold": "auto"},
