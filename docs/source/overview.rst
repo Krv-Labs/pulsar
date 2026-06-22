@@ -37,7 +37,7 @@ Pulsar combines Python ergonomics with Rust performance:
          D["Imputation"]
          E["JL/PCA projection"]
          F["Ball Mapper"]
-         G["Laplacian accumulation"]
+         G["Cosmic graph construction"]
       end
 
       subgraph "Output"
@@ -76,15 +76,13 @@ StandardScaler normalization followed by Johnson-Lindenstrauss (JL) random proje
 
 For each projection, build Ball Mapper graphs at multiple epsilon values. Low-dimensional embeddings (1-16 dimensions) use a KD-tree radius query for membership assignment; wider embeddings fall back to the linear scan path.
 
-**4. Pseudo-Laplacian Accumulation**
+**4. Cosmic Graph Construction**
 
-Compute graph Laplacians for each Ball Mapper configuration and aggregate them into a summary representation.
+Fuse Ball Mapper outputs into a weighted similarity graph. By default (``cosmic_graph.construction: minhash``), Pulsar accumulates unbiased MinHash Jaccard signatures of each point's ball-set via seeded signatures and LSH banding — sub-quadratic and constant-memory. Set ``construction: exact`` for the bit-identical sparse pseudo-Laplacian backbone when exact co-occurrence weights matter more than speed.
 
-**5. Cosmic Graph Assembly**
+**5. Threshold Selection & Assembly**
 
-Combine pseudo-Laplacians into a weighted graph where edges represent similarity between configurations.
-
-By default, Pulsar sparsifies the original unthresholded Cosmic Graph with effective-resistance sampling, then selects/applies the construction threshold on that sparse weighted graph. ``model.cosmic_graph`` is therefore a sparse ``networkx.Graph`` with ``weight`` attributes. Dense compatibility getters remain available when needed.
+Select and apply ``construction_threshold`` (``"auto"`` uses approximate H0 persistent homology). ``model.cosmic_graph`` is a thresholded sparse ``networkx.Graph`` with ``weight`` attributes; the hot path never allocates a dense n×n matrix. ``weighted_adjacency`` is materialized lazily on first access. Spectral sparsification (``cosmic_graph.sparsify: true`` or ``model.spectral_sparsify()``) is opt-in only and runs after construction — not part of the default pipeline.
 
 **6. Representative Selection**
 
@@ -118,7 +116,11 @@ Pulsar uses a hierarchical configuration:
        epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 
    cosmic_graph:
+     construction: minhash
+     minhash_d: 256
+     minhash_seed: 42
      construction_threshold: "auto"
+     sparsify: false
 
 Key Outputs
 -----------
@@ -140,8 +142,9 @@ The Rust core provides significant speedups:
 
 - **10-100x faster** Ball Mapper construction, with KD-tree acceleration for 1-16D embeddings
 - **Parallel** JL/PCA projection computation across configurations
-- **Memory efficient** Laplacian accumulation
-- **Sparse** CosmicGraph spectral sparsification for smaller graph outputs
+- **Sparse cosmic-graph backbone** — no dense n×n allocation on ``fit``
+- **MinHash construction** for large sweeps and massive ``n`` (default path)
+- **Opt-in spectral sparsification** for downstream spectral analysis (``sparsify: false`` by default)
 
 For large datasets (>10k rows) or extensive sweeps (>100 configurations), Pulsar's Rust implementation is essential.
 

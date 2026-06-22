@@ -195,6 +195,9 @@ sweep:
     epsilon:
       range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
 cosmic_graph:
+  construction: minhash
+  minhash_d: 256
+  minhash_seed: 42
   construction_threshold: auto
   sparsify: false # opt-in spectral sparsification hook (off by default)
   sparsify_epsilon: 1.0
