@@ -3,6 +3,7 @@
 import numpy as np
 
 from pulsar._pulsar import CosmicGraph, BallMapper, accumulate_pseudo_laplacians
+from pulsar.analysis import cosmic_to_networkx
 from tests.conftest import pseudo_laplacian_py
 
 
@@ -85,3 +86,91 @@ def test_with_accumulated_laplacian():
     assert wadj.shape == (n, n)
     assert np.all(wadj >= 0)
     assert np.all(wadj <= 1.0 + 1e-10)
+
+
+def test_weighted_edges_for_dense_graph():
+    L = make_simple_laplacian()
+    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
+    edges = cg.weighted_edges()
+    wadj = np.array(cg.weighted_adj)
+
+    assert len(edges) == cg.n_edges
+    for i, j, w in edges:
+        assert i < j
+        assert w == wadj[i, j]
+        assert w > 0.0
+
+
+def test_spectral_sparsify_deterministic_and_symmetric():
+    nodes = [list(range(18))]
+    L = pseudo_laplacian_py(nodes, 18)
+    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
+
+    sp1 = cg.spectral_sparsify(1.5, seed=123, sketch_dim=8, sample_count=40)
+    sp2 = cg.spectral_sparsify(1.5, seed=123, sketch_dim=8, sample_count=40)
+
+    assert sp1.n == cg.n
+    assert sp1.n_edges <= cg.n_edges
+    assert sp1.weighted_edges() == sp2.weighted_edges()
+    wadj = np.array(sp1.weighted_adj)
+    np.testing.assert_allclose(wadj, wadj.T, atol=1e-12)
+    np.testing.assert_array_equal(np.diag(wadj), 0.0)
+
+
+def test_spectral_sparsify_quadratic_forms_relaxed():
+    nodes = [list(range(14))]
+    L = pseudo_laplacian_py(nodes, 14)
+    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
+    sp = cg.spectral_sparsify(1.2, seed=5, sketch_dim=10, sample_count=80)
+
+    w_full = np.array(cg.weighted_adj)
+    w_sparse = np.array(sp.weighted_adj)
+    rng = np.random.default_rng(0)
+    for _ in range(5):
+        x = rng.standard_normal(14)
+        q_full = sum(
+            w_full[i, j] * (x[i] - x[j]) ** 2
+            for i in range(14)
+            for j in range(i + 1, 14)
+        )
+        q_sparse = sum(
+            w_sparse[i, j] * (x[i] - x[j]) ** 2
+            for i in range(14)
+            for j in range(i + 1, 14)
+        )
+        assert q_sparse > 0
+        assert 0.15 * q_full <= q_sparse <= 3.5 * q_full
+
+
+def test_spectral_sparsify_disconnected_graph_has_no_cross_edges():
+    L = pseudo_laplacian_py([list(range(5)), list(range(5, 10))], 10)
+    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
+    sp = cg.spectral_sparsify(1.0, seed=9, sketch_dim=6, sample_count=30)
+
+    for i, j, _ in sp.weighted_edges():
+        assert (i < 5 and j < 5) or (i >= 5 and j >= 5)
+
+
+def test_cosmic_to_networkx_uses_weighted_edges():
+    L = make_simple_laplacian()
+    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
+    graph = cosmic_to_networkx(cg)
+
+    assert graph.number_of_edges() == cg.n_edges
+    for i, j, w in cg.weighted_edges():
+        assert graph[i][j]["weight"] == w
+
+
+def test_cosmic_to_networkx_scale_normalizes_weights_and_threshold():
+    # `scale` divides weights before thresholding, so the same threshold filters
+    # on the normalized scale. Here every raw weight halves; a 0.4 cut on the
+    # scaled weights keeps only edges whose raw weight exceeds 0.8.
+    L = make_simple_laplacian()
+    cg = CosmicGraph.from_pseudo_laplacian(L, threshold=0.0)
+    scale = 2.0
+    graph = cosmic_to_networkx(cg, threshold=0.4, scale=scale)
+
+    expected = {(i, j): w / scale for i, j, w in cg.weighted_edges() if w / scale > 0.4}
+    assert {tuple(sorted(e)) for e in graph.edges()} == set(expected)
+    for (i, j), w in expected.items():
+        assert graph[i][j]["weight"] == w

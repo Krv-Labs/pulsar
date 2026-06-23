@@ -10,6 +10,7 @@ fit exception (incl. MemoryError) is caught and recorded as a clean job failure.
 A post-sweep structure check surfaces "no reliable structure detected" for noise and
 advisory "caution" when the plateau is real but singleton/tail mass still merits care.
 """
+
 from __future__ import annotations
 
 import json
@@ -45,7 +46,9 @@ def _worker_id() -> str:
 
 
 def _control_base_url() -> str | None:
-    explicit = os.environ.get("SWEEP_CONTROL_BASE_URL") or os.environ.get("ISOMORPH_WEB_URL")
+    explicit = os.environ.get("SWEEP_CONTROL_BASE_URL") or os.environ.get(
+        "ISOMORPH_WEB_URL"
+    )
     if explicit:
         return explicit.rstrip("/")
     port = os.environ.get("WEB_PORT")
@@ -53,7 +56,9 @@ def _control_base_url() -> str | None:
 
 
 def _control_token() -> str | None:
-    return os.environ.get("INTERNAL_WORKER_TOKEN") or os.environ.get("INTERNAL_MCP_TOKEN")
+    return os.environ.get("INTERNAL_WORKER_TOKEN") or os.environ.get(
+        "INTERNAL_MCP_TOKEN"
+    )
 
 
 def _post_heartbeat(job_id: str, worker_id: str) -> dict:
@@ -98,7 +103,9 @@ def _raise_if_cancelled(job_id: str, queue: FsJobQueue) -> None:
         raise SweepCancelled(str(rec.get("cancel_reason") or "cancel_requested"))
 
 
-def _start_heartbeat_loop(job_id: str, queue: FsJobQueue, worker_id: str) -> threading.Event:
+def _start_heartbeat_loop(
+    job_id: str, queue: FsJobQueue, worker_id: str
+) -> threading.Event:
     stop = threading.Event()
     try:
         interval = float(os.environ.get("SWEEP_HEARTBEAT_INTERVAL_S", "15"))
@@ -114,7 +121,9 @@ def _start_heartbeat_loop(job_id: str, queue: FsJobQueue, worker_id: str) -> thr
             except SweepCancelled:
                 stop.set()
 
-    thread = threading.Thread(target=beat, name=f"sweep-heartbeat-{job_id}", daemon=True)
+    thread = threading.Thread(
+        target=beat, name=f"sweep-heartbeat-{job_id}", daemon=True
+    )
     thread.start()
     return stop
 
@@ -151,12 +160,27 @@ def _assess_structure(model) -> str:
     """
     import numpy as np
 
-    from pulsar.mcp.interpreter import _cluster_by_threshold_stability
+    from pulsar.mcp.interpreter import (
+        _cluster_by_threshold_stability,
+        _cluster_by_threshold_stability_sparse,
+    )
 
-    W = np.asarray(model._weighted_adjacency, dtype=float)
-    n = int(W.shape[0])
+    stability = getattr(model, "_stability_result", None) or getattr(
+        model, "stability_result", None
+    )
     try:
-        ts = _cluster_by_threshold_stability(W, n)
+        # Prefer the sparse H0 path: the post-#17 pipeline keeps the cosmic graph
+        # sparse and leaves the dense `_weighted_adjacency` unmaterialized, so
+        # densifying here would both crash and defeat the sparse design. Fall back
+        # to the dense path only when a dense adjacency is actually present.
+        dense = getattr(model, "_weighted_adjacency", None)
+        if dense is not None:
+            W = np.asarray(dense, dtype=float)
+            ts = _cluster_by_threshold_stability(W, int(W.shape[0]))
+        else:
+            n = int(model.cosmic_rust.n)
+            edges = model.weighted_edges(threshold=0.0)
+            ts = _cluster_by_threshold_stability_sparse(n, edges, stability)
     except Exception:
         ts = None
     if ts is None or ts.n_clusters <= 1:
@@ -165,7 +189,9 @@ def _assess_structure(model) -> str:
     return "ok" if readiness.get("status") == "ready" else "caution"
 
 
-def run_job(job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore | None = None):
+def run_job(
+    job: dict, *, queue: FsJobQueue | None = None, store: FsObjectStore | None = None
+):
     """Run a single claimed sweep job to completion. Returns the artifact_ref or None on failure."""
     queue = queue or get_job_queue()
     store = store or get_object_store()

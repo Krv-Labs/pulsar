@@ -58,10 +58,15 @@ mcp = AgnosticFastMCP(
         "Manifold discovery and topological data analysis for tabular datasets. Call "
         "`get_workflow_guide` once for the end-to-end procedure and tool map.\n"
         "Shared params across tools: `detail` ('summary' default; 'full' for "
-        "audit/debug) and `response_format` ('markdown' default; 'json' for "
-        "structured payloads)."
+        "audit/debug) and `response_format` ('json' for structured payloads; "
+        "'markdown' where a readable rendering is supported)."
     ),
 )
+
+# ---------------------------------------------------------------------------
+# Dynamic Registration of All Tools
+# ---------------------------------------------------------------------------
+from pulsar.mcp.tools import ALL_TOOLS_LIST  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +85,9 @@ class _BearerAuthASGI:
     If no token is configured the gate is open (stdio/dev only).
     """
 
-    def __init__(self, app, token: str, exempt: tuple[str, ...] = ("/healthz",)) -> None:
+    def __init__(
+        self, app, token: str, exempt: tuple[str, ...] = ("/healthz",)
+    ) -> None:
         self.app = app
         self.token = token
         self.exempt = exempt
@@ -94,7 +101,9 @@ class _BearerAuthASGI:
         provided = dict(scope.get("headers") or []).get(b"authorization", b"").decode()
         if provided == f"Bearer {self.token}":
             return await self.app(scope, receive, send)
-        await JSONResponse({"error": "Unauthorized"}, status_code=401)(scope, receive, send)
+        await JSONResponse({"error": "Unauthorized"}, status_code=401)(
+            scope, receive, send
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +123,6 @@ if _TOOLSET == "curated":
 
     _TOOLS = CURATED_TOOLS_LIST
 else:
-    from pulsar.mcp.tools import ALL_TOOLS_LIST  # noqa: E402
-
     _TOOLS = ALL_TOOLS_LIST
 
 for tool_fn in _TOOLS:

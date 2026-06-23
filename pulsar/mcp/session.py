@@ -31,14 +31,26 @@ class SweepRecord:
 
 
 @dataclass
+class GraphArtifact:
+    artifact_id: str
+    run_id: str
+    kind: str
+    created_at: float
+    params: dict[str, Any]
+    graph_summary: dict[str, Any]
+    metrics: dict[str, Any]
+
+
+@dataclass
 class _PulsarSession:
     """Session state for a single MCP client."""
 
     model: ThemaRS | None = None
     data: pd.DataFrame | None = None
     clusters: pd.Series | None = None
-    embeddings: list | None = None  # cached PCA output from last fit
-    pca_fingerprint: str | None = None  # SHA256 of (data_path, dims, seeds, n_rows)
+    embeddings: list | None = None  # cached projection output from last fit
+    projection_fingerprint: str | None = None
+    pca_fingerprint: str | None = None  # Legacy alias for projection_fingerprint.
     sweep_history: list[SweepRecord] = field(default_factory=list)
     dataset_id: str | None = None
     latest_run_id: str | None = None
@@ -48,8 +60,14 @@ class _PulsarSession:
     feature_evidence_index: FeatureEvidenceIndex | None = None
     feature_evidence_fingerprint: str | None = None
     feature_evidence_cluster_meta: dict[str, Any] | None = None
+    # run_id of the fitted model the cached cluster state was computed from.
+    # A newer sweep advances `latest_run_id` but does NOT recompute clusters,
+    # so this stamp lets reads detect (and reject) stale cluster caches.
+    clusters_run_id: str | None = None
+    cluster_assignment_id: str | None = None
     active_config_yaml: str | None = None
     active_config_dataset_id: str | None = None
+    graph_artifacts: dict[str, GraphArtifact] = field(default_factory=dict)
 
     def calculate_memory_mb(self) -> float:
         """Estimate current session memory footprint in MB."""
@@ -58,8 +76,14 @@ class _PulsarSession:
             # Deep memory usage for Pandas (captures string objects etc)
             bytes_total += self.data.memory_usage(deep=True).sum()
 
-        if self.model is not None and self.model._weighted_adjacency is not None:
-            bytes_total += self.model._weighted_adjacency.nbytes
+        if self.model is not None:
+            if self.model._weighted_adjacency is not None:
+                # Dense view has been materialized (lazily, on first access).
+                bytes_total += self.model._weighted_adjacency.nbytes
+            elif self.model._cosmic_rust is not None:
+                # Hot path keeps the graph sparse; size the edge list instead of
+                # forcing an n×n densification just to report memory.
+                bytes_total += self.model._cosmic_rust.n_edges * 24
 
         if self.embeddings is not None:
             for emb in self.embeddings:
@@ -208,6 +232,8 @@ def _invalidate_feature_evidence_cache(session: _PulsarSession) -> None:
     session.feature_evidence_fingerprint = None
     session.feature_evidence_cluster_meta = None
     session.clusters = None
+    session.clusters_run_id = None
+    session.cluster_assignment_id = None
 
 
 def _feature_evidence_fingerprint(
@@ -241,7 +267,7 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
         return (
             "empty",
             is_connected,
-            "No edges are present at this threshold. Consider a lower stability plateau or a broader PCA/epsilon sweep before interpreting clusters.",
+            "No edges are present at this threshold. Consider a lower stability plateau or a broader projection/epsilon sweep before interpreting clusters.",
         )
     if density > 0.8:
         return (
@@ -270,15 +296,18 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
     )
 
 
-def _pca_cache_status(
+def _projection_cache_status(
     session: _PulsarSession,
     cfg: Any,
 ) -> tuple[list | None, dict[str, Any]]:
-    """Return reusable PCA embeddings and an operational status payload."""
-    from pulsar.runtime.fingerprint import pca_fingerprint
+    """Return reusable projection embeddings and an operational status payload."""
+    from pulsar.runtime.fingerprint import projection_fingerprint
 
+    method = getattr(getattr(cfg, "projection", None), "method", "jl")
     status: dict[str, Any] = {
         "scope": "session",
+        "artifact": "projection_embeddings",
+        "method": method,
         "status": "miss",
         "reason": "no_cached_embeddings",
     }
@@ -287,12 +316,13 @@ def _pca_cache_status(
     if session.data is None:
         status["reason"] = "no_session_data"
         return None, status
-    if session.pca_fingerprint is None:
+    cached_fingerprint = session.projection_fingerprint or session.pca_fingerprint
+    if cached_fingerprint is None:
         status["reason"] = "no_cached_fingerprint"
         return None, status
 
-    fingerprint = pca_fingerprint(cfg, len(session.data), session.data)
-    if fingerprint != session.pca_fingerprint:
+    fingerprint = projection_fingerprint(cfg, len(session.data), session.data)
+    if fingerprint != cached_fingerprint:
         status["reason"] = "fingerprint_mismatch"
         return None, status
 
@@ -300,7 +330,17 @@ def _pca_cache_status(
         session.embeddings,
         {
             "scope": "session",
+            "artifact": "projection_embeddings",
+            "method": method,
             "status": "hit",
             "reason": "fingerprint_match",
         },
     )
+
+
+def _pca_cache_status(
+    session: _PulsarSession,
+    cfg: Any,
+) -> tuple[list | None, dict[str, Any]]:
+    """Compatibility alias for the projection embedding cache status."""
+    return _projection_cache_status(session, cfg)

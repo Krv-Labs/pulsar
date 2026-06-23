@@ -82,7 +82,7 @@ def test_callback_exception_propagates(basic_config, test_data):
 
 
 def test_cached_pca_stage_label(basic_config, test_data):
-    """With cached embeddings, the pca stage name contains '(cached)'."""
+    """With cached embeddings, the projection stage name contains '(cached)'."""
     cfg = load_config(basic_config)
     model1 = ThemaRS(cfg).fit(data=test_data)
 
@@ -93,15 +93,15 @@ def test_cached_pca_stage_label(basic_config, test_data):
         _precomputed_embeddings=model1._embeddings,
     )
 
-    pca_labels = [s for s in labels if "pca" in s.lower()]
-    assert pca_labels, "No PCA stage label found"
-    assert any("cached" in s for s in pca_labels), (
-        f"Expected '(cached)' in PCA label, got: {pca_labels}"
+    projection_labels = [s for s in labels if "projection" in s.lower()]
+    assert projection_labels, "No projection stage label found"
+    assert any("cached" in s for s in projection_labels), (
+        f"Expected '(cached)' in projection label, got: {projection_labels}"
     )
 
 
-def test_cached_pca_fractions_reach_one(basic_config, test_data):
-    """With cached PCA (zero weight), fractions must still renormalize to 1.0."""
+def test_cached_projection_fractions_reach_one(basic_config, test_data):
+    """With cached projections, fractions must still renormalize to 1.0."""
     cfg = load_config(basic_config)
     model1 = ThemaRS(cfg).fit(data=test_data)
 
@@ -113,7 +113,7 @@ def test_cached_pca_fractions_reach_one(basic_config, test_data):
     )
 
     assert fractions[-1] == 1.0, (
-        f"Final fraction with cached PCA is {fractions[-1]}, not 1.0"
+        f"Final fraction with cached projection is {fractions[-1]}, not 1.0"
     )
     assert fractions == sorted(fractions), f"Fractions not monotonic: {fractions}"
 
@@ -150,11 +150,25 @@ def test_auto_threshold_reaches_one(auto_config, test_data):
 
     ones = [i for i, f in enumerate(fractions) if f == 1.0]
     assert len(ones) == 1, f"Duplicate 1.0 at indices {ones}"
+    assert any(s == "stability" for s, _ in updates), (
+        f"Auto-threshold progress should expose stability stage: {updates}"
+    )
 
 
-def test_stage_count(basic_config, test_data):
-    """fit() fires exactly 7 callbacks (one per stage)."""
-    cfg = load_config(basic_config)
+def test_fit_reports_sweep_batches(basic_config, test_data):
+    """fit() reports progress inside the batched BallMapper/Laplacian loop."""
+    config = {
+        **basic_config,
+        "sweep": {
+            "projection": {
+                "method": "jl",
+                "dimensions": {"values": [2, 3, 4]},
+                "seed": {"values": [42]},
+            },
+            "ball_mapper": {"epsilon": {"values": [0.5, 1.0]}},
+        },
+    }
+    cfg = load_config(config)
     stages: list[str] = []
 
     ThemaRS(cfg).fit(
@@ -162,7 +176,12 @@ def test_stage_count(basic_config, test_data):
         progress_callback=lambda s, _: stages.append(s),
     )
 
-    assert len(stages) == 7, f"Expected 7 stages, got {len(stages)}: {stages}"
+    batch_stages = [s for s in stages if "sweep batch" in s]
+    assert batch_stages == [
+        "sweep batch 1/3: ball_mapper + construction",
+        "sweep batch 2/3: ball_mapper + construction",
+        "sweep batch 3/3: ball_mapper + construction",
+    ]
 
 
 def test_fit_with_progress_returns_model(basic_config, test_data):
@@ -227,19 +246,33 @@ def test_fit_multi_callback_fires(basic_config):
     assert fractions[-1] == 1.0, f"fit_multi final fraction is {fractions[-1]}"
 
 
-def test_fit_multi_stage_count(basic_config):
-    """fit_multi with N=2 datasets fires exactly 5*2 + 2 = 12 callbacks."""
-    cfg = load_config(basic_config)
+def test_fit_multi_reports_sweep_batches(basic_config):
+    """fit_multi reports per-dataset batch progress."""
+    config = {
+        **basic_config,
+        "sweep": {
+            "projection": {
+                "method": "jl",
+                "dimensions": {"values": [2, 3]},
+                "seed": {"values": [42]},
+            },
+            "ball_mapper": {"epsilon": {"values": [0.5, 1.0]}},
+        },
+    }
+    cfg = load_config(config)
     rng = np.random.default_rng(2)
     ds1 = pd.DataFrame(rng.standard_normal((30, 3)), columns=["x", "y", "z"])
     ds2 = pd.DataFrame(rng.standard_normal((30, 3)), columns=["x", "y", "z"])
 
     stages: list[str] = []
-    ThemaRS(cfg).fit_multi([ds1, ds2], progress_callback=lambda s, _: stages.append(s))
-
-    assert len(stages) == 12, (
-        f"Expected 12 callbacks for 2 datasets, got {len(stages)}: {stages}"
+    ThemaRS(cfg).fit_multi(
+        [ds1, ds2],
+        ballmap_batch_size=1,
+        progress_callback=lambda s, _: stages.append(s),
     )
+
+    assert "Dataset 1/2: sweep batch 1/2: ball_mapper + construction" in stages
+    assert "Dataset 2/2: sweep batch 2/2: ball_mapper + construction" in stages
 
 
 def test_fit_multi_load_stage_present(basic_config):

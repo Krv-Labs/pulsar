@@ -11,6 +11,7 @@ Adding these to ``CURATED_TOOLS_LIST`` gives the HTTP agent the self-correction 
 otherwise lacks (config recommendation/validation/repair, column probing, workflow guide) — so it no
 longer has to guess an impute config it has no schema for.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -76,7 +77,12 @@ def _json_default(o):
 
 def _result(markdown: str, structured, viz=None, confidence=None) -> str:
     return json.dumps(
-        {"markdown": markdown, "structured": structured, "vizPayload": viz, "confidence": confidence},
+        {
+            "markdown": markdown,
+            "structured": structured,
+            "vizPayload": viz,
+            "confidence": confidence,
+        },
         default=_json_default,
     )
 
@@ -151,13 +157,21 @@ async def recommend_preprocessing(
     n_samples = geo.get("n_samples", 0)
     column_profiles = geo.get("column_profiles", [])
 
-    column_profiles, dirty_numeric_detection = enrich_dirty_numeric_samples(column_profiles, df)
-    drop, impute, encode, rationale = _recommend_preprocessing_block(column_profiles, n_samples)
+    column_profiles, dirty_numeric_detection = enrich_dirty_numeric_samples(
+        column_profiles, df
+    )
+    drop, impute, encode, rationale = _recommend_preprocessing_block(
+        column_profiles, n_samples
+    )
     preprocessing_yaml = _preprocessing_block_to_yaml(drop, impute, encode)
 
     expansion_estimate = 0
     for raw_cp in column_profiles:
-        cp = raw_cp if isinstance(raw_cp, dict) else {"name": raw_cp.name, "n_unique": raw_cp.n_unique}
+        cp = (
+            raw_cp
+            if isinstance(raw_cp, dict)
+            else {"name": raw_cp.name, "n_unique": raw_cp.n_unique}
+        )
         if cp["name"] in encode:
             expansion_estimate += cp.get("n_unique", 2)
 
@@ -207,9 +221,15 @@ async def validate_preprocessing_config(
 
     input_cols = set(df.columns)
     output_names = layout.feature_names
-    dummy_count = sum(1 for name in output_names if "_" in name and name not in input_cols)
-    missingness_flag_count = sum(1 for name in output_names if name.endswith("_was_missing"))
-    high_cardinality_encoded = [col for col, cats in layout.vocab.items() if len(cats) > 20]
+    dummy_count = sum(
+        1 for name in output_names if "_" in name and name not in input_cols
+    )
+    missingness_flag_count = sum(
+        1 for name in output_names if name.endswith("_was_missing")
+    )
+    high_cardinality_encoded = [
+        col for col, cats in layout.vocab.items() if len(cats) > 20
+    ]
     col_preview = list(output_names[:8])
     if len(output_names) > 8:
         col_preview.append(f"... +{len(output_names) - 8} more")
@@ -284,7 +304,9 @@ async def probe_columns(
 # importantly a clear path to EXCLUDE a column from graph construction via
 # preprocessing.drop_columns (create_config → refine_config → prepare_sweep).
 # --------------------------------------------------------------------------- #
-async def create_config(dataset_id: str, intent: str = "", user_id: str = "local") -> str:
+async def create_config(
+    dataset_id: str, intent: str = "", user_id: str = "local"
+) -> str:
     """Build the canonical Pulsar config for a dataset and return a stable config_ref.
 
     Use the returned `config_ref` with `refine_config`; do not copy the YAML string between tools.
@@ -295,7 +317,11 @@ async def create_config(dataset_id: str, intent: str = "", user_id: str = "local
     geo = dataclasses.asdict(result)
     run_name = intent.strip() or "initial_sweep"
     processed = await asyncio.to_thread(
-        _calibrate_processed_space, df, geo["column_profiles"], geo["n_samples"], data_path
+        _calibrate_processed_space,
+        df,
+        geo["column_profiles"],
+        geo["n_samples"],
+        data_path,
     )
     config_yaml = _build_initial_config_yaml(
         geo, data_path=data_path, run_name=run_name, processed_profile=processed
@@ -317,8 +343,8 @@ async def create_config(dataset_id: str, intent: str = "", user_id: str = "local
     }
     md = (
         f"Built config `{config_ref}` for `{dataset_id}`. To exclude columns from the graph, call "
-        f"`refine_config(dataset_id=\"{dataset_id}\", config_ref=\"{config_ref}\", "
-        f"overrides={{\"preprocessing.drop_columns\": [...]}})`, then pass the returned "
+        f'`refine_config(dataset_id="{dataset_id}", config_ref="{config_ref}", '
+        f'overrides={{"preprocessing.drop_columns": [...]}})`, then pass the returned '
         f"`config_ref` to `prepare_sweep`. Current drop_columns: {structured['drop_columns']}."
     )
     return _result(md, structured)
@@ -361,7 +387,10 @@ async def refine_config(
     config = yaml.safe_load(result.config_yaml)
     if dataset_id:
         new_ref, config = save_config_ref(
-            store, user_id=user_id, dataset_id=dataset_id, config_yaml=result.config_yaml
+            store,
+            user_id=user_id,
+            dataset_id=dataset_id,
+            config_yaml=result.config_yaml,
         )
     structured = {
         "status": "ok",
@@ -374,7 +403,7 @@ async def refine_config(
         "config": config,
     }
     if new_ref:
-        md = f"Applied overrides {result.applied_overrides}. Pass `config_ref=\"{new_ref}\"` to `prepare_sweep`."
+        md = f'Applied overrides {result.applied_overrides}. Pass `config_ref="{new_ref}"` to `prepare_sweep`.'
     else:
         md = f"Applied overrides {result.applied_overrides}. Pass `config_yaml` to `prepare_sweep`.\n\n```yaml\n{result.config_yaml}\n```"
     return _result(md, structured)
@@ -389,7 +418,9 @@ async def get_config(dataset_id: str, config_ref: str, user_id: str = "local") -
     """
     store = get_object_store()
     try:
-        config_yaml = load_config_ref(store, user_id=user_id, dataset_id=dataset_id, config_ref=config_ref)
+        config_yaml = load_config_ref(
+            store, user_id=user_id, dataset_id=dataset_id, config_ref=config_ref
+        )
     except FileNotFoundError as e:
         raise ToolError(str(e)) from e
     config = yaml.safe_load(config_yaml)
@@ -405,14 +436,18 @@ async def get_config(dataset_id: str, config_ref: str, user_id: str = "local") -
     return _result(md, structured)
 
 
-async def validate_config(config_yaml: str, dataset_id: str = "", user_id: str = "local") -> str:
+async def validate_config(
+    config_yaml: str, dataset_id: str = "", user_id: str = "local"
+) -> str:
     """Validate a full Pulsar config (and normalize it). Pass `dataset_id` to also check column
     references (e.g. that drop_columns names exist) against the actual data."""
     data_path = None
     if dataset_id:
         _df, data_path = _require_dataset(dataset_id, user_id)
     report = validate_config_yaml(config_yaml, dataset_path=data_path)
-    return _result(render_validation_report(report), {"status": "ok", "validated": True})
+    return _result(
+        render_validation_report(report), {"status": "ok", "validated": True}
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -427,7 +462,9 @@ async def validate_config(config_yaml: str, dataset_id: str = "", user_id: str =
 # the caller's own ``user_id`` prefix and returns the ``artifact_ref`` (datasetId +
 # configHash) the interpret tools need. No artifact bytes, no host paths, no mutation.
 # --------------------------------------------------------------------------- #
-async def list_sweeps(dataset_id: str = "", user_id: str = "local", limit: int = 20) -> str:
+async def list_sweeps(
+    dataset_id: str = "", user_id: str = "local", limit: int = 20
+) -> str:
     """List COMPLETED topological sweeps already persisted for this user (optionally one dataset).
 
     Use this before spending a new sweep on an existing dataset: if a completed sweep already exists
@@ -465,7 +502,9 @@ async def list_sweeps(dataset_id: str = "", user_id: str = "local", limit: int =
         ds_id, cfg_file = rel.parts[0], rel.parts[2]
         cfg_hash = cfg_file.removesuffix(".json")
         try:
-            sweep = load_sweep_manifest(store, user_id=user_id, dataset_id=ds_id, config_hash=cfg_hash)
+            sweep = load_sweep_manifest(
+                store, user_id=user_id, dataset_id=ds_id, config_hash=cfg_hash
+            )
         except Exception:
             continue
         name = None
@@ -473,11 +512,15 @@ async def list_sweeps(dataset_id: str = "", user_id: str = "local", limit: int =
             name = load_dataset_meta(ds_id, store, user_id=user_id).get("name")
         except Exception:
             name = None
-        artifact_ref = sweep.get("artifactRef") or sweep.get("artifact_ref") or {
-            "datasetId": ds_id,
-            "configHash": cfg_hash,
-            "userId": user_id,
-        }
+        artifact_ref = (
+            sweep.get("artifactRef")
+            or sweep.get("artifact_ref")
+            or {
+                "datasetId": ds_id,
+                "configHash": cfg_hash,
+                "userId": user_id,
+            }
+        )
         sweeps.append(
             {
                 "artifactRef": artifact_ref,

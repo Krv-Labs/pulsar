@@ -1,40 +1,52 @@
-# Pulsar parameter sweep configuration
-# Inspired by Weights & Biases sweep files.
-#
-# Sweep parameters support three specification styles:
-#   values: [2, 3, 5]                       → use list directly (grid search)
-#   range: {min: 0.1, max: 1.0, steps: 10}  → np.linspace
-#   distribution: {type: uniform, min, max}  → reserved for random search
+# Pulsar parameter sweep config.
+# Sweep parameters support:
+#   values: [2, 3, 5]                       -> grid search values
+#   range: {min: 0.1, max: 1.0, steps: 10}  -> np.linspace
 
 run:
-  name: my_experiment         # optional label for output files
+  name: my_experiment
   data: path/to/data.csv      # CSV or parquet
 
 preprocessing:
   drop_columns: []            # column names to drop before fitting
-
   impute:                     # one entry per column that has missing values
     age:
-      method: sample_normal   # sample_normal | sample_categorical |
+      method: sample_normal   # sample_normal | sample_categorical
       seed: 42                # fill_mean | fill_median | fill_mode
-
     category:
       method: sample_categorical
       seed: 7
+  encode:
+    category:
+      method: one_hot
 
 sweep:
-  pca:
+  projection:
+    method: jl                # default; use "pca" for legacy randomized PCA
     dimensions:
-      values: [2, 3, 5]       # grid over these n_components values
+      values: [2, 3, 5]
     seed:
-      values: [42, 7, 13]     # grid over these random seeds
-
+      values: [42, 7, 13]
+    center: true
   ball_mapper:
     epsilon:
       values: [0.3, 0.5, 0.8]
-      # alternative — sweep a linspace:
+      # alternative:
       # range: {min: 0.1, max: 1.5, steps: 8}
 
-# Advanced options use sensible defaults and are usually not needed:
-# cosmic_graph:
-#   neighborhood: node
+cosmic_graph:
+  construction: minhash
+  minhash_d: 256
+  minhash_seed: 42
+  construction_threshold: auto
+  neighborhood: node
+  sparsify: false
+  sparsify_epsilon: 1.0
+  sparsify_seed: 42
+  sparsify_sketch_dim: null
+  sparsify_sample_count: null
+  sparsify_pcg_tol: 1.0e-6
+  sparsify_max_iter: 1000
+
+output:
+  n_reps: 4

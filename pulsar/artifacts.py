@@ -19,6 +19,7 @@ The on-disk JSON aligns with ``PulsarArtifact`` in ``packages/contracts`` (D17 v
 contract); ``dataRef``/``dataColumns``/``nBallMaps`` are pulsar-side extensions needed for
 faithful interpretation (mirrored as optional fields in the TS contract).
 """
+
 from __future__ import annotations
 
 import io
@@ -110,7 +111,9 @@ def _safe_cluster_labels(model, n: int) -> list[int]:
 # --------------------------------------------------------------------------- #
 # dump
 # --------------------------------------------------------------------------- #
-def dump_artifact(model, *, dataset_id: str, config_hash: str, prefix: str, store) -> dict[str, Any]:
+def dump_artifact(
+    model, *, dataset_id: str, config_hash: str, prefix: str, store
+) -> dict[str, Any]:
     """Serialize a fitted ``ThemaRS`` to a derived-artifact dict + blobs in ``store``.
 
     ``prefix`` is the object-store key prefix (``{user_id}/{dataset_id}/{config_hash}``).
@@ -119,11 +122,27 @@ def dump_artifact(model, *, dataset_id: str, config_hash: str, prefix: str, stor
     import numpy as np
     from scipy.sparse import csr_matrix
 
-    W = np.asarray(model._weighted_adjacency, dtype=np.float64)
-    n = int(W.shape[0])
-    G = model._cosmic_graph
+    # The post-#17 pipeline keeps the cosmic graph sparse and leaves the dense
+    # `_weighted_adjacency` unmaterialized. Build the serialized CSR straight from
+    # the edge weights rather than densifying an n×n matrix (stays performant on
+    # large graphs); fall back to the dense cache when it is already present.
+    dense = getattr(model, "_weighted_adjacency", None)
+    if dense is not None:
+        W = np.asarray(dense, dtype=np.float64)
+        n = int(W.shape[0])
+        csr = csr_matrix(W)
+    else:
+        n = int(model.cosmic_rust.n)
+        rows: list[int] = []
+        cols: list[int] = []
+        data: list[float] = []
+        for i, j, w in model.weighted_edges(threshold=0.0):
+            rows.extend([int(i), int(j)])
+            cols.extend([int(j), int(i)])
+            data.extend([float(w), float(w)])
+        csr = csr_matrix((data, (rows, cols)), shape=(n, n))
 
-    csr = csr_matrix(W)
+    G = model._cosmic_graph
     weighted_adjacency = {
         "format": "csr",
         "indptr": [int(x) for x in csr.indptr.tolist()],
@@ -176,6 +195,17 @@ def dump_artifact(model, *, dataset_id: str, config_hash: str, prefix: str, stor
         "stabilityCurve": stability_curve,
         "resolvedConstructionThreshold": float(model._resolved_construction_threshold),
         "nBallMaps": int(len(model._ball_maps)),
+        # Construction metadata so the cold ArtifactView can report minhash_profile.
+        "cosmicConstruction": getattr(
+            getattr(getattr(model, "config", None), "cosmic_graph", None),
+            "construction",
+            "minhash",
+        ),
+        "minhashD": getattr(
+            getattr(getattr(model, "config", None), "cosmic_graph", None),
+            "minhash_d",
+            None,
+        ),
         "metrics": _graph_metrics(G, n),
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
@@ -230,11 +260,22 @@ class ArtifactView:
         pulsar_version: str | None,
         n: int,
         n_ball_maps: int,
+        construction: str = "minhash",
+        minhash_d: int | None = None,
         artifact: dict | None = None,
         store=None,
     ) -> None:
+        from types import SimpleNamespace
+
         self._artifact = artifact
         self._store = store
+        # Minimal config shim so diagnose_model can read cosmic_graph.minhash_d /
+        # .construction off a cold artifact exactly as it does off a live model.
+        self.config = SimpleNamespace(
+            cosmic_graph=SimpleNamespace(
+                construction=construction, minhash_d=minhash_d
+            )
+        )
         self._weighted_adjacency_cache = weighted_adjacency
         self._cosmic_graph_cache = cosmic_graph
         self._embeddings_cache = embeddings
@@ -260,19 +301,50 @@ class ArtifactView:
 
             wa = self._artifact["weightedAdjacency"]
             shape = tuple(int(x) for x in wa["shape"])
-            self._weighted_adjacency_cache = csr_matrix(
-                (
-                    np.asarray(wa["data"], dtype=np.float64),
-                    np.asarray(wa["indices"], dtype=np.int64),
-                    np.asarray(wa["indptr"], dtype=np.int64),
-                ),
-                shape=shape,
-            ).toarray().astype(np.float64)
+            self._weighted_adjacency_cache = (
+                csr_matrix(
+                    (
+                        np.asarray(wa["data"], dtype=np.float64),
+                        np.asarray(wa["indices"], dtype=np.int64),
+                        np.asarray(wa["indptr"], dtype=np.int64),
+                    ),
+                    shape=shape,
+                )
+                .toarray()
+                .astype(np.float64)
+            )
         return self._weighted_adjacency_cache
 
     @property
     def _weighted_adjacency(self):
         return self.weighted_adjacency
+
+    def weighted_edges(self, threshold: float = 0.0):
+        """Upper-triangle ``(i, j, w)`` edges with ``w > threshold``.
+
+        Mirrors ``ThemaRS.weighted_edges`` (the post-#17 sparse accessor) so
+        diagnostics run unchanged on a cold-loaded artifact, reading the persisted
+        CSR directly without densifying.
+        """
+        import numpy as np
+        from scipy.sparse import csr_matrix, triu
+
+        wa = self._artifact["weightedAdjacency"]
+        shape = tuple(int(x) for x in wa["shape"])
+        csr = csr_matrix(
+            (
+                np.asarray(wa["data"], dtype=np.float64),
+                np.asarray(wa["indices"], dtype=np.int64),
+                np.asarray(wa["indptr"], dtype=np.int64),
+            ),
+            shape=shape,
+        )
+        upper = triu(csr, k=1).tocoo()
+        return [
+            (int(i), int(j), float(w))
+            for i, j, w in zip(upper.row, upper.col, upper.data)
+            if w > threshold
+        ]
 
     @property
     def cosmic_graph(self):
@@ -310,7 +382,9 @@ class ArtifactView:
     def data(self):
         if self._data_cache is _UNLOADED:
             if self._artifact.get("dataRef"):
-                self._data_cache = _load_df_parquet(self._store.get(self._artifact["dataRef"]))
+                self._data_cache = _load_df_parquet(
+                    self._store.get(self._artifact["dataRef"])
+                )
             else:
                 self._data_cache = self.preprocessed_data
         return self._data_cache
@@ -323,7 +397,8 @@ class ArtifactView:
     def _embeddings(self):
         if self._embeddings_cache is _UNLOADED:
             self._embeddings_cache = [
-                _load_ndarray(self._store.get(m["ref"])) for m in self._artifact.get("embeddings", [])
+                _load_ndarray(self._store.get(m["ref"]))
+                for m in self._artifact.get("embeddings", [])
             ]
         return self._embeddings_cache
 
@@ -337,7 +412,9 @@ class ArtifactView:
         if self._stability_result_cache is None:
             from pulsar._pulsar import find_stable_thresholds
 
-            self._stability_result_cache = find_stable_thresholds(self.weighted_adjacency)
+            self._stability_result_cache = find_stable_thresholds(
+                self.weighted_adjacency
+            )
         return self._stability_result_cache
 
     @property
@@ -361,6 +438,8 @@ def load_artifact(d: dict, store) -> ArtifactView:
         pulsar_version=d.get("pulsarVersion"),
         n=n,
         n_ball_maps=int(d.get("nBallMaps", 0)),
+        construction=d.get("cosmicConstruction", "minhash"),
+        minhash_d=d.get("minhashD"),
         artifact=d,
         store=store,
     )

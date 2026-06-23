@@ -8,6 +8,7 @@ persists the derived artifact, and updates status; ``get_sweep_status`` polls.
 good for local dev + tests. A Redis-backed ``LocalQueue`` is the documented
 multi-worker alternative; the prod swap is Cloud Tasks (same enqueue/claim surface).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -18,7 +19,13 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-QUEUED, RUNNING, DONE, ERROR, CANCELLED = "queued", "running", "done", "error", "cancelled"
+QUEUED, RUNNING, DONE, ERROR, CANCELLED = (
+    "queued",
+    "running",
+    "done",
+    "error",
+    "cancelled",
+)
 
 
 def config_hash(config: dict) -> str:
@@ -167,5 +174,7 @@ class FsJobQueue:
 
 def get_job_queue() -> FsJobQueue:
     """Local job queue rooted under ``JOB_QUEUE_DIR`` (default: ``<OBJECT_STORE_DIR>/_queue``)."""
-    default = os.path.join(os.environ.get("OBJECT_STORE_DIR", "./.localstore"), "_queue")
+    default = os.path.join(
+        os.environ.get("OBJECT_STORE_DIR", "./.localstore"), "_queue"
+    )
     return FsJobQueue(os.environ.get("JOB_QUEUE_DIR", default))

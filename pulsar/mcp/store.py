@@ -7,6 +7,7 @@ same ``put``/``get``/``exists`` surface — selected by ``DEPLOY_ENV`` upstream.
 This is intentionally tiny and dependency-free: ``pulsar/artifacts.py`` only needs
 a duck-typed object with ``put(key, bytes)`` / ``get(key) -> bytes`` / ``exists(key)``.
 """
+
 from __future__ import annotations
 
 import os

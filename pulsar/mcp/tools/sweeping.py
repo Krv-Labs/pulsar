@@ -8,7 +8,6 @@ import os
 import time
 from typing import Any, Literal
 
-import networkx as nx
 import yaml
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -35,13 +34,20 @@ from pulsar.mcp.session import (
     _get_session,
     _graph_health_summary,
     _normalize_data_path,
-    _pca_cache_status,
+    _projection_cache_status,
     _resolve_dataset_path,
 )
 from pulsar.pipeline import ThemaRS
-from pulsar.runtime.fingerprint import pca_fingerprint
+from pulsar.runtime.fingerprint import projection_fingerprint
 
 logger = logging.getLogger(__name__)
+
+
+def _projection_dimensions_from_config(cfg: dict) -> list[Any]:
+    sweep = cfg.get("sweep", {})
+    return sweep.get("projection", {}).get("dimensions", {}).get("values") or sweep.get(
+        "pca", {}
+    ).get("dimensions", {}).get("values", [])
 
 
 def _format_epsilon(cfg: dict) -> str:
@@ -77,40 +83,111 @@ def _auto_save_config(cfg) -> str:
     return save_path
 
 
-async def get_experiment_history(ctx: Context) -> str:
-    """Markdown table of all sweeps run in this session."""
-    session = _get_session(ctx)
-    if not session.sweep_history:
-        return "No experiments run yet in this session.\n\n| Run | PCA Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |\n|---|---|---|---|---|---|---|"
-
-    lines = [
-        "| Run | PCA Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |"
-    ]
-    lines.append("|---|---|---|---|---|---|---|")
-
-    for i, record in enumerate(session.sweep_history):
+def _sweep_history_rows(history: list[SweepRecord]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for i, record in enumerate(history):
         cfg = yaml.safe_load(record.config_yaml)
-        pca = str(
-            cfg.get("sweep", {}).get("pca", {}).get("dimensions", {}).get("values", [])
+        metrics = record.metrics
+        rows.append(
+            {
+                "run_index": i + 1,
+                "dataset_id": record.dataset_id,
+                "projection_dimensions": _projection_dimensions_from_config(cfg),
+                "epsilon": _format_epsilon(cfg),
+                "nodes": metrics.get("n_nodes"),
+                "edges": metrics.get("n_edges"),
+                "components": metrics.get("component_count"),
+                "giant_fraction": metrics.get("giant_fraction", 0),
+            }
         )
-        eps = _format_epsilon(cfg)
+    return rows
 
-        m = record.metrics
+
+def _sweep_history_table(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        "| Run | Projection Dims | Epsilon Range | Nodes | Edges | Components | Giant Fraction |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    if not rows:
+        return "\n".join(lines)
+
+    for row in rows:
         lines.append(
-            f"| {i + 1} | {pca} | {eps} | {m.get('n_nodes')} | {m.get('n_edges')} | {m.get('component_count')} | {m.get('giant_fraction', 0):.2%} |"
+            f"| {row['run_index']} | {row['projection_dimensions']} | {row['epsilon']} | "
+            f"{row['nodes']} | {row['edges']} | {row['components']} | "
+            f"{float(row['giant_fraction']):.2%} |"
         )
-
     return "\n".join(lines)
 
 
-async def summarize_sweep_history(ctx: Context = None) -> str:
-    """Synthesize patterns across the session's sweeps. Returns
-    `{n_runs, observations, rationale}`. Agent owns next-step decision.
-    Use `get_experiment_history` for the raw per-run table.
-    """
+async def get_sweep_history(
+    detail: Literal["table", "summary", "full"] = "table",
+    response_format: Literal["markdown", "json"] = "markdown",
+    ctx: Context = None,
+) -> str:
+    """Session sweep history. `table` returns the compact run table; `summary`
+    synthesizes patterns; `full` returns both rows and synthesis."""
     session = _get_session(ctx)
+    if detail not in {"table", "summary", "full"}:
+        return mcp_error(
+            "get_sweep_history",
+            "detail must be 'table', 'summary', or 'full'.",
+        )
+    if response_format not in {"markdown", "json"}:
+        return mcp_error(
+            "get_sweep_history",
+            "response_format must be 'markdown' or 'json'.",
+        )
+
+    rows = _sweep_history_rows(list(session.sweep_history))
     summary = summarize_history(list(session.sweep_history))
-    return json.dumps(summary, indent=2)
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "detail": detail,
+        "n_runs": len(rows),
+    }
+    if detail in {"table", "full"}:
+        payload["runs"] = rows
+    if detail in {"summary", "full"}:
+        payload["summary"] = summary
+
+    if response_format == "json":
+        return json.dumps(payload, indent=2)
+
+    if not rows:
+        return "No sweeps run yet in this session.\n\n" + _sweep_history_table(rows)
+    if detail == "table":
+        return _sweep_history_table(rows)
+    if detail == "summary":
+        observations = summary.get("observations", [])
+        raw_rationale = summary.get("rationale", "")
+        rationale = (
+            raw_rationale
+            if isinstance(raw_rationale, list)
+            else [raw_rationale]
+            if raw_rationale
+            else []
+        )
+        lines = ["# Sweep History Summary", "", f"- Runs: {len(rows)}"]
+        if observations:
+            lines.extend(["", "## Observations"])
+            lines.extend(f"- {item}" for item in observations)
+        if rationale:
+            lines.extend(["", "## Rationale"])
+            lines.extend(f"- {item}" for item in rationale)
+        return "\n".join(lines).strip()
+
+    return "\n\n".join(
+        [
+            "# Sweep History",
+            _sweep_history_table(rows),
+            await get_sweep_history(
+                detail="summary",
+                response_format="markdown",
+                ctx=ctx,
+            ),
+        ]
+    ).strip()
 
 
 async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
@@ -138,7 +215,7 @@ async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
             "",
             "| Field | Run A | Run B |",
             "|---|---|---|",
-            f"| pca_dims | {cfg_a.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} | {cfg_b.get('sweep', {}).get('pca', {}).get('dimensions', {}).get('values', [])} |",
+            f"| projection_dimensions | {_projection_dimensions_from_config(cfg_a)} | {_projection_dimensions_from_config(cfg_b)} |",
             f"| epsilon | {_format_epsilon(cfg_a)} | {_format_epsilon(cfg_b)} |",
             f"| threshold | {cfg_a.get('cosmic_graph', {}).get('construction_threshold', 'auto')} | {cfg_b.get('cosmic_graph', {}).get('construction_threshold', 'auto')} |",
             f"| nodes | {metrics_a.get('n_nodes')} | {metrics_b.get('n_nodes')} |",
@@ -221,19 +298,36 @@ async def run_topological_sweep(
 
         cfg = model.config
 
-        precomputed, pca_cache_status = _pca_cache_status(session, cfg)
+        projection_method = getattr(cfg.projection, "method", "jl")
+        precomputed, projection_cache_status = _projection_cache_status(session, cfg)
         if precomputed is not None:
-            logger.info("Reusing cached PCA embeddings (fingerprint match)")
+            logger.info(
+                "Reusing cached %s projection embeddings (fingerprint match)",
+                projection_method,
+            )
 
         loop = asyncio.get_running_loop()
+        progress_futures = []
+
+        async def report_progress(stage: str, fraction: float) -> None:
+            if ctx is None:
+                return
+            await ctx.report_progress(progress=fraction, total=1.0, message=stage)
 
         def progress_callback(stage: str, fraction: float) -> None:
             if ctx is None:
                 return
+            scaled_fraction = min(float(fraction), 1.0) * 0.9
             try:
-                asyncio.run_coroutine_threadsafe(
-                    ctx.report_progress(progress=fraction, total=1.0, message=stage),
-                    loop,
+                progress_futures.append(
+                    asyncio.run_coroutine_threadsafe(
+                        ctx.report_progress(
+                            progress=scaled_fraction,
+                            total=1.0,
+                            message=stage,
+                        ),
+                        loop,
+                    )
                 )
             except RuntimeError:
                 pass
@@ -243,6 +337,12 @@ async def run_topological_sweep(
             _precomputed_embeddings=precomputed,
             progress_callback=progress_callback,
         )
+        if progress_futures:
+            await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in progress_futures),
+                return_exceptions=True,
+            )
+        await report_progress("finalize session", 0.91)
 
         session.model = model
         bound_data_path = _normalize_data_path(cfg.data) if cfg.data else None
@@ -259,14 +359,30 @@ async def run_topological_sweep(
 
         if precomputed is None:
             session.embeddings = model._embeddings
-            session.pca_fingerprint = pca_fingerprint(cfg, len(model.data), model.data)
+            session.projection_fingerprint = projection_fingerprint(
+                cfg, len(model.data), model.data
+            )
+            session.pca_fingerprint = session.projection_fingerprint
 
         saved_path = _auto_save_config(cfg) if save_config else None
 
         # Calculate metrics for diff
+        await report_progress("diagnostics", 0.92)
         current_metrics_obj = diagnose_model(model)
         current_metrics = dataclasses.asdict(current_metrics_obj)
         graph_summary = _build_graph_summary(model)
+        await report_progress("threshold stability summary", 0.95)
+        from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
+
+        # Blocking Rust stability analysis — keep it off the event loop, mirroring
+        # the to_thread wrapping used in get_threshold_stability_curve.
+        threshold_curve_summary = await asyncio.to_thread(
+            _threshold_curve_payload,
+            model,
+            detail="summary",
+            threshold_candidate_policy="balanced",
+        )
+        await report_progress("build response", 0.97)
 
         # Build structured diff
         persisted_dataset_id = bound_dataset_id
@@ -276,20 +392,16 @@ async def run_topological_sweep(
             prev_cfg = yaml.safe_load(prev_record.config_yaml)
             curr_cfg = yaml.safe_load(current_yaml)
 
-            p_pca = (
-                prev_cfg.get("sweep", {})
-                .get("pca", {})
-                .get("dimensions", {})
-                .get("values", [])
-            )
-            c_pca = (
-                curr_cfg.get("sweep", {})
-                .get("pca", {})
-                .get("dimensions", {})
-                .get("values", [])
-            )
-            if str(p_pca) != str(c_pca):
-                diff.append({"field": "pca_dims", "previous": p_pca, "current": c_pca})
+            p_projection = _projection_dimensions_from_config(prev_cfg)
+            c_projection = _projection_dimensions_from_config(curr_cfg)
+            if str(p_projection) != str(c_projection):
+                diff.append(
+                    {
+                        "field": "projection_dimensions",
+                        "previous": p_projection,
+                        "current": c_projection,
+                    }
+                )
 
             p_eps = _format_epsilon(prev_cfg)
             c_eps = _format_epsilon(curr_cfg)
@@ -319,14 +431,17 @@ async def run_topological_sweep(
                 dataset_id=persisted_dataset_id,
             )
         )
+        await report_progress("persist run", 0.98)
         run_record = registry.save_run(
             dataset_id=persisted_dataset_id,
             config_yaml=current_yaml,
             metrics=current_metrics,
             resolved_construction_threshold=model.resolved_construction_threshold,
             graph_summary=graph_summary,
+            threshold_stability_summary=threshold_curve_summary,
         )
         session.latest_run_id = run_record.run_id
+        await report_progress("format response", 0.99)
 
         # Build configuration advisory message
         if save_config and saved_path:
@@ -338,19 +453,25 @@ async def run_topological_sweep(
             "status": "ok",
             "run_id": run_record.run_id,
             "metrics": current_metrics,
+            "projection_method": projection_method,
+            "projection_cached": precomputed is not None,
+            "projection_cache_status": projection_cache_status,
             "pca_cached": precomputed is not None,
-            "pca_cache_status": pca_cache_status,
+            "pca_cache_status": projection_cache_status,
             "memory_usage_mb": session.calculate_memory_mb(),
             "diff": diff,
             "config_advisory": config_advisory,
             "config_yaml_normalized": current_yaml,
             "data_shape": list(session.data.shape),
         }
-        graph_health, is_connected, recommended_next_action = _graph_health_summary(
-            current_metrics
+        graph_health, is_connected, _ = _graph_health_summary(current_metrics)
+        unthresholded_component_count = threshold_curve_summary.get(
+            "unthresholded_component_count"
         )
         full_affinity_connected = bool(
-            nx.is_connected(nx.from_numpy_array((model.weighted_adjacency > 0)))
+            int(model.cosmic_rust.n) > 0
+            and unthresholded_component_count is not None
+            and int(unthresholded_component_count) <= 1
         )
         response["is_connected"] = is_connected
         response["constructed_graph_connected"] = is_connected
@@ -358,11 +479,13 @@ async def run_topological_sweep(
         response["singleton_fraction"] = current_metrics.get("singleton_fraction", 0.0)
         response["spectral_clustering_allowed"] = full_affinity_connected
         response["graph_health"] = graph_health
-        response["recommended_next_action"] = recommended_next_action
+        response["analysis_status"] = "diagnostics_required"
+        response["next_required_check"] = "diagnose_cosmic_graph"
         response["finalization_gate"] = _finalization_gate(
             current_metrics,
             sweep_count=len(session.sweep_history),
             config_yaml=current_yaml,
+            threshold_curve_summary=threshold_curve_summary,
         )
         response["construction_threshold"] = float(
             model.resolved_construction_threshold
@@ -383,7 +506,9 @@ async def run_topological_sweep(
                     component_limit=component_limit,
                     include_config_yaml=include_config_yaml,
                 )
+                await report_progress("complete", 1.0)
                 return sweep_payload_to_markdown(summary_payload)
+            await report_progress("complete", 1.0)
             return json.dumps(response, indent=2)
 
         summary_payload = build_sweep_summary_payload(
@@ -391,6 +516,7 @@ async def run_topological_sweep(
             component_limit=component_limit,
             include_config_yaml=include_config_yaml,
         )
+        await report_progress("complete", 1.0)
         if response_format == "markdown":
             return sweep_payload_to_markdown(summary_payload)
         return json.dumps(summary_payload, indent=2)

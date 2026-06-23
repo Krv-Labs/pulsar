@@ -1,4 +1,5 @@
 """Regression coverage for fixed construction-threshold artifact dumps."""
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,9 @@ class FixedThresholdModel:
         self._cosmic_graph.add_nodes_from([0, 1, 2])
         self._cosmic_graph.add_edge(0, 1, weight=0.75)
         self._cosmic_graph.add_edge(1, 2, weight=0.25)
-        self._embeddings = [np.array([[0.0, 0.0], [1.0, 0.5], [2.0, 1.0]], dtype=np.float32)]
+        self._embeddings = [
+            np.array([[0.0, 0.0], [1.0, 0.5], [2.0, 1.0]], dtype=np.float32)
+        ]
         self._preprocessed_data = pd.DataFrame({"x": [0.0, 1.0, 2.0]})
         self._data = self._preprocessed_data.copy()
         self._stability_result = None
@@ -94,7 +97,9 @@ def test_load_artifact_defers_blob_reads_until_properties_are_accessed():
     assert store.get_keys == []
 
     assert view.cosmic_graph.number_of_edges() == 2
-    assert np.allclose(view.weighted_adjacency, FixedThresholdModel()._weighted_adjacency)
+    assert np.allclose(
+        view.weighted_adjacency, FixedThresholdModel()._weighted_adjacency
+    )
     assert store.get_keys == []
 
     assert list(view.data.columns) == ["x"]

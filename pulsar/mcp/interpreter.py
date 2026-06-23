@@ -18,10 +18,12 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from scipy import stats
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components as sparse_connected_components
 from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.metrics import silhouette_score
 
-from pulsar._pulsar import find_stable_thresholds
+from pulsar._pulsar import find_stable_thresholds, find_stable_thresholds_sparse
 from pulsar.pipeline import ThemaRS
 from pulsar.runtime.utils import (
     generate_distribution_sparkline,
@@ -40,6 +42,10 @@ logger = logging.getLogger(__name__)
 # Clustering strategy constants
 _SPECTRAL_K_MIN = 2
 _SPECTRAL_K_MAX = 20
+# Reject a plateau only if >half its nodes are singletons — a scale-free dust
+# guard. There is intentionally no absolute cap on component count (Pulsar must
+# stay dataset-agnostic: large datasets can have many genuine cohorts).
+_MAX_SINGLETON_RATIO = 0.5
 _MAX_SIGNAL_MATRIX_NUMERIC = 10
 _MAX_SIGNAL_MATRIX_CATEGORICAL = 5
 _EPS = 1e-9
@@ -95,6 +101,27 @@ class ClusterResult:
     failure_reason: str | None
     interpretation_edge_weight_threshold_applied: float = 0.0
     stability_plateaus: list[dict] | None = None
+
+
+class SpectralClusterCutError(ValueError):
+    """Spectral search completed, but no evaluated k passed the cut floor."""
+
+    def __init__(self, diagnostics: dict[str, Any]):
+        super().__init__("No stable spectral cut found.")
+        self.diagnostics = diagnostics
+
+    def payload(self, *, detail: str = "summary") -> dict[str, Any]:
+        diagnostics = dict(self.diagnostics)
+        candidate_scores = diagnostics.pop("candidate_scores", [])
+        if detail == "full":
+            diagnostics["candidate_scores"] = candidate_scores
+        return {
+            "status": "error",
+            "tool": "generate_cluster_dossier",
+            "reason": "No stable spectral cut found.",
+            "error_code": "NO_STABLE_SPECTRAL_CUT",
+            "details": diagnostics,
+        }
 
 
 @dataclass
@@ -212,14 +239,30 @@ def resolve_clusters(
     interpretation_edge_weight_threshold: float = 0.0,
 ) -> ClusterResult:
     """Entry point for clustering. Respects explicit method selection."""
-    W = model.weighted_adjacency
-    n = W.shape[0]
+    sparse_graph = _model_sparse_graph(model)
+    W: np.ndarray | None = None
+    if sparse_graph is None:
+        W = model.weighted_adjacency
+        n = W.shape[0]
+    else:
+        n, edges = sparse_graph
 
     # 1. Component Strategy
     if method == "components" or (
         method == "auto" and interpretation_edge_weight_threshold > 0
     ):
         thresh = max(float(interpretation_edge_weight_threshold), 0.0)
+        if sparse_graph is not None:
+            labels, n_clusters = _component_labels_from_edges(n, edges, thresh)
+            return ClusterResult(
+                labels=pd.Series(labels, name="cluster"),
+                method_used="components",
+                n_clusters=n_clusters,
+                silhouette_score=None,
+                failure_reason=None,
+                interpretation_edge_weight_threshold_applied=thresh,
+            )
+        assert W is not None
         binary = (W > thresh).astype(np.int64)
         adj = W * binary
         G = nx.from_numpy_array(adj)
@@ -239,21 +282,52 @@ def resolve_clusters(
 
     # 2. Threshold Stability (PH-based)
     if method in ("auto", "threshold_stability"):
-        result = _cluster_by_threshold_stability(W, n)
+        if sparse_graph is not None:
+            result = _cluster_by_threshold_stability_sparse(
+                n,
+                edges,
+                getattr(model, "_stability_result", None)
+                or getattr(model, "stability_result", None),
+            )
+        else:
+            assert W is not None
+            result = _cluster_by_threshold_stability(W, n)
         if result:
             return result
 
     # 3. Spectral Fallback
     if method == "auto":
-        connectivity_graph = nx.from_numpy_array((W > 0).astype(np.int64))
-        if not nx.is_connected(connectivity_graph):
-            return resolve_clusters(
-                model,
-                method="components",
-                max_k=max_k,
-                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
-            )
+        if sparse_graph is not None:
+            _labels, n_components = _component_labels_from_edges(n, edges, 0.0)
+            if n_components > 1:
+                return resolve_clusters(
+                    model,
+                    method="components",
+                    max_k=max_k,
+                    interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+                )
+        else:
+            assert W is not None
+            connectivity_graph = nx.from_numpy_array((W > 0).astype(np.int64))
+            if not nx.is_connected(connectivity_graph):
+                return resolve_clusters(
+                    model,
+                    method="components",
+                    max_k=max_k,
+                    interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+                )
     if method in ("auto", "spectral"):
+        if sparse_graph is not None:
+            return _cluster_spectral_from_edges(
+                n,
+                edges,
+                max_k,
+                interpretation_edge_weight_threshold=max(
+                    float(interpretation_edge_weight_threshold), 0.0
+                ),
+            )
+        if W is None:
+            W = model.weighted_adjacency
         thresh = max(float(interpretation_edge_weight_threshold), 0.0)
         spectral_W = W * (W > thresh)
         return _cluster_spectral(
@@ -289,11 +363,206 @@ def _has_reliable_mass_split(adj: np.ndarray, threshold: float) -> bool:
     total = float(sum(sizes))
     singleton_mass = sum(size for size in sizes if size == 1) / total
     nontrivial_mass = sum(nontrivial_sizes) / total
-    return hint in {
-        "stable nontrivial multi-component structure",
-        "mostly connected graph with a small tail",
-        "giant component with small-tail fragmentation",
-    } and nontrivial_mass > singleton_mass
+    return (
+        hint
+        in {
+            "stable nontrivial multi-component structure",
+            "mostly connected graph with a small tail",
+            "giant component with small-tail fragmentation",
+        }
+        and nontrivial_mass > singleton_mass
+    )
+
+
+def _model_sparse_graph(
+    model: ThemaRS,
+) -> tuple[int, list[tuple[int, int, float]]] | None:
+    weighted_edges = getattr(model, "weighted_edges", None)
+    if not callable(weighted_edges):
+        return None
+    try:
+        n = int(model.cosmic_rust.n)
+        edges = weighted_edges(threshold=0.0)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+    return n, edges
+
+
+def _component_labels_from_edges(
+    n: int,
+    edges: list[tuple[int, int, float]],
+    threshold: float,
+    *,
+    sort_by_size: bool = False,
+) -> tuple[np.ndarray, int]:
+    rows: list[int] = []
+    cols: list[int] = []
+    for i, j, weight in edges:
+        if float(weight) > threshold:
+            rows.extend([int(i), int(j)])
+            cols.extend([int(j), int(i)])
+
+    graph = csr_matrix(
+        (np.ones(len(rows), dtype=np.int8), (rows, cols)),
+        shape=(n, n),
+    )
+    n_components, labels = sparse_connected_components(
+        graph,
+        directed=False,
+        return_labels=True,
+    )
+    labels = np.asarray(labels, dtype=int)
+
+    if sort_by_size and n_components > 1:
+        sizes = np.bincount(labels, minlength=n_components)
+        order = sorted(
+            range(n_components), key=lambda label: sizes[label], reverse=True
+        )
+        remap = np.empty(n_components, dtype=int)
+        for new_label, old_label in enumerate(order):
+            remap[old_label] = new_label
+        labels = remap[labels]
+
+    return labels, int(n_components)
+
+
+def _cluster_by_threshold_stability_sparse(
+    n: int,
+    edges: list[tuple[int, int, float]],
+    stability: Any | None = None,
+) -> ClusterResult | None:
+    """Find clusters via H0 persistence without materializing weighted_adjacency."""
+    if stability is None:
+        stability = find_stable_thresholds_sparse(n, edges)
+
+    plateau_dicts = [
+        {
+            "start": float(p.start_threshold),
+            "end": float(p.end_threshold),
+            "component_count": int(p.component_count),
+            "length": float(p.length),
+        }
+        for p in stability.top_k_plateaus(5)
+    ]
+
+    for plateau in stability.plateaus:
+        # Dataset-agnostic plateau gate: skip only the degenerate ends — a fully
+        # connected cut (nothing to separate) and a dust-dominated cut (>half the
+        # nodes are singletons). There is deliberately NO absolute cap on the
+        # component count: a large dataset may have many genuine cohorts, and the
+        # singleton fraction is scale-free, so this stays performant on any size.
+        if int(plateau.component_count) <= 1:
+            continue
+
+        thresh = float(plateau.midpoint)
+        labels, n_clusters = _component_labels_from_edges(
+            n,
+            edges,
+            thresh,
+            sort_by_size=True,
+        )
+        sizes = np.bincount(labels, minlength=n_clusters)
+        singletons = int(np.count_nonzero(sizes == 1))
+        if (singletons / n) > _MAX_SINGLETON_RATIO:
+            continue
+
+        return ClusterResult(
+            labels=pd.Series(labels, name="cluster"),
+            method_used="threshold_stability",
+            n_clusters=n_clusters,
+            silhouette_score=None,
+            failure_reason=None,
+            interpretation_edge_weight_threshold_applied=thresh,
+            stability_plateaus=plateau_dicts,
+        )
+    return None
+
+
+def _cluster_spectral_from_edges(
+    n: int,
+    edges: list[tuple[int, int, float]],
+    max_k: int,
+    interpretation_edge_weight_threshold: float = 0.0,
+) -> ClusterResult:
+    labels, n_components = _component_labels_from_edges(
+        n,
+        edges,
+        interpretation_edge_weight_threshold,
+        sort_by_size=True,
+    )
+    if n_components <= 1:
+        adj = np.zeros((n, n), dtype=float)
+        for i, j, weight in edges:
+            if float(weight) > interpretation_edge_weight_threshold:
+                adj[int(i), int(j)] = float(weight)
+                adj[int(j), int(i)] = float(weight)
+        return _cluster_spectral(
+            adj,
+            n,
+            max_k,
+            interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+        )
+
+    components = [
+        set(np.flatnonzero(labels == component_id))
+        for component_id in range(n_components)
+    ]
+    giant = sorted(components[0])
+    giant_lookup = {node: idx for idx, node in enumerate(giant)}
+    affinity_sub = np.zeros((len(giant), len(giant)), dtype=float)
+    for i, j, weight in edges:
+        if float(weight) <= interpretation_edge_weight_threshold:
+            continue
+        local_i = giant_lookup.get(int(i))
+        local_j = giant_lookup.get(int(j))
+        if local_i is None or local_j is None:
+            continue
+        affinity_sub[local_i, local_j] = float(weight)
+        affinity_sub[local_j, local_i] = float(weight)
+
+    best_labels, best_k, best_score, candidate_scores = _spectral_best_cut(
+        affinity_sub,
+        max_k,
+    )
+    if best_labels is None or best_score <= 0.05:
+        raise SpectralClusterCutError(
+            _spectral_failure_diagnostics(
+                n=n,
+                max_k=max_k,
+                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+                components=components,
+                giant_size=len(giant),
+                candidate_scores=candidate_scores,
+                best_k=best_k,
+                best_score=best_score,
+            )
+        )
+
+    result_labels = np.empty(n, dtype=int)
+    result_labels[np.asarray(giant, dtype=int)] = best_labels
+    next_id = best_k
+    residual_nodes = 0
+    for comp in components[1:]:
+        for node in sorted(comp):
+            result_labels[node] = next_id
+            next_id += 1
+            residual_nodes += 1
+
+    return ClusterResult(
+        labels=pd.Series(result_labels, name="cluster"),
+        method_used="spectral",
+        n_clusters=next_id,
+        silhouette_score=best_score,
+        failure_reason=(
+            f"Graph disconnected: clustered giant component "
+            f"({len(giant)} of {n} nodes) spectrally; "
+            f"{residual_nodes} residual node(s) in {len(components) - 1} "
+            f"smaller component(s) isolated as singleton clusters."
+        ),
+        interpretation_edge_weight_threshold_applied=(
+            interpretation_edge_weight_threshold
+        ),
+    )
 
 
 def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | None:
@@ -336,32 +605,31 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
     return None
 
 
-def _cluster_spectral(
-    adj: np.ndarray,
-    n: int,
+def _spectral_best_cut(
+    affinity_sub: np.ndarray,
     max_k: int,
-    interpretation_edge_weight_threshold: float = 0.0,
-) -> ClusterResult:
-    """Run spectral clustering on a weighted affinity matrix."""
-    G = nx.from_numpy_array((adj > 0).astype(np.int64))
-    if not nx.is_connected(G):
-        raise ValueError(
-            "Graph is disconnected — spectral clustering requires a connected affinity graph. "
-            "Use method='components' or increase epsilon to connect the graph."
-        )
+) -> tuple[np.ndarray | None, int, float, list[dict[str, Any]]]:
+    """Sweep k on a connected affinity submatrix; return best (labels, k, score).
 
-    # Distance = 1 - Affinity
-    affinity = adj.copy()
+    Operates on a self-contained affinity matrix (no global node ids); callers
+    are responsible for mapping the returned local labels back to global
+    positions. Returns ``(None, _SPECTRAL_K_MIN, -1.0)`` when no cut with more
+    than one label could be scored.
+    """
+    sub_n = affinity_sub.shape[0]
+
+    # Distance = 1 - affinity. Spectral sparsification can reweight edges above
+    # 1.0, so clip only for the silhouette distance matrix.
+    affinity = affinity_sub.copy()
     np.fill_diagonal(affinity, 1.0)
-    distance = 1.0 - affinity
+    distance = 1.0 - np.clip(affinity, 0.0, 1.0)
 
     best_score = -1.0
-    best_labels = None
+    best_labels: np.ndarray | None = None
     best_k = _SPECTRAL_K_MIN
-    k_range = range(_SPECTRAL_K_MIN, min(max_k + 1, n))
-    scores_by_k = {}
+    candidate_scores: list[dict[str, Any]] = []
 
-    for k_test in k_range:
+    for k_test in range(_SPECTRAL_K_MIN, min(max_k + 1, sub_n)):
         sc = SpectralClustering(
             n_clusters=k_test,
             affinity="precomputed",
@@ -372,30 +640,173 @@ def _cluster_spectral(
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
                 labels = sc.fit_predict(affinity)
-        except Exception:
+        except Exception as exc:
+            candidate_scores.append(
+                {
+                    "k": k_test,
+                    "status": "solver_error",
+                    "error": str(exc),
+                }
+            )
             continue
 
         if len(np.unique(labels)) > 1:
             score = float(silhouette_score(distance, labels, metric="precomputed"))
-            scores_by_k[k_test] = score
+            candidate_scores.append(
+                {
+                    "k": k_test,
+                    "status": "scored",
+                    "silhouette_score": round(score, 6),
+                    "n_labels": int(len(np.unique(labels))),
+                }
+            )
             if score > best_score:
                 best_score = score
                 best_k = k_test
                 best_labels = labels
+        else:
+            candidate_scores.append(
+                {
+                    "k": k_test,
+                    "status": "single_label",
+                    "n_labels": int(len(np.unique(labels))),
+                }
+            )
 
-    if best_labels is not None and best_score > 0.05:
-        return ClusterResult(
-            labels=pd.Series(best_labels, name="cluster"),
-            method_used="spectral",
-            n_clusters=best_k,
-            silhouette_score=best_score,
-            failure_reason=None,
-            interpretation_edge_weight_threshold_applied=(
-                interpretation_edge_weight_threshold
-            ),
+    return best_labels, best_k, best_score, candidate_scores
+
+
+def _spectral_failure_diagnostics(
+    *,
+    n: int,
+    max_k: int,
+    interpretation_edge_weight_threshold: float,
+    components: list[set[int]],
+    giant_size: int,
+    candidate_scores: list[dict[str, Any]],
+    best_k: int,
+    best_score: float,
+) -> dict[str, Any]:
+    return {
+        "method": "spectral",
+        "interpretation_edge_weight_threshold": round(
+            float(interpretation_edge_weight_threshold), 6
+        ),
+        "affinity_component_count": len(components),
+        "giant_component_size": int(giant_size),
+        "giant_component_fraction": round(giant_size / max(n, 1), 6),
+        "residual_node_count": int(n - giant_size),
+        "k_min": _SPECTRAL_K_MIN,
+        "max_k": int(max_k),
+        "best_k": int(best_k) if best_score >= 0 else None,
+        "best_silhouette_score": round(float(best_score), 6)
+        if best_score >= 0
+        else None,
+        "accepted_silhouette_min": 0.05,
+        "candidate_scores": candidate_scores,
+    }
+
+
+def _cluster_spectral(
+    adj: np.ndarray,
+    n: int,
+    max_k: int,
+    interpretation_edge_weight_threshold: float = 0.0,
+) -> ClusterResult:
+    """Run spectral clustering on a weighted affinity matrix.
+
+    When the affinity graph is disconnected (the common case for real EHR data
+    with natural outliers/singletons), spectral clustering is run on the giant
+    (largest) connected component only. Every off-giant node — smaller
+    components and singletons — is then assigned its own cluster id continuing
+    the giant-component numbering, so each node receives a label and outliers
+    are surfaced as a residual rather than blocking the whole call. A fully
+    connected graph takes the original single-pass path with identical results.
+    """
+    G = nx.from_numpy_array((adj > 0).astype(np.int64))
+    components = sorted(nx.connected_components(G), key=len, reverse=True)
+
+    if len(components) <= 1:
+        # Connected graph: cluster all nodes directly (unchanged behavior).
+        best_labels, best_k, best_score, candidate_scores = _spectral_best_cut(
+            adj, max_k
+        )
+        if best_labels is not None and best_score > 0.05:
+            return ClusterResult(
+                labels=pd.Series(best_labels, name="cluster"),
+                method_used="spectral",
+                n_clusters=best_k,
+                silhouette_score=best_score,
+                failure_reason=None,
+                interpretation_edge_weight_threshold_applied=(
+                    interpretation_edge_weight_threshold
+                ),
+            )
+        raise SpectralClusterCutError(
+            _spectral_failure_diagnostics(
+                n=n,
+                max_k=max_k,
+                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+                components=components,
+                giant_size=n,
+                candidate_scores=candidate_scores,
+                best_k=best_k,
+                best_score=best_score,
+            )
         )
 
-    raise ValueError("No stable cluster cut found.")
+    # Disconnected graph: cluster the giant component, isolate the residual.
+    giant = sorted(components[0])
+    giant_idx = np.asarray(giant, dtype=int)
+    affinity_sub = adj[np.ix_(giant_idx, giant_idx)]
+
+    best_labels, best_k, best_score, candidate_scores = _spectral_best_cut(
+        affinity_sub, max_k
+    )
+    if best_labels is None or best_score <= 0.05:
+        raise SpectralClusterCutError(
+            _spectral_failure_diagnostics(
+                n=n,
+                max_k=max_k,
+                interpretation_edge_weight_threshold=interpretation_edge_weight_threshold,
+                components=components,
+                giant_size=len(giant),
+                candidate_scores=candidate_scores,
+                best_k=best_k,
+                best_score=best_score,
+            )
+        )
+
+    labels = np.empty(n, dtype=int)
+    labels[giant_idx] = best_labels
+    # Off-giant nodes (smaller components + singletons) each get their own
+    # cluster id continuing the numbering. Keeping every off-giant node
+    # distinct (rather than collapsing them into one bucket) preserves the
+    # outlier structure for downstream profiling; the residual count below
+    # makes the split auditable.
+    next_id = best_k
+    residual_nodes = 0
+    for comp in components[1:]:
+        for node in sorted(comp):
+            labels[node] = next_id
+            next_id += 1
+            residual_nodes += 1
+
+    return ClusterResult(
+        labels=pd.Series(labels, name="cluster"),
+        method_used="spectral",
+        n_clusters=next_id,
+        silhouette_score=best_score,
+        failure_reason=(
+            f"Graph disconnected: clustered giant component "
+            f"({len(giant)} of {n} nodes) spectrally; "
+            f"{residual_nodes} residual node(s) in {len(components) - 1} "
+            f"smaller component(s) isolated as singleton clusters."
+        ),
+        interpretation_edge_weight_threshold_applied=(
+            interpretation_edge_weight_threshold
+        ),
+    )
 
 
 def _bh_fdr(p_values: list[float | None]) -> list[float | None]:

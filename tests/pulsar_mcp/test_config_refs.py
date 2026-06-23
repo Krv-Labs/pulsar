@@ -1,4 +1,5 @@
 """Regression tests for agent-safe config references."""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +26,9 @@ def test_curated_create_refine_prepare_uses_config_ref(tmp_path, monkeypatch):
         buf = io.BytesIO()
         df.to_parquet(buf, index=False)
         store.put("up/p.parquet", buf.getvalue())
-        ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"]["datasetId"]
+        ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"][
+            "datasetId"
+        ]
 
         created = json.loads(await C.create_config(ds))["structured"]
         assert created["config_ref"].startswith("cfg_")
@@ -40,7 +43,9 @@ def test_curated_create_refine_prepare_uses_config_ref(tmp_path, monkeypatch):
         assert refined["config_ref"].startswith("cfg_")
         assert refined["config_ref"] != created["config_ref"]
 
-        prepared = json.loads(await C.prepare_sweep(ds, config_ref=refined["config_ref"]))["structured"]
+        prepared = json.loads(
+            await C.prepare_sweep(ds, config_ref=refined["config_ref"])
+        )["structured"]
         assert prepared["source"] == "config_ref"
         assert prepared["config"]["preprocessing"]["drop_columns"] == ["species"]
 
@@ -59,7 +64,9 @@ def test_refine_config_accepts_legacy_escaped_newline_yaml(tmp_path, monkeypatch
         buf = io.BytesIO()
         df.to_parquet(buf, index=False)
         store.put("up/p.parquet", buf.getvalue())
-        ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"]["datasetId"]
+        ds = json.loads(await C.ingest_dataset("up/p.parquet"))["structured"][
+            "datasetId"
+        ]
         created = json.loads(await C.create_config(ds))["structured"]
         escaped_yaml = created["config_yaml"].replace("\n", "\\n")
 

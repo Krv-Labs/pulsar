@@ -15,6 +15,17 @@ THRESHOLD_CANDIDATE_POLICIES = {
     "detail_seeking",
     "outlier_mining",
 }
+_COHORT_READY_TIERS = frozenset({"report_ready", "balanced"})
+
+
+def first_report_ready_candidate(
+    candidates: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Return the first candidate suitable for component-based cohort reading."""
+    for candidate in candidates or []:
+        if candidate.get("interpretability_tier") in _COHORT_READY_TIERS:
+            return candidate
+    return None
 
 
 @dataclass(frozen=True)
@@ -29,7 +40,7 @@ class _PreparedThresholdGraph:
 
     @property
     def shape(self) -> tuple[int, int]:
-        return self.dense_adj.shape
+        return (self.n_nodes, self.n_nodes)
 
 
 ThresholdGraph = np.ndarray | _PreparedThresholdGraph
@@ -47,6 +58,28 @@ def prepare_threshold_graph(
     possible_edges = max(n_nodes * n_nodes, 1)
     return _PreparedThresholdGraph(
         dense_adj=dense_adj,
+        weighted_csr=weighted_csr,
+        n_nodes=n_nodes,
+        nnz=int(weighted_csr.nnz),
+        density=round(float(weighted_csr.nnz) / possible_edges, 6),
+    )
+
+
+def prepare_threshold_graph_from_edges(
+    n_nodes: int,
+    edges: list[tuple[int, int, float]],
+) -> _PreparedThresholdGraph:
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for i, j, weight in edges:
+        rows.extend([int(i), int(j)])
+        cols.extend([int(j), int(i)])
+        data.extend([float(weight), float(weight)])
+    weighted_csr = csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+    possible_edges = max(n_nodes * n_nodes, 1)
+    return _PreparedThresholdGraph(
+        dense_adj=np.empty((0, 0), dtype=float),
         weighted_csr=weighted_csr,
         n_nodes=n_nodes,
         nnz=int(weighted_csr.nnz),
@@ -164,11 +197,64 @@ def useful_component_size_floor(n_nodes: int) -> int:
     return max(3, min(round(np.sqrt(n_nodes)), round(0.005 * n_nodes)))
 
 
+# A real cohort is defined by its position in the size *distribution* at the
+# slice, not by an absolute fraction of n. An n-scaled floor silently discards
+# genuine minority modes in large graphs (a 101-node cohort in a 100k graph), so
+# significance is purely relative: a >= this-many-fold drop between neighbouring
+# (descending) component sizes marks where the dust tail begins.
+_SIGNIFICANCE_CLIFF_RATIO = 3.0
+
+
+def significant_component_sizes(sizes: list[int]) -> tuple[list[int], str]:
+    """Components that are real modes vs. dust, judged relative to the split.
+
+    Significance is positional, not absolute. Over the descending sizes, the dust
+    tail is the contiguous run of small components at the bottom; it ends at the
+    *lowest* multiplicative cliff (a >= cliff-ratio drop between neighbours).
+    Everything above that cliff is a real mode, except a lone singleton (a single
+    node is never itself a mode). With no cliff, every component is a mode
+    (balanced / smoothly distributed structure).
+
+    The full size list -- including dust and singletons -- is scanned: the dust is
+    exactly the contrast that reveals where the modes end (a 101-node cohort sits
+    above a 2-node-dust cliff, but looks like dust if the dust is pre-filtered).
+
+    This replaces the old absolute ``useful_component_size_floor`` membership
+    test, which dropped genuine minority cohorts below an n-scaled line. It is
+    intentionally independent of ``n`` -- only the shape matters.
+
+    ``sizes`` is the top-k component sizes at one slice (any order). Real modes
+    are large, so the top-k captures them; truncating the dust tail is harmless.
+
+    Returns ``(significant_sizes_desc, reason)``. Note: a sole non-giant component
+    with no tail to contrast against reads as part of the giant (the safe "still
+    one blob" default). The fuller signal is per-component persistence across
+    neighbouring thresholds (see ``_PERSISTENCE_ACTIVE_RANGE_FRACTION``); deferred.
+    """
+    ordered = sorted((int(x) for x in sizes), reverse=True)
+    if not ordered:
+        return [], "no_components"
+
+    # Overwriting on each cliff leaves `cut` at the LOWEST (bottom-most) cliff,
+    # so only the contiguous small tail beneath it is shed as dust.
+    cut = len(ordered)
+    for i in range(len(ordered) - 1):
+        if ordered[i] / max(ordered[i + 1], 1) >= _SIGNIFICANCE_CLIFF_RATIO:
+            cut = i + 1
+    modes = [size for size in ordered[:cut] if size > 1]
+    if not modes:
+        return [], "no_modes"
+    return modes, "modes_above_dust_cliff" if cut < len(ordered) else "all_modes"
+
+
 def _mass_shape_metrics(profile: dict[str, Any]) -> dict[str, float | int]:
     n_nodes = int(profile["n_nodes"])
     top_sizes = [int(size) for size in profile["top_component_sizes"]]
+    # "Nontrivial" = a real mode by relative significance (gap to the dust tail),
+    # not an absolute n-scaled floor. useful_component_size_floor is retained only
+    # as descriptive context in the returned payload.
     floor = useful_component_size_floor(n_nodes)
-    nontrivial_sizes = [size for size in top_sizes if size >= floor]
+    nontrivial_sizes, _ = significant_component_sizes(top_sizes)
     nontrivial_mass = sum(nontrivial_sizes)
     multi_component_mass = sum(nontrivial_sizes[1:]) if len(nontrivial_sizes) > 1 else 0
 
@@ -201,6 +287,41 @@ def _mass_shape_metrics(profile: dict[str, Any]) -> dict[str, float | int]:
     }
 
 
+def threshold_morphology_profile(
+    adj: ThresholdGraph,
+    threshold: float,
+    *,
+    top_k: int = 10,
+) -> dict[str, Any]:
+    """Compact mass-distribution row for one threshold cut.
+
+    This is intentionally descriptive, not prescriptive: downstream tools and
+    agents decide what to do with the shape in context.
+    """
+    profile = component_mass_profile(adj, threshold, top_k=top_k)
+    metrics = _mass_shape_metrics(profile)
+    top_sizes = [int(size) for size in profile["top_component_sizes"]]
+    giant_size = top_sizes[0] if top_sizes else 0
+    second_size = top_sizes[1] if len(top_sizes) > 1 else 0
+    second_largest_ratio = second_size / giant_size if giant_size else 0.0
+    return {
+        "threshold": float(threshold),
+        "component_count": int(profile["component_count"]),
+        "top_component_sizes": top_sizes,
+        "top_component_sizes_omitted": profile["top_component_sizes_omitted"],
+        "giant_fraction": profile["largest_component_fraction"],
+        "second_largest_ratio": round(second_largest_ratio, 4),
+        "singleton_count": int(profile["singleton_count"]),
+        "singleton_fraction": profile["singleton_fraction"],
+        "small_component_mass_fraction": profile["small_component_mass_fraction"],
+        "nontrivial_component_count": int(metrics["nontrivial_component_count"]),
+        "nontrivial_mass_fraction": metrics["nontrivial_mass_fraction"],
+        "multi_component_coverage": metrics["multi_component_coverage"],
+        "component_size_entropy": metrics["component_size_entropy"],
+        "interpretation_hint": mass_profile_hint(profile),
+    }
+
+
 def _plateau_tier(profile: dict[str, Any], metrics: dict[str, float | int]) -> str:
     largest = float(profile["largest_component_fraction"])
     singletons = float(profile["singleton_fraction"])
@@ -220,14 +341,60 @@ def _plateau_tier(profile: dict[str, Any], metrics: dict[str, float | int]) -> s
     return "weak_candidate"
 
 
+# Fraction of the active (nontrivial) threshold range a plateau must span to be
+# considered fully "persistent". A plateau covering >= this fraction of the active
+# range saturates persistence at 1.0. Chosen at 0.25 so that roughly a quarter of
+# the meaningful threshold window is "very stable" -- this keeps persistence
+# scale-relative instead of tied to an absolute width, so spectral sparsification
+# (which compresses the meaningful window) no longer under-ranks the true plateau.
+_PERSISTENCE_ACTIVE_RANGE_FRACTION = 0.25
+_SINGLETON_FRONTIER_FRACTION = 0.95
+
+
+def _active_threshold_range(
+    thresholds: list[float],
+    component_counts: list[int],
+) -> float:
+    """Span of thresholds over which the component count is nontrivial.
+
+    "Nontrivial" mirrors ``ph.rs`` optimal-threshold selection: a count strictly
+    between 1 (fully connected) and ``n`` (fully fragmented). The active range is
+    the width of the threshold window where ``1 < component_count < n``; the
+    cliff regions where everything is connected or everything is a singleton are
+    excluded. Returns 0.0 if no such window exists.
+    """
+    if not thresholds or not component_counts:
+        return 0.0
+    n_max = max(int(c) for c in component_counts)
+    nontrivial = [
+        float(t)
+        for t, c in zip(thresholds, component_counts, strict=False)
+        if 1 < int(c) < n_max
+    ]
+    if not nontrivial:
+        return 0.0
+    return abs(max(nontrivial) - min(nontrivial))
+
+
 def _rank_plateau_candidate(
     *,
     plateau_width: float,
     profile: dict[str, Any],
     metrics: dict[str, float | int],
     policy: str,
+    active_range: float | None = None,
 ) -> float:
-    persistence = min(max(float(plateau_width) / 0.05, 0.0), 1.0)
+    # Persistence is the plateau width as a fraction of the active threshold range
+    # (the window where structure is nontrivial), not a fixed absolute width. This
+    # keeps ranking scale-adaptive: after sparsification the active window narrows,
+    # so a clean-but-narrow plateau still scores as persistent. Falls back to the
+    # legacy absolute scale (0.05) only when the active range is unavailable/zero.
+    eps = 1e-9
+    if active_range and active_range > eps:
+        denom = max(float(active_range) * _PERSISTENCE_ACTIVE_RANGE_FRACTION, eps)
+    else:
+        denom = 0.05
+    persistence = min(max(float(plateau_width) / denom, 0.0), 1.0)
     balance = float(metrics["top_two_balance"])
     coverage = float(metrics["nontrivial_mass_fraction"])
     entropy = float(metrics["component_size_entropy"])
@@ -290,15 +457,54 @@ def _candidate_use_guidance(
     )
 
 
+def _candidate_singleton_fraction(candidate: dict[str, Any]) -> float:
+    if "component_mass_profile" in candidate:
+        return float(candidate["component_mass_profile"].get("singleton_fraction", 0.0))
+    return float(candidate.get("singleton_fraction", 0.0))
+
+
+def _candidate_eligible_for_policy(candidate: dict[str, Any], policy: str) -> bool:
+    if policy == "outlier_mining":
+        return True
+    return _candidate_singleton_fraction(candidate) < _SINGLETON_FRONTIER_FRACTION
+
+
+def _active_range_from_plateaus(plateaus: list[Any], n_nodes: int) -> float:
+    """Approximate the active (nontrivial) threshold range from plateaus alone.
+
+    Used when explicit ``thresholds``/``component_counts`` are not threaded in.
+    Each plateau covers ``[end_threshold, start_threshold]`` with a constant
+    ``component_count``; we take the union span of plateaus whose count is
+    nontrivial (``1 < count < n``). This is an approximation of the per-threshold
+    computation in ``_active_threshold_range`` -- the fuller approach is to pass
+    the raw ``thresholds``/``component_counts`` (see ``agent_threshold_options``),
+    which avoids relying on plateau boundaries lining up with the true window.
+    """
+    bounds: list[float] = []
+    for plateau in plateaus:
+        count = int(plateau.component_count)
+        if 1 < count < max(n_nodes, 2):
+            bounds.append(float(plateau.start_threshold))
+            bounds.append(float(plateau.end_threshold))
+    if not bounds:
+        return 0.0
+    return abs(max(bounds) - min(bounds))
+
+
 def plateau_threshold_candidates(
     adj: ThresholdGraph,
     plateaus: list[Any],
     *,
     policy: str = "balanced",
     max_candidates: int = 3,
+    active_range: float | None = None,
 ) -> list[dict[str, Any]]:
     if policy not in THRESHOLD_CANDIDATE_POLICIES:
         raise ValueError(f"unknown threshold candidate policy: {policy}")
+
+    n_nodes = int(_threshold_graph_shape(adj)[0])
+    if active_range is None:
+        active_range = _active_range_from_plateaus(plateaus, n_nodes)
 
     candidates = []
     for plateau in plateaus:
@@ -312,6 +518,7 @@ def plateau_threshold_candidates(
             profile=profile,
             metrics=metrics,
             policy=policy,
+            active_range=active_range,
         )
         best_for, avoid_for, why = _candidate_use_guidance(
             tier,
@@ -538,11 +745,15 @@ def agent_threshold_options(
 ) -> dict[str, Any]:
     n_nodes = int(_threshold_graph_shape(adj)[0])
     stable_cap, transition_cap = _policy_caps(policy, max_candidates)
+    # Exact active (nontrivial) range from the raw component curve; threaded into
+    # plateau ranking so persistence is relative to the meaningful window.
+    active_range = _active_threshold_range(thresholds, component_counts)
     stable_candidates = plateau_threshold_candidates(
         adj,
         plateaus,
         policy=policy,
         max_candidates=stable_cap,
+        active_range=active_range,
     )
     transition_candidates = transition_adjacent_candidates(
         adj,
@@ -555,11 +766,19 @@ def agent_threshold_options(
     # Pre-deduplicate individual lists for cleaner sub-components
     stable_candidates = _deduplicate_candidates(stable_candidates, n_nodes)
     transition_candidates = _deduplicate_candidates(transition_candidates, n_nodes)
+    selectable_stable_candidates = [
+        row for row in stable_candidates if _candidate_eligible_for_policy(row, policy)
+    ]
+    selectable_transition_candidates = [
+        row
+        for row in transition_candidates
+        if _candidate_eligible_for_policy(row, policy)
+    ]
 
     if policy == "detail_seeking":
-        candidates = transition_candidates + [
+        candidates = selectable_transition_candidates + [
             row
-            for row in stable_candidates
+            for row in selectable_stable_candidates
             if row["interpretability_tier"]
             not in {"giant_component_with_dust", "weak_candidate"}
         ]
@@ -570,18 +789,22 @@ def agent_threshold_options(
     elif policy == "report_ready":
         candidates = [
             row
-            for row in stable_candidates
+            for row in selectable_stable_candidates
             if row["interpretability_tier"] in {"report_ready", "balanced"}
         ]
         strategy = "stable_plateau"
     else:
         useful_stable = [
             row
-            for row in stable_candidates
+            for row in selectable_stable_candidates
             if row["interpretability_tier"]
             not in {"giant_component_with_dust", "weak_candidate"}
         ]
-        candidates = useful_stable or transition_candidates[:2] or stable_candidates[:1]
+        candidates = (
+            useful_stable
+            or selectable_transition_candidates[:2]
+            or selectable_stable_candidates[:1]
+        )
         strategy = "stable_plateau" if useful_stable else "transition_adjacent"
 
     # Post-deduplicate merged recommendations list to ensure distinct options are presented

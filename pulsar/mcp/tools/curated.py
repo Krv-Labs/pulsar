@@ -11,6 +11,7 @@ Each tool returns a JSON string ``{markdown, structured, vizPayload, confidence}
 locked to the H0 vocabulary (D15): cosmic_graph, threshold_stability, manifold3d,
 feature_signal — never "persistence diagram"/"barcode".
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -87,7 +88,12 @@ def _json_default(o):
 
 def _result(markdown: str, structured, viz=None, confidence=None) -> str:
     return json.dumps(
-        {"markdown": markdown, "structured": structured, "vizPayload": viz, "confidence": confidence},
+        {
+            "markdown": markdown,
+            "structured": structured,
+            "vizPayload": viz,
+            "confidence": confidence,
+        },
         default=_json_default,
     )
 
@@ -117,7 +123,9 @@ def _validated_config_for_dataset(
     config: dict, *, dataset_id: str, user_id: str, store
 ) -> tuple[dict, str]:
     data_path = _dataset_validation_path(store, user_id, dataset_id)
-    report = validate_config_yaml(yaml.safe_dump(config, sort_keys=False), dataset_path=data_path)
+    report = validate_config_yaml(
+        yaml.safe_dump(config, sort_keys=False), dataset_path=data_path
+    )
     if not report.ok or report.normalized_yaml is None:
         issues = "; ".join(f"{i.path}: {i.message}" for i in report.issues)
         raise ToolError(f"Config validation failed for dataset {dataset_id}: {issues}")
@@ -219,7 +227,11 @@ def _diagnose_markdown(gm) -> str:
         f"clustering tools may report a different number at a different threshold.\n"
         f"**Cosmic graph** — {gm.n_nodes} nodes, {gm.n_edges} edges, density {gm.density:.3f} "
         f"(giant fraction {gm.giant_fraction:.2f}, singleton fraction {gm.singleton_fraction:.2f}).\n"
-        + ("Advisories: " + "; ".join(a.get("code", "") for a in (gm.advisories or [])) if gm.advisories else "")
+        + (
+            "Advisories: " + "; ".join(a.get("code", "") for a in (gm.advisories or []))
+            if gm.advisories
+            else ""
+        )
     )
 
 
@@ -248,13 +260,17 @@ def _sparse_threshold_curve(
     ]
 
 
-def _threshold_agent_readout(selected_profile: dict | None, breakpoints: list[dict]) -> str:
+def _threshold_agent_readout(
+    selected_profile: dict | None, breakpoints: list[dict]
+) -> str:
     if not selected_profile:
         return "No threshold mass profile was available."
 
     largest_pct = float(selected_profile["largest_component_fraction"]) * 100
     small_pct = float(selected_profile["small_component_mass_fraction"]) * 100
-    large_breakpoints = [row for row in breakpoints if row["event"] == "large_component_transition"]
+    large_breakpoints = [
+        row for row in breakpoints if row["event"] == "large_component_transition"
+    ]
 
     if largest_pct >= 95:
         if large_breakpoints:
@@ -284,12 +300,18 @@ async def ingest_dataset(file_ref: str, name: str = "", user_id: str = "local") 
     """
     store = get_object_store()
     raw = store.get(file_ref)
-    df = pd.read_parquet(io.BytesIO(raw)) if file_ref.endswith(".parquet") else pd.read_csv(io.BytesIO(raw))
+    df = (
+        pd.read_parquet(io.BytesIO(raw))
+        if file_ref.endswith(".parquet")
+        else pd.read_csv(io.BytesIO(raw))
+    )
     try:
         meta = ingest_dataframe(df, store, user_id=user_id, name=name, source="upload")
     except DatasetAdmissionError as e:
         raise ToolError(str(e))
-    md = f"Ingested `{meta['datasetId']}` — {meta['nRows']} rows × {meta['nCols']} cols."
+    md = (
+        f"Ingested `{meta['datasetId']}` — {meta['nRows']} rows × {meta['nCols']} cols."
+    )
     return _result(md, meta)
 
 
@@ -326,7 +348,13 @@ async def prepare_sweep(
 
     df = load_dataset(dataset_id, store, user_id=user_id)
     data_path = _dataset_validation_path(store, user_id, dataset_id)
-    source = "provided_config" if config is not None else "config_ref" if config_ref else "create_config"
+    source = (
+        "provided_config"
+        if config is not None
+        else "config_ref"
+        if config_ref
+        else "create_config"
+    )
 
     if config is None and config_ref:
         try:
@@ -342,7 +370,9 @@ async def prepare_sweep(
 
         profile = _char(data_path, dataframe=df)
         geo = dataclasses.asdict(profile)
-        processed = _calibrate_processed_space(df, geo["column_profiles"], geo["n_samples"], data_path)
+        processed = _calibrate_processed_space(
+            df, geo["column_profiles"], geo["n_samples"], data_path
+        )
         config_yaml = _build_initial_config_yaml(
             geo,
             data_path=data_path,
@@ -355,7 +385,9 @@ async def prepare_sweep(
         config, dataset_id=dataset_id, user_id=user_id, store=store
     )
     ch = config_hash(validated_config)
-    save_config_ref(store, user_id=user_id, dataset_id=dataset_id, config_yaml=normalized_yaml)
+    save_config_ref(
+        store, user_id=user_id, dataset_id=dataset_id, config_yaml=normalized_yaml
+    )
     structured = {
         "status": "ok",
         "datasetId": dataset_id,
@@ -369,7 +401,9 @@ async def prepare_sweep(
     return _result(md, structured)
 
 
-async def run_topological_sweep(dataset_id: str, config: dict | None = None, user_id: str = "local") -> str:
+async def run_topological_sweep(
+    dataset_id: str, config: dict | None = None, user_id: str = "local"
+) -> str:
     """Enqueue an async sweep (NEVER blocks). Returns a job_id + the artifact_ref to poll for."""
     store = get_object_store()
     queue = get_job_queue()
@@ -379,7 +413,9 @@ async def run_topological_sweep(dataset_id: str, config: dict | None = None, use
         raise ToolError(
             "Validated config required. Call prepare_sweep(dataset_id) first and pass its returned config to run_topological_sweep."
         )
-    cfg, _ = _validated_config_for_dataset(config, dataset_id=dataset_id, user_id=user_id, store=store)
+    cfg, _ = _validated_config_for_dataset(
+        config, dataset_id=dataset_id, user_id=user_id, store=store
+    )
     ch = config_hash(cfg)
     job_id = queue.enqueue(
         {
@@ -430,7 +466,9 @@ async def get_sweep_status(job_id: str) -> str:
 # --------------------------------------------------------------------------- #
 # interpret tools (artifact_ref = userId/datasetId/configHash)
 # --------------------------------------------------------------------------- #
-async def diagnose_cosmic_graph(dataset_id: str, config_hash: str, user_id: str = "local") -> str:
+async def diagnose_cosmic_graph(
+    dataset_id: str, config_hash: str, user_id: str = "local"
+) -> str:
     """H0 cosmic-graph diagnostics off the persisted artifact. viz: cosmic_graph."""
     view = _load_view(user_id, dataset_id, config_hash, get_object_store())
     gm = diagnose_model(view)
@@ -482,7 +520,9 @@ async def get_feature_signal(
     view = _load_view(user_id, dataset_id, config_hash, get_object_store())
     cr = _safe_clusters(view)
     if cr is None:
-        raise ToolError("No reliable structure detected; run generate_cluster_dossier first.")
+        raise ToolError(
+            "No reliable structure detected; run generate_cluster_dossier first."
+        )
     fei = build_feature_evidence_index(view, view.data, cr.labels)
     signals = feature_signal_payload(fei, feature_names, cluster_ids=cluster_ids)
     rows = []
@@ -493,7 +533,9 @@ async def get_feature_signal(
         col = r.get("column")
         if col is None:
             continue
-        if col not in best or abs(r.get("z_score", 0.0) or 0.0) > abs(best[col].get("z_score", 0.0) or 0.0):
+        if col not in best or abs(r.get("z_score", 0.0) or 0.0) > abs(
+            best[col].get("z_score", 0.0) or 0.0
+        ):
             best[col] = r
     md = feature_signal_payload_to_markdown(signals)
     return _result(md, {"signals": signals}, _viz_feature_signal(list(best.values())))
@@ -511,33 +553,49 @@ async def get_cluster_profile(
     view = _load_view(user_id, dataset_id, config_hash, get_object_store())
     cr = _safe_clusters(view)
     if cr is None:
-        raise ToolError("No reliable structure detected; run generate_cluster_dossier first.")
+        raise ToolError(
+            "No reliable structure detected; run generate_cluster_dossier first."
+        )
     fei = build_feature_evidence_index(view, view.data, cr.labels)
-    cluster = cluster_profile_payload(fei, cluster_id, detail=detail, max_features=max_features)
+    cluster = cluster_profile_payload(
+        fei, cluster_id, detail=detail, max_features=max_features
+    )
     gm = diagnose_model(view)
     payload = {
         "status": "ok",
-        "cluster_result": cluster_result_payload(cr, view.resolved_construction_threshold),
+        "cluster_result": cluster_result_payload(
+            cr, view.resolved_construction_threshold
+        ),
         "graph_metrics": dataclasses.asdict(gm),
         "detail": detail,
         "max_features": max_features,
         "cluster": cluster,
     }
     md = cluster_profile_payload_to_markdown(payload)
-    return _result(md, payload, _viz_feature_signal(cluster.get("numeric_features", [])))
+    return _result(
+        md, payload, _viz_feature_signal(cluster.get("numeric_features", []))
+    )
 
 
 async def compare_clusters(
-    dataset_id: str, config_hash: str, cluster_a: int, cluster_b: int, user_id: str = "local"
+    dataset_id: str,
+    config_hash: str,
+    cluster_a: int,
+    cluster_b: int,
+    user_id: str = "local",
 ) -> str:
     """Pairwise cluster comparison off the persisted artifact."""
     view = _load_view(user_id, dataset_id, config_hash, get_object_store())
     cr = _safe_clusters(view)
     if cr is None:
-        raise ToolError("No reliable structure detected; run generate_cluster_dossier first.")
+        raise ToolError(
+            "No reliable structure detected; run generate_cluster_dossier first."
+        )
     results = _compare_clusters_fn(view.data, cr.labels, cluster_a, cluster_b)
     md = comparison_to_markdown(cluster_a, cluster_b, results)
-    return _result(md, {"comparison": results, "clusterA": cluster_a, "clusterB": cluster_b})
+    return _result(
+        md, {"comparison": results, "clusterA": cluster_a, "clusterB": cluster_b}
+    )
 
 
 async def get_threshold_stability_curve(
@@ -564,7 +622,9 @@ async def get_threshold_stability_curve(
     component_counts = [int(c) for c in stability.component_counts]
     resolved_construction_threshold = float(view.resolved_construction_threshold)
     optimal_threshold = float(stability.optimal_threshold)
-    matches_current = bool(np.isclose(resolved_construction_threshold, optimal_threshold))
+    matches_current = bool(
+        np.isclose(resolved_construction_threshold, optimal_threshold)
+    )
 
     row_max = adj.max(axis=1)
     ts = np.asarray(thresholds, dtype=adj.dtype)
@@ -583,7 +643,9 @@ async def get_threshold_stability_curve(
                 "length": float(p.length),
                 "midpoint": float(p.midpoint),
                 "singleton_count": singleton_count,
-                "singleton_fraction": round(singleton_count / max(int(adj.shape[0]), 1), 4),
+                "singleton_fraction": round(
+                    singleton_count / max(int(adj.shape[0]), 1), 4
+                ),
                 "component_mass_profile": mass_profile,
                 "interpretation_hint": mass_profile_hint(mass_profile),
             }
@@ -602,7 +664,11 @@ async def get_threshold_stability_curve(
     if detail == "summary":
         for p in plateaus:
             p.pop("component_mass_profile", None)
-        for list_key in ["stable_plateau_candidates", "transition_adjacent_candidates", "candidates"]:
+        for list_key in [
+            "stable_plateau_candidates",
+            "transition_adjacent_candidates",
+            "candidates",
+        ]:
             for cand in threshold_options.get(list_key, []):
                 cand.pop("component_mass_profile", None)
                 cand.pop("mass_shape", None)
@@ -681,8 +747,12 @@ async def get_topological_skeleton(
         "config_yaml_unavailable": (
             "Curated HTTP skeleton reads persisted artifacts only; config YAML is not stored in the artifact."
         ),
-        "resolved_construction_threshold": graph_summary.get("resolved_construction_threshold"),
-        "graph": _skeleton_graph_payload(graph_summary, detail=detail, max_edges=max_edges, max_nodes=max_nodes),
+        "resolved_construction_threshold": graph_summary.get(
+            "resolved_construction_threshold"
+        ),
+        "graph": _skeleton_graph_payload(
+            graph_summary, detail=detail, max_edges=max_edges, max_nodes=max_nodes
+        ),
         "recommended_next_tools": [
             "diagnose_cosmic_graph",
             "get_threshold_stability_curve",
@@ -720,7 +790,9 @@ async def get_cluster_signal_matrix(
     view = _load_view(user_id, dataset_id, config_hash, get_object_store())
     cr = _safe_clusters(view)
     if cr is None:
-        raise ToolError("No reliable structure detected; run generate_cluster_dossier first.")
+        raise ToolError(
+            "No reliable structure detected; run generate_cluster_dossier first."
+        )
     fei = build_feature_evidence_index(view, view.data, cr.labels)
     matrix = signal_matrix_payload(
         fei,
@@ -733,7 +805,9 @@ async def get_cluster_signal_matrix(
         "status": "ok",
         "datasetId": dataset_id,
         "configHash": config_hash,
-        "cluster_result": cluster_result_payload(cr, view.resolved_construction_threshold),
+        "cluster_result": cluster_result_payload(
+            cr, view.resolved_construction_threshold
+        ),
         "signal_matrix": matrix,
     }
     md = (
@@ -764,7 +838,11 @@ async def sync_to_pulsar(
     )
     try:
         meta = ingest_dataframe(
-            df, store, user_id=user_id, source="sync", parent_dataset_id=parent_dataset_id
+            df,
+            store,
+            user_id=user_id,
+            source="sync",
+            parent_dataset_id=parent_dataset_id,
         )
     except DatasetAdmissionError as e:
         raise ToolError(str(e))
