@@ -83,6 +83,9 @@ class FsJobQueue:
             "error": None,
             "cancel_reason": None,
             "cancelled_at": None,
+            "progress_stage": "queued",
+            "progress_fraction": 0.0,
+            "progress_updated_at": time.time(),
             "peak_rss_mb": None,
             "vcpu_ms": None,
             **payload,
@@ -114,9 +117,23 @@ class FsJobQueue:
                 continue
             cur["status"] = RUNNING
             cur["claimed_at"] = time.time()
+            cur["progress_stage"] = "claimed"
+            cur["progress_fraction"] = max(
+                float(cur.get("progress_fraction") or 0.0), 0.01
+            )
+            cur["progress_updated_at"] = time.time()
             self._write(cur)
             return cur
         return None
+
+    def progress(self, job_id: str, *, stage: str, fraction: float) -> None:
+        rec = self._read(job_id)
+        if rec is None or rec.get("status") == CANCELLED:
+            return
+        rec["progress_stage"] = str(stage)
+        rec["progress_fraction"] = max(0.0, min(float(fraction), 1.0))
+        rec["progress_updated_at"] = time.time()
+        self._write(rec)
 
     def complete(
         self,
@@ -138,6 +155,9 @@ class FsJobQueue:
             artifact_ref=artifact_ref,
             structure_status=structure_status,
             finished_at=time.time(),
+            progress_stage="complete",
+            progress_fraction=1.0,
+            progress_updated_at=time.time(),
             peak_rss_mb=peak_rss_mb,
             vcpu_ms=vcpu_ms,
         )

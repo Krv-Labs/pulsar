@@ -263,7 +263,9 @@ def test_worker_cancels_before_compute_when_control_requests_stop(
     monkeypatch.setattr(
         worker,
         "ThemaRS_fit",
-        lambda cfg, df: pytest.fail("cancelled sweep should not compute"),
+        lambda cfg, df, progress_callback=None: pytest.fail(
+            "cancelled sweep should not compute"
+        ),
     )
 
     run_job(q.claim(), queue=q, store=store)
@@ -313,6 +315,35 @@ def test_worker_heartbeat_posts_to_isomorph_control(monkeypatch):
     }
 
 
+def test_curated_status_surfaces_worker_progress(store_env):
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.jobs import get_job_queue
+
+    q = get_job_queue()
+    jid = q.enqueue(
+        {
+            "user_id": "u",
+            "dataset_id": "ds_progress",
+            "config_hash": "cfg_progress",
+            "data_path": PENGUINS,
+            "config": _penguins_cfg(),
+        }
+    )
+    assert q.claim()["job_id"] == jid
+    q.progress(jid, stage="projection", fraction=0.42)
+
+    payload = json.loads(asyncio.run(C.get_sweep_status(jid)))
+    assert payload["structured"]["status"] == "running"
+    assert payload["structured"]["progressStage"] == "projection"
+    assert payload["structured"]["progressFraction"] == 0.42
+    assert payload["structured"]["progress"] == {
+        "stage": "projection",
+        "fraction": 0.42,
+        "updatedAt": payload["structured"]["progressUpdatedAt"],
+    }
+    assert "projection (42%)" in payload["markdown"]
+
+
 def test_sweep_enqueue_worker_status_caution(store_env, monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -355,7 +386,7 @@ def test_sweep_enqueue_worker_status_caution(store_env, monkeypatch, tmp_path):
     monkeypatch.setattr(
         worker,
         "ThemaRS_fit",
-        lambda cfg, df: SimpleNamespace(
+        lambda cfg, df, progress_callback=None: SimpleNamespace(
             _weighted_adjacency=np.eye(len(df), dtype=float)
         ),
     )
@@ -368,6 +399,8 @@ def test_sweep_enqueue_worker_status_caution(store_env, monkeypatch, tmp_path):
     run_job(q.claim(), queue=q, store=store)
     st = q.status(jid)
     assert st["status"] == "done"
+    assert st["progress_stage"] == "complete"
+    assert st["progress_fraction"] == 1.0
     assert st["structure_status"] == "caution"
     assert store.exists(f"u/ds_caution/{ch}/artifact.json")
 
@@ -439,6 +472,35 @@ def test_noise_no_reliable_structure(store_env, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# regression: threshold_stability viz must be bounded, not a raw O(edges) dump.
+# A no-structure dossier fallback once shipped the full stability arrays and blew
+# past the context window. The shared viz builder now downsamples to a fixed cap.
+# --------------------------------------------------------------------------- #
+def test_threshold_stability_viz_is_bounded():
+    import types
+
+    import pulsar.mcp.tools.curated as C
+
+    n = C._VIZ_CURVE_MAX_POINTS * 3
+    view = types.SimpleNamespace(
+        _stability_curve={
+            "thresholds": [1.0 - i / n for i in range(n)],
+            "componentCounts": list(range(n)),
+            "optimalThreshold": 0.5,
+        },
+        resolved_construction_threshold=0.5,
+    )
+    viz = C._viz_threshold_stability(view)
+    assert viz["kind"] == "threshold_stability"
+    assert len(viz["thresholds"]) <= C._VIZ_CURVE_MAX_POINTS
+    assert len(viz["componentCounts"]) == len(viz["thresholds"])
+    assert viz["pointsOmitted"] == n - len(viz["thresholds"])
+    # endpoints preserved so the rendered curve still spans the full domain
+    assert viz["thresholds"][0] == 1.0
+    assert viz["componentCounts"][0] == 0 and viz["componentCounts"][-1] == n - 1
+
+
+# --------------------------------------------------------------------------- #
 # curated tools interpret off the persisted artifact + carry a viz_payload
 # --------------------------------------------------------------------------- #
 def test_curated_interpret_with_viz(store_env):
@@ -469,6 +531,8 @@ def test_curated_interpret_with_viz(store_env):
         run_job(q.claim(), queue=q, store=store)
         st = json.loads(await C.get_sweep_status(rs["structured"]["jobId"]))
         assert st["structured"]["status"] == "done"
+        assert st["structured"]["progressStage"] == "complete"
+        assert st["structured"]["progressFraction"] == 1.0
 
         rd = json.loads(await C.diagnose_cosmic_graph(ds, ch))
         assert "n_nodes" in rd["structured"]

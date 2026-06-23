@@ -179,12 +179,34 @@ def _viz_cosmic_graph(view, labels, max_edges: int = 2500, provenance=None):
     return build_cosmic_graph_payload(view, labels, provenance=provenance)
 
 
+# A rendered curve needs only enough points to look smooth on screen, not the full
+# O(unique-edge-weight) stability array — which on large graphs balloons the JSON
+# tool result past the context window. (This is what blew up the no-structure
+# dossier fallback below, which ships this viz raw.) The agent-facing read stays the
+# bounded `curve_sample` in get_threshold_stability_curve; this denser cap is just the chart.
+_VIZ_CURVE_MAX_POINTS = 200
+
+
+def _even_indices(n_points: int, max_points: int) -> list[int]:
+    """Evenly spaced indices into a length-`n_points` sequence, capped at `max_points`."""
+    if n_points <= max_points:
+        return list(range(n_points))
+    return sorted({int(i) for i in np.linspace(0, n_points - 1, num=max_points)})
+
+
 def _viz_threshold_stability(view):
     sc = view._stability_curve or {}
+    thresholds = sc.get("thresholds", [])
+    counts = sc.get("componentCounts", [])
+    n = min(
+        len(thresholds), len(counts)
+    )  # defensive: arrays are built parallel upstream
+    idx = _even_indices(n, _VIZ_CURVE_MAX_POINTS)
     return {
         "kind": "threshold_stability",
-        "thresholds": sc.get("thresholds", []),
-        "componentCounts": sc.get("componentCounts", []),
+        "thresholds": [thresholds[i] for i in idx],
+        "componentCounts": [counts[i] for i in idx],
+        "pointsOmitted": max(n - len(idx), 0),
         "optimal": sc.get("optimalThreshold", view.resolved_construction_threshold),
     }
 
@@ -242,21 +264,13 @@ def _sparse_threshold_curve(
     *,
     max_points: int,
 ) -> list[dict]:
-    n_points = len(thresholds)
-    if n_points == 0:
-        return []
-    indices = (
-        range(n_points)
-        if n_points <= max_points
-        else sorted({int(i) for i in np.linspace(0, n_points - 1, num=max_points)})
-    )
     return [
         {
             "threshold": thresholds[i],
             "component_count": component_counts[i],
             "singleton_count": singleton_counts[i],
         }
-        for i in indices
+        for i in _even_indices(len(thresholds), max_points)
     ]
 
 
@@ -450,10 +464,21 @@ async def get_sweep_status(job_id: str) -> str:
         "error": rec.get("error"),
         "cancelReason": rec.get("cancel_reason"),
         "cancelledAt": rec.get("cancelled_at"),
+        "progressStage": rec.get("progress_stage"),
+        "progressFraction": rec.get("progress_fraction"),
+        "progressUpdatedAt": rec.get("progress_updated_at"),
+        "progress": {
+            "stage": rec.get("progress_stage"),
+            "fraction": rec.get("progress_fraction"),
+            "updatedAt": rec.get("progress_updated_at"),
+        },
         "peakRssMb": rec.get("peak_rss_mb"),
         "vcpuMs": rec.get("vcpu_ms"),
     }
     md = f"Job `{job_id}`: **{rec['status']}**"
+    if rec.get("progress_stage") and rec.get("status") in {"queued", "running"}:
+        pct = float(rec.get("progress_fraction") or 0.0) * 100
+        md += f" — {rec['progress_stage']} ({pct:.0f}%)"
     if rec.get("structure_status"):
         md += f" — {rec['structure_status']}"
     if rec.get("error"):

@@ -212,11 +212,18 @@ def run_job(
                 f"(Spike-3 memory envelope; n>10k prohibitive). Downsample or raise the cap."
             )
 
-        model = ThemaRS_fit(cfg, df)
+        def progress_callback(stage: str, fraction: float) -> None:
+            queue.progress(
+                job_id, stage=stage, fraction=min(float(fraction), 1.0) * 0.9
+            )
+
+        model = ThemaRS_fit(cfg, df, progress_callback=progress_callback)
         _raise_if_cancelled(job_id, queue)
+        queue.progress(job_id, stage="assess structure", fraction=0.92)
         structure_status = _assess_structure(model)
         _raise_if_cancelled(job_id, queue)
 
+        queue.progress(job_id, stage="persist artifact", fraction=0.96)
         prefix = artifact_prefix(job["user_id"], job["dataset_id"], job["config_hash"])
         artifact = dump_artifact(
             model,
@@ -228,6 +235,7 @@ def run_job(
         artifact["structureStatus"] = structure_status
         artifact_key = f"{prefix}/artifact.json"
         store.put(artifact_key, json.dumps(artifact).encode())
+        queue.progress(job_id, stage="write manifest", fraction=0.98)
         write_sweep_manifest(
             store,
             artifact,
@@ -261,11 +269,11 @@ def run_job(
             heartbeat_stop.set()
 
 
-def ThemaRS_fit(cfg, df):
+def ThemaRS_fit(cfg, df, progress_callback=None):
     """Isolated fit call (kept tiny so the import of the heavy pipeline is lazy)."""
     from pulsar.pipeline import ThemaRS
 
-    return ThemaRS(cfg).fit(df)
+    return ThemaRS(cfg).fit(df, progress_callback=progress_callback)
 
 
 def run_forever(poll_interval: float = 0.5) -> None:
