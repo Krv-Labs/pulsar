@@ -272,9 +272,7 @@ class ArtifactView:
         # Minimal config shim so diagnose_model can read cosmic_graph.minhash_d /
         # .construction off a cold artifact exactly as it does off a live model.
         self.config = SimpleNamespace(
-            cosmic_graph=SimpleNamespace(
-                construction=construction, minhash_d=minhash_d
-            )
+            cosmic_graph=SimpleNamespace(construction=construction, minhash_d=minhash_d)
         )
         self._weighted_adjacency_cache = weighted_adjacency
         self._cosmic_graph_cache = cosmic_graph
