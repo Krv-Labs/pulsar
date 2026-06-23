@@ -63,7 +63,7 @@ What is Pulsar?
 Pulsar is a **Rust-accelerated Python library** for topological data analysis:
 
 - **Input**: CSV, Parquet, or Pandas DataFrame
-- **Process**: Grid sweeps over PCA dimensions and epsilon values (Ball Mapper)
+- **Process**: Grid sweeps over projection dimensions and epsilon values (Ball Mapper)
 - **Output**: Weighted network graph (networkx.Graph) showing cluster structure
 
 The workflow:
@@ -72,7 +72,7 @@ The workflow:
 
    graph LR
       A["Data<br/>(CSV)"] --> B["Preprocess"]
-      B --> C["PCA Grid"]
+      B --> C["Projection Grid"]
       C --> D["Ball Mapper"]
       D --> E["Cosmic Graph"]
       E --> F["Clusters &<br/>Insights"]
@@ -112,7 +112,7 @@ Key Capabilities
    Core algorithms in Rust via PyO3. 10-100x speedups over pure Python implementations.
 
 **Grid-Based Exploration**
-   Sweep over PCA dimensions, epsilon values, and random seeds to find robust structure.
+   Sweep over JL/PCA projection dimensions, epsilon values, and random seeds to find robust structure.
 
 **Temporal Data**
    TemporalCosmicGraph for 3D tensors (patient × feature × time). Discover trajectory patterns.

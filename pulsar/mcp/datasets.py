@@ -8,6 +8,7 @@ Datasets are stored per-user under ``{user_id}/datasets/{dataset_id}/`` in the o
 store: ``data.parquet`` + ``meta.json``. Ingest enforces the Spike-3 row cap (clean,
 structured error — never a crash).
 """
+
 from __future__ import annotations
 
 import hashlib

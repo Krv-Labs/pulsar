@@ -7,10 +7,10 @@ Covers:
 
 Run: `uv run pytest tests/pulsar_mcp/test_viz_engine.py -q`
 """
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from pulsar.mcp.viz_graph import (
     LAYOUT_SEED,
@@ -140,7 +140,7 @@ def test_giant_central():
 def test_bounding_radius_floor_for_degenerate_component():
     # All-at-origin component → radius falls back to √size floor (> 0).
     local = {0: (0.0, 0.0), 1: (0.0, 0.0), 2: (0.0, 0.0), 3: (0.0, 0.0)}
-    assert _bounding_radius(local) >= 0.5 * (4 ** 0.5)
+    assert _bounding_radius(local) >= 0.5 * (4**0.5)
 
 
 # --------------------------------------------------------------------------- #

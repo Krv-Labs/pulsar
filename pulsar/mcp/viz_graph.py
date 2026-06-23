@@ -20,6 +20,7 @@ Pipeline (build-spec viz revamp; contract = isomorph packages/contracts CosmicGr
 
 Output keys are camelCase and flow VERBATIM to the client.
 """
+
 from __future__ import annotations
 
 import networkx as nx
@@ -43,11 +44,11 @@ LAYOUT_SEED = 42
 LAYOUT_ITERATIONS = 60
 # Packing geometry. Components are placed on a deterministic Archimedean spiral with
 # bounding circles that NEVER overlap; the giant (largest) sits at the origin.
-_PACK_PADDING = 0.25       # extra gap between adjacent bounding circles (in radius units)
-_PACK_SPIRAL_B = 1.0       # spiral tightness; larger = looser turns
+_PACK_PADDING = 0.25  # extra gap between adjacent bounding circles (in radius units)
+_PACK_SPIRAL_B = 1.0  # spiral tightness; larger = looser turns
 # Singleton periphery band: tiled on concentric rings OUTSIDE every packed component.
 _SINGLETON_BAND_GAP = 1.5  # gap (radius units) between the packed region and ring 1
-_SINGLETON_RING_STEP = 0.6 # radial spacing between successive singleton rings
+_SINGLETON_RING_STEP = 0.6  # radial spacing between successive singleton rings
 
 
 def _edge_budget(n_nodes: int) -> int:
@@ -205,7 +206,9 @@ def _component_force_layout(
     # is ~constant across islands (radius ∝ √size ⇒ area ∝ size) — readable, breathing components.
     # Packing measures the scaled radius, so islands stay non-overlapping regardless of this factor.
     spread = float(len(coords)) ** 0.5
-    return {node: ((x - cx) * spread, (y - cy) * spread) for node, (x, y) in coords.items()}
+    return {
+        node: ((x - cx) * spread, (y - cy) * spread) for node, (x, y) in coords.items()
+    }
 
 
 def _bounding_radius(local: dict[int, tuple[float, float]]) -> float:
@@ -249,7 +252,7 @@ def _spiral_pack_centers(radii: list[float]) -> list[tuple[float, float]]:
             cx = rad * float(np.cos(theta))
             cy = rad * float(np.sin(theta))
             ok = True
-            for (px, py, pr) in placed:
+            for px, py, pr in placed:
                 dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
                 if dist < (pr + ri + _PACK_PADDING):
                     ok = False
@@ -267,10 +270,7 @@ def _outer_packed_radius(
     """Farthest extent (center distance + bounding radius) of any packed component."""
     if not centers:
         return 0.0
-    return max(
-        ((cx * cx + cy * cy) ** 0.5) + r
-        for (cx, cy), r in zip(centers, radii)
-    )
+    return max(((cx * cx + cy * cy) ** 0.5) + r for (cx, cy), r in zip(centers, radii))
 
 
 def compute_island_layout(
@@ -323,7 +323,7 @@ def compute_island_layout(
     centers = _spiral_pack_centers(radii)
 
     positions: dict[int, tuple[float, float]] = {}
-    for (c, (cx, cy)) in zip(multi, centers):
+    for c, (cx, cy) in zip(multi, centers):
         cid = int(c["id"])
         for node, (x, y) in local_layouts[cid].items():
             positions[node] = (cx + x, cy + y)
@@ -388,7 +388,6 @@ def build_cosmic_graph_payload(view, labels, *, provenance=None) -> dict:
     all_edges = _thresholded_edges(W, threshold)
     total_edges = len(all_edges)
     component_of_node, components_meta = _components_by_size(n_nodes, all_edges)
-    n_components = len(components_meta)
 
     # S2 — backbone (maximum spanning forest).
     backbone = _backbone_edges(all_edges)
@@ -404,12 +403,12 @@ def build_cosmic_graph_payload(view, labels, *, provenance=None) -> dict:
 
     out_edges: list[dict] = []
     degree = np.zeros(n_nodes, dtype=np.int64)
-    for (u, v) in backbone:
+    for u, v in backbone:
         w = weight_of.get((u, v), weight_of.get((v, u), 1.0))
         out_edges.append({"u": u, "v": v, "w": float(w), "role": "backbone"})
         degree[u] += 1
         degree[v] += 1
-    for (u, v) in context:
+    for u, v in context:
         w = weight_of.get((u, v), weight_of.get((v, u), 1.0))
         out_edges.append({"u": u, "v": v, "w": float(w), "role": "context"})
         degree[u] += 1

@@ -20,10 +20,19 @@ feeding a dataframe.
            "drop_columns": []
        },
        "sweep": {
-           "pca": {"dimensions": {"values": [2]}, "seed": {"values": [42]}},
+           "projection": {
+               "method": "jl",
+               "dimensions": {"values": [2]},
+               "seed": {"values": [42]},
+               "center": True,
+           },
            "ball_mapper": {"epsilon": {"values": [0.5]}}
        },
-       "cosmic_graph": {"construction_threshold": "auto"},
+       "cosmic_graph": {
+           "construction": "minhash",
+           "minhash_d": 256,
+           "construction_threshold": "auto",
+       },
        "output": {"n_reps": 3}
    })
    model.fit(data=df)

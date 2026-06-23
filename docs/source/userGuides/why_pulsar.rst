@@ -187,7 +187,7 @@ Pulsar chains these stages:
 
 Each stage is optimized in Rust and parallelized with `rayon`. The Python layer orchestrates.
 
-**Key insight**: The grid sweep (multiple epsilon values, multiple PCA dimensions, multiple random seeds) is *essential*. A single ball map can be misleading; the grid reveals robustness.
+**Key insight**: The grid sweep (multiple epsilon values, multiple projection dimensions, multiple random seeds) is *essential*. A single ball map can be misleading; the grid reveals robustness.
 
 ---
 
@@ -217,5 +217,5 @@ Next Steps
 
 1. **See it in action**: Start with the :ref:`demos` section — each one is runnable in minutes.
 2. **Use with AI**: Set up the :ref:`mcp` server and let Claude or Gemini handle the parameter tuning.
-3. **Understand the parameters**: :ref:`intermediate` explains what PCA dimensions and epsilon do.
+3. **Understand the parameters**: :ref:`intermediate` explains what projection dimensions and epsilon do.
 4. **Deep dive on theory**: The `Pulsar paper <https://www.nature.com/articles/s41567-024-02449-x>`_ (Nature Physics 2024) covers the mathematical foundations.

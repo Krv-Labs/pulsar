@@ -3,6 +3,7 @@
 The heavy artifact JSON is the data plane. Listing completed sweeps is control-plane
 metadata and must never load the full artifact body.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,11 @@ def sweep_manifest_from_artifact(
     config_hash: str,
     object_key: str,
 ) -> dict:
-    artifact_ref = {"userId": user_id, "datasetId": dataset_id, "configHash": config_hash}
+    artifact_ref = {
+        "userId": user_id,
+        "datasetId": dataset_id,
+        "configHash": config_hash,
+    }
     return {
         "artifactRef": artifact_ref,
         # Backward-compatible alias for existing Python-side tests/clients.
@@ -59,6 +64,9 @@ def write_sweep_manifest(
     return manifest
 
 
-def load_sweep_manifest(store, *, user_id: str, dataset_id: str, config_hash: str) -> dict:
-    return json.loads(store.get(sweep_manifest_key(user_id, dataset_id, config_hash)).decode("utf-8"))
-
+def load_sweep_manifest(
+    store, *, user_id: str, dataset_id: str, config_hash: str
+) -> dict:
+    return json.loads(
+        store.get(sweep_manifest_key(user_id, dataset_id, config_hash)).decode("utf-8")
+    )

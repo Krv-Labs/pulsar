@@ -2,7 +2,7 @@
 Runtime helpers used by the core Pulsar pipeline.
 """
 
-from pulsar.runtime.fingerprint import pca_fingerprint
+from pulsar.runtime.fingerprint import pca_fingerprint, projection_fingerprint
 from pulsar.runtime.progress import fit_multi_with_progress, fit_with_progress
 from pulsar.runtime.utils import (
     STAGE_WEIGHTS,
@@ -17,4 +17,5 @@ __all__ = [
     "fit_with_progress",
     "fit_multi_with_progress",
     "pca_fingerprint",
+    "projection_fingerprint",
 ]

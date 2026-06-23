@@ -1,57 +1,42 @@
+use std::collections::{HashMap, VecDeque};
+
 use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
+use rand::prelude::*;
+use rand_distr::StandardNormal;
 
-/// Internal Cosmic Graph data: weighted and binary adjacency matrices.
+use crate::ballmapper::BallMapper;
+use crate::error::PulsarError;
+use crate::minhash::{cosmic_edges_minhash, MinHashSignatures};
+use crate::pseudolaplacian::SparsePseudoLaplacian;
+
+type WeightedEdge = (usize, usize, f64);
+
+#[derive(Copy, Clone)]
+struct PcgOptions {
+    tol: f64,
+    max_iter: usize,
+}
+
+/// Internal Cosmic Graph data.
 ///
-/// The Cosmic Graph summarises topological proximity between data points by
-/// normalising the pseudo-Laplacian into a weighted adjacency matrix.
-pub struct CosmicGraphInner {
-    /// Weighted adjacency matrix, shape `(n, n)`, values in `[0, 1]`.
-    /// Entry `(i, j)` is the normalised co-membership weight between points
-    /// `i` and `j` (see [`from_pseudo_laplacian`] for the formula).
-    pub weighted_adj: Array2<f64>,
-    /// Binary adjacency matrix (0/1), shape `(n, n)`.
-    /// Entry `(i, j) = 1` iff `weighted_adj[i,j] > threshold`.
-    pub adj: Array2<u8>,
-    /// Number of data points (side length of both matrices).
-    pub n: usize,
+/// Dense storage preserves the historical construction path. Sparse storage is
+/// used by spectral sparsification and materializes dense arrays only when a
+/// compatibility getter asks for them.
+pub enum CosmicGraphInner {
+    Dense {
+        weighted_adj: Array2<f64>,
+        adj: Array2<u8>,
+        n: usize,
+    },
+    Sparse {
+        n: usize,
+        edges: Vec<WeightedEdge>,
+    },
 }
 
 impl CosmicGraphInner {
-    /// Construct a Cosmic Graph from an accumulated pseudo-Laplacian.
-    ///
-    /// This is a direct port of Thema's `normalize_cosmicGraph` in
-    /// `starHelpers.py`.
-    ///
-    /// # Weight formula
-    ///
-    /// For each off-diagonal pair `(i, j)`:
-    ///
-    /// ```text
-    /// denom = L[i,i] + L[j,j] + L[i,j]
-    ///
-    ///                 -L[i,j]
-    /// W[i,j] =  ─────────────────   if denom > 0
-    ///               denom
-    ///
-    ///         = 0                    otherwise
-    /// ```
-    ///
-    /// **Intuition:**
-    /// - `L[i,j]` is negative (number of shared balls, negated), so `-L[i,j]`
-    ///   is positive: the raw shared co-membership count.
-    /// - `L[i,i]` and `L[j,j]` are the individual membership counts (degrees).
-    /// - Dividing by their sum normalises the weight to `[0, 1]`.
-    /// - The maximum weight of 1 is reached when `L[i,j] = −L[i,i] = −L[j,j]`,
-    ///   i.e. both points appear in exactly the same balls.
-    ///
-    /// Pairs where `denom ≤ 0` (disconnected points) keep weight 0.
-    ///
-    /// # Parameters
-    /// - `l` — accumulated pseudo-Laplacian, shape `(n, n)`, dtype `i64`.
-    /// - `threshold` — minimum weight for an edge to appear in the binary
-    ///   adjacency matrix.  Use `0.0` to include all positive-weight edges.
     pub fn from_pseudo_laplacian(l: &Array2<i64>, threshold: f64) -> CosmicGraphInner {
         let n = l.shape()[0];
         let mut wadj = Array2::<f64>::zeros((n, n));
@@ -72,26 +57,101 @@ impl CosmicGraphInner {
             }
         }
 
-        CosmicGraphInner { weighted_adj: wadj, adj, n }
+        CosmicGraphInner::Dense {
+            weighted_adj: wadj,
+            adj,
+            n,
+        }
+    }
+
+    /// Build a sparse CosmicGraph directly from a sparse pseudo-Laplacian, without
+    /// ever materializing the n×n matrix. Computes weights only for the nonzero
+    /// off-diagonal entries.
+    ///
+    /// Parity with [`from_pseudo_laplacian`]: with `l[i,j] = -count`, the dense
+    /// denominator `l[i,i] + l[j,j] + l[i,j]` equals `diag[i] + diag[j] - count`,
+    /// and `wadj[i,j] = -l[i,j]/denom = count/denom`. Pairs with no shared ball have
+    /// `count = 0` → weight 0 in the dense path, so iterating only nonzero entries
+    /// yields identical weights with no spurious edges. `denom > 0` always holds when
+    /// an entry exists (`count ≤ min(diag[i], diag[j])`). Pass `threshold = 0.0` to
+    /// reproduce the dense pre-threshold `weighted_adj` exactly.
+    pub fn from_pseudo_laplacian_sparse(
+        n: usize,
+        diag: &[i64],
+        offdiag: &[(usize, usize, i64)],
+        threshold: f64,
+    ) -> CosmicGraphInner {
+        let mut edges = Vec::with_capacity(offdiag.len());
+        for &(i, j, count) in offdiag {
+            let denom = diag[i] + diag[j] - count;
+            if denom > 0 {
+                let w = count as f64 / denom as f64;
+                if w > threshold {
+                    edges.push((i, j, w));
+                }
+            }
+        }
+        // `offdiag` is sorted by (i, j); `edges` preserves that order → deterministic.
+        CosmicGraphInner::Sparse { n, edges }
+    }
+
+    fn n(&self) -> usize {
+        match self {
+            CosmicGraphInner::Dense { n, .. } | CosmicGraphInner::Sparse { n, .. } => *n,
+        }
+    }
+
+    fn weighted_edges(&self) -> Vec<WeightedEdge> {
+        match self {
+            CosmicGraphInner::Sparse { edges, .. } => edges.clone(),
+            CosmicGraphInner::Dense {
+                weighted_adj, n, ..
+            } => {
+                let mut edges = Vec::new();
+                for i in 0..*n {
+                    for j in (i + 1)..*n {
+                        let w = weighted_adj[[i, j]];
+                        if w > 0.0 {
+                            edges.push((i, j, w));
+                        }
+                    }
+                }
+                edges
+            }
+        }
+    }
+
+    fn weighted_adj(&self) -> Array2<f64> {
+        match self {
+            CosmicGraphInner::Dense { weighted_adj, .. } => weighted_adj.clone(),
+            CosmicGraphInner::Sparse { n, edges } => {
+                let mut out = Array2::<f64>::zeros((*n, *n));
+                for &(i, j, w) in edges {
+                    out[[i, j]] = w;
+                    out[[j, i]] = w;
+                }
+                out
+            }
+        }
+    }
+
+    fn adj(&self) -> Array2<u8> {
+        match self {
+            CosmicGraphInner::Dense { adj, .. } => adj.clone(),
+            CosmicGraphInner::Sparse { n, edges } => {
+                let mut out = Array2::<u8>::zeros((*n, *n));
+                for &(i, j, w) in edges {
+                    if w > 0.0 {
+                        out[[i, j]] = 1;
+                        out[[j, i]] = 1;
+                    }
+                }
+                out
+            }
+        }
     }
 }
 
-/// Python-facing Cosmic Graph class.
-///
-/// ```python
-/// from pulsar._pulsar import CosmicGraph, pseudo_laplacian
-/// import numpy as np
-///
-/// # Accumulate pseudo-Laplacians across all ball maps in the sweep
-/// galactic_L = np.zeros((n, n), dtype=np.int64)
-/// for bm in ball_maps:
-///     galactic_L += pseudo_laplacian(bm.nodes, n)
-///
-/// # Build the Cosmic Graph
-/// cg = CosmicGraph.from_pseudo_laplacian(galactic_L, threshold=0.0)
-/// print(cg.weighted_adj)   # float weights in [0, 1]
-/// print(cg.adj)            # binary adjacency (uint8)
-/// ```
 #[pyclass]
 pub struct CosmicGraph {
     inner: CosmicGraphInner,
@@ -99,16 +159,6 @@ pub struct CosmicGraph {
 
 #[pymethods]
 impl CosmicGraph {
-    /// Build a Cosmic Graph from an accumulated pseudo-Laplacian matrix.
-    ///
-    /// # Parameters
-    /// - `l` (`np.ndarray[int64, 2D]`, shape `(n, n)`) — summed pseudo-Laplacian
-    ///   from all Ball Maps in the parameter sweep.
-    /// - `threshold` (`float`) — edges with weight ≤ `threshold` are excluded
-    ///   from the binary adjacency matrix.  Typical value: `0.0`.
-    ///
-    /// # Returns
-    /// A `CosmicGraph` instance.
     #[staticmethod]
     pub fn from_pseudo_laplacian<'py>(
         _py: Python<'py>,
@@ -120,26 +170,434 @@ impl CosmicGraph {
         Ok(CosmicGraph { inner })
     }
 
-    /// Weighted adjacency matrix, shape `(n, n)`, values in `[0, 1]`.
+    /// Build a CosmicGraph from a sparse pseudo-Laplacian (see
+    /// [`accumulate_pseudo_laplacians_sparse`]) without materializing an n×n matrix.
+    /// Pass `threshold = 0.0` for exact parity with the dense construction path.
+    #[staticmethod]
+    pub fn from_pseudo_laplacian_sparse(
+        spl: PyRef<SparsePseudoLaplacian>,
+        threshold: f64,
+    ) -> PyResult<Self> {
+        let inner = CosmicGraphInner::from_pseudo_laplacian_sparse(
+            spl.n,
+            &spl.diag,
+            &spl.offdiag,
+            threshold,
+        );
+        Ok(CosmicGraph { inner })
+    }
+
+    /// Build a CosmicGraph directly from ball memberships via MinHash + LSH, the
+    /// approximate construction path. Bypasses the exact pseudo-Laplacian (whose
+    /// Σ_c |B_c|² pair materialization is the real bottleneck): edge weights are
+    /// unbiased Jaccard estimates of the points' ball-sets with `Var = J(1−J)/d`.
     ///
-    /// Entry `(i, j)` represents normalised co-membership between points `i`
-    /// and `j` across all Ball Maps in the sweep.
+    /// `d` is the signature depth (accuracy/speed knob; error is size-independent).
+    /// `seed` makes the (randomized) construction reproducible. Output is the same
+    /// sparse representation as [`from_pseudo_laplacian_sparse`], so the downstream
+    /// interpretation layer (threshold selection, components) is unchanged.
+    #[staticmethod]
+    #[pyo3(signature = (ball_maps, n, d=256, seed=42))]
+    pub fn from_ball_maps_minhash(
+        ball_maps: Vec<PyRef<BallMapper>>,
+        n: usize,
+        d: usize,
+        seed: u64,
+    ) -> PyResult<Self> {
+        if d == 0 {
+            return Err(PulsarError::InvalidParameter {
+                msg: "minhash signature depth d must be >= 1".to_string(),
+            }
+            .into());
+        }
+        let balls: Vec<&[usize]> = ball_maps
+            .iter()
+            .flat_map(|bm| bm.nodes.iter().map(|v| v.as_slice()))
+            .collect();
+        let edges = cosmic_edges_minhash(&balls, n, d, seed);
+        Ok(CosmicGraph {
+            inner: CosmicGraphInner::Sparse { n, edges },
+        })
+    }
+
+    /// Spielman-Srivastava style spectral sparsifier using JL resistance sketches.
+    #[pyo3(signature = (epsilon, seed=42, sketch_dim=None, sample_count=None, pcg_tol=1e-6, max_iter=1000))]
+    pub fn spectral_sparsify(
+        &self,
+        epsilon: f64,
+        seed: u64,
+        sketch_dim: Option<usize>,
+        sample_count: Option<usize>,
+        pcg_tol: f64,
+        max_iter: usize,
+    ) -> PyResult<Self> {
+        if !epsilon.is_finite() || epsilon <= 0.0 {
+            return Err(PulsarError::InvalidParameter {
+                msg: "epsilon must be finite and positive".to_string(),
+            }
+            .into());
+        }
+        if !pcg_tol.is_finite() || pcg_tol <= 0.0 {
+            return Err(PulsarError::InvalidParameter {
+                msg: "pcg_tol must be finite and positive".to_string(),
+            }
+            .into());
+        }
+
+        let n = self.inner.n();
+        let edges: Vec<WeightedEdge> = self
+            .inner
+            .weighted_edges()
+            .into_iter()
+            .filter(|&(i, j, w)| i != j && w.is_finite() && w > 0.0)
+            .collect();
+        if n <= 1 || edges.is_empty() {
+            return Ok(CosmicGraph {
+                inner: CosmicGraphInner::Sparse {
+                    n,
+                    edges: Vec::new(),
+                },
+            });
+        }
+
+        let components = connected_components(n, &edges);
+        let dim = sketch_dim
+            .unwrap_or_else(|| {
+                ((24.0 * (n as f64).ln().max(1.0)) / (epsilon * epsilon)).ceil() as usize
+            })
+            .max(1);
+        let samples = sample_count
+            .unwrap_or_else(|| {
+                ((9.0 * n as f64 * (n as f64).ln().max(1.0)) / (epsilon * epsilon)).ceil() as usize
+            })
+            .max(1);
+
+        let mut resistances = vec![0.0; edges.len()];
+        let diag = laplacian_diag(n, &edges);
+
+        for row in 0..dim {
+            let row_seed = seed ^ (row as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut rng = StdRng::seed_from_u64(row_seed);
+            let mut rhs = vec![0.0; n];
+            for &(u, v, w) in &edges {
+                let g: f64 = rng.sample(StandardNormal);
+                let noise = g * w.sqrt() / (dim as f64).sqrt();
+                rhs[u] += noise;
+                rhs[v] -= noise;
+            }
+
+            let potentials = solve_by_component(
+                n,
+                &edges,
+                &components,
+                &diag,
+                &rhs,
+                PcgOptions {
+                    tol: pcg_tol,
+                    max_iter,
+                },
+            );
+            for (idx, &(u, v, _)) in edges.iter().enumerate() {
+                let diff = potentials[u] - potentials[v];
+                resistances[idx] += diff * diff;
+            }
+        }
+
+        let mut leverage: Vec<f64> = edges
+            .iter()
+            .zip(resistances.iter())
+            .map(|(&(_, _, w), &r)| (w * r).max(0.0))
+            .collect();
+        let leverage_sum: f64 = leverage.iter().sum();
+        if leverage_sum <= f64::EPSILON {
+            let weight_sum: f64 = edges.iter().map(|&(_, _, w)| w).sum();
+            leverage = edges.iter().map(|&(_, _, w)| w / weight_sum).collect();
+        } else {
+            for tau in &mut leverage {
+                *tau /= leverage_sum;
+            }
+        }
+
+        let mut cdf = Vec::with_capacity(leverage.len());
+        let mut running = 0.0;
+        for p in leverage {
+            running += p;
+            cdf.push(running);
+        }
+        if let Some(last) = cdf.last_mut() {
+            *last = 1.0;
+        }
+
+        let mut aggregated: HashMap<(usize, usize), f64> = HashMap::new();
+        for sample_idx in 0..samples {
+            let sample_seed = seed ^ (sample_idx as u64 + 11).wrapping_mul(0xD1B5_4A32_D192_ED03);
+            let mut rng = StdRng::seed_from_u64(sample_seed);
+            let draw: f64 = rng.gen();
+            let edge_idx = cdf.partition_point(|&p| p < draw).min(edges.len() - 1);
+            let (u, v, w) = edges[edge_idx];
+            let p = (cdf[edge_idx]
+                - if edge_idx == 0 {
+                    0.0
+                } else {
+                    cdf[edge_idx - 1]
+                })
+            .max(f64::EPSILON);
+            let sampled_weight = w / (samples as f64 * p);
+            *aggregated.entry((u.min(v), u.max(v))).or_insert(0.0) += sampled_weight;
+        }
+
+        let mut sparse_edges: Vec<WeightedEdge> = aggregated
+            .into_iter()
+            .map(|((u, v), w)| (u, v, w))
+            .filter(|&(_, _, w)| w.is_finite() && w > 0.0)
+            .collect();
+        sparse_edges.sort_by_key(|&(u, v, _)| (u, v));
+
+        Ok(CosmicGraph {
+            inner: CosmicGraphInner::Sparse {
+                n,
+                edges: sparse_edges,
+            },
+        })
+    }
+
     #[getter]
     pub fn weighted_adj<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        Ok(self.inner.weighted_adj.clone().into_pyarray_bound(py))
+        Ok(self.inner.weighted_adj().into_pyarray_bound(py))
     }
 
-    /// Binary adjacency matrix, shape `(n, n)`, dtype `uint8`.
-    ///
-    /// Entry `(i, j) = 1` iff `weighted_adj[i, j] > threshold`.
     #[getter]
     pub fn adj<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u8>>> {
-        Ok(self.inner.adj.clone().into_pyarray_bound(py))
+        Ok(self.inner.adj().into_pyarray_bound(py))
     }
 
-    /// Number of data points (side length of both adjacency matrices).
     #[getter]
     pub fn n(&self) -> usize {
-        self.inner.n
+        self.inner.n()
+    }
+
+    pub fn weighted_edges(&self) -> Vec<WeightedEdge> {
+        self.inner.weighted_edges()
+    }
+
+    #[getter]
+    pub fn n_edges(&self) -> usize {
+        self.inner.weighted_edges().len()
+    }
+}
+
+/// Streaming MinHash signature accumulator for memory-bounded multi-dataset
+/// construction (`fit_multi`). Folds batches of ball maps into a constant-size `d×n`
+/// signature via element-wise `min`, then builds the cosmic graph in one shot — the
+/// signature never grows with the number of ball maps, so batches can be discarded as
+/// they are consumed (matching the exact path's `merge_in_place` streaming).
+#[pyclass]
+pub struct MinHashAccumulator {
+    inner: MinHashSignatures,
+}
+
+#[pymethods]
+impl MinHashAccumulator {
+    #[new]
+    #[pyo3(signature = (n, d=256, seed=42))]
+    pub fn new(n: usize, d: usize, seed: u64) -> PyResult<Self> {
+        if d == 0 {
+            return Err(PulsarError::InvalidParameter {
+                msg: "minhash signature depth d must be >= 1".to_string(),
+            }
+            .into());
+        }
+        Ok(MinHashAccumulator {
+            inner: MinHashSignatures::new(n, d, seed),
+        })
+    }
+
+    /// Fold a batch of ball maps into the running signature.
+    pub fn accumulate(&mut self, ball_maps: Vec<PyRef<BallMapper>>) {
+        let balls: Vec<&[usize]> = ball_maps
+            .iter()
+            .flat_map(|bm| bm.nodes.iter().map(|v| v.as_slice()))
+            .collect();
+        self.inner.accumulate(&balls);
+    }
+
+    /// Build the cosmic graph (LSH banding + candidate weight estimation) from the
+    /// accumulated signature.
+    pub fn to_cosmic_graph(&self) -> CosmicGraph {
+        CosmicGraph {
+            inner: CosmicGraphInner::Sparse {
+                n: self.inner.n(),
+                edges: self.inner.edges(),
+            },
+        }
+    }
+}
+
+fn laplacian_diag(n: usize, edges: &[WeightedEdge]) -> Vec<f64> {
+    let mut diag = vec![0.0; n];
+    for &(u, v, w) in edges {
+        diag[u] += w;
+        diag[v] += w;
+    }
+    diag
+}
+
+fn connected_components(n: usize, edges: &[WeightedEdge]) -> Vec<Vec<usize>> {
+    let mut adj = vec![Vec::new(); n];
+    for &(u, v, _) in edges {
+        adj[u].push(v);
+        adj[v].push(u);
+    }
+
+    let mut seen = vec![false; n];
+    let mut components = Vec::new();
+    for start in 0..n {
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut queue = VecDeque::from([start]);
+        let mut component = Vec::new();
+        while let Some(u) = queue.pop_front() {
+            component.push(u);
+            for &v in &adj[u] {
+                if !seen[v] {
+                    seen[v] = true;
+                    queue.push_back(v);
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
+}
+
+fn solve_by_component(
+    n: usize,
+    edges: &[WeightedEdge],
+    components: &[Vec<usize>],
+    diag: &[f64],
+    rhs: &[f64],
+    options: PcgOptions,
+) -> Vec<f64> {
+    let mut out = vec![0.0; n];
+    for component in components {
+        if component.len() <= 1 {
+            continue;
+        }
+        let anchor = component[0];
+        let x = pcg_component(n, edges, component, anchor, diag, rhs, options);
+        for &idx in component {
+            out[idx] = x[idx];
+        }
+    }
+    out
+}
+
+fn pcg_component(
+    n: usize,
+    edges: &[WeightedEdge],
+    component: &[usize],
+    anchor: usize,
+    diag: &[f64],
+    rhs: &[f64],
+    options: PcgOptions,
+) -> Vec<f64> {
+    let PcgOptions { tol, max_iter } = options;
+    let in_component = {
+        let mut flags = vec![false; n];
+        for &idx in component {
+            flags[idx] = true;
+        }
+        flags
+    };
+
+    let mut x = vec![0.0; n];
+    let mut r = rhs.to_vec();
+    zero_outside_component(&mut r, &in_component);
+    r[anchor] = 0.0;
+
+    let mut z = apply_jacobi(&r, diag, &in_component, anchor);
+    let mut p = z.clone();
+    let mut rz_old = dot_component(&r, &z, component);
+    let tol_sq = tol * tol * dot_component(rhs, rhs, component).max(1.0);
+    if rz_old <= tol_sq {
+        return x;
+    }
+
+    for _ in 0..max_iter {
+        let ap = laplacian_matvec(n, edges, &p, &in_component, anchor);
+        let denom = dot_component(&p, &ap, component);
+        if denom.abs() <= f64::EPSILON {
+            break;
+        }
+        let alpha = rz_old / denom;
+        for &idx in component {
+            if idx == anchor {
+                continue;
+            }
+            x[idx] += alpha * p[idx];
+            r[idx] -= alpha * ap[idx];
+        }
+        if dot_component(&r, &r, component) <= tol_sq {
+            break;
+        }
+        z = apply_jacobi(&r, diag, &in_component, anchor);
+        let rz_new = dot_component(&r, &z, component);
+        if rz_old.abs() <= f64::EPSILON {
+            break;
+        }
+        let beta = rz_new / rz_old;
+        for &idx in component {
+            if idx == anchor {
+                p[idx] = 0.0;
+            } else {
+                p[idx] = z[idx] + beta * p[idx];
+            }
+        }
+        rz_old = rz_new;
+    }
+    x
+}
+
+fn laplacian_matvec(
+    n: usize,
+    edges: &[WeightedEdge],
+    x: &[f64],
+    in_component: &[bool],
+    anchor: usize,
+) -> Vec<f64> {
+    let mut out = vec![0.0; n];
+    for &(u, v, w) in edges {
+        if !in_component[u] || !in_component[v] {
+            continue;
+        }
+        let diff = x[u] - x[v];
+        out[u] += w * diff;
+        out[v] -= w * diff;
+    }
+    out[anchor] = 0.0;
+    out
+}
+
+fn apply_jacobi(r: &[f64], diag: &[f64], in_component: &[bool], anchor: usize) -> Vec<f64> {
+    let mut z = vec![0.0; r.len()];
+    for i in 0..r.len() {
+        if in_component[i] && i != anchor && diag[i] > f64::EPSILON {
+            z[i] = r[i] / diag[i];
+        }
+    }
+    z
+}
+
+fn dot_component(a: &[f64], b: &[f64], component: &[usize]) -> f64 {
+    component.iter().map(|&idx| a[idx] * b[idx]).sum()
+}
+
+fn zero_outside_component(values: &mut [f64], in_component: &[bool]) {
+    for (idx, value) in values.iter_mut().enumerate() {
+        if !in_component[idx] {
+            *value = 0.0;
+        }
     }
 }

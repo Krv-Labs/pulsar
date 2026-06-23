@@ -69,7 +69,10 @@ async def characterize_dataset(
     response_format: Literal["markdown", "json"] = "markdown",
     ctx: Context = None,
 ) -> str:
-    """Probe dataset geometry: N, features, variance curve, k-NN mean."""
+    """Dataset geometry/schema overview: N, feature counts, variance curve,
+    k-NN distance scale, and bounded interesting-column preview. On massive datasets
+    it also surfaces a ``minhash_advisory`` (a suggested ``cosmic_graph.minhash_d`` with
+    its memory/accuracy trade-off)."""
     try:
         from pulsar.analysis.characterization import characterize_dataset as _char
 
