@@ -178,9 +178,9 @@ def test_fit_reports_sweep_batches(basic_config, test_data):
 
     batch_stages = [s for s in stages if "sweep batch" in s]
     assert batch_stages == [
-        "sweep batch 1/3: ball_mapper + laplacian",
-        "sweep batch 2/3: ball_mapper + laplacian",
-        "sweep batch 3/3: ball_mapper + laplacian",
+        "sweep batch 1/3: ball_mapper + construction",
+        "sweep batch 2/3: ball_mapper + construction",
+        "sweep batch 3/3: ball_mapper + construction",
     ]
 
 
@@ -271,8 +271,8 @@ def test_fit_multi_reports_sweep_batches(basic_config):
         progress_callback=lambda s, _: stages.append(s),
     )
 
-    assert "Dataset 1/2: sweep batch 1/2: ball_mapper + laplacian" in stages
-    assert "Dataset 2/2: sweep batch 2/2: ball_mapper + laplacian" in stages
+    assert "Dataset 1/2: sweep batch 1/2: ball_mapper + construction" in stages
+    assert "Dataset 2/2: sweep batch 2/2: ball_mapper + construction" in stages
 
 
 def test_fit_multi_load_stage_present(basic_config):

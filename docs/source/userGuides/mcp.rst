@@ -139,7 +139,7 @@ Once connected, give the AI a goal rather than instructions. The AI already know
 
 Under the hood the AI will:
 
-1. **Characterize geometry** — probe k-NN distances and projection dimensions to ground parameter choices
+1. **Characterize geometry** — probe k-NN distances and projection dimensions to ground parameter choices; on large datasets, may include a ``minhash_advisory`` with suggested ``cosmic_graph.minhash_d`` that agents can apply via ``refine_config`` before expensive sweeps
 2. **Generate a preprocessing config** — recommend impute/encode rules for every column with rationale
 3. **Validate preprocessing** — dry-run the preprocessing stage before committing to a full sweep
 4. **Run a topological sweep** — find the most stable version of the data's shape
@@ -158,7 +158,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - Tool
      - What It Does
    * - **characterize_dataset**
-     - Quick exploratory summary: k-NN distances (is your data sparse or dense?), projection dimensions, missing value patterns. Claude uses this to make smart initial parameter guesses instead of random choices.
+     - Quick exploratory summary: k-NN distances (is your data sparse or dense?), projection dimensions, missing value patterns. On large datasets (``n`` above the advisor threshold), may include ``minhash_advisory`` with suggested ``minhash_d``, memory estimate, and error bounds. Claude uses this to make smart initial parameter guesses instead of random choices.
    * - **run_topological_sweep**
      - Execute the full Pulsar pipeline: imputation → projection → Ball Mapper → cosmic graph, all from inline YAML config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
    * - **generate_cluster_dossier**
@@ -168,7 +168,7 @@ The server exposes these tools to the AI client. Claude automatically chains the
    * - **export_labeled_data**
      - Return your original dataframe with labels from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. Ready for downstream analysis, visualization, or handoff to domain experts.
    * - **diagnose_cosmic_graph**
-     - Current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets these measurements against the user's objective.
+     - Current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. When ``construction: minhash``, includes ``minhash_profile`` (realized weight accuracy and confidence interval at the configured signature depth). The agent interprets these measurements against the user's objective.
    * - **recommend_preprocessing**
      - Analyze column profiles and return a complete ``preprocessing:`` YAML block with per-column rationale. Call this before the first sweep to avoid hand-writing impute/encode rules from raw stats.
    * - **repair_preprocessing_config**
@@ -225,6 +225,7 @@ The dataset is not bundled with Pulsar. Export it to CSV with either of these on
        epsilon:
          range: {min: 0.80, max: 1.50, steps: 15}
    cosmic_graph:
+     construction: minhash
      construction_threshold: auto
 
 The resulting graph shattered into components along **island** and **sex** boundaries, not just species—revealing that habitat and morphological sex are geometrically dominant. Chinstraps on Dream Island were structurally indistinguishable from Adelies on the same island: the math reflected the biology.

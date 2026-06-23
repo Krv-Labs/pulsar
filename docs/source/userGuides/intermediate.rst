@@ -155,6 +155,43 @@ Ball Mapper Parameters
 Cosmic Graph Parameters
 -----------------------
 
+``cosmic_graph.construction``
+   How edge weights are computed when fusing Ball Mapper outputs into the Cosmic
+   Graph.
+
+   - ``minhash`` (default): approximate but unbiased Jaccard estimates of each
+     point's ball-set overlap via MinHash signatures and LSH banding. Fast,
+     sub-quadratic, and constant-memory — the recommended path for large sweeps
+     and massive ``n``.
+   - ``exact``: bit-identical sparse pseudo-Laplacian co-occurrence weights.
+     Use when exact, reproducible weights matter more than speed or memory.
+
+   .. code-block:: yaml
+
+      cosmic_graph:
+        construction: minhash
+
+``cosmic_graph.minhash_d`` / ``cosmic_graph.minhash_seed``
+   MinHash signature depth and seed (only used when ``construction: minhash``).
+
+   - ``minhash_d`` (default ``256``): number of hash functions. Edge weights are
+     unbiased Jaccard estimates with variance ``J(1−J)/d`` — error depends only
+     on ``d``, independent of ``n`` or ball count. Lower ``d`` reduces signature
+     memory (``d·n·4`` bytes) and construction time at the cost of wider
+     confidence intervals.
+   - ``minhash_seed`` (default ``42``): makes randomized construction
+     reproducible.
+
+   Defaults rarely need tuning. On large datasets, the MCP server may suggest a
+   lower ``minhash_d`` via ``characterize_dataset`` (see :ref:`mcp`).
+
+   .. code-block:: yaml
+
+      cosmic_graph:
+        construction: minhash
+        minhash_d: 256
+        minhash_seed: 42
+
 ``cosmic_graph.construction_threshold``
    Minimum edge-weight cutoff applied after graph construction. ``"auto"`` uses
    approximate H0 persistent homology to find a stable component-count plateau.
@@ -242,6 +279,9 @@ Full Example
        epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
 
    cosmic_graph:
+     construction: minhash
+     minhash_d: 256
+     minhash_seed: 42
      construction_threshold: auto
      sparsify: false
      sparsify_epsilon: 1.0
@@ -250,5 +290,5 @@ Full Example
    output:
      n_reps: 4
 
-This produces ``3 * 3 * 8 = 72`` Ball Maps, fuses them into a Cosmic Graph,
-sparsifies that graph, and then selects/applies the construction threshold.
+This produces ``3 * 3 * 8 = 72`` Ball Maps, fuses them into a Cosmic Graph via
+MinHash (default), then selects/applies ``construction_threshold``.

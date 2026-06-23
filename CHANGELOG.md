@@ -3,11 +3,19 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+
+## [0.2.5]
+### Added
+- **MinHash/LSH cosmic-graph construction** in the Rust core: approximate edge weights as unbiased Jaccard estimates of each point's ball-set via seeded MinHash signatures and LSH banding — sub-quadratic, constant-memory, and deterministic for a given `(balls, n, d, seed)`. Exposed to Python as `MinHashAccumulator`.
+- `cosmic_graph.construction` toggle (`"minhash"` default | `"exact"`): `"minhash"` uses the sketch path; `"exact"` preserves the bit-identical sparse pseudo-Laplacian backbone for reproducible co-occurrence weights.
+- `cosmic_graph.minhash_d` and `cosmic_graph.minhash_seed` config knobs for signature depth and reproducibility (defaults `256` / `42`).
+- Sparse cosmic-graph backbone in the Rust core: `accumulate_pseudo_laplacians_sparse` (COO co-membership accumulation, no n×n allocation), `CosmicGraph.from_pseudo_laplacian_sparse`, and `find_stable_thresholds_sparse` (edge-list threshold selection). Existing dense APIs are unchanged.
+- MCP MinHash signature-depth advisory (`pulsar.mcp.minhash_advisor`): Hoeffding/CLT error bounds, memory estimates, and proactive `minhash_d` suggestions for massive datasets via `characterize_dataset`.
+- `minhash_profile` in `diagnose_cosmic_graph` payloads when construction is `"minhash"`.
 ### Changed
+- **Default cosmic-graph construction is now MinHash** (`cosmic_graph.construction: minhash`). The pipeline routes both `fit` and `fit_multi` through a shared `_CosmicBuilder` that never allocates an n×n matrix on either path.
 - **Spectral sparsification is now opt-in (`cosmic_graph.sparsify: false` by default).** It runs after the cosmic graph is already built, so as a default it was pure additional cost on the construction path (and its only downstream consumer re-densified the graph anyway). It remains available as a hook (`ThemaRS.spectral_sparsify`) — a leverage-aware, epsilon-controlled graph that preserves spectrum/effective-resistance (distances), not topology, for downstream spectral analysis.
 - `weighted_adjacency` is now materialized lazily on first access; the cosmic-graph backbone is kept sparse end-to-end so the hot path (`fit` → threshold → networkx) never allocates a dense n×n matrix.
-### Added
-- Sparse cosmic-graph backbone in the Rust core: `accumulate_pseudo_laplacians_sparse` (COO co-membership accumulation, no n×n allocation), `CosmicGraph.from_pseudo_laplacian_sparse`, and `find_stable_thresholds_sparse` (edge-list threshold selection). Existing dense APIs are unchanged.
 
 ## [0.2.4]
 ### Added

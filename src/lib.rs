@@ -35,6 +35,7 @@ mod cosmic;
 mod error;
 mod impute;
 mod jl;
+mod minhash;
 mod pca;
 mod ph;
 mod pseudolaplacian;
@@ -72,6 +73,7 @@ fn _pulsar(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Cosmic Graph
     m.add_class::<cosmic::CosmicGraph>()?;
+    m.add_class::<cosmic::MinHashAccumulator>()?;
 
     // Persistent Homology / Threshold Stability
     m.add_class::<ph::PyPlateau>()?;

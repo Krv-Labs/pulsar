@@ -84,6 +84,7 @@ Create ``params.yaml``:
        epsilon: {range: {min: 0.1, max: 0.5, steps: 5}}
 
    cosmic_graph:
+     construction: minhash
      construction_threshold: "auto"
 
 **Step 2: Run the pipeline**
@@ -135,8 +136,8 @@ Pulsar executes these stages:
 2. **Scale**: StandardScaler normalization
 3. **Projection sweep**: Project data to multiple dimensions with JL by default, or PCA when configured explicitly
 4. **Ball Mapper sweep**: Build neighborhood graphs at multiple epsilon values
-5. **Pseudo-Laplacians**: Compute graph Laplacians for each configuration
-6. **Cosmic graph**: Aggregate into a weighted similarity graph
+5. **Cosmic graph construction**: Fuse Ball Mapper outputs via MinHash (default) or exact sparse pseudo-Laplacian accumulation
+6. **Threshold & assembly**: Apply ``construction_threshold`` to produce a sparse weighted similarity graph
 7. **Selection**: Choose representative configurations via graph distances
 
 .. code-block:: python

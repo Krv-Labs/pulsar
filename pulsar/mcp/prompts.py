@@ -149,6 +149,29 @@ When divergence is intentional, the JSON dossier response carries
 `threshold_inherited`, plus `threshold_surface` guidance so you can see exactly
 which surface clustering used.
 
+## COSMIC GRAPH CONSTRUCTION (MINHASH)
+The cosmic graph is built by an approximate, randomized recipe: each edge weight is
+a MinHash estimate of the Jaccard similarity of two points' ball-sets, averaged over
+`cosmic_graph.minhash_d` independent hash functions. This replaces the exact
+O(Σ|B_c|²) co-occurrence count with an O(d·M) sketch. Keep the *construction* recipe
+distinct from the *interpretation* layer (threshold/components/clustering above):
+construction only has to faithfully approximate the weighted graph.
+
+- Weights are unbiased with `Var = J(1−J)/d`, so accuracy depends only on `d` —
+  **independent of dataset size**. Hoeffding: `P(|Ŵ−W|≥ε) ≤ 2e^{−2dε²}`.
+- `minhash_d` is the only knob and rarely needs tuning. Default `256` gives a 95% CI
+  of ±0.061 (worst case). Lower it on massive datasets to cut signature memory
+  (`d·n·4` bytes) and construction time (linear in `d`); raise it for tighter weights.
+- `characterize_dataset` surfaces a `minhash_advisory` (suggested `d`, with the
+  memory/time win and CI cost) when `n` is large; `diagnose_cosmic_graph` reports the
+  realized error (`minhash_profile`) for the `d` actually used. Set with
+  `refine_config(..., cosmic_graph.minhash_d=<value>)`. Runs are reproducible via
+  `cosmic_graph.minhash_seed`.
+- For exact, bit-identical co-occurrence weights (at higher time/memory cost), set
+  `cosmic_graph.construction="exact"` — it builds the sparse pseudo-Laplacian backbone
+  directly with no estimation error (no `minhash_profile`). Default `"minhash"` is the
+  right choice for routine exploration.
+
 ## PHASE III: CONTRASTIVE INTERPRETATION
 7. Cluster: `generate_cluster_dossier`.
 8. Contrast: Perform comparative analysis. Identify the 'Pivot Feature' —

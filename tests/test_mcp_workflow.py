@@ -1879,6 +1879,11 @@ def test_diagnose_cosmic_graph_returns_structured_observables(tmp_path):
     assert "risk_factors" in objective
     assert "recommendation" not in objective
     assert "finalization_gate" not in objective
+    # Contract: the prompt tells the agent diagnose reports `minhash_profile` for the
+    # default (MinHash) construction. It must actually be in the payload, or the
+    # prompt over-promises. Pins prompts.py <-> _diagnosis_payload against drift.
+    assert "minhash_profile" in objective
+    assert objective["minhash_profile"]["d"] == 256
     assert "component_sizes" not in objective["component_morphology"]
     morph = objective["component_morphology"]
     assert morph["nontrivial_component_floor"] >= 1
@@ -1892,6 +1897,7 @@ def test_diagnose_cosmic_graph_returns_structured_observables(tmp_path):
     markdown = asyncio.run(diagnose_cosmic_graph(response_format="markdown"))
     assert markdown.startswith("# Cosmic Graph Diagnosis")
     assert "Observed patterns:" in markdown
+    assert "MinHash construction" in markdown
     assert "Risk factors:" in markdown
 
 
