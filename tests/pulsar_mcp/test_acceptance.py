@@ -512,6 +512,17 @@ def test_curated_interpret_with_viz(store_env):
     store = get_object_store()
     q = get_job_queue()
 
+    def fetch_viz(result, kind):
+        # Contract: render-scale geometry is NEVER inlined into the model channel.
+        # The tool returns a vizRef handle + a bounded vizSummary; the renderer (and
+        # this test) fetch the full payload out-of-band — here straight from the store
+        # (the GET /viz/{key} endpoint is covered by test_viz_endpoint_serves_by_ref).
+        assert "vizPayload" not in result
+        assert result["vizSummary"]["kind"] == kind
+        viz = json.loads(store.get(result["vizRef"]))
+        assert viz["kind"] == kind
+        return viz
+
     async def run():
         df = pd.read_csv(PENGUINS)
         buf = io.BytesIO()
@@ -536,7 +547,10 @@ def test_curated_interpret_with_viz(store_env):
 
         rd = json.loads(await C.diagnose_cosmic_graph(ds, ch))
         assert "n_nodes" in rd["structured"]
-        assert rd["vizPayload"]["kind"] == "cosmic_graph"
+        # component_sizes (O(components)) is bounded in the model channel.
+        assert "component_sizes" not in rd["structured"]
+        assert "component_sizes_summary" in rd["structured"]
+        rd_viz = fetch_viz(rd, "cosmic_graph")
         # cluster_provenance: the reference component count is self-describing and
         # 1:1-comparable to itself by definition.
         diag_prov = rd["structured"]["cluster_provenance"]
@@ -549,20 +563,23 @@ def test_curated_interpret_with_viz(store_env):
         assert diag_prov["n_groups"] == rd["structured"]["component_count"]
         # The cosmic_graph viz emits the connectivity-preserving backbone payload with
         # camelCase honest-pruning disclosure (the OLD code wrongly emitted snake_case).
-        viz = rd["vizPayload"]
+        viz = rd_viz
         assert "edges_truncated" not in viz and "total_edges" not in viz  # legacy gone
         assert isinstance(viz["edgesTruncated"], bool)
         assert viz["totalEdges"] >= len(viz["edges"])
         assert viz["renderedEdges"] == len(viz["edges"])
         assert viz["prunedEdges"] == viz["totalEdges"] - viz["renderedEdges"] >= 0
         assert viz["edgesTruncated"] == (viz["prunedEdges"] > 0)
+        # vizSummary mirrors the full payload's shape without the arrays.
+        assert rd["vizSummary"]["nodesCount"] == len(viz["nodes"])
+        assert rd["vizSummary"]["renderedEdges"] == viz["renderedEdges"]
         # FAITHFULNESS GATE: distinct component ids == diagnose_model component_count.
         distinct_components = {n["component"] for n in viz["nodes"]}
         assert len(distinct_components) == rd["structured"]["component_count"]
         assert viz["provenance"]["method_used"] == "components"
 
         ts = json.loads(await C.get_threshold_stability_curve(ds, ch))
-        assert ts["vizPayload"]["kind"] == "threshold_stability"
+        fetch_viz(ts, "threshold_stability")
         assert ts["structured"]["detail"] == "summary"
         assert "thresholds" not in ts["structured"]
         assert ts["structured"]["curve_sample"]
@@ -575,7 +592,7 @@ def test_curated_interpret_with_viz(store_env):
         sk = json.loads(
             await C.get_topological_skeleton(ds, ch, detail="nodes", max_nodes=5)
         )
-        assert sk["vizPayload"]["kind"] == "cosmic_graph"
+        fetch_viz(sk, "cosmic_graph")
         assert sk["structured"]["graph"]["detail"] == "nodes"
         assert "topological_summary" in sk["structured"]["graph"]
         sk_edges = json.loads(
@@ -584,8 +601,8 @@ def test_curated_interpret_with_viz(store_env):
         assert sk_edges["structured"]["graph"]["edges_returned"] <= 5
 
         rdo = json.loads(await C.generate_cluster_dossier(ds, ch))
-        assert rdo["vizPayload"]["kind"] == "manifold3d"
-        assert len(rdo["vizPayload"]["points"][0]) == 3  # real 3-D projection
+        rdo_viz = fetch_viz(rdo, "manifold3d")
+        assert len(rdo_viz["points"][0]) == 3  # real 3-D projection
         # cluster_provenance is well-formed and threaded into the dossier payload.
         dossier_prov = rdo["structured"]["cluster_result"]["cluster_provenance"]
         assert dossier_prov["unit"] in {"connected_component", "spectral_community"}
@@ -1030,3 +1047,71 @@ def test_streamable_http_bearer_auth(http_server):
         timeout=10,
     )
     assert good.status_code == 200  # MCP initialize succeeds with the bearer
+
+
+def test_viz_endpoint_serves_by_ref(http_server, tmp_path):
+    """GET /viz/{key}: bearer-gated, confined to viz JSON blobs, serves by handle."""
+    import httpx
+
+    from pulsar.mcp.store import FsObjectStore
+
+    base, token = http_server
+    # The fixture points the server's store at tmp_path/"s"; write a viz blob there.
+    store = FsObjectStore(tmp_path / "s")
+    key = "local/ds/cfg/viz/cosmic_graph-deadbeefdeadbeef.json"
+    store.put(key, b'{"kind":"cosmic_graph","nodes":[1,2,3]}')
+    auth = {"Authorization": f"Bearer {token}"}
+
+    assert (
+        httpx.get(f"{base}/viz/{key}", timeout=5).status_code == 401
+    )  # bearer required
+    # Confined to /viz/ JSON keys — cannot be used to read artifacts/datasets.
+    assert (
+        httpx.get(
+            f"{base}/viz/local/ds/cfg/artifact.json", headers=auth, timeout=5
+        ).status_code
+        == 403
+    )
+    assert (
+        httpx.get(
+            f"{base}/viz/local/ds/cfg/viz/missing-0000000000000000.json",
+            headers=auth,
+            timeout=5,
+        ).status_code
+        == 404
+    )
+    ok = httpx.get(f"{base}/viz/{key}", headers=auth, timeout=5)
+    assert ok.status_code == 200
+    assert ok.json()["kind"] == "cosmic_graph"
+
+
+def test_result_externalizes_large_viz(store_env):
+    """Invariant: the model-facing tool result is bounded regardless of graph size —
+    render-scale geometry goes out-of-band behind a vizRef, never inline."""
+    import pulsar.mcp.tools.curated as C
+    from pulsar.mcp.store import get_object_store
+
+    big = {
+        "kind": "cosmic_graph",
+        "nodes": [{"id": i, "x": i * 0.1, "y": i * 0.2} for i in range(5000)],
+        "edges": [{"u": i, "v": i + 1, "w": 0.9} for i in range(30000)],
+        "renderedEdges": 30000,
+        "totalEdges": 30000,
+    }
+    result = C._result("md", {"n_nodes": 5000}, big, ref=("local", "ds", "cfg"))
+    parsed = json.loads(result)
+
+    assert "vizPayload" not in parsed  # geometry is NOT in the model channel
+    assert len(result) < 4096  # bounded by construction, even for 30k edges
+    assert parsed["vizSummary"] == {
+        "kind": "cosmic_graph",
+        "nodesCount": 5000,
+        "edgesCount": 30000,
+        "renderedEdges": 30000,
+        "totalEdges": 30000,
+    }
+    # Full geometry is recoverable out-of-band via the handle.
+    raw = get_object_store().get(parsed["vizRef"])
+    assert len(raw) > 100_000
+    blob = json.loads(raw)
+    assert len(blob["nodes"]) == 5000 and len(blob["edges"]) == 30000

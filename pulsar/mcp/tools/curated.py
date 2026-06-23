@@ -15,6 +15,7 @@ feature_signal — never "persistence diagram"/"barcode".
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import json
 
@@ -55,10 +56,11 @@ from pulsar.mcp.payloads import (
     cluster_result_payload,
     feature_signal_payload_to_markdown,
     singleton_count_at_threshold,
+    size_summary,
     summary_evidence_payload_to_markdown,
 )
 from pulsar.mcp.preprocessing import _calibrate_processed_space
-from pulsar.mcp.store import get_object_store
+from pulsar.mcp.store import artifact_prefix, get_object_store
 from pulsar.mcp.thresholds import (
     THRESHOLD_CANDIDATE_POLICIES,
     agent_threshold_options,
@@ -86,16 +88,45 @@ def _json_default(o):
     raise TypeError(f"not JSON serializable: {type(o)!r}")
 
 
-def _result(markdown: str, structured, viz=None, confidence=None) -> str:
-    return json.dumps(
-        {
-            "markdown": markdown,
-            "structured": structured,
-            "vizPayload": viz,
-            "confidence": confidence,
-        },
-        default=_json_default,
-    )
+def _viz_summary(viz: dict) -> dict:
+    """Compact, model-facing stand-in for a viz payload: its kind, scalar metadata,
+    and a count for every array field (NOT the arrays themselves). This is what the
+    agent reads; the full O(n) geometry lives behind ``vizRef`` for the renderer.
+    """
+    summary: dict = {"kind": viz.get("kind")}
+    for key, value in viz.items():
+        if key == "kind":
+            continue
+        if isinstance(value, list):
+            summary[f"{key}Count"] = len(value)
+        elif isinstance(value, (int, float, str, bool)):
+            summary[key] = value
+    return summary
+
+
+def _result(markdown: str, structured, viz=None, confidence=None, *, ref=None) -> str:
+    """Serialize a tool result. Render-scale ``viz`` (O(nodes)/O(edges)) is NEVER
+    inlined into the model channel: when a ``ref=(user_id, dataset_id, config_hash)``
+    is supplied it is content-addressed into the object store and replaced by a small
+    ``vizRef`` handle (the store key) plus a bounded ``vizSummary``. The frontend
+    fetches the full payload out-of-band via ``GET /viz/{key}``. Without a ref (no
+    artifact context) it falls back to inlining — only the no-viz tools hit that path.
+    """
+    payload: dict = {
+        "markdown": markdown,
+        "structured": structured,
+        "confidence": confidence,
+    }
+    if viz is not None and ref is not None:
+        blob = json.dumps(viz, default=_json_default).encode()
+        digest = hashlib.sha256(blob).hexdigest()[:16]
+        key = f"{artifact_prefix(*ref)}/viz/{viz.get('kind', 'viz')}-{digest}.json"
+        get_object_store().put(key, blob)
+        payload["vizRef"] = key
+        payload["vizSummary"] = _viz_summary(viz)
+    else:
+        payload["vizPayload"] = viz
+    return json.dumps(payload, default=_json_default)
 
 
 def _load_view(user_id: str, dataset_id: str, config_hash_: str, store):
@@ -498,6 +529,13 @@ async def diagnose_cosmic_graph(
     view = _load_view(user_id, dataset_id, config_hash, get_object_store())
     gm = diagnose_model(view)
     structured = dataclasses.asdict(gm)
+    # component_sizes is O(components) — unbounded on a shattered graph. Replace the
+    # raw list with bounded telemetry in the model channel (mirrors the dossier and
+    # skeleton payloads); full sizes are recoverable from the cosmic_graph viz.
+    structured["component_sizes_summary"] = size_summary(
+        structured.get("component_sizes", [])
+    )
+    structured.pop("component_sizes", None)
     cr = _safe_clusters(view)
     labels = list(cr.labels) if cr else None
     # The cosmic-graph viz carries the reference component-count provenance so a
@@ -506,6 +544,7 @@ async def diagnose_cosmic_graph(
         _diagnose_markdown(gm),
         structured,
         _viz_cosmic_graph(view, labels, provenance=gm.cluster_provenance),
+        ref=(user_id, dataset_id, config_hash),
     )
 
 
@@ -525,13 +564,19 @@ async def generate_cluster_dossier(
             "Interpretation is not advised on this snapshot.",
             {"structureStatus": "no_reliable_structure"},
             _viz_threshold_stability(view),
+            ref=(user_id, dataset_id, config_hash),
         )
     fei = build_feature_evidence_index(view, view.data, cr.labels)
     gm = diagnose_model(view)
     cmeta = cluster_result_payload(cr, view.resolved_construction_threshold)
     structured = build_summary_evidence_payload(fei, cmeta, dataclasses.asdict(gm))
     md = summary_evidence_payload_to_markdown(structured)
-    return _result(md, structured, _viz_manifold3d(view, cr.labels))
+    return _result(
+        md,
+        structured,
+        _viz_manifold3d(view, cr.labels),
+        ref=(user_id, dataset_id, config_hash),
+    )
 
 
 async def get_feature_signal(
@@ -563,7 +608,12 @@ async def get_feature_signal(
         ):
             best[col] = r
     md = feature_signal_payload_to_markdown(signals)
-    return _result(md, {"signals": signals}, _viz_feature_signal(list(best.values())))
+    return _result(
+        md,
+        {"signals": signals},
+        _viz_feature_signal(list(best.values())),
+        ref=(user_id, dataset_id, config_hash),
+    )
 
 
 async def get_cluster_profile(
@@ -598,7 +648,10 @@ async def get_cluster_profile(
     }
     md = cluster_profile_payload_to_markdown(payload)
     return _result(
-        md, payload, _viz_feature_signal(cluster.get("numeric_features", []))
+        md,
+        payload,
+        _viz_feature_signal(cluster.get("numeric_features", [])),
+        ref=(user_id, dataset_id, config_hash),
     )
 
 
@@ -742,7 +795,12 @@ async def get_threshold_stability_curve(
         f"optimal {optimal_threshold:.4f}, construction {resolved_construction_threshold:.4f}. "
         f"{structured['agent_readout']}"
     )
-    return _result(md, structured, _viz_threshold_stability(view))
+    return _result(
+        md,
+        structured,
+        _viz_threshold_stability(view),
+        ref=(user_id, dataset_id, config_hash),
+    )
 
 
 async def get_topological_skeleton(
@@ -797,6 +855,7 @@ async def get_topological_skeleton(
         md,
         structured,
         _viz_cosmic_graph(view, view._cluster_labels, provenance=provenance),
+        ref=(user_id, dataset_id, config_hash),
     )
 
 

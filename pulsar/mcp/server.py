@@ -12,7 +12,7 @@ from typing import Any
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,26 @@ from pulsar.mcp.tools import ALL_TOOLS_LIST  # noqa: E402
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "pulsar-mcp"})
+
+
+@mcp.custom_route("/viz/{key:path}", methods=["GET"])
+async def get_viz(request: Request) -> Response:
+    """Serve an externalized viz blob by object-store key.
+
+    Curated tools no longer inline render-scale geometry into tool results; they
+    persist it and return a ``vizRef`` (the key) which the frontend fetches here.
+    Bearer auth is enforced by the global ASGI gate (this path is not exempt).
+    Confined to ``/viz/`` JSON blobs so the route cannot read datasets/artifacts.
+    """
+    from pulsar.mcp.store import get_object_store
+
+    key = request.path_params["key"]
+    if "/viz/" not in key or not key.endswith(".json"):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    store = get_object_store()
+    if not store.exists(key):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return Response(store.get(key), media_type="application/json")
 
 
 class _BearerAuthASGI:
