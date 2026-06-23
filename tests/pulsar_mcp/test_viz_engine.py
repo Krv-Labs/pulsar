@@ -68,6 +68,18 @@ def test_layout_seed_and_coords_emitted():
         assert -1.0001 <= nd["y"] <= 1.0001
 
 
+def test_cosmic_graph_keeps_construction_and_interpretation_provenance_separate():
+    viz = build_cosmic_graph_payload(
+        _View(_block_adjacency([2, 2])),
+        labels=[0, 1, 1, 0],
+        provenance={"method_used": "components"},
+        interpretation_provenance={"method_used": "threshold_stability"},
+    )
+
+    assert viz["provenance"]["method_used"] == "components"
+    assert viz["interpretationProvenance"]["method_used"] == "threshold_stability"
+
+
 def test_layout_deterministic_across_two_calls():
     a = _make_payload()
     b = _make_payload()

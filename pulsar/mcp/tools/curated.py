@@ -196,7 +196,13 @@ def _project_3d(embeddings):
     return np.column_stack([emb, np.zeros((len(emb), 2))]), "raw"
 
 
-def _viz_cosmic_graph(view, labels, max_edges: int = 2500, provenance=None):
+def _viz_cosmic_graph(
+    view,
+    labels,
+    max_edges: int = 2500,
+    provenance=None,
+    interpretation_provenance=None,
+):
     """Connectivity-preserving backbone payload over the FULL weighted-adjacency.
 
     Delegates to ``pulsar.mcp.viz_graph``: the rendered graph has far fewer edges than
@@ -207,7 +213,12 @@ def _viz_cosmic_graph(view, labels, max_edges: int = 2500, provenance=None):
     """
     from pulsar.mcp.viz_graph import build_cosmic_graph_payload
 
-    return build_cosmic_graph_payload(view, labels, provenance=provenance)
+    return build_cosmic_graph_payload(
+        view,
+        labels,
+        provenance=provenance,
+        interpretation_provenance=interpretation_provenance,
+    )
 
 
 # A rendered curve needs only enough points to look smooth on screen, not the full
@@ -239,6 +250,7 @@ def _viz_threshold_stability(view):
         "componentCounts": [counts[i] for i in idx],
         "pointsOmitted": max(n - len(idx), 0),
         "optimal": sc.get("optimalThreshold", view.resolved_construction_threshold),
+        "construction": float(view.resolved_construction_threshold),
     }
 
 
@@ -538,12 +550,20 @@ async def diagnose_cosmic_graph(
     structured.pop("component_sizes", None)
     cr = _safe_clusters(view)
     labels = list(cr.labels) if cr else None
+    interpretation_provenance = (
+        cluster_provenance(cr, view.resolved_construction_threshold) if cr else None
+    )
     # The cosmic-graph viz carries the reference component-count provenance so a
     # consumer reading the (truncated) edge list knows which partition it shows.
     return _result(
         _diagnose_markdown(gm),
         structured,
-        _viz_cosmic_graph(view, labels, provenance=gm.cluster_provenance),
+        _viz_cosmic_graph(
+            view,
+            labels,
+            provenance=gm.cluster_provenance,
+            interpretation_provenance=interpretation_provenance,
+        ),
         ref=(user_id, dataset_id, config_hash),
     )
 
@@ -854,7 +874,11 @@ async def get_topological_skeleton(
     return _result(
         md,
         structured,
-        _viz_cosmic_graph(view, view._cluster_labels, provenance=provenance),
+        _viz_cosmic_graph(
+            view,
+            view._cluster_labels,
+            interpretation_provenance=provenance,
+        ),
         ref=(user_id, dataset_id, config_hash),
     )
 

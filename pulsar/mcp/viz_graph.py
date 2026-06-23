@@ -370,14 +370,17 @@ def compute_island_layout(
 # --------------------------------------------------------------------------- #
 # Assembly
 # --------------------------------------------------------------------------- #
-def build_cosmic_graph_payload(view, labels, *, provenance=None) -> dict:
+def build_cosmic_graph_payload(
+    view, labels, *, provenance=None, interpretation_provenance=None
+) -> dict:
     """Build the backbone cosmic_graph viz payload from ``view.weighted_adjacency``.
 
     Args:
         view: ``ArtifactView`` (or fitted ThemaRS) exposing ``weighted_adjacency``,
             ``resolved_construction_threshold``, and ``n``.
         labels: per-node interpretation cluster labels (or ``None``).
-        provenance: ClusterProvenance object (snake_case) attached VERBATIM.
+        provenance: construction-component ClusterProvenance object attached VERBATIM.
+        interpretation_provenance: optional ClusterProvenance for the ``cluster`` overlay.
     """
     W = np.asarray(view.weighted_adjacency, dtype=np.float64)
     n_nodes = int(view.n)
@@ -450,4 +453,6 @@ def build_cosmic_graph_payload(view, labels, *, provenance=None) -> dict:
     }
     if provenance is not None:
         viz["provenance"] = provenance
+    if interpretation_provenance is not None:
+        viz["interpretationProvenance"] = interpretation_provenance
     return viz
