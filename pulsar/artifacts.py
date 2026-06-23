@@ -195,6 +195,17 @@ def dump_artifact(
         "stabilityCurve": stability_curve,
         "resolvedConstructionThreshold": float(model._resolved_construction_threshold),
         "nBallMaps": int(len(model._ball_maps)),
+        # Construction metadata so the cold ArtifactView can report minhash_profile.
+        "cosmicConstruction": getattr(
+            getattr(getattr(model, "config", None), "cosmic_graph", None),
+            "construction",
+            "minhash",
+        ),
+        "minhashD": getattr(
+            getattr(getattr(model, "config", None), "cosmic_graph", None),
+            "minhash_d",
+            None,
+        ),
         "metrics": _graph_metrics(G, n),
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
@@ -249,11 +260,22 @@ class ArtifactView:
         pulsar_version: str | None,
         n: int,
         n_ball_maps: int,
+        construction: str = "minhash",
+        minhash_d: int | None = None,
         artifact: dict | None = None,
         store=None,
     ) -> None:
+        from types import SimpleNamespace
+
         self._artifact = artifact
         self._store = store
+        # Minimal config shim so diagnose_model can read cosmic_graph.minhash_d /
+        # .construction off a cold artifact exactly as it does off a live model.
+        self.config = SimpleNamespace(
+            cosmic_graph=SimpleNamespace(
+                construction=construction, minhash_d=minhash_d
+            )
+        )
         self._weighted_adjacency_cache = weighted_adjacency
         self._cosmic_graph_cache = cosmic_graph
         self._embeddings_cache = embeddings
@@ -416,6 +438,8 @@ def load_artifact(d: dict, store) -> ArtifactView:
         pulsar_version=d.get("pulsarVersion"),
         n=n,
         n_ball_maps=int(d.get("nBallMaps", 0)),
+        construction=d.get("cosmicConstruction", "minhash"),
+        minhash_d=d.get("minhashD"),
         artifact=d,
         store=store,
     )
