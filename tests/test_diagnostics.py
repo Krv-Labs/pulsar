@@ -451,6 +451,31 @@ def test_resolve_clusters_spectral_method(connected_spectral_model):
     assert len(result.labels.unique()) >= 2
 
 
+def test_threshold_stability_accepts_many_nontrivial_components():
+    """A many-cluster graph with real mass should not fail just because count is high."""
+    from pulsar.mcp.interpreter import _cluster_by_threshold_stability
+
+    groups = 40
+    group_size = 3
+    n = groups * group_size
+    adj = np.full((n, n), 0.05, dtype=np.float64)
+    np.fill_diagonal(adj, 0.0)
+
+    for g in range(groups):
+        start = g * group_size
+        stop = start + group_size
+        for i in range(start, stop):
+            for j in range(i + 1, stop):
+                adj[i, j] = 0.9
+                adj[j, i] = 0.9
+
+    result = _cluster_by_threshold_stability(adj, n)
+
+    assert result is not None
+    assert result.method_used == "threshold_stability"
+    assert result.n_clusters == groups
+
+
 def test_resolve_clusters_spectral_honors_explicit_method_with_threshold():
     """A positive interpretation threshold must not force component clustering."""
     from types import SimpleNamespace

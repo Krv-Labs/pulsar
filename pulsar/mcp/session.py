@@ -257,11 +257,18 @@ def _feature_evidence_fingerprint(
 
 
 def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
+    n_edges = int(metrics.get("n_edges", 0))
     density = float(metrics.get("density", 0.0))
     component_count = int(metrics.get("component_count", 0))
     singleton_fraction = float(metrics.get("singleton_fraction", 0.0))
     giant_fraction = float(metrics.get("giant_fraction", 0.0))
     is_connected = component_count <= 1
+    if n_edges == 0:
+        return (
+            "empty",
+            is_connected,
+            "No edges are present at this threshold. Consider a lower stability plateau or a broader projection/epsilon sweep before interpreting clusters.",
+        )
     if density > 0.8:
         return (
             "hairball",

@@ -30,14 +30,22 @@ from pulsar.runtime.utils import (
     generate_proportion_bar,
 )
 from pulsar.mcp.diagnostics import diagnose_model
+from pulsar.mcp.thresholds import (
+    component_mass_profile,
+    component_state_at_threshold,
+    mass_profile_hint,
+    useful_component_size_floor,
+)
 
 logger = logging.getLogger(__name__)
 
 # Clustering strategy constants
-_MAX_COMPONENTS = 30  # Use component strategy if fewer than this
-_MAX_SINGLETON_RATIO = 0.5  # Reject if >50% of nodes are singletons
 _SPECTRAL_K_MIN = 2
 _SPECTRAL_K_MAX = 20
+# Reject a plateau only if >half its nodes are singletons — a scale-free dust
+# guard. There is intentionally no absolute cap on component count (Pulsar must
+# stay dataset-agnostic: large datasets can have many genuine cohorts).
+_MAX_SINGLETON_RATIO = 0.5
 _MAX_SIGNAL_MATRIX_NUMERIC = 10
 _MAX_SIGNAL_MATRIX_CATEGORICAL = 5
 _EPS = 1e-9
@@ -127,6 +135,101 @@ class FeatureEvidenceIndex:
     metadata: Dict[str, Any]
     working_columns: List[str] = field(default_factory=list)
     categorical_columns_gated: List[Dict[str, Any]] = field(default_factory=list)
+
+
+# Float tolerance for declaring that the interpretation threshold equals the
+# fitted construction threshold (mirrors np.isclose defaults used elsewhere).
+_THRESHOLD_MATCH_ATOL = 1e-8
+_THRESHOLD_MATCH_RTOL = 1e-5
+
+
+def cluster_provenance(
+    result: "ClusterResult",
+    resolved_construction_threshold: float,
+) -> dict[str, Any]:
+    """Self-describing provenance for a ``resolve_clusters`` partition.
+
+    Emits the snake_case ``cluster_provenance`` contract (mirrors
+    ``ClusterProvenance`` in isomorph ``packages/contracts/src/index.ts``) so a
+    consumer never confuses a clustering count with the fitted cosmic-graph
+    component count. Different methods cut a DIFFERENT matrix at a DIFFERENT
+    threshold; this object says which, so divergent counts are expected, not a
+    paradox.
+    """
+    construction = float(resolved_construction_threshold)
+    labels = result.labels
+    n_groups = int(labels.nunique())
+    sizes = labels.value_counts()
+    n_singletons = int((sizes == 1).sum())
+
+    if result.method_used == "spectral":
+        # Spectral labels every node into a community; there is no edge-weight
+        # cut and no singleton notion.
+        unit = "spectral_community"
+        threshold_applied: float | None = None
+        threshold_source = "none"
+        base_matrix = "weighted_adjacency"
+        matches_construction = False
+        n_singletons = 0
+    else:
+        unit = "connected_component"
+        threshold_applied = float(result.interpretation_edge_weight_threshold_applied)
+        base_matrix = "weighted_adjacency"
+        matches_construction = bool(
+            math.isclose(
+                threshold_applied,
+                construction,
+                rel_tol=_THRESHOLD_MATCH_RTOL,
+                abs_tol=_THRESHOLD_MATCH_ATOL,
+            )
+        )
+        if result.method_used == "threshold_stability":
+            threshold_source = "stability_plateau_midpoint"
+        elif threshold_applied == 0.0:
+            threshold_source = "full_affinity"
+        else:
+            threshold_source = "explicit"
+
+    comparable = unit == "connected_component" and matches_construction
+    return {
+        "unit": unit,
+        "method_used": result.method_used,
+        "threshold_applied": threshold_applied,
+        "threshold_source": threshold_source,
+        "base_matrix": base_matrix,
+        "resolved_construction_threshold": construction,
+        "matches_construction_threshold": matches_construction,
+        "n_groups": n_groups,
+        "n_singletons": n_singletons,
+        "comparable_to_component_count": bool(comparable),
+    }
+
+
+def component_count_provenance(
+    *,
+    resolved_construction_threshold: float,
+    component_count: int,
+    singleton_count: int,
+) -> dict[str, Any]:
+    """Provenance for the fitted cosmic-graph connected-component count.
+
+    This is the reference partition: connected components of the cosmic graph AT
+    the construction threshold. It is the ONE count that is 1:1-comparable to
+    itself, so ``comparable_to_component_count`` is true by definition.
+    """
+    construction = float(resolved_construction_threshold)
+    return {
+        "unit": "connected_component",
+        "method_used": "components",
+        "threshold_applied": construction,
+        "threshold_source": "construction_threshold",
+        "base_matrix": "cosmic_graph",
+        "resolved_construction_threshold": construction,
+        "matches_construction_threshold": True,
+        "n_groups": int(component_count),
+        "n_singletons": int(singleton_count),
+        "comparable_to_component_count": True,
+    }
 
 
 def resolve_clusters(
@@ -237,6 +340,40 @@ def resolve_clusters(
     raise ValueError(f"Unknown clustering method: {method}")
 
 
+def _has_reliable_mass_split(adj: np.ndarray, threshold: float) -> bool:
+    """Accept stable plateaus when the component mass is not singleton-dominated.
+
+    This keeps the reliability gate dataset-relative: use a size floor tied to n,
+    then compare meaningful component mass against singleton dust instead of raw
+    component count. If we later need a softer policy, split this into tiers.
+    """
+    sizes, _ = component_state_at_threshold(adj, threshold)
+    if len(sizes) <= 1:
+        return False
+
+    hint = mass_profile_hint(component_mass_profile(adj, threshold, top_k=5))
+    if hint == "singleton-heavy fragmentation":
+        return False
+
+    floor = useful_component_size_floor(int(adj.shape[0]))
+    nontrivial_sizes = [size for size in sizes if size >= floor]
+    if len(nontrivial_sizes) < 2:
+        return False
+
+    total = float(sum(sizes))
+    singleton_mass = sum(size for size in sizes if size == 1) / total
+    nontrivial_mass = sum(nontrivial_sizes) / total
+    return (
+        hint
+        in {
+            "stable nontrivial multi-component structure",
+            "mostly connected graph with a small tail",
+            "giant component with small-tail fragmentation",
+        }
+        and nontrivial_mass > singleton_mass
+    )
+
+
 def _model_sparse_graph(
     model: ThemaRS,
 ) -> tuple[int, list[tuple[int, int, float]]] | None:
@@ -309,8 +446,12 @@ def _cluster_by_threshold_stability_sparse(
     ]
 
     for plateau in stability.plateaus:
-        comp_count = int(plateau.component_count)
-        if comp_count <= 1 or comp_count >= _MAX_COMPONENTS:
+        # Dataset-agnostic plateau gate: skip only the degenerate ends — a fully
+        # connected cut (nothing to separate) and a dust-dominated cut (>half the
+        # nodes are singletons). There is deliberately NO absolute cap on the
+        # component count: a large dataset may have many genuine cohorts, and the
+        # singleton fraction is scale-free, so this stays performant on any size.
+        if int(plateau.component_count) <= 1:
             continue
 
         thresh = float(plateau.midpoint)
@@ -438,17 +579,12 @@ def _cluster_by_threshold_stability(adj: np.ndarray, n: int) -> ClusterResult | 
     ]
 
     for plateau in stability.plateaus:
-        comp_count = int(plateau.component_count)
-        if comp_count <= 1 or comp_count >= _MAX_COMPONENTS:
+        thresh = float(plateau.midpoint)
+        if not _has_reliable_mass_split(adj, thresh):
             continue
 
-        # Check singleton ratio
-        thresh = float(plateau.midpoint)
         binary_adj = (adj > thresh).astype(np.int64)
         G = nx.from_numpy_array(binary_adj)
-        singletons = sum(1 for node in G.nodes() if G.degree(node) == 0)
-        if (singletons / n) > _MAX_SINGLETON_RATIO:
-            continue
 
         # Success: valid stable split
         labels = np.zeros(n, dtype=int)

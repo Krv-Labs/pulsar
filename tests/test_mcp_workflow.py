@@ -9,7 +9,12 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from pulsar.mcp.session import SweepRecord, _sessions, _get_session
+from pulsar.mcp.session import (
+    SweepRecord,
+    _sessions,
+    _get_session,
+    _graph_health_summary,
+)
 from pulsar.mcp.diagnostics import _finalization_gate
 from pulsar.mcp.config_tools import _initial_pca_grid
 from pulsar.mcp.payloads import sweep_payload_to_markdown
@@ -2489,3 +2494,23 @@ def test_run_topological_sweep_reports_projection_cache_hit_on_repeat(tmp_path):
     }
     assert second["pca_cached"] is second["projection_cached"]
     assert second["pca_cache_status"] == second["projection_cache_status"]
+
+
+def test_graph_health_summary_empty_graph():
+    """A zero-edge constructed graph gets an explicit empty health label."""
+    health, is_connected, action = _graph_health_summary(
+        {
+            "n_nodes": 10,
+            "n_edges": 0,
+            "density": 0.0,
+            "component_count": 10,
+            "singleton_fraction": 1.0,
+            "giant_fraction": 0.1,
+        }
+    )
+
+    assert health == "empty"
+    assert is_connected is False
+    assert "No edges are present" in action
+    assert "lower stability plateau" in action
+    assert "broader projection/epsilon sweep" in action

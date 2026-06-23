@@ -106,7 +106,14 @@ def parse_yaml_mapping(config_yaml: str) -> dict[str, Any]:
         raise ValueError(
             "config_yaml must be raw YAML, not a fenced Markdown code block"
         )
-    parsed = yaml.safe_load(config_yaml)
+    try:
+        parsed = yaml.safe_load(config_yaml)
+    except yaml.YAMLError:
+        # Tolerate legacy clients that send YAML with escaped "\n" (e.g. a
+        # JSON-stringified config) and no real newlines: un-escape and retry.
+        if "\\n" not in config_yaml or "\n" in config_yaml:
+            raise
+        parsed = yaml.safe_load(config_yaml.replace("\\n", "\n"))
     if not isinstance(parsed, dict):
         raise ValueError("config_yaml must be a valid YAML mapping")
     return parsed

@@ -360,7 +360,7 @@ async def generate_cluster_dossier(
         # Single source of truth for cluster metadata: build the O(n) size table
         # once, store it on the session, and reuse it for every downstream reader
         # (compacted header, cluster_selection ID universe, sibling tools).
-        cluster_meta = cluster_result_payload(result)
+        cluster_meta = cluster_result_payload(result, construction_threshold)
         session.feature_evidence_cluster_meta = cluster_meta
         assignment = registry.save_cluster_assignment(
             run_id=session.latest_run_id,

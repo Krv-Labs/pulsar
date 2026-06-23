@@ -7,8 +7,12 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +68,107 @@ mcp = AgnosticFastMCP(
 # ---------------------------------------------------------------------------
 from pulsar.mcp.tools import ALL_TOOLS_LIST  # noqa: E402
 
-for tool_fn in ALL_TOOLS_LIST:
+
+# ---------------------------------------------------------------------------
+# Health check (unauthenticated) + bearer auth for Streamable HTTP transport
+# ---------------------------------------------------------------------------
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "service": "pulsar-mcp"})
+
+
+@mcp.custom_route("/viz/{key:path}", methods=["GET"])
+async def get_viz(request: Request) -> Response:
+    """Serve an externalized viz blob by object-store key.
+
+    Curated tools no longer inline render-scale geometry into tool results; they
+    persist it and return a ``vizRef`` (the key) which the frontend fetches here.
+    Bearer auth is enforced by the global ASGI gate (this path is not exempt).
+    Confined to ``/viz/`` JSON blobs so the route cannot read datasets/artifacts.
+    """
+    from pulsar.mcp.store import get_object_store
+
+    key = request.path_params["key"]
+    if "/viz/" not in key or not key.endswith(".json"):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    store = get_object_store()
+    if not store.exists(key):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return Response(store.get(key), media_type="application/json")
+
+
+class _BearerAuthASGI:
+    """Pure-ASGI bearer gate for Streamable HTTP (does NOT buffer streaming responses).
+
+    Guards every path except those in ``exempt``. Requires
+    ``Authorization: Bearer <INTERNAL_MCP_TOKEN>``; a missing/wrong token => 401.
+    If no token is configured the gate is open (stdio/dev only).
+    """
+
+    def __init__(
+        self, app, token: str, exempt: tuple[str, ...] = ("/healthz",)
+    ) -> None:
+        self.app = app
+        self.token = token
+        self.exempt = exempt
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not self.token:
+            return await self.app(scope, receive, send)
+        path = (scope.get("path", "") or "/").rstrip("/") or "/"
+        if path in self.exempt:
+            return await self.app(scope, receive, send)
+        provided = dict(scope.get("headers") or []).get(b"authorization", b"").decode()
+        if provided == f"Bearer {self.token}":
+            return await self.app(scope, receive, send)
+        await JSONResponse({"error": "Unauthorized"}, status_code=401)(
+            scope, receive, send
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool registration — env-gated allowlist (build-spec §3.2)
+#   PULSAR_TOOLSET=full    — all tools
+#                 |curated — artifact-based production surface
+# The default is TRANSPORT-AWARE: HTTP (the web/production surface) defaults to `curated`; stdio dev
+# keeps the `full` surface. An explicit PULSAR_TOOLSET always overrides. This stops an HTTP launch
+# that forgets the env var from silently serving the full surface (the web app's curated-contract
+# gate would then 503 every chat).
+# ---------------------------------------------------------------------------
+_TRANSPORT = os.environ.get("PULSAR_TRANSPORT", "stdio").lower()
+_DEFAULT_TOOLSET = "curated" if _TRANSPORT in ("http", "streamable-http") else "full"
+_TOOLSET = os.environ.get("PULSAR_TOOLSET", _DEFAULT_TOOLSET).lower()
+if _TOOLSET == "curated":
+    from pulsar.mcp.tools.curated import CURATED_TOOLS_LIST  # noqa: E402
+
+    _TOOLS = CURATED_TOOLS_LIST
+else:
+    _TOOLS = ALL_TOOLS_LIST
+
+for tool_fn in _TOOLS:
     mcp.tool()(tool_fn)
 
 
 def main():
-    mcp.run()
+    transport = _TRANSPORT
+    if transport in ("http", "streamable-http"):
+        token = os.environ.get("INTERNAL_MCP_TOKEN", "")
+        host = os.environ.get("PULSAR_MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("PULSAR_MCP_PORT", os.environ.get("PORT", "8000")))
+        path = os.environ.get("PULSAR_MCP_PATH", "/mcp")
+        if not token:
+            logger.warning(
+                "PULSAR_TRANSPORT=http but INTERNAL_MCP_TOKEN is empty — bearer gate OPEN (dev only)."
+            )
+        mcp.run(
+            transport="streamable-http",
+            host=host,
+            port=port,
+            path=path,
+            middleware=[Middleware(_BearerAuthASGI, token=token)],
+        )
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":

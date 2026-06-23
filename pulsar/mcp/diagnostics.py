@@ -48,6 +48,10 @@ class GraphMetrics:
     grid_adequacy_status: str = "unknown"
     grid_adequacy_note: str = ""
     advisories: list[dict] = field(default_factory=list)
+    # Self-describing provenance for the component_count above: it is the
+    # connected-component count of the FITTED cosmic graph at the construction
+    # threshold — the reference partition both sides can compare against.
+    cluster_provenance: dict[str, Any] = field(default_factory=dict)
     # Realized accuracy of the MinHash-constructed weights at the depth `d` used:
     # edge weights are unbiased Jaccard estimates with Var = J(1−J)/d. None if the
     # construction depth could not be read from the model config.
@@ -280,6 +284,17 @@ def diagnose_model(model: ThemaRS) -> GraphMetrics:
     minhash_d = getattr(cosmic_cfg, "minhash_d", None)
     if getattr(cosmic_cfg, "construction", "minhash") == "minhash" and minhash_d:
         result.minhash_profile = depth_profile(int(minhash_d), result.n_nodes)
+
+    # Self-describing provenance for result.component_count: the connected-component
+    # count of the FITTED cosmic graph at the construction threshold — the reference
+    # partition consumers (e.g. the curated graph viz) compare cluster counts against.
+    from pulsar.mcp.interpreter import component_count_provenance
+
+    result.cluster_provenance = component_count_provenance(
+        resolved_construction_threshold=float(model.resolved_construction_threshold),
+        component_count=result.component_count,
+        singleton_count=result.singleton_count,
+    )
 
     logger.info(
         "diagnose_model: nodes=%d, edges=%d, components=%d, ball_maps=%d",
