@@ -712,3 +712,58 @@ class ThemaRS:
             reps.append(self._ball_maps[closest])
 
         return reps
+
+    def export_edges_parquet(
+        self, path: str, threshold: float | None = None
+    ) -> None:
+        """Export the weighted edge list of the cosmic graph to a Parquet file in sparse COO format.
+
+        Args:
+            path: Destination file path.
+            threshold: Optional threshold to filter edges. Defaults to the resolved
+                construction threshold.
+        """
+        _ = self.cosmic_rust  # Triggers RuntimeError if fit() hasn't been called
+        edges = self.weighted_edges(threshold=threshold)
+        df = pd.DataFrame(edges, columns=["row", "col", "weight"])
+        df.to_parquet(path)
+
+    def export_nodes_parquet(
+        self, path: str, thresholds: float | list[float] | None = None
+    ) -> None:
+        """Export the preprocessed node dataset along with connected component labels
+        at various thresholds to a Parquet file.
+
+        Args:
+            path: Destination file path.
+            thresholds: Single threshold or list of thresholds to compute connected components.
+                If None, uses [self.resolved_construction_threshold].
+        """
+        df = self.preprocessed_data.copy()  # Triggers RuntimeError if fit() hasn't been called
+        n = self.cosmic_rust.n
+
+        if thresholds is None:
+            thresholds = [self.resolved_construction_threshold]
+        elif isinstance(thresholds, (int, float)):
+            thresholds = [float(thresholds)]
+        else:
+            thresholds = [float(t) for t in thresholds]
+
+        for t in thresholds:
+            # Build networkx graph at threshold t
+            G = nx.Graph()
+            G.add_nodes_from(range(n))
+            for u, v, w in self.weighted_edges(threshold=t):
+                G.add_edge(u, v, weight=w)
+
+            components = sorted(nx.connected_components(G), key=len, reverse=True)
+            node_to_comp = {}
+            for comp_idx, comp in enumerate(components):
+                for node in comp:
+                    node_to_comp[node] = comp_idx
+
+            # Assign labels
+            col_name = f"cc_label_{t:.4f}".replace(".", "_")
+            df[col_name] = [node_to_comp[i] for i in range(n)]
+
+        df.to_parquet(path)
