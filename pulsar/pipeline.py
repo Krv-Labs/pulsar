@@ -713,9 +713,7 @@ class ThemaRS:
 
         return reps
 
-    def export_edges_parquet(
-        self, path: str, threshold: float | None = None
-    ) -> None:
+    def export_edges_parquet(self, path: str, threshold: float | None = None) -> None:
         """Export the weighted edge list of the cosmic graph to a Parquet file in sparse COO format.
 
         Args:
@@ -739,7 +737,9 @@ class ThemaRS:
             thresholds: Single threshold or list of thresholds to compute connected components.
                 If None, uses [self.resolved_construction_threshold].
         """
-        df = self.preprocessed_data.copy()  # Triggers RuntimeError if fit() hasn't been called
+        df = (
+            self.preprocessed_data.copy()
+        )  # Triggers RuntimeError if fit() hasn't been called
         n = self.cosmic_rust.n
 
         if thresholds is None:
