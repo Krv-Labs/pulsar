@@ -389,7 +389,9 @@ def test_export_dataset_bundle_invalid_cluster_assignment_id():
     session.model = MagicMock()
 
     result_json = asyncio.run(
-        export_dataset_bundle("out", "slug", cluster_assignment_id="ca_missing", ctx=None)
+        export_dataset_bundle(
+            "out", "slug", cluster_assignment_id="ca_missing", ctx=None
+        )
     )
     result = json.loads(result_json)
     assert result["status"] == "error"
@@ -416,7 +418,10 @@ def test_export_dataset_bundle_mismatched_row_count():
 
     result_json = asyncio.run(
         export_dataset_bundle(
-            "out", "slug", cluster_assignment_id=assignment.cluster_assignment_id, ctx=None
+            "out",
+            "slug",
+            cluster_assignment_id=assignment.cluster_assignment_id,
+            ctx=None,
         )
     )
     result = json.loads(result_json)
@@ -437,9 +442,7 @@ def test_export_dataset_bundle_invalid_metadata():
 
     # Case 1: Non-flat dict
     result_json = asyncio.run(
-        export_dataset_bundle(
-            "out", "slug", cluster_names="invalid_type", ctx=None
-        )
+        export_dataset_bundle("out", "slug", cluster_names="invalid_type", ctx=None)
     )
     result = json.loads(result_json)
     assert result["status"] == "error"
@@ -447,9 +450,7 @@ def test_export_dataset_bundle_invalid_metadata():
 
     # Case 2: Unknown cluster ID key
     result_json = asyncio.run(
-        export_dataset_bundle(
-            "out", "slug", cluster_names={"99": "Unknown"}, ctx=None
-        )
+        export_dataset_bundle("out", "slug", cluster_names={"99": "Unknown"}, ctx=None)
     )
     result = json.loads(result_json)
     assert result["status"] == "error"

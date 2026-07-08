@@ -436,7 +436,11 @@ async def export_dataset_bundle(
     if edges_threshold is not None:
         try:
             edges_threshold = float(edges_threshold)
-            if not np.isfinite(edges_threshold) or edges_threshold < 0.0 or edges_threshold > 1.0:
+            if (
+                not np.isfinite(edges_threshold)
+                or edges_threshold < 0.0
+                or edges_threshold > 1.0
+            ):
                 return mcp_error(
                     "export_dataset_bundle",
                     "edges_threshold must be a float between 0.0 and 1.0",
