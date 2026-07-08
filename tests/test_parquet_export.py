@@ -301,6 +301,8 @@ def test_export_dataset_bundle_with_clean_and_node_id_indices(fitted_model):
             layout="projection",
             include_clean=True,
         )
+        assert isinstance(manifest, dict)
+        assert "pulsar_version" in manifest
         base_path = os.path.join(tmpdir, slug)
         raw_path = os.path.join(base_path, "tabular", "raw.parquet")
         clean_path = os.path.join(base_path, "tabular", "clean.parquet")
@@ -328,7 +330,9 @@ def test_export_dataset_bundle_alignment_guard(fitted_model):
     fitted_model._data = original_data.iloc[:10]  # size 10, but n is 30
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        with pytest.raises(RuntimeError, match="raw data has 10 rows but graph has 30 nodes"):
+        with pytest.raises(
+            RuntimeError, match="raw data has 10 rows but graph has 30 nodes"
+        ):
             fitted_model.export_dataset_bundle(
                 output_dir=tmpdir,
                 slug="test-slug-align-raw",
@@ -341,10 +345,14 @@ def test_export_dataset_bundle_alignment_guard(fitted_model):
 
     # 2. Force a length mismatch on clean_data
     original_preprocessed = fitted_model._preprocessed_data
-    fitted_model._preprocessed_data = original_preprocessed.iloc[:10]  # size 10, but n is 30
+    fitted_model._preprocessed_data = original_preprocessed.iloc[
+        :10
+    ]  # size 10, but n is 30
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        with pytest.raises(RuntimeError, match="clean_data has 10 rows but graph has 30 nodes"):
+        with pytest.raises(
+            RuntimeError, match="clean_data has 10 rows but graph has 30 nodes"
+        ):
             fitted_model.export_dataset_bundle(
                 output_dir=tmpdir,
                 slug="test-slug-align-clean",

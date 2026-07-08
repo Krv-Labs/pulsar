@@ -352,7 +352,9 @@ def export_dataset_bundle(
     if include_clean:
         clean_df = clean_data(model).copy()
         if len(clean_df) != n:
-            raise RuntimeError(f"clean_data has {len(clean_df)} rows but graph has {n} nodes")
+            raise RuntimeError(
+                f"clean_data has {len(clean_df)} rows but graph has {n} nodes"
+            )
         clean_df.index = pd.Index(np.arange(n, dtype=np.uint32), name="node_id")
         clean_df.to_parquet(tabular_path / "clean.parquet", index=True)
 
