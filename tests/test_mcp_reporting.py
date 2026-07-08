@@ -404,6 +404,7 @@ def test_export_dataset_bundle_mismatched_row_count():
     _sessions.clear()
     session = _get_session(None)
     session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.latest_run_id = "run_1"
     session.model = MagicMock()
 
     assignment = registry.save_cluster_assignment(
@@ -427,6 +428,126 @@ def test_export_dataset_bundle_mismatched_row_count():
     result = json.loads(result_json)
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_ASSIGNMENT_ROW_MISMATCH"
+
+
+def test_export_dataset_bundle_rejects_assignment_from_other_run():
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.latest_run_id = "run_active"
+    session.model = MagicMock()
+
+    assignment = registry.save_cluster_assignment(
+        run_id="run_other",
+        dataset_id=None,
+        method="components",
+        interpretation_edge_weight_threshold=0.25,
+        threshold_source="explicit",
+        construction_threshold=0.25,
+        labels=[0, 1, 0],
+    )
+
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            "out",
+            "slug",
+            cluster_assignment_id=assignment.cluster_assignment_id,
+            ctx=None,
+        )
+    )
+    result = json.loads(result_json)
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH"
+    assert result["details"]["assignment_run_id"] == "run_other"
+    assert result["details"]["current_run_id"] == "run_active"
+    session.model.export_dataset_bundle.assert_not_called()
+
+
+def test_export_dataset_bundle_rejects_assignment_from_other_dataset(tmp_path):
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    path_a = tmp_path / "a.csv"
+    path_b = tmp_path / "b.csv"
+    pd.DataFrame({"x": [1, 2, 3]}).to_csv(path_a, index=False)
+    pd.DataFrame({"x": [4, 5, 6]}).to_csv(path_b, index=False)
+    dataset_a = registry.register_dataset(str(path_a))
+    dataset_b = registry.register_dataset(str(path_b))
+
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [4, 5, 6]})
+    session.data_dataset_id = dataset_b.dataset_id
+    session.latest_run_id = "run_active"
+    session.model = MagicMock()
+
+    assignment = registry.save_cluster_assignment(
+        run_id=session.latest_run_id,
+        dataset_id=dataset_a.dataset_id,
+        method="components",
+        interpretation_edge_weight_threshold=0.25,
+        threshold_source="explicit",
+        construction_threshold=0.25,
+        labels=[0, 1, 0],
+    )
+
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            "out",
+            "slug",
+            cluster_assignment_id=assignment.cluster_assignment_id,
+            ctx=None,
+        )
+    )
+    result = json.loads(result_json)
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH"
+    assert result["details"]["assignment_dataset_id"] == dataset_a.dataset_id
+    assert result["details"]["current_dataset_id"] == dataset_b.dataset_id
+    session.model.export_dataset_bundle.assert_not_called()
+
+
+def test_export_dataset_bundle_rejects_stale_assignment_dataset(tmp_path):
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    input_path = tmp_path / "input.csv"
+    pd.DataFrame({"x": [1, 2, 3]}).to_csv(input_path, index=False)
+    dataset = registry.register_dataset(str(input_path))
+    pd.DataFrame({"x": [1, 2, 3, 4]}).to_csv(input_path, index=False)
+
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.data_dataset_id = dataset.dataset_id
+    session.latest_run_id = "run_active"
+    session.model = MagicMock()
+
+    assignment = registry.save_cluster_assignment(
+        run_id=session.latest_run_id,
+        dataset_id=dataset.dataset_id,
+        method="components",
+        interpretation_edge_weight_threshold=0.25,
+        threshold_source="explicit",
+        construction_threshold=0.25,
+        labels=[0, 1, 0],
+    )
+
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            "out",
+            "slug",
+            cluster_assignment_id=assignment.cluster_assignment_id,
+            ctx=None,
+        )
+    )
+    result = json.loads(result_json)
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTER_ASSIGNMENT_DATASET_STALE"
+    session.model.export_dataset_bundle.assert_not_called()
 
 
 def test_export_dataset_bundle_invalid_metadata():

@@ -50,6 +50,7 @@ NODE_FIELD_TYPES = {
     "ez": pa.float32(),
     "is_live": pa.bool_(),
 }
+NODE_RESERVED_FIELDS = set(NODE_FIELD_TYPES)
 
 
 def _write_parquet(df: pd.DataFrame, schema: pa.Schema, path: Path) -> None:
@@ -68,6 +69,30 @@ def _cast_known_fields(
                 i, pa.field(field.name, field_types[field.name], nullable=False)
             )
     return table.cast(schema)
+
+
+def _node_passthrough_columns(
+    raw_columns: list[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return graph/nodes passthrough names without clobbering canonical fields."""
+    used = set(NODE_RESERVED_FIELDS)
+    passthrough: dict[str, str] = {}
+    renamed: dict[str, str] = {}
+
+    for col in raw_columns:
+        output_col = col
+        if output_col in used:
+            base = f"raw_{col}"
+            output_col = base
+            suffix = 1
+            while output_col in used or output_col in raw_columns:
+                output_col = f"{base}_{suffix}"
+                suffix += 1
+            renamed[col] = output_col
+        used.add(output_col)
+        passthrough[output_col] = col
+
+    return passthrough, renamed
 
 
 def clean_data(model: ThemaRS) -> pd.DataFrame:
@@ -204,7 +229,7 @@ def node_table(
     cluster_names: dict[int, str] | None = None,
     edges_threshold: float | None = None,
     layout: Literal["projection", "spectral", "zeros"] = "projection",
-    extra_columns: list[str] | None = None,
+    extra_columns: dict[str, str] | list[str] | None = None,
 ) -> pd.DataFrame:
     """Build nodes.parquet-shaped frame.
 
@@ -243,9 +268,14 @@ def node_table(
 
     if extra_columns:
         raw_df = model.data
-        for col in extra_columns:
-            if col in raw_df.columns:
-                df[col] = raw_df[col].to_numpy()
+        column_map = (
+            extra_columns
+            if isinstance(extra_columns, dict)
+            else _node_passthrough_columns(extra_columns)[0]
+        )
+        for output_col, source_col in column_map.items():
+            if source_col in raw_df.columns:
+                df[output_col] = raw_df[source_col].to_numpy()
 
     return df
 
@@ -367,7 +397,7 @@ def export_dataset_bundle(
     _write_parquet(edges_df, EDGE_SCHEMA, graph_path / "edges.parquet")
 
     # 5. Export graph/nodes.parquet
-    extra_cols = list(raw_df.columns)
+    extra_cols, renamed_node_columns = _node_passthrough_columns(list(raw_df.columns))
     nodes_df = node_table(
         model,
         cluster_labels=cluster_labels,
@@ -422,6 +452,7 @@ def export_dataset_bundle(
                 "cosmic_edges": int(len(cosmic_df)),
                 "groups": int(len(groups_df)),
             },
+            "node_passthrough_column_renames": renamed_node_columns,
         }
         manifest_path = base_path / "export_manifest.json"
         with open(manifest_path, "w") as f:

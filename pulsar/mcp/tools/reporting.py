@@ -460,6 +460,57 @@ async def export_dataset_bundle(
                 "cluster_assignment_id",
                 cluster_assignment_id,
             )
+        if assignment.run_id != session.latest_run_id:
+            return mcp_error(
+                "export_dataset_bundle",
+                "Cluster assignment was computed from a different run than the active fitted model.",
+                error_code="CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH",
+                agent_action=(
+                    "Regenerate generate_cluster_dossier for the active model and use "
+                    "the new cluster_assignment_id."
+                ),
+                details={
+                    "cluster_assignment_id": cluster_assignment_id,
+                    "assignment_run_id": assignment.run_id,
+                    "current_run_id": session.latest_run_id,
+                },
+            )
+        if assignment.dataset_id:
+            dataset = registry.get_dataset(assignment.dataset_id)
+            if dataset is None or not registry.dataset_matches_disk(dataset):
+                return mcp_error(
+                    "export_dataset_bundle",
+                    "The dataset backing this cluster assignment is gone or has "
+                    "changed since the labels were computed, so the labels no longer "
+                    "align with its rows.",
+                    error_code="CLUSTER_ASSIGNMENT_DATASET_STALE",
+                    agent_action=(
+                        "Re-ingest the dataset and rerun generate_cluster_dossier, "
+                        "then export with the new cluster_assignment_id."
+                    ),
+                    details={
+                        "cluster_assignment_id": cluster_assignment_id,
+                        "dataset_id": assignment.dataset_id,
+                    },
+                )
+            if (
+                session.data_dataset_id is not None
+                and assignment.dataset_id != session.data_dataset_id
+            ):
+                return mcp_error(
+                    "export_dataset_bundle",
+                    "Cluster assignment dataset does not match the active fitted model's dataset.",
+                    error_code="CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH",
+                    agent_action=(
+                        "Export using a cluster_assignment_id generated for the "
+                        "active fitted model."
+                    ),
+                    details={
+                        "cluster_assignment_id": cluster_assignment_id,
+                        "assignment_dataset_id": assignment.dataset_id,
+                        "current_dataset_id": session.data_dataset_id,
+                    },
+                )
         if assignment.label_count != len(session.data):
             return mcp_error(
                 "export_dataset_bundle",

@@ -247,6 +247,49 @@ def test_export_dataset_bundle_nodes_schema(exported_bundle):
     assert tbl_nodes.schema.field("is_live").type == pa.bool_()
 
 
+def test_export_dataset_bundle_reserved_raw_columns_do_not_override_nodes(
+    fitted_model,
+):
+    cluster_labels = np.array([0] * 15 + [1] * 15)
+    source = fitted_model.data.copy()
+    source["node_id"] = np.arange(100, 130, dtype=np.uint32)
+    source["group_id"] = np.full(30, 99, dtype=np.uint32)
+    source["val"] = np.arange(30, dtype=np.float32)
+    source["ex"] = np.arange(30, dtype=np.float32)
+    source["raw_node_id"] = np.arange(200, 230, dtype=np.uint32)
+    fitted_model._data = source
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        slug = "reserved-node-fields"
+        manifest = fitted_model.export_dataset_bundle(
+            output_dir=tmpdir,
+            slug=slug,
+            cluster_labels=cluster_labels,
+            layout="zeros",
+        )
+
+        nodes = pq.read_table(
+            os.path.join(tmpdir, slug, "graph", "nodes.parquet")
+        ).to_pandas()
+        raw = pq.read_table(os.path.join(tmpdir, slug, "tabular", "raw.parquet"))
+
+    assert nodes["node_id"].tolist() == list(range(30))
+    assert nodes["group_id"].tolist() == cluster_labels.tolist()
+    assert nodes["ex"].tolist() == [0.0] * 30
+    assert nodes["raw_node_id_1"].tolist() == source["node_id"].tolist()
+    assert nodes["raw_group_id"].tolist() == source["group_id"].tolist()
+    assert nodes["raw_val"].tolist() == source["val"].tolist()
+    assert nodes["raw_ex"].tolist() == source["ex"].tolist()
+    assert nodes["raw_node_id"].tolist() == source["raw_node_id"].tolist()
+    assert raw.schema.names.count("node_id") == 1
+    assert manifest["node_passthrough_column_renames"] == {
+        "node_id": "raw_node_id_1",
+        "group_id": "raw_group_id",
+        "val": "raw_val",
+        "ex": "raw_ex",
+    }
+
+
 def test_export_dataset_bundle_edges_schema(exported_bundle):
     tmpdir, slug, _ = exported_bundle
     graph_dir = os.path.join(tmpdir, slug, "graph")
