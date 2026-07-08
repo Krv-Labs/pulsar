@@ -337,14 +337,24 @@ def export_dataset_bundle(
     tabular_path.mkdir(parents=True, exist_ok=True)
     graph_path.mkdir(parents=True, exist_ok=True)
 
+    if model.cosmic_rust is None:
+        raise RuntimeError("Call fit() first")
+    n = model.cosmic_rust.n
+
     # 1. Export tabular/raw.parquet
-    raw_df = model.data
-    raw_df.to_parquet(tabular_path / "raw.parquet", index=False)
+    raw_df = model.data.copy()
+    if len(raw_df) != n:
+        raise RuntimeError(f"raw data has {len(raw_df)} rows but graph has {n} nodes")
+    raw_df.index = pd.Index(np.arange(n, dtype=np.uint32), name="node_id")
+    raw_df.to_parquet(tabular_path / "raw.parquet", index=True)
 
     # 2. Export tabular/clean.parquet (optional)
     if include_clean:
-        clean_df = clean_data(model)
-        clean_df.to_parquet(tabular_path / "clean.parquet", index=False)
+        clean_df = clean_data(model).copy()
+        if len(clean_df) != n:
+            raise RuntimeError(f"clean_data has {len(clean_df)} rows but graph has {n} nodes")
+        clean_df.index = pd.Index(np.arange(n, dtype=np.uint32), name="node_id")
+        clean_df.to_parquet(tabular_path / "clean.parquet", index=True)
 
     # 3. Export graph/cosmic.parquet
     cosmic_df = cosmic_edges(model, threshold=0.0)

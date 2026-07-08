@@ -288,3 +288,69 @@ def test_clean_embedding_at_center(fitted_model):
     assert emb.ndim == 1
     # Minimal config has pca dimensions values: [2], so output projection should be 2D
     assert len(emb) == 2
+
+
+def test_export_dataset_bundle_with_clean_and_node_id_indices(fitted_model):
+    cluster_labels = np.array([0] * 15 + [1] * 15)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        slug = "test-slug-clean"
+        manifest = fitted_model.export_dataset_bundle(
+            output_dir=tmpdir,
+            slug=slug,
+            cluster_labels=cluster_labels,
+            layout="projection",
+            include_clean=True,
+        )
+        base_path = os.path.join(tmpdir, slug)
+        raw_path = os.path.join(base_path, "tabular", "raw.parquet")
+        clean_path = os.path.join(base_path, "tabular", "clean.parquet")
+
+        assert os.path.exists(raw_path)
+        assert os.path.exists(clean_path)
+
+        tbl_raw = pq.read_table(raw_path)
+        tbl_clean = pq.read_table(clean_path)
+
+        # Verify node_id is the index/column in raw.parquet
+        assert "node_id" in tbl_raw.schema.names
+        assert tbl_raw.schema.field("node_id").type == pa.uint32()
+
+        # Verify node_id is the index/column in clean.parquet
+        assert "node_id" in tbl_clean.schema.names
+        assert tbl_clean.schema.field("node_id").type == pa.uint32()
+
+
+def test_export_dataset_bundle_alignment_guard(fitted_model):
+    cluster_labels = np.array([0] * 15 + [1] * 15)
+
+    # 1. Force a length mismatch on data (raw)
+    original_data = fitted_model._data
+    fitted_model._data = original_data.iloc[:10]  # size 10, but n is 30
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with pytest.raises(RuntimeError, match="raw data has 10 rows but graph has 30 nodes"):
+            fitted_model.export_dataset_bundle(
+                output_dir=tmpdir,
+                slug="test-slug-align-raw",
+                cluster_labels=cluster_labels,
+                include_clean=False,
+            )
+
+    # Restore original data
+    fitted_model._data = original_data
+
+    # 2. Force a length mismatch on clean_data
+    original_preprocessed = fitted_model._preprocessed_data
+    fitted_model._preprocessed_data = original_preprocessed.iloc[:10]  # size 10, but n is 30
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with pytest.raises(RuntimeError, match="clean_data has 10 rows but graph has 30 nodes"):
+            fitted_model.export_dataset_bundle(
+                output_dir=tmpdir,
+                slug="test-slug-align-clean",
+                cluster_labels=cluster_labels,
+                include_clean=True,
+            )
+
+    # Restore original preprocessed data
+    fitted_model._preprocessed_data = original_preprocessed
