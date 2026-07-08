@@ -757,6 +757,7 @@ class ThemaRS:
         *,
         cluster_labels: pd.Series | np.ndarray,
         cluster_names: dict[int, str] | None = None,
+        edges_threshold: float | None = None,
         layout: Literal["projection", "spectral", "zeros"] = "projection",
         extra_columns: list[str] | None = None,
     ) -> pd.DataFrame:
@@ -776,6 +777,7 @@ class ThemaRS:
             self,
             cluster_labels=cluster_labels,
             cluster_names=cluster_names,
+            edges_threshold=edges_threshold,
             layout=layout,
             extra_columns=extra_columns,
         )

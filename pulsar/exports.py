@@ -142,10 +142,12 @@ def snapshot_edges(
     return _weighted_edges_df(model, cutoff)
 
 
-def _node_weighted_degree(model: ThemaRS, n: int) -> np.ndarray:
+def _node_weighted_degree(
+    model: ThemaRS, n: int, *, threshold: float | None = None
+) -> np.ndarray:
     """Per-node sum of incident snapshot-edge weights."""
     val = np.zeros(n, dtype=np.float32)
-    snapshot_df = snapshot_edges(model)
+    snapshot_df = snapshot_edges(model, threshold=threshold)
     if len(snapshot_df) > 0:
         sources = snapshot_df["source_id"].to_numpy()
         targets = snapshot_df["target_id"].to_numpy()
@@ -200,6 +202,7 @@ def node_table(
     *,
     cluster_labels: pd.Series | np.ndarray,
     cluster_names: dict[int, str] | None = None,
+    edges_threshold: float | None = None,
     layout: Literal["projection", "spectral", "zeros"] = "projection",
     extra_columns: list[str] | None = None,
 ) -> pd.DataFrame:
@@ -229,7 +232,7 @@ def node_table(
         {
             "node_id": node_ids,
             "group_id": group_ids,
-            "val": _node_weighted_degree(model, n),
+            "val": _node_weighted_degree(model, n, threshold=edges_threshold),
             "archetype": _node_archetypes(group_ids, cluster_names),
             "ex": coords[:, 0],
             "ey": coords[:, 1],
@@ -357,6 +360,7 @@ def export_dataset_bundle(
         model,
         cluster_labels=cluster_labels,
         cluster_names=cluster_names,
+        edges_threshold=edges_threshold,
         layout=layout,
         extra_columns=extra_cols,
     )
