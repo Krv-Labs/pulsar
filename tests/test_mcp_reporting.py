@@ -11,6 +11,7 @@ from pulsar.mcp.tools.reporting import (
     _normalize_cluster_names,
     export_html_report,
     export_labeled_data,
+    export_dataset_bundle,
 )
 
 
@@ -241,3 +242,215 @@ def test_export_html_report_missing_session_state_gives_recovery_action():
     assert payload["details"]["latest_dataset_id"] == "ds_previous"
     assert "get_runtime_context" in payload["agent_action"]
     assert "run_topological_sweep" in payload["agent_action"]
+
+
+def test_export_dataset_bundle_success_session_clusters(tmp_path):
+    from unittest.mock import MagicMock
+    import numpy as np
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.clusters = pd.Series([0, 1, 0])
+    session.clusters_run_id = "run_1"
+    session.latest_run_id = "run_1"
+
+    mock_manifest = {"nodes": 3, "edges": 2, "groups": 2}
+    session.model = MagicMock()
+    session.model.export_dataset_bundle.return_value = mock_manifest
+
+    output_dir = tmp_path / "export"
+    slug = "test_slug"
+
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            output_dir=str(output_dir),
+            slug=slug,
+            cluster_names={"0": "Cluster A", "1": "Cluster B"},
+            cluster_descriptions={"0": "Desc A", "1": "Desc B"},
+            edges_threshold=0.5,
+            ctx=None,
+        )
+    )
+    result = json.loads(result_json)
+
+    assert result["status"] == "ok"
+    assert result["slug"] == slug
+    assert result["manifest"] == mock_manifest
+
+    # Check that model method was called with correctly parsed/normalized parameters
+    session.model.export_dataset_bundle.assert_called_once()
+    kwargs = session.model.export_dataset_bundle.call_args[1]
+    assert kwargs["output_dir"] == str(output_dir)
+    assert kwargs["slug"] == slug
+    assert np.array_equal(kwargs["cluster_labels"], session.clusters)
+    assert kwargs["cluster_names"] == {0: "Cluster A", 1: "Cluster B"}
+    assert kwargs["cluster_descriptions"] == {0: "Desc A", 1: "Desc B"}
+    assert kwargs["edges_threshold"] == 0.5
+
+
+def test_export_dataset_bundle_success_cluster_assignment(tmp_path):
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.latest_run_id = "run_1"
+
+    assignment = registry.save_cluster_assignment(
+        run_id="run_1",
+        dataset_id=None,
+        method="components",
+        interpretation_edge_weight_threshold=0.25,
+        threshold_source="explicit",
+        construction_threshold=0.25,
+        labels=[0, 1, 0],
+    )
+
+    mock_manifest = {"nodes": 3, "edges": 2, "groups": 2}
+    session.model = MagicMock()
+    session.model.export_dataset_bundle.return_value = mock_manifest
+
+    output_dir = tmp_path / "export"
+    slug = "test_slug"
+
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            output_dir=str(output_dir),
+            slug=slug,
+            cluster_assignment_id=assignment.cluster_assignment_id,
+            ctx=None,
+        )
+    )
+    result = json.loads(result_json)
+
+    assert result["status"] == "ok"
+    assert result["manifest"] == mock_manifest
+    session.model.export_dataset_bundle.assert_called_once()
+
+
+def test_export_dataset_bundle_missing_session_state():
+    _sessions.clear()
+    result_json = asyncio.run(export_dataset_bundle("out", "slug", ctx=None))
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert result["error_code"] == "SESSION_STATE_MISSING"
+
+
+def test_export_dataset_bundle_missing_clusters_or_stale():
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.model = MagicMock()
+
+    # Case 1: no clusters in session
+    result_json = asyncio.run(export_dataset_bundle("out", "slug", ctx=None))
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTERS_MISSING"
+
+    # Case 2: stale clusters
+    session.clusters = pd.Series([0, 1, 0])
+    session.clusters_run_id = "run_old"
+    session.latest_run_id = "run_new"
+    result_json = asyncio.run(export_dataset_bundle("out", "slug", ctx=None))
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTER_CACHE_STALE"
+
+
+def test_export_dataset_bundle_invalid_edges_threshold():
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.clusters = pd.Series([0, 1, 0])
+    session.clusters_run_id = "run_1"
+    session.latest_run_id = "run_1"
+    session.model = MagicMock()
+
+    result_json = asyncio.run(
+        export_dataset_bundle("out", "slug", edges_threshold=-0.5, ctx=None)
+    )
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert "edges_threshold" in result["reason"]
+
+
+def test_export_dataset_bundle_invalid_cluster_assignment_id():
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.model = MagicMock()
+
+    result_json = asyncio.run(
+        export_dataset_bundle("out", "slug", cluster_assignment_id="ca_missing", ctx=None)
+    )
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTER_ASSIGNMENT_ID_UNKNOWN"
+
+
+def test_export_dataset_bundle_mismatched_row_count():
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.model = MagicMock()
+
+    assignment = registry.save_cluster_assignment(
+        run_id="run_1",
+        dataset_id=None,
+        method="components",
+        interpretation_edge_weight_threshold=0.25,
+        threshold_source="explicit",
+        construction_threshold=0.25,
+        labels=[0, 1],  # Only 2 rows, mismatch!
+    )
+
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            "out", "slug", cluster_assignment_id=assignment.cluster_assignment_id, ctx=None
+        )
+    )
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert result["error_code"] == "CLUSTER_ASSIGNMENT_ROW_MISMATCH"
+
+
+def test_export_dataset_bundle_invalid_metadata():
+    from unittest.mock import MagicMock
+
+    _sessions.clear()
+    session = _get_session(None)
+    session.data = pd.DataFrame({"x": [1, 2, 3]})
+    session.clusters = pd.Series([0, 1, 0])
+    session.clusters_run_id = "run_1"
+    session.latest_run_id = "run_1"
+    session.model = MagicMock()
+
+    # Case 1: Non-flat dict
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            "out", "slug", cluster_names="invalid_type", ctx=None
+        )
+    )
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert "must be a flat object" in result["reason"]
+
+    # Case 2: Unknown cluster ID key
+    result_json = asyncio.run(
+        export_dataset_bundle(
+            "out", "slug", cluster_names={"99": "Unknown"}, ctx=None
+        )
+    )
+    result = json.loads(result_json)
+    assert result["status"] == "error"
+    assert "contains unknown cluster ID" in result["reason"]

@@ -35,6 +35,7 @@ from pulsar.mcp.tools.reporting import (
     export_labeled_data,
     export_html_report,
     probe_columns,
+    export_dataset_bundle,
 )
 from pulsar.mcp.tools.preprocessing import (
     recommend_preprocessing,
@@ -81,6 +82,7 @@ ALL_TOOLS_LIST = [
     export_labeled_data,
     export_html_report,
     probe_columns,
+    export_dataset_bundle,
     # Preprocessing
     recommend_preprocessing,
     repair_preprocessing_config,
@@ -115,6 +117,7 @@ __all__ = [
     "export_labeled_data",
     "export_html_report",
     "probe_columns",
+    "export_dataset_bundle",
     "recommend_preprocessing",
     "repair_preprocessing_config",
     "validate_preprocessing_config",
