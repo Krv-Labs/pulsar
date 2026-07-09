@@ -405,3 +405,48 @@ def test_export_dataset_bundle_alignment_guard(fitted_model):
 
     # Restore original preprocessed data
     fitted_model._preprocessed_data = original_preprocessed
+
+
+def test_export_dataset_bundle_with_names_and_descriptions(fitted_model):
+    cluster_labels = np.array([0] * 15 + [1] * 15)
+
+    # We will test using string keys, which should be successfully converted/matched
+    cluster_names = {"0": "Zeroes Group", "1": "Ones Group"}
+    cluster_descriptions = {"0": "Description for 0", "1": "Description for 1"}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        slug = "test-slug-metadata"
+        fitted_model.export_dataset_bundle(
+            output_dir=tmpdir,
+            slug=slug,
+            cluster_labels=cluster_labels,
+            cluster_names=cluster_names,
+            cluster_descriptions=cluster_descriptions,
+            layout="projection",
+        )
+
+        base_path = os.path.join(tmpdir, slug)
+        graph_dir = os.path.join(base_path, "graph")
+
+        # Read groups parquet and verify names and descriptions are written out correctly
+        tbl_groups = pq.read_table(os.path.join(graph_dir, "groups.parquet"))
+        df_groups = tbl_groups.to_pandas()
+
+        assert len(df_groups) == 2
+        # Group 0
+        row_0 = df_groups[df_groups["group_id"] == 0].iloc[0]
+        assert row_0["name"] == "Zeroes Group"
+        assert row_0["desc"] == "Description for 0"
+
+        # Group 1
+        row_1 = df_groups[df_groups["group_id"] == 1].iloc[0]
+        assert row_1["name"] == "Ones Group"
+        assert row_1["desc"] == "Description for 1"
+
+        # Read nodes parquet and verify archetypes (names) are written out correctly
+        tbl_nodes = pq.read_table(os.path.join(graph_dir, "nodes.parquet"))
+        df_nodes = tbl_nodes.to_pandas()
+
+        assert (df_nodes.iloc[:15]["archetype"] == "Zeroes Group").all()
+        assert (df_nodes.iloc[15:]["archetype"] == "Ones Group").all()
+

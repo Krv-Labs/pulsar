@@ -222,6 +222,19 @@ def _layout_coordinates(
     raise ValueError(f"Unsupported layout: {layout!r}")
 
 
+def _normalize_keys(d: dict[Any, Any] | None) -> dict[int, Any] | None:
+    """Normalize dictionary keys to integers where possible, supporting both int and str keys."""
+    if d is None:
+        return None
+    normalized = {}
+    for k, v in d.items():
+        try:
+            normalized[int(k)] = v
+        except (ValueError, TypeError):
+            normalized[k] = v
+    return normalized
+
+
 def node_table(
     model: ThemaRS,
     *,
@@ -244,6 +257,8 @@ def node_table(
     if model.cosmic_rust is None:
         raise RuntimeError("Call fit() first")
     n = model.cosmic_rust.n
+
+    cluster_names = _normalize_keys(cluster_names)
 
     node_ids = np.arange(n, dtype=np.uint32)
     if isinstance(cluster_labels, pd.Series):
@@ -301,6 +316,9 @@ def group_table(
         group_ids_arr = cluster_labels.to_numpy().astype(np.uint32)
     else:
         group_ids_arr = np.ascontiguousarray(cluster_labels).astype(np.uint32)
+
+    cluster_names = _normalize_keys(cluster_names)
+    cluster_descriptions = _normalize_keys(cluster_descriptions)
 
     unique_gids = sorted(list(set(int(gid) for gid in group_ids_arr)))
 
@@ -370,6 +388,9 @@ def export_dataset_bundle(
     if model.cosmic_rust is None:
         raise RuntimeError("Call fit() first")
     n = model.cosmic_rust.n
+
+    cluster_names = _normalize_keys(cluster_names)
+    cluster_descriptions = _normalize_keys(cluster_descriptions)
 
     # 1. Export tabular/raw.parquet
     raw_df = model.data.copy()
