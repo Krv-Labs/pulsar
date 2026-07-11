@@ -1,3 +1,4 @@
+from pulsar._version import __version__
 from pulsar._pulsar import (
     impute_column,
     StandardScaler,

@@ -180,6 +180,7 @@ Next Steps
 
    overview
    configuration
+   releases
    api
 
 References

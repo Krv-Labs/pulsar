@@ -29,6 +29,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Check versions (Cargo.toml is source of truth)
+        run: python scripts/check_versions.py
+
       - name: Install dependencies
         run: uv sync --group dev --group mcp --python ${{ matrix.python-version }}
 

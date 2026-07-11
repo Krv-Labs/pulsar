@@ -455,12 +455,9 @@ def export_dataset_bundle(
     manifest_data = {}
     manifest_path = base_path / "export_manifest.json"
     if write_manifest:
-        try:
-            import importlib.metadata as importlib_metadata
+        from pulsar._version import get_version
 
-            version = importlib_metadata.version("thema-pulsar")
-        except Exception:
-            version = "0.1.0"
+        version = get_version()
 
         config_payload = json.dumps(
             asdict(model.config), sort_keys=True, separators=(",", ":")

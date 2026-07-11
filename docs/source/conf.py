@@ -6,7 +6,10 @@ sys.path.insert(0, os.path.abspath("../.."))
 project = "Pulsar"
 author = "Krv Labs"
 copyright = "2026, Krv Labs"
-release = "0.2.0"
+
+from pulsar import __version__  # noqa: E402
+
+release = __version__
 
 extensions = [
     "sphinx.ext.autodoc",
