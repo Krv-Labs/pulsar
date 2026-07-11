@@ -398,9 +398,7 @@ def export_dataset_bundle(
     raw_df = model.data.copy()
     if len(raw_df) != n:
         raise RuntimeError(f"raw data has {len(raw_df)} rows but graph has {n} nodes")
-    extra_cols, renamed_node_columns = _node_passthrough_columns(
-        list(raw_df.columns)
-    )
+    extra_cols, renamed_node_columns = _node_passthrough_columns(list(raw_df.columns))
     if source_node_id := renamed_node_columns.get("node_id"):
         raw_df.rename(columns={"node_id": source_node_id}, inplace=True)
     raw_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
@@ -416,9 +414,7 @@ def export_dataset_bundle(
             )
         if "node_id" in clean_df.columns:
             clean_renames = _node_passthrough_columns(list(clean_df.columns))[1]
-            clean_df.rename(
-                columns={"node_id": clean_renames["node_id"]}, inplace=True
-            )
+            clean_df.rename(columns={"node_id": clean_renames["node_id"]}, inplace=True)
         clean_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
         clean_df.to_parquet(clean_path, index=False)
     else:

@@ -281,9 +281,7 @@ def test_export_dataset_bundle_reserved_raw_columns_do_not_override_nodes(
             os.path.join(tmpdir, slug, "graph", "nodes.parquet")
         ).to_pandas()
         raw = pq.read_table(os.path.join(tmpdir, slug, "tabular", "raw.parquet"))
-        clean = pq.read_table(
-            os.path.join(tmpdir, slug, "tabular", "clean.parquet")
-        )
+        clean = pq.read_table(os.path.join(tmpdir, slug, "tabular", "clean.parquet"))
 
     assert nodes["node_id"].tolist() == list(range(30))
     assert nodes["group_id"].tolist() == cluster_labels.tolist()
