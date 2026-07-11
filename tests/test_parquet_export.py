@@ -1,3 +1,6 @@
+from dataclasses import asdict
+import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -211,11 +214,15 @@ def exported_bundle(fitted_model):
         yield tmpdir, slug, manifest
 
 
-def test_export_dataset_bundle_manifest(exported_bundle):
+def test_export_dataset_bundle_manifest(exported_bundle, fitted_model):
     _, _, manifest = exported_bundle
     assert isinstance(manifest, dict)
     assert "pulsar_version" in manifest
-    assert "config_hash" in manifest
+    config_payload = json.dumps(
+        asdict(fitted_model.config), sort_keys=True, separators=(",", ":")
+    )
+    expected_hash = hashlib.sha256(config_payload.encode("utf-8")).hexdigest()
+    assert manifest["config_hash"] == expected_hash
 
 
 def test_export_dataset_bundle_file_layout(exported_bundle):
@@ -258,6 +265,7 @@ def test_export_dataset_bundle_reserved_raw_columns_do_not_override_nodes(
     source["ex"] = np.arange(30, dtype=np.float32)
     source["raw_node_id"] = np.arange(200, 230, dtype=np.uint32)
     fitted_model._data = source
+    fitted_model._preprocessed_data = source.copy()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         slug = "reserved-node-fields"
@@ -266,12 +274,16 @@ def test_export_dataset_bundle_reserved_raw_columns_do_not_override_nodes(
             slug=slug,
             cluster_labels=cluster_labels,
             layout="zeros",
+            include_clean=True,
         )
 
         nodes = pq.read_table(
             os.path.join(tmpdir, slug, "graph", "nodes.parquet")
         ).to_pandas()
         raw = pq.read_table(os.path.join(tmpdir, slug, "tabular", "raw.parquet"))
+        clean = pq.read_table(
+            os.path.join(tmpdir, slug, "tabular", "clean.parquet")
+        )
 
     assert nodes["node_id"].tolist() == list(range(30))
     assert nodes["group_id"].tolist() == cluster_labels.tolist()
@@ -281,7 +293,12 @@ def test_export_dataset_bundle_reserved_raw_columns_do_not_override_nodes(
     assert nodes["raw_val"].tolist() == source["val"].tolist()
     assert nodes["raw_ex"].tolist() == source["ex"].tolist()
     assert nodes["raw_node_id"].tolist() == source["raw_node_id"].tolist()
-    assert raw.schema.names.count("node_id") == 1
+    assert raw["node_id"].to_pylist() == list(range(30))
+    assert raw["raw_node_id_1"].to_pylist() == source["node_id"].tolist()
+    assert "__index_level_0__" not in raw.schema.names
+    assert clean["node_id"].to_pylist() == list(range(30))
+    assert clean["raw_node_id_1"].to_pylist() == source["node_id"].tolist()
+    assert "__index_level_0__" not in clean.schema.names
     assert manifest["node_passthrough_column_renames"] == {
         "node_id": "raw_node_id_1",
         "group_id": "raw_group_id",
@@ -405,6 +422,31 @@ def test_export_dataset_bundle_alignment_guard(fitted_model):
 
     # Restore original preprocessed data
     fitted_model._preprocessed_data = original_preprocessed
+
+
+def test_export_dataset_bundle_removes_stale_optional_files(fitted_model):
+    cluster_labels = np.array([0] * 15 + [1] * 15)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        slug = "reused-slug"
+        fitted_model.export_dataset_bundle(
+            output_dir=tmpdir,
+            slug=slug,
+            cluster_labels=cluster_labels,
+            include_clean=True,
+            write_manifest=True,
+        )
+        fitted_model.export_dataset_bundle(
+            output_dir=tmpdir,
+            slug=slug,
+            cluster_labels=cluster_labels,
+            include_clean=False,
+            write_manifest=False,
+        )
+
+        base_path = os.path.join(tmpdir, slug)
+        assert not os.path.exists(os.path.join(base_path, "tabular", "clean.parquet"))
+        assert not os.path.exists(os.path.join(base_path, "export_manifest.json"))
 
 
 def test_export_dataset_bundle_with_names_and_descriptions(fitted_model):

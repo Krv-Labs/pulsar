@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING
@@ -396,18 +398,31 @@ def export_dataset_bundle(
     raw_df = model.data.copy()
     if len(raw_df) != n:
         raise RuntimeError(f"raw data has {len(raw_df)} rows but graph has {n} nodes")
-    raw_df.index = pd.Index(np.arange(n, dtype=np.uint32), name="node_id")
-    raw_df.to_parquet(tabular_path / "raw.parquet", index=True)
+    extra_cols, renamed_node_columns = _node_passthrough_columns(
+        list(raw_df.columns)
+    )
+    if source_node_id := renamed_node_columns.get("node_id"):
+        raw_df.rename(columns={"node_id": source_node_id}, inplace=True)
+    raw_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
+    raw_df.to_parquet(tabular_path / "raw.parquet", index=False)
 
     # 2. Export tabular/clean.parquet (optional)
+    clean_path = tabular_path / "clean.parquet"
     if include_clean:
         clean_df = clean_data(model).copy()
         if len(clean_df) != n:
             raise RuntimeError(
                 f"clean_data has {len(clean_df)} rows but graph has {n} nodes"
             )
-        clean_df.index = pd.Index(np.arange(n, dtype=np.uint32), name="node_id")
-        clean_df.to_parquet(tabular_path / "clean.parquet", index=True)
+        if "node_id" in clean_df.columns:
+            clean_renames = _node_passthrough_columns(list(clean_df.columns))[1]
+            clean_df.rename(
+                columns={"node_id": clean_renames["node_id"]}, inplace=True
+            )
+        clean_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
+        clean_df.to_parquet(clean_path, index=False)
+    else:
+        clean_path.unlink(missing_ok=True)
 
     # 3. Export graph/cosmic.parquet
     cosmic_df = cosmic_edges(model, threshold=0.0)
@@ -418,7 +433,6 @@ def export_dataset_bundle(
     _write_parquet(edges_df, EDGE_SCHEMA, graph_path / "edges.parquet")
 
     # 5. Export graph/nodes.parquet
-    extra_cols, renamed_node_columns = _node_passthrough_columns(list(raw_df.columns))
     nodes_df = node_table(
         model,
         cluster_labels=cluster_labels,
@@ -443,6 +457,7 @@ def export_dataset_bundle(
 
     # 7. Write export_manifest.json (optional)
     manifest_data = {}
+    manifest_path = base_path / "export_manifest.json"
     if write_manifest:
         try:
             import importlib.metadata as importlib_metadata
@@ -451,11 +466,14 @@ def export_dataset_bundle(
         except Exception:
             version = "0.1.0"
 
-        config_hash = hash(str(model.config))
+        config_payload = json.dumps(
+            asdict(model.config), sort_keys=True, separators=(",", ":")
+        )
+        config_hash = hashlib.sha256(config_payload.encode("utf-8")).hexdigest()
 
         manifest_data = {
             "pulsar_version": version,
-            "config_hash": str(config_hash),
+            "config_hash": config_hash,
             "thresholds": {
                 "resolved_construction_threshold": float(
                     model.resolved_construction_threshold
@@ -475,8 +493,9 @@ def export_dataset_bundle(
             },
             "node_passthrough_column_renames": renamed_node_columns,
         }
-        manifest_path = base_path / "export_manifest.json"
         with open(manifest_path, "w") as f:
             json.dump(manifest_data, f, indent=2)
+    else:
+        manifest_path.unlink(missing_ok=True)
 
     return manifest_data
