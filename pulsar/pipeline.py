@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import gc
 from collections.abc import Callable
-from typing import Any, Union
+from pathlib import Path
+from typing import Any, Literal, Union
 
 import networkx as nx
 import numpy as np
@@ -712,3 +713,145 @@ class ThemaRS:
             reps.append(self._ball_maps[closest])
 
         return reps
+
+    # ------------------------------------------------------------------
+    # Export helpers & orchestrator (Issue 26)
+    # ------------------------------------------------------------------
+
+    def clean_data(self) -> pd.DataFrame:
+        """Preprocessed (imputed) table, row-aligned with the fitted graph."""
+        from pulsar.exports import clean_data as _clean_data
+
+        return _clean_data(self)
+
+    def cosmic_edges(
+        self,
+        *,
+        threshold: float = 0.0,
+    ) -> pd.DataFrame:
+        """Export the full exploration graph.
+
+        Returns undirected edges (i, j) where i < j.
+        Columns: source_id (UInt32), target_id (UInt32), weight (Float32).
+        """
+        from pulsar.exports import cosmic_edges as _cosmic_edges
+
+        return _cosmic_edges(self, threshold=threshold)
+
+    def snapshot_edges(
+        self,
+        *,
+        threshold: float | None = None,
+    ) -> pd.DataFrame:
+        """Export the thresholded snapshot graph (default threshold = resolved_construction_threshold).
+
+        Returns undirected edges (i, j) where i < j.
+        Columns: source_id (UInt32), target_id (UInt32), weight (Float32).
+        """
+        from pulsar.exports import snapshot_edges as _snapshot_edges
+
+        return _snapshot_edges(self, threshold=threshold)
+
+    def node_table(
+        self,
+        *,
+        cluster_labels: pd.Series | np.ndarray,
+        cluster_names: dict[int, str] | None = None,
+        edges_threshold: float | None = None,
+        layout: Literal["projection", "spectral", "zeros"] = "projection",
+        extra_columns: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """Build nodes.parquet-shaped frame.
+
+        Columns:
+            node_id: UInt32 (0 .. n-1)
+            group_id: UInt32 (cluster label)
+            val: Float32 (weighted degree on snapshot graph)
+            archetype: Utf8 (semantic cluster name or "Cluster {group_id}")
+            ex, ey, ez: Float32 (layout coords)
+            is_live: Boolean (always true)
+        """
+        from pulsar.exports import node_table as _node_table
+
+        return _node_table(
+            self,
+            cluster_labels=cluster_labels,
+            cluster_names=cluster_names,
+            edges_threshold=edges_threshold,
+            layout=layout,
+            extra_columns=extra_columns,
+        )
+
+    def group_table(
+        self,
+        *,
+        cluster_labels: pd.Series | np.ndarray,
+        cluster_names: dict[int, str] | None = None,
+        cluster_descriptions: dict[int, str] | None = None,
+    ) -> pd.DataFrame:
+        """Build groups.parquet-shaped frame.
+
+        Columns:
+            group_id: UInt32
+            name: Utf8
+            desc: Utf8
+            member_ids: List<UInt32>
+        """
+        from pulsar.exports import group_table as _group_table
+
+        return _group_table(
+            self,
+            cluster_labels=cluster_labels,
+            cluster_names=cluster_names,
+            cluster_descriptions=cluster_descriptions,
+        )
+
+    def export_dataset_bundle(
+        self,
+        output_dir: Path | str,
+        slug: str,
+        *,
+        cluster_labels: pd.Series | np.ndarray,
+        cluster_names: dict[int, str] | None = None,
+        cluster_descriptions: dict[int, str] | None = None,
+        edges_threshold: float | None = None,
+        layout: Literal["projection", "spectral", "zeros"] = "projection",
+        include_clean: bool = False,
+        write_manifest: bool = True,
+    ) -> dict[str, Any]:
+        """Write the full bundle under `{output_dir}/{slug}/`.
+
+        Bundle layout:
+            {slug}/
+                tabular/
+                    raw.parquet
+                    clean.parquet  (optional)
+                graph/
+                    nodes.parquet
+                    edges.parquet
+                    cosmic.parquet
+                    groups.parquet
+                export_manifest.json  (optional)
+        """
+        from pulsar.exports import export_dataset_bundle as _export_dataset_bundle
+
+        return _export_dataset_bundle(
+            self,
+            output_dir,
+            slug,
+            cluster_labels=cluster_labels,
+            cluster_names=cluster_names,
+            cluster_descriptions=cluster_descriptions,
+            edges_threshold=edges_threshold,
+            layout=layout,
+            include_clean=include_clean,
+            write_manifest=write_manifest,
+        )
+
+    def clean_embedding_at_center(self) -> np.ndarray:
+        """Scale/project clean_data() and return the embedding of the graph's center node."""
+        from pulsar.exports import (
+            clean_embedding_at_center as _clean_embedding_at_center,
+        )
+
+        return _clean_embedding_at_center(self)

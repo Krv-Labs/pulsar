@@ -115,9 +115,10 @@ def test_default_mcp_tool_surface_is_curated(monkeypatch):
     tools = importlib.reload(tools)
     names = [tool.__name__ for tool in tools.ALL_TOOLS_LIST]
 
-    assert len(names) == 25
+    assert len(names) == 26
     assert "get_sweep_history" in names
     assert "compare_clusters" in names
+    assert "export_dataset_bundle" in names
     assert "explain_suggestion" not in names
     assert "get_experiment_history" not in names
     assert "summarize_sweep_history" not in names

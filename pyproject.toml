@@ -62,9 +62,3 @@ docs = [
     "nbsphinx>=0.9.5",
     "fastmcp>=3.2.0",
 ]
-
-[[tool.uv.index]]
-name = "research"
-url = "https://api.pyx.dev/simple/krv/research"
-publish-url = "https://api.pyx.dev/v1/upload/krv/research"
-explicit=true

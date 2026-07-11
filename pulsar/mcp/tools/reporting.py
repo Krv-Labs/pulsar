@@ -358,3 +358,238 @@ async def probe_columns(
         return json.dumps(payload, indent=2)
     except Exception as e:
         return mcp_error("probe_columns", str(e))
+
+
+def _normalize_cluster_metadata(
+    metadata: dict[str, str] | None,
+    *,
+    valid_cluster_ids: set[int],
+    name: str,
+) -> dict[int, str] | None:
+    """Validate flat metadata (names or descriptions) from MCP JSON arguments."""
+    if not metadata:
+        return None
+    if not isinstance(metadata, dict):
+        raise ToolError(
+            f"{name} must be a flat object mapping cluster ID strings to values, e.g. "
+            '{"0": "Cohort A", "1": "Cohort B"}.'
+        )
+
+    normalized: dict[int, str] = {}
+    for raw_id, val in metadata.items():
+        key = str(raw_id).strip()
+        if not key:
+            raise ToolError(f"{name} contains an empty cluster ID key.")
+        try:
+            cluster_id = int(key)
+        except ValueError as exc:
+            raise ToolError(
+                f"{name} keys must be integer cluster IDs encoded as strings; got {raw_id!r}."
+            ) from exc
+        if cluster_id not in valid_cluster_ids:
+            raise ToolError(
+                f"{name} contains unknown cluster ID {cluster_id}. "
+                f"Available IDs: {sorted(valid_cluster_ids)}."
+            )
+        normalized[cluster_id] = str(val).strip()
+    return normalized
+
+
+async def export_dataset_bundle(
+    output_dir: str,
+    slug: str,
+    cluster_assignment_id: str | None = None,
+    cluster_names: dict[str, str] | None = None,
+    cluster_descriptions: dict[str, str] | None = None,
+    edges_threshold: float | None = None,
+    layout: Literal["projection", "spectral", "zeros"] = "projection",
+    include_clean: bool = False,
+    write_manifest: bool = True,
+    ctx: Context = None,
+) -> str:
+    """Export the complete dataset bundle to a directory.
+
+    Writes a standard bundle under `{output_dir}/{slug}/` containing tabular/raw, tabular/clean
+    (optional), graph/nodes, graph/edges, graph/cosmic, graph/groups Parquet files,
+    and a manifest JSON file.
+
+    Args:
+        output_dir: The directory where the exported bundle should be written.
+        slug: The subdirectory name (e.g. 'project_alpha') under output_dir.
+        cluster_assignment_id: Optional ID of a saved cluster assignment. If omitted,
+            the active session's clusters are used.
+        cluster_names: Optional dictionary mapping string cluster IDs to semantic names.
+        cluster_descriptions: Optional dictionary mapping string cluster IDs to semantic descriptions.
+        edges_threshold: Optional threshold for graph/edges.parquet (snapshot edges).
+            Omit to inherit the model's resolved construction threshold.
+        layout: Layout coordinates mode for graph/nodes.parquet ('projection', 'spectral', or 'zeros').
+        include_clean: If True, include preprocessed (imputed) clean data under tabular/clean.parquet.
+        write_manifest: If True, write an export_manifest.json with metadata and counts.
+    """
+    import numpy as np
+    from pathlib import Path
+
+    session = _get_session(ctx)
+    if session.model is None or session.data is None:
+        return _missing_session_state_error("export_dataset_bundle", session)
+
+    if edges_threshold is not None:
+        try:
+            edges_threshold = float(edges_threshold)
+            if (
+                not np.isfinite(edges_threshold)
+                or edges_threshold < 0.0
+                or edges_threshold > 1.0
+            ):
+                return mcp_error(
+                    "export_dataset_bundle",
+                    "edges_threshold must be a float between 0.0 and 1.0",
+                )
+        except ValueError:
+            return mcp_error(
+                "export_dataset_bundle",
+                "edges_threshold must be a float between 0.0 and 1.0",
+            )
+
+    # Resolve cluster labels
+    if cluster_assignment_id is not None:
+        assignment = registry.get_cluster_assignment(cluster_assignment_id)
+        if assignment is None:
+            return unknown_handle_error(
+                "export_dataset_bundle",
+                "cluster_assignment_id",
+                cluster_assignment_id,
+            )
+        if assignment.run_id != session.latest_run_id:
+            return mcp_error(
+                "export_dataset_bundle",
+                "Cluster assignment was computed from a different run than the active fitted model.",
+                error_code="CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH",
+                agent_action=(
+                    "Regenerate generate_cluster_dossier for the active model and use "
+                    "the new cluster_assignment_id."
+                ),
+                details={
+                    "cluster_assignment_id": cluster_assignment_id,
+                    "assignment_run_id": assignment.run_id,
+                    "current_run_id": session.latest_run_id,
+                },
+            )
+        if assignment.dataset_id:
+            dataset = registry.get_dataset(assignment.dataset_id)
+            if dataset is None or not registry.dataset_matches_disk(dataset):
+                return mcp_error(
+                    "export_dataset_bundle",
+                    "The dataset backing this cluster assignment is gone or has "
+                    "changed since the labels were computed, so the labels no longer "
+                    "align with its rows.",
+                    error_code="CLUSTER_ASSIGNMENT_DATASET_STALE",
+                    agent_action=(
+                        "Re-ingest the dataset and rerun generate_cluster_dossier, "
+                        "then export with the new cluster_assignment_id."
+                    ),
+                    details={
+                        "cluster_assignment_id": cluster_assignment_id,
+                        "dataset_id": assignment.dataset_id,
+                    },
+                )
+            if (
+                session.data_dataset_id is not None
+                and assignment.dataset_id != session.data_dataset_id
+            ):
+                return mcp_error(
+                    "export_dataset_bundle",
+                    "Cluster assignment dataset does not match the active fitted model's dataset.",
+                    error_code="CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH",
+                    agent_action=(
+                        "Export using a cluster_assignment_id generated for the "
+                        "active fitted model."
+                    ),
+                    details={
+                        "cluster_assignment_id": cluster_assignment_id,
+                        "assignment_dataset_id": assignment.dataset_id,
+                        "current_dataset_id": session.data_dataset_id,
+                    },
+                )
+        if assignment.label_count != len(session.data):
+            return mcp_error(
+                "export_dataset_bundle",
+                "Cluster assignment label count does not match the active model's dataset row count.",
+                error_code="CLUSTER_ASSIGNMENT_ROW_MISMATCH",
+                agent_action=(
+                    "Regenerate generate_cluster_dossier for this dataset and use "
+                    "the new cluster_assignment_id."
+                ),
+                details={
+                    "cluster_assignment_id": cluster_assignment_id,
+                    "label_count": assignment.label_count,
+                    "row_count": len(session.data),
+                },
+            )
+        cluster_labels = np.array(assignment.labels, dtype=np.uint32)
+        valid_cluster_ids = set(assignment.cluster_ids)
+    else:
+        if session.clusters is None:
+            return mcp_error(
+                "export_dataset_bundle",
+                "No cluster assignment ID was provided and no clusters are active in this session.",
+                error_code="CLUSTERS_MISSING",
+                agent_action="Run generate_cluster_dossier first or provide a cluster_assignment_id.",
+            )
+        if session.clusters_run_id != session.latest_run_id:
+            return mcp_error(
+                "export_dataset_bundle",
+                "Cached cluster state is stale. It was computed from run "
+                f"'{session.clusters_run_id}', but the active fitted model is run "
+                f"'{session.latest_run_id}'.",
+                error_code="CLUSTER_CACHE_STALE",
+                agent_action="Re-run generate_cluster_dossier() to recompute clusters before exporting.",
+                details={
+                    "cached_run_id": session.clusters_run_id,
+                    "current_run_id": session.latest_run_id,
+                },
+            )
+        cluster_labels = session.clusters
+        valid_cluster_ids = set(int(gid) for gid in cluster_labels.unique())
+
+    try:
+        norm_names = _normalize_cluster_metadata(
+            cluster_names,
+            valid_cluster_ids=valid_cluster_ids,
+            name="cluster_names",
+        )
+        norm_descs = _normalize_cluster_metadata(
+            cluster_descriptions,
+            valid_cluster_ids=valid_cluster_ids,
+            name="cluster_descriptions",
+        )
+    except ToolError as e:
+        return mcp_error("export_dataset_bundle", str(e))
+
+    try:
+        # Use asyncio.to_thread to avoid blocking FastMCP's event loop on large exports.
+        manifest_data = await asyncio.to_thread(
+            session.model.export_dataset_bundle,
+            output_dir=output_dir,
+            slug=slug,
+            cluster_labels=cluster_labels,
+            cluster_names=norm_names,
+            cluster_descriptions=norm_descs,
+            edges_threshold=edges_threshold,
+            layout=layout,
+            include_clean=include_clean,
+            write_manifest=write_manifest,
+        )
+
+        response = {
+            "status": "ok",
+            "output_dir": str(Path(output_dir).resolve()),
+            "slug": slug,
+            "bundle_path": str((Path(output_dir) / slug).resolve()),
+            "manifest": manifest_data,
+        }
+        return json.dumps(response, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error exporting dataset bundle: {e}")
+        return mcp_error("export_dataset_bundle", str(e))
