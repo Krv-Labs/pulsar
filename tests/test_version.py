@@ -25,7 +25,10 @@ def test_get_version_falls_back_to_cargo_toml():
 
 
 def test_cargo_version_matches_repo():
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
 
     cargo_path = Path(__file__).resolve().parent.parent / "Cargo.toml"
     with cargo_path.open("rb") as f:

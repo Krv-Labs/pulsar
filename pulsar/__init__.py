@@ -62,6 +62,8 @@ __all__ = [
     "config_to_yaml",
     # Pipeline
     "ThemaRS",
+    # Version
+    "__version__",
     # Hooks / utilities
     "label_points",
     "membership_matrix",
