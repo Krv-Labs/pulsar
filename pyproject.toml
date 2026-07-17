@@ -28,6 +28,7 @@ pulsar-mcp = "pulsar.mcp.server:main"
 mcp = ["fastmcp>=2.0"]
 
 [tool.maturin]
+# Version comes from [package].version in Cargo.toml (see scripts/check_versions.py).
 features        = ["pyo3/extension-module"]
 module-name     = "pulsar._pulsar"
 python-packages = ["pulsar"]
@@ -42,6 +43,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "rich>=14.3.3",
     "ruff>=0.15.7",
+    # Reference TOML parser for tests/test_version.py (cross-checks the
+    # stdlib-regex fallback in pulsar/_version.py). Not a runtime dependency.
+    "tomli>=2.0.1; python_version < '3.11'",
 ]
 demos = [
     "sentence-transformers>=3.0",

@@ -1,3 +1,4 @@
+from pulsar._version import __version__
 from pulsar._pulsar import (
     impute_column,
     StandardScaler,
@@ -61,6 +62,8 @@ __all__ = [
     "config_to_yaml",
     # Pipeline
     "ThemaRS",
+    # Version
+    "__version__",
     # Hooks / utilities
     "label_points",
     "membership_matrix",

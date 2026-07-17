@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev --group mcp --python ${{ matrix.python-version }}
 
+      - name: Check versions (Cargo.toml is source of truth)
+        run: uv run python scripts/check_versions.py
+
       - name: Run Clippy
         if: matrix.python-version == '3.13'
         run: cargo clippy -- -D warnings

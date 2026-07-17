@@ -74,3 +74,10 @@ Understand parameters and customize your sweeps:
 
       Full control over the pipeline with the Python API.
 
+Maintainers & Releases
+----------------------
+
+Versioning, changelog conventions, and the tag-driven publish workflow:
+
+:ref:`releases`
+
