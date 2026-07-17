@@ -19,7 +19,6 @@ dependencies = [
     "scikit-learn>=1.5",
     "scipy>=1.10",
     "pyyaml>=6.0",
-    "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [project.scripts]
@@ -44,6 +43,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "rich>=14.3.3",
     "ruff>=0.15.7",
+    # Reference TOML parser for tests/test_version.py (cross-checks the
+    # stdlib-regex fallback in pulsar/_version.py). Not a runtime dependency.
+    "tomli>=2.0.1; python_version < '3.11'",
 ]
 demos = [
     "sentence-transformers>=3.0",

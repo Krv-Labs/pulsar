@@ -3,20 +3,31 @@
 
 from __future__ import annotations
 
+import re
 import runpy
 import sys
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    import tomli as tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# The ``[package]`` table of Cargo.toml, up to the next table header or EOF.
+_PACKAGE_TABLE_RE = re.compile(
+    r"^\[package\]\s*$(?P<body>.*?)(?=^\[|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+# ``version = "x.y.z"`` on its own line within that table.
+_VERSION_RE = re.compile(r'^\s*version\s*=\s*"([^"]+)"', re.MULTILINE)
+
 
 def cargo_version() -> str:
-    with (ROOT / "Cargo.toml").open("rb") as f:
-        return tomllib.load(f)["package"]["version"]
+    text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    table = _PACKAGE_TABLE_RE.search(text)
+    if table is None:
+        raise ValueError("no [package] table found in Cargo.toml")
+    match = _VERSION_RE.search(table.group("body"))
+    if match is None:
+        raise ValueError("no version key in the [package] table of Cargo.toml")
+    return match.group(1)
 
 
 def python_source_version() -> str:
