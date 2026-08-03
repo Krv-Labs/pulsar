@@ -6,26 +6,40 @@ Quickstart
 
 Get from zero to insights in under 10 minutes.
 
-.. code-block:: bash
-
-   uv pip install pulsar
-
-
 Prerequisites
 -------------
 
-- Python 3.10+
+- For the no-code MCP path: `uv <https://docs.astral.sh/uv/getting-started/installation/>`_ and an MCP client such as Gemini CLI
+- For the Python API: Python 3.10+
 - For development: Rust toolchain
 
-Option 1: Use a Pre-Built Demo (Fastest)
------------------------------------------
+Option 1: Use Gemini CLI (No Code, No Clone)
+---------------------------------------------
 
-The fastest way to see Pulsar in action:
+Register the released Pulsar MCP server from any directory:
+
+.. code-block:: bash
+
+   gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from 'thema-pulsar[mcp]' pulsar-mcp
+   cd /path/to/your/workspace
+   gemini
+
+The first time Gemini opens the workspace, choose **Trust folder** when prompted. Gemini will not start stdio MCP servers in an untrusted workspace. If you previously chose not to trust it, run ``/permissions trust`` inside Gemini and select **Trust folder**. Let Gemini relaunch, then run ``/mcp list`` to confirm Pulsar is connected. If Gemini was already running when you added Pulsar and does not relaunch, fully exit and start it again.
+
+Start Gemini in the directory containing your dataset and ask: *"Use Pulsar to find the hidden structure in* ``data.csv`` *and explain the meaningful subgroups."*
+
+``uvx`` downloads ``thema-pulsar[mcp]`` from PyPI and runs it in an isolated environment. You do not need this repository or a local Python project.
+
+Option 2: Use a Pre-Built Demo
+------------------------------
+
+To run the source demo locally:
 
 .. code-block:: bash
 
    # Run the penguins demo (no data download needed)
-   cd /path/to/pulsar
+   git clone https://github.com/Krv-Labs/pulsar.git
+   cd pulsar
    uv sync
    uv run maturin develop --release
    python -c "
@@ -40,8 +54,8 @@ Done! You've discovered penguin species structure without looking at species lab
 
 For all demos: :ref:`demos`
 
-Option 2: Use with Claude AI (No Code)
----------------------------------------
+Use with Another AI Client
+--------------------------
 
 Let Claude handle the analysis:
 

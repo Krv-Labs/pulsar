@@ -131,7 +131,7 @@ Installation
 
 .. code-block:: bash
 
-   pip install pulsar
+   pip install thema-pulsar
 
 For development (requires Rust toolchain):
 

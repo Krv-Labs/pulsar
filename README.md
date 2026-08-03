@@ -24,7 +24,24 @@ The Pulsar MCP (Model Context Protocol) Server is our attempt to give you what y
 
 ### Setup
 
-Don't overcomplicate this. Add the server to your Claude Desktop config (or Gemini CLI, or whatever you're using):
+You do **not** need to clone this repository. With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, Gemini CLI users can register the released PyPI package from any directory with one command:
+
+```sh
+gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from 'thema-pulsar[mcp]' pulsar-mcp
+```
+
+Then launch Gemini from the workspace containing your data:
+
+```sh
+cd /path/to/your/workspace
+gemini
+```
+
+The first time Gemini opens a workspace, choose **Trust folder** when prompted. Gemini will not start stdio MCP servers—including user-scoped servers—in an untrusted workspace. If you previously chose not to trust it, run `/permissions trust` inside Gemini and select **Trust folder**. Let Gemini relaunch, then run `/mcp list` to confirm Pulsar is connected. If Gemini was already running when you added Pulsar and does not relaunch, fully exit and start it again; running sessions do not reload external settings changes.
+
+`--scope user` makes Pulsar available in every Gemini workspace. Replace it with `--scope project` to limit Pulsar to the current project. The 60-second timeout allows `uvx` to download and initialize Pulsar on its first launch.
+
+For clients configured with JSON, use:
 
 ```json
 {
@@ -38,7 +55,7 @@ Don't overcomplicate this. Add the server to your Claude Desktop config (or Gemi
 }
 ```
 
-This pulls `thema-pulsar` straight from PyPI — no clone, no `uv sync` required. If you prefer a persistent install, `pipx install "thema-pulsar[mcp]"` and use `"command": "pulsar-mcp"` instead.
+`uvx` pulls `thema-pulsar[mcp]` straight from PyPI and runs `pulsar-mcp` in an isolated environment—no clone, manually managed Python environment, or `uv sync` required. If you prefer a persistent install, run `pipx install "thema-pulsar[mcp]"` and use `"command": "pulsar-mcp"` instead.
 
 Restart your client. Done.
 
