@@ -12,7 +12,7 @@ The Python reference is the same formula used by the Rust implementation:
 import numpy as np
 
 from pulsar._pulsar import BallMapper, accumulate_pseudo_laplacians
-from tests.conftest import pseudo_laplacian_py
+from tests.reference import pseudo_laplacian_py
 
 
 def test_single_ballmap_matches_reference():
