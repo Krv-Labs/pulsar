@@ -74,10 +74,11 @@ What the tag triggers
 ``.github/workflows/release.yml`` runs on tag push:
 
 - Builds wheels (Linux, Windows, macOS) and sdist
+- Smoke-tests each macOS wheel (including native ``macos-15-intel`` x86_64) by installing it and importing the MCP server
 - Creates a GitHub Release with attached artifacts
 - Publishes to PyPI via trusted publishing
 
-Pull requests to ``main`` also exercise the release build matrix but do **not** publish.
+Pull requests to ``main`` also exercise the release build matrix but do **not** publish. CI additionally runs ``scripts/smoke_mcp.py`` on ``macos-15-intel``.
 
 Agent-friendly replication
 --------------------------
@@ -89,3 +90,4 @@ Agents automating releases should read ``.agents/AGENTS.md`` (versioning section
 - ``scripts/check_versions.py`` — must pass (no manual doc version strings)
 
 Do **not** hand-edit ``pyproject.toml`` version fields or hard-code versions in ``docs/source/conf.py``; both derive from ``Cargo.toml`` through the Python package.
+
