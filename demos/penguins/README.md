@@ -18,7 +18,7 @@ What follows from here is a walkthrough to help you—the domain expert—actual
 
 Before we start mapping the cosmos, we need to turn the bridge on. Pulsar uses the **Model Context Protocol (MCP)**. Think of this as a secure "bridge" that lets your AI safely talk to your data and use our topological tools.
 
-Configuring Python environments by hand is a nightmare that belongs in the past. We highly recommend using `uv` (the blazing-fast Python package manager) to run the server. If you're still manually activating virtual environments... who hurt you?
+Configuring Python environments by hand is a nightmare that belongs in the past. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then use `uvx` to run Pulsar directly from PyPI. You do not need to clone the Pulsar repository or create a Python environment for your own data.
 
 Here is exactly how to wire up Pulsar to your AI of choice. Pick your poison:
 
@@ -40,15 +40,15 @@ Open that file in a text editor (like Notepad or TextEdit) and add this block in
 {
   "mcpServers": {
     "pulsar": {
-      "command": "uv",
-      "args": ["run", "--group", "mcp", "pulsar-mcp"]
+      "command": "uvx",
+      "args": ["--from", "thema-pulsar[mcp]", "pulsar-mcp"]
     }
   }
 }
 ```
 
 > [!CAUTION]
-> **Pathing Issues:** If Claude complains it can't find `uv`, replace `"command": "uv"` with the absolute path to your `uv` executable (e.g., `/Users/yourname/.cargo/bin/uv`).
+> **Pathing Issues:** If Claude complains it can't find `uvx`, replace `"command": "uvx"` with the absolute path to your `uvx` executable (find it with `which uvx`).
 
 **3. Restart Claude**
 Fully quit Claude Desktop and restart it. Look for the little **Hammer icon** in a new chat to confirm the tools loaded. You are officially a topological cartographer.
@@ -60,13 +60,16 @@ Fully quit Claude Desktop and restart it. Look for the little **Hammer icon** in
 
   <br>
 
-If you're using the Gemini CLI, you literally just run one command in your terminal from the Pulsar directory:
+If you're using the Gemini CLI, run one command from any directory:
 
 ```bash
-gemini mcp add pulsar uv run --group mcp pulsar-mcp
+gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
 ```
 
-That's it. You're done. Go analyze some data.
+Now launch Gemini from the folder holding your data, hit **Trust folder** when it asks, and run `/mcp list` to see Pulsar staring back at you. That's it. Go analyze some data.
+
+> [!NOTE]
+> **No Pulsar in `/mcp list`?** Gemini refuses to start stdio MCP servers in an untrusted workspace, and user-scoped servers are no exception. Run `/permissions trust`, pick **Trust folder**, and let Gemini relaunch — if it doesn't relaunch itself, quit and reopen it, since a running session won't reload settings. Still nothing? The first boot downloads Pulsar, which can take up to a minute.
 
 </details>
 
@@ -78,7 +81,7 @@ That's it. You're done. Go analyze some data.
 Using Anthropic's terminal client? It's just as easy as Gemini. Run this from your terminal:
 
 ```bash
-claude mcp add pulsar -- uv run --group mcp pulsar-mcp
+claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
 ```
 
 </details>
@@ -95,7 +98,7 @@ If you live inside an AI IDE like Cursor (which uses OpenAI/Claude models under 
 3. Click **+ Add new MCP server**.
 4. Set the name to `pulsar`.
 5. Set the type to `command`.
-6. Set the command to: `uv run --group mcp pulsar-mcp`
+6. Set the command to: `uvx --from "thema-pulsar[mcp]" pulsar-mcp`
 7. Save and refresh. You'll see the Pulsar tools light up with a green dot.
 </details>
 

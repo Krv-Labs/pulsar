@@ -33,6 +33,21 @@ features        = ["pyo3/extension-module"]
 module-name     = "pulsar._pulsar"
 python-packages = ["pulsar"]
 
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# Selected explicitly so a ruff upgrade cannot change what CI enforces. Without
+# this, rule selection is whatever the installed ruff defaults to, and ruff 0.16
+# widened that default (adding I, UP, SIM, BLE, RUF, ...) — turning a green tree
+# red on an unrelated PR. This list is ruff's pre-0.16 default: pyflakes plus
+# the pycodestyle errors that catch real breakage.
+#
+# Widening the selection is a deliberate, separate change: run
+# `ruff check --statistics pulsar tests demos` against the candidate rule set
+# first, since most additions have a non-trivial backlog to clear.
+select = ["E4", "E7", "E9", "F"]
+
 [dependency-groups]
 mcp = [
     "fastmcp>=2.0",
@@ -42,7 +57,10 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.1.0",
     "rich>=14.3.3",
-    "ruff>=0.15.7",
+    # Bounded to one minor series: ruff's *default* rule set expands between
+    # minors (0.16 added I/UP/SIM/BLE/RUF/...), which silently changes what CI
+    # enforces. [tool.ruff.lint] pins the rules; this pins the engine.
+    "ruff>=0.16.1,<0.17",
     # Reference TOML parser for tests/test_version.py (cross-checks the
     # stdlib-regex fallback in pulsar/_version.py). Not a runtime dependency.
     "tomli>=2.0.1; python_version < '3.11'",

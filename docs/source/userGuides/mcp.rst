@@ -55,10 +55,15 @@ Claude handles all the messy parts: imputation, categorical encoding, parameter 
 Setup
 -----
 
-Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of the published ``thema-pulsar`` package. You do **not** need to clone the repo — `uvx <https://docs.astral.sh/uv/guides/tools/>`_ (or ``pipx``) can launch it directly from PyPI.
+Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of the published ``thema-pulsar`` package. You do **not** need to clone the repo or create a Python environment. Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then choose your client below. ``uvx`` downloads the released package from PyPI and runs it in an isolated environment.
 
 .. note::
   Pulsar works with any MCP-capable client, including Cursor and Gemini CLI, where you can add Pulsar as an MCP server/tool.
+
+.. note::
+  **The first launch can take a little while.** Pulsar is a substantial scientific server, and ``uvx`` may need to download the package and initialize its numerical dependencies before MCP tools appear. Wait for it to finish before retrying; later launches normally reuse uv's cache.
+
+  The Gemini command below sets ``--timeout 60000`` (60,000 milliseconds, or 60 seconds) so this first boot can complete. Clients that expose no timeout setting may give up before the download finishes — for those, either run the ``uvx`` command once in a terminal to warm uv's cache before starting the client, or use a persistent install (see `Alternative install methods`_) so there is nothing to download at launch.
 
 .. tab-set::
 
@@ -71,7 +76,7 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of
          {
            "mcpServers": {
              "pulsar": {
-               "command": "uv tool run",
+               "command": "uvx",
                "args": ["--from", "thema-pulsar[mcp]", "pulsar-mcp"]
              }
            }
@@ -80,19 +85,28 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of
       Restart Claude Desktop. A hammer icon in new chats confirms the tools loaded.
 
       .. note::
-         GUI-launched apps on macOS often don't inherit your shell ``PATH``. If Claude can't find ``uvx``, replace ``"command": "uv tool run"`` with its absolute path (find it with ``which uvx``, e.g. ``/Users/yourname/.local/bin/uvx``).
+         GUI-launched apps on macOS often don't inherit your shell ``PATH``. If Claude can't find ``uvx``, replace ``"command": "uvx"`` with its absolute path (find it with ``which uvx``, e.g. ``/Users/yourname/.local/bin/uvx``).
 
    .. tab-item:: Gemini CLI
 
       .. code-block:: bash
 
-         gemini mcp add pulsar uv tool run --from "thema-pulsar[mcp]" pulsar-mcp
+         gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
+
+      The ``--`` matters: it stops Gemini's own argument parser from consuming ``--from``. This user-scoped registration works from any directory and makes Pulsar available in every *trusted* Gemini workspace (see the trust note below). Use ``--scope project`` instead to limit it to the current project. The longer timeout gives ``uvx`` time to download and initialize Pulsar on its first launch.
+
+      Launch Gemini from the workspace containing your data, then run ``/mcp list`` to confirm Pulsar is connected.
+
+      .. note::
+         **Workspace trust gates stdio MCP servers.** As of Gemini CLI 0.53, Gemini does not start stdio MCP servers in an untrusted workspace, so a user-scoped Pulsar registration still stays dormant until you trust the folder. Choose **Trust folder** when first prompted; if you previously declined, run ``/permissions trust`` inside Gemini and select **Trust folder**. Let Gemini relaunch — running sessions do not reload external settings changes, so if it does not relaunch on its own, fully exit and start it again.
+
+         See `Gemini CLI folder trust <https://google-gemini.github.io/gemini-cli/docs/cli/trusted-folders.html>`_ for what untrusted mode restricts and how to review your trust decisions. Note that on 0.53 the trust prompt appears without any opt-in, so ignore that page's claim that the feature is disabled by default.
 
    .. tab-item:: Claude Code
 
       .. code-block:: bash
 
-         claude mcp add pulsar -- uv tool run --from "thema-pulsar[mcp]" pulsar-mcp
+         claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
 
    .. tab-item:: Cursor / Windsurf
 
@@ -100,7 +114,7 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of
 
       - Name: ``pulsar``
       - Type: ``command``
-      - Command: ``uv tool run --from "thema-pulsar[mcp]" pulsar-mcp``
+      - Command: ``uvx --from "thema-pulsar[mcp]" pulsar-mcp``
 
 Alternative install methods
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
