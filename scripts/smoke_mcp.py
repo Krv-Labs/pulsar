@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Smoke-test Pulsar MCP: import path, live handshake, and stdio launch.
 
-Used by macOS Intel CI to catch arch/ABI and packaging failures that unit tests
-on Linux do not exercise. Exercises the same launch surface Gemini/Claude hit
-via ``uvx ... pulsar-mcp`` (stdio MCP).
+Used by release CI on every published wheel platform (Linux x86_64/ARM, Windows,
+macOS Intel/ARM) and by the dedicated macOS Intel CI job. Exercises the same
+launch surface Gemini/Claude hit via ``uvx ... pulsar-mcp`` (stdio MCP).
 """
 
 from __future__ import annotations
@@ -80,17 +80,23 @@ async def _check_inprocess() -> None:
         await _assert_healthy(client, "in-process")
 
 
+def _pulsar_mcp_command() -> tuple[str, list[str]]:
+    """Resolve the installed entry point, with a module fallback for Windows PATH quirks."""
+    command = shutil.which("pulsar-mcp")
+    if command is not None:
+        return command, []
+    return sys.executable, ["-m", "pulsar.mcp.server"]
+
+
 async def _check_stdio_launch() -> None:
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
 
-    command = shutil.which("pulsar-mcp")
-    if command is None:
-        raise SystemExit("pulsar-mcp not on PATH; cannot smoke stdio launch")
+    command, args = _pulsar_mcp_command()
 
     # Quiet-ish child process; banner may still print depending on FastMCP version.
     env = {**os.environ, "FASTMCP_SHOW_SERVER_BANNER": "false"}
-    transport = StdioTransport(command=command, args=[], env=env)
+    transport = StdioTransport(command=command, args=args, env=env)
     async with Client(transport) as client:
         await _assert_healthy(client, "stdio launch")
 

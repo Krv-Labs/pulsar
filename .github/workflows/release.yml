@@ -15,10 +15,16 @@ permissions:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    # Native hosts so we can install+smoke the wheel (aarch64 was previously
+    # cross-compiled on x86_64 and could not be executed there).
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +35,20 @@ jobs:
           args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13
           sccache: 'true'
           manylinux: auto
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Smoke-test installed wheel + MCP
+        shell: bash
+        run: |
+          WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
+          test -n "$WHEEL"
+          python -m pip install --upgrade pip
+          python -m pip install "${WHEEL}" 'fastmcp>=2.0'
+          python scripts/smoke_mcp.py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -59,6 +79,15 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13
           sccache: 'true'
+
+      - name: Smoke-test installed wheel + MCP
+        shell: bash
+        run: |
+          WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
+          test -n "$WHEEL"
+          python -m pip install --upgrade pip
+          python -m pip install "${WHEEL}" 'fastmcp>=2.0'
+          python scripts/smoke_mcp.py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -98,8 +127,10 @@ jobs:
           sccache: 'true'
 
       - name: Smoke-test installed wheel + MCP
+        shell: bash
         run: |
           WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
+          test -n "$WHEEL"
           python -m pip install --upgrade pip
           python -m pip install "${WHEEL}" 'fastmcp>=2.0'
           python scripts/smoke_mcp.py
