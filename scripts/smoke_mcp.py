@@ -47,9 +47,7 @@ def _check_imports() -> None:
     else:  # pragma: no cover - Python 3.10
         scripts = {ep.name for ep in eps.get("console_scripts", [])}
     if "pulsar-mcp" not in scripts:
-        raise SystemExit(
-            f"pulsar-mcp entry point missing; have={sorted(scripts)[:20]}"
-        )
+        raise SystemExit(f"pulsar-mcp entry point missing; have={sorted(scripts)[:20]}")
 
     print(f"ok: imports (_pulsar + {len(names)} tools + entry point)")
 

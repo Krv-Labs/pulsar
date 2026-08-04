@@ -18,4 +18,3 @@ def array_with_nans():
 def categorical_array():
     # Encoded as float: 0.0, 1.0, 2.0
     return np.array([0.0, 1.0, np.nan, 0.0, np.nan, 1.0])
-
