@@ -54,7 +54,7 @@ gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[m
 
 Restart your client. Done.
 
-Two things that trip people up: the first launch can take up to a minute while `uvx` downloads Pulsar (hence Gemini's `--timeout 60000`), and Gemini will not start stdio MCP servers in an untrusted workspace—choose **Trust folder** when prompted. The [MCP setup guide](docs/source/userGuides/mcp.rst) covers both, per client.
+Two things that trip people up: the first launch can take up to a minute while `uvx` downloads Pulsar (hence Gemini's `--timeout 60000`), and Gemini will not start stdio MCP servers in an untrusted workspace—choose **Trust folder** when prompted. The [MCP setup guide](https://github.com/Krv-Labs/pulsar/blob/main/docs/source/userGuides/mcp.rst) covers both, per client.
 
 ### General Overview
 

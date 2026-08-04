@@ -98,7 +98,9 @@ Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of
       Launch Gemini from the workspace containing your data, then run ``/mcp list`` to confirm Pulsar is connected.
 
       .. note::
-         **Workspace trust gates stdio MCP servers.** As of Gemini CLI 0.53, Gemini does not start stdio MCP servers in an untrusted workspace, so a user-scoped Pulsar registration still stays dormant until you trust the folder. Choose **Trust folder** when first prompted; if you previously declined, run ``/permissions trust`` inside Gemini and select **Trust folder**. Let Gemini relaunch — running sessions do not reload external settings changes, so if it does not relaunch on its own, fully exit and start it again. See `Gemini CLI folder trust <https://google-gemini.github.io/gemini-cli/docs/cli/trusted-folders.html>`_ for current behavior.
+         **Workspace trust gates stdio MCP servers.** As of Gemini CLI 0.53, Gemini does not start stdio MCP servers in an untrusted workspace, so a user-scoped Pulsar registration still stays dormant until you trust the folder. Choose **Trust folder** when first prompted; if you previously declined, run ``/permissions trust`` inside Gemini and select **Trust folder**. Let Gemini relaunch — running sessions do not reload external settings changes, so if it does not relaunch on its own, fully exit and start it again.
+
+         See `Gemini CLI folder trust <https://google-gemini.github.io/gemini-cli/docs/cli/trusted-folders.html>`_ for what untrusted mode restricts and how to review your trust decisions. Note that on 0.53 the trust prompt appears without any opt-in, so ignore that page's claim that the feature is disabled by default.
 
    .. tab-item:: Claude Code
 
