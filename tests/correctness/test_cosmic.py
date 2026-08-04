@@ -20,7 +20,7 @@ from pulsar._pulsar import (
     accumulate_pseudo_laplacians,
     accumulate_pseudo_laplacians_sparse,
 )
-from tests.conftest import pseudo_laplacian_py
+from tests.reference import pseudo_laplacian_py
 
 
 def py_cosmic(L, threshold):

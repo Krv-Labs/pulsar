@@ -4,7 +4,7 @@ import numpy as np
 
 from pulsar._pulsar import CosmicGraph, BallMapper, accumulate_pseudo_laplacians
 from pulsar.analysis import cosmic_to_networkx
-from tests.conftest import pseudo_laplacian_py
+from tests.reference import pseudo_laplacian_py
 
 
 def make_simple_laplacian():
