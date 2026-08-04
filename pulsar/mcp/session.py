@@ -16,6 +16,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from pulsar.pipeline import ThemaRS
+from pulsar.representations import CosmicTrajectory, TemporalCosmicGraph
 from pulsar.mcp.registry import registry
 from pulsar.mcp.interpreter import FeatureEvidenceIndex
 
@@ -39,6 +40,24 @@ class GraphArtifact:
     params: dict[str, Any]
     graph_summary: dict[str, Any]
     metrics: dict[str, Any]
+
+
+@dataclass
+class LongitudinalArtifact:
+    """A built longitudinal panel plus whichever representations were requested.
+
+    Lives in the session only, like the fitted ``ThemaRS`` model — the sparse
+    matrices and frames do not round-trip through the registry cheaply.
+    """
+
+    longitudinal_id: str
+    dataset_id: str | None
+    representation: str  # "trajectory" | "temporal" | "both"
+    trajectory: CosmicTrajectory | None
+    temporal: TemporalCosmicGraph | None
+    panel: dict[str, Any]
+    config_yaml: str
+    created_at: float
 
 
 @dataclass
@@ -68,6 +87,7 @@ class _PulsarSession:
     active_config_yaml: str | None = None
     active_config_dataset_id: str | None = None
     graph_artifacts: dict[str, GraphArtifact] = field(default_factory=dict)
+    longitudinal: dict[str, LongitudinalArtifact] = field(default_factory=dict)
 
     def calculate_memory_mb(self) -> float:
         """Estimate current session memory footprint in MB."""
@@ -89,6 +109,18 @@ class _PulsarSession:
             for emb in self.embeddings:
                 if hasattr(emb, "nbytes"):
                     bytes_total += emb.nbytes
+
+        for artifact in self.longitudinal.values():
+            if artifact.trajectory is not None:
+                # Sparse stores: size the data/index buffers, never densify.
+                for matrix in (
+                    artifact.trajectory.similarity,
+                    artifact.trajectory.incidence,
+                ):
+                    bytes_total += matrix.data.nbytes + matrix.indices.nbytes
+                bytes_total += artifact.trajectory.obs.memory_usage(deep=True).sum()
+            if artifact.temporal is not None:
+                bytes_total += artifact.temporal.tensor.nbytes
 
         return round(float(bytes_total) / (1024 * 1024), 2)
 
@@ -136,6 +168,24 @@ def _resolve_dataset_record(dataset_id: str):
     if record is None:
         raise LookupError(dataset_id)
     return record
+
+
+def _resolve_longitudinal(
+    session: _PulsarSession, longitudinal_id: str
+) -> LongitudinalArtifact:
+    """Resolve a longitudinal handle, or raise LookupError for the error envelope.
+
+    Falls back to the most recent artifact when the caller omits the handle, so a
+    single-panel session does not have to thread the id through every call.
+    """
+    if not longitudinal_id:
+        if not session.longitudinal:
+            raise LookupError("")
+        return next(reversed(session.longitudinal.values()))
+    artifact = session.longitudinal.get(longitudinal_id)
+    if artifact is None:
+        raise LookupError(longitudinal_id)
+    return artifact
 
 
 def _resolve_dataset_path(dataset_id: str) -> str:
