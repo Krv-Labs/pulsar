@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP setup documentation now describes a working no-clone install.** `pip install pulsar` installed an unrelated third-party package from PyPI; the correct distribution is `thema-pulsar`. The Claude Desktop JSON config specified `"command": "uv tool run"`, which can never resolve — MCP clients exec `command` directly with no shell, so a value containing a space is not an executable. Client commands now use `uvx`, and the Gemini registration documents workspace trust (stdio MCP servers stay dormant in an untrusted folder) plus `--timeout 60000` for the first-boot download. ([#33](https://github.com/Krv-Labs/pulsar/pull/33))
+- **Ruff rule selection is now explicit and the engine is version-bounded.** The project had no `[tool.ruff]` configuration, so CI enforced whatever the installed ruff defaulted to. Ruff 0.16 widened that default (adding `I`, `UP`, `SIM`, `BLE`, `RUF`, and more), and because `uv.lock` is not committed, CI resolves dependencies fresh on every run — so the unbounded `ruff>=0.15.7` picked up 0.16.1 and failed lint on unrelated pull requests with 231 pre-existing findings. `[tool.ruff.lint] select` now pins the pre-0.16 rule set and the dev group is bounded to `>=0.16.1,<0.17`. ([#33](https://github.com/Krv-Labs/pulsar/pull/33))
+
 ## [0.2.5] - 2026-07-11
 
 ### Added
