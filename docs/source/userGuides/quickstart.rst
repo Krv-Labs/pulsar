@@ -14,19 +14,19 @@ Prerequisites
 - For development: Rust toolchain
 
 Option 1: Use Gemini CLI (No Code, No Clone)
----------------------------------------------
+--------------------------------------------
 
 Register the released Pulsar MCP server from any directory:
 
 .. code-block:: bash
 
-   gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from 'thema-pulsar[mcp]' pulsar-mcp
+   gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
    cd /path/to/your/workspace
    gemini
 
-The first time Gemini opens the workspace, choose **Trust folder** when prompted. Gemini will not start stdio MCP servers in an untrusted workspace. If you previously chose not to trust it, run ``/permissions trust`` inside Gemini and select **Trust folder**. Let Gemini relaunch, then run ``/mcp list`` to confirm Pulsar is connected. If Gemini was already running when you added Pulsar and does not relaunch, fully exit and start it again.
+The first time Gemini opens the workspace, choose **Trust folder** when prompted — Gemini does not start stdio MCP servers in an untrusted workspace. Then run ``/mcp list`` to confirm Pulsar is connected. See :ref:`mcp` if it doesn't appear.
 
-Start Gemini in the directory containing your dataset and ask: *"Use Pulsar to find the hidden structure in* ``data.csv`` *and explain the meaningful subgroups."*
+Then ask: *"Use Pulsar to find the hidden structure in* ``data.csv`` *and explain the meaningful subgroups."*
 
 ``uvx`` downloads ``thema-pulsar[mcp]`` from PyPI and runs it in an isolated environment. You do not need this repository or a local Python project.
 
@@ -54,19 +54,19 @@ Done! You've discovered penguin species structure without looking at species lab
 
 For all demos: :ref:`demos`
 
-Use with Another AI Client
---------------------------
+Option 3: Use with Another AI Client
+------------------------------------
 
-Let Claude handle the analysis:
+Let your MCP client handle the analysis:
 
-1. Set up Pulsar MCP server (see :ref:`mcp`)
-2. Open Claude Desktop
+1. Set up the Pulsar MCP server for your client (see :ref:`mcp`)
+2. Open the client — Claude Desktop, Claude Code, Cursor, or Windsurf
 3. Paste: *"Analyze the file at ``demos/penguins/penguins.csv`` using Pulsar. Find the hidden structure."*
 
-Claude will orchestrate parameter tuning and generate a statistical dossier.
+The client will orchestrate parameter tuning and generate a statistical dossier.
 
-Option 3: YAML-Driven Workflow (Recommended for Reproducibility)
------------------------------------------------------------------
+Option 4: YAML-Driven Workflow (Recommended for Reproducibility)
+----------------------------------------------------------------
 
 Use YAML configuration for transparent, reproducible pipelines.
 
@@ -124,8 +124,8 @@ Create ``params.yaml``:
    for i, rep in enumerate(reps):
        print(f"Representative {i+1}: {rep}")
 
-Option 4: Programmatic Configuration (Full Control)
------------------------------------------------------
+Option 5: Programmatic Configuration (Full Control)
+---------------------------------------------------
 
 For maximum control, configure directly in Python:
 

@@ -63,10 +63,13 @@ Fully quit Claude Desktop and restart it. Look for the little **Hammer icon** in
 If you're using the Gemini CLI, run one command from any directory:
 
 ```bash
-gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from 'thema-pulsar[mcp]' pulsar-mcp
+gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
 ```
 
-Launch Gemini from the workspace containing your data. The first time Gemini opens that workspace, choose **Trust folder** when prompted; Gemini does not start stdio MCP servers in untrusted workspaces. If you previously chose not to trust it, run `/permissions trust` inside Gemini and select **Trust folder**. Let Gemini relaunch, then run `/mcp list`. If Gemini was already running when you added Pulsar and does not relaunch, fully exit and start it again. Then you're done—go analyze some data.
+Now launch Gemini from the folder holding your data, hit **Trust folder** when it asks, and run `/mcp list` to see Pulsar staring back at you. That's it. Go analyze some data.
+
+> [!NOTE]
+> **No Pulsar in `/mcp list`?** Gemini refuses to start stdio MCP servers in an untrusted workspace, and user-scoped servers are no exception. Run `/permissions trust`, pick **Trust folder**, and let Gemini relaunch — if it doesn't relaunch itself, quit and reopen it, since a running session won't reload settings. Still nothing? The first boot downloads Pulsar, which can take up to a minute.
 
 </details>
 
@@ -78,7 +81,7 @@ Launch Gemini from the workspace containing your data. The first time Gemini ope
 Using Anthropic's terminal client? It's just as easy as Gemini. Run this from your terminal:
 
 ```bash
-claude mcp add pulsar -- uvx --from 'thema-pulsar[mcp]' pulsar-mcp
+claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
 ```
 
 </details>

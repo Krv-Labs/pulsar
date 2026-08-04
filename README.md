@@ -24,24 +24,9 @@ The Pulsar MCP (Model Context Protocol) Server is our attempt to give you what y
 
 ### Setup
 
-You do **not** need to clone this repository. With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, Gemini CLI users can register the released PyPI package from any directory with one command:
+You do **not** need to clone this repository. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then point your client at the published package.
 
-```sh
-gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from 'thema-pulsar[mcp]' pulsar-mcp
-```
-
-Then launch Gemini from the workspace containing your data:
-
-```sh
-cd /path/to/your/workspace
-gemini
-```
-
-The first time Gemini opens a workspace, choose **Trust folder** when prompted. Gemini will not start stdio MCP servers—including user-scoped servers—in an untrusted workspace. If you previously chose not to trust it, run `/permissions trust` inside Gemini and select **Trust folder**. Let Gemini relaunch, then run `/mcp list` to confirm Pulsar is connected. If Gemini was already running when you added Pulsar and does not relaunch, fully exit and start it again; running sessions do not reload external settings changes.
-
-`--scope user` makes Pulsar available in every Gemini workspace. Replace it with `--scope project` to limit Pulsar to the current project. The 60-second timeout allows `uvx` to download and initialize Pulsar on its first launch.
-
-For clients configured with JSON, use:
+For clients configured with JSON (Claude Desktop, Cursor, Windsurf):
 
 ```json
 {
@@ -55,9 +40,21 @@ For clients configured with JSON, use:
 }
 ```
 
+For CLI clients, one command:
+
+```sh
+# Claude Code
+claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
+
+# Gemini CLI — user scope works from any directory; use --scope project to limit it to one project
+gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
+```
+
 `uvx` pulls `thema-pulsar[mcp]` straight from PyPI and runs `pulsar-mcp` in an isolated environment—no clone, manually managed Python environment, or `uv sync` required. If you prefer a persistent install, run `pipx install "thema-pulsar[mcp]"` and use `"command": "pulsar-mcp"` instead.
 
 Restart your client. Done.
+
+Two things that trip people up: the first launch can take up to a minute while `uvx` downloads Pulsar (hence Gemini's `--timeout 60000`), and Gemini will not start stdio MCP servers in an untrusted workspace—choose **Trust folder** when prompted. The [MCP setup guide](docs/source/userGuides/mcp.rst) covers both, per client.
 
 ### General Overview
 
