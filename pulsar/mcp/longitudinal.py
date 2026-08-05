@@ -767,7 +767,9 @@ def archetype_payload(
         observed_seq = [v for v in sequence if not pd.isna(v)]
         archetypes.append(
             {
-                "sequence": [None if pd.isna(value) else int(value) for value in sequence],
+                "sequence": [
+                    None if pd.isna(value) else int(value) for value in sequence
+                ],
                 "n_entities": int(population),
                 "fraction": round(float(population) / len(sequences), 4),
                 "transitions": int(
@@ -862,10 +864,12 @@ def levenshtein_distance(seq1: list[int], seq2: list[int]) -> int:
         dp[0][j] = j
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            cost = 0 if seq1[i-1] == seq2[j-1] else 1
-            dp[i][j] = min(dp[i-1][j] + 1,      # deletion
-                           dp[i][j-1] + 1,      # insertion
-                           dp[i-1][j-1] + cost) # substitution
+            cost = 0 if seq1[i - 1] == seq2[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,  # deletion
+                dp[i][j - 1] + 1,  # insertion
+                dp[i - 1][j - 1] + cost,
+            )  # substitution
     return dp[n][m]
 
 
@@ -876,19 +880,21 @@ def dtw_distance(seq1: list[int], seq2: list[int]) -> float:
         return float(max(n, m))
     dp = np.full((n, m), np.inf)
     dp[0, 0] = 0.0 if seq1[0] == seq2[0] else 1.0
-    
+
     for i in range(1, n):
-        dp[i, 0] = dp[i-1, 0] + (0.0 if seq1[i] == seq2[0] else 1.0)
+        dp[i, 0] = dp[i - 1, 0] + (0.0 if seq1[i] == seq2[0] else 1.0)
     for j in range(1, m):
-        dp[0, j] = dp[0, j-1] + (0.0 if seq1[0] == seq2[j] else 1.0)
-        
+        dp[0, j] = dp[0, j - 1] + (0.0 if seq1[0] == seq2[j] else 1.0)
+
     for i in range(1, n):
         for j in range(1, m):
             cost = 0.0 if seq1[i] == seq2[j] else 1.0
-            dp[i, j] = cost + min(dp[i-1, j],    # insertion
-                                  dp[i, j-1],    # deletion
-                                  dp[i-1, j-1])  # match/mismatch
-    return float(dp[n-1, m-1])
+            dp[i, j] = cost + min(
+                dp[i - 1, j],  # insertion
+                dp[i, j - 1],  # deletion
+                dp[i - 1, j - 1],
+            )  # match/mismatch
+    return float(dp[n - 1, m - 1])
 
 
 def classify_trajectories_payload(
@@ -1055,7 +1061,9 @@ def classify_trajectories_payload(
         }
 
     # Sort classifications by entity_id for deterministic return
-    sorted_classification = {k: classification[k] for k in sorted(classification.keys())}
+    sorted_classification = {
+        k: classification[k] for k in sorted(classification.keys())
+    }
 
     return {
         "representation": "trajectory",

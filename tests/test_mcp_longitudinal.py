@@ -447,7 +447,10 @@ class TestClassifyTrajectories:
         response = json.loads(
             asyncio.run(
                 classify_trajectories(
-                    built["longitudinal_id"], method="complexity", threshold=0.25, response_format="json"
+                    built["longitudinal_id"],
+                    method="complexity",
+                    threshold=0.25,
+                    response_format="json",
                 )
             )
         )
@@ -455,13 +458,16 @@ class TestClassifyTrajectories:
         assert response["method"] == "complexity"
         assert "Stable (0 entropy)" in response["classes_summary"]
         assert "Volatile / Refractory" in response["classes_summary"]
-        
+
     def test_classify_transition(self, tmp_path):
         built = _build(tmp_path)
         response = json.loads(
             asyncio.run(
                 classify_trajectories(
-                    built["longitudinal_id"], method="transition", threshold=0.25, response_format="json"
+                    built["longitudinal_id"],
+                    method="transition",
+                    threshold=0.25,
+                    response_format="json",
                 )
             )
         )
@@ -474,7 +480,10 @@ class TestClassifyTrajectories:
         response = json.loads(
             asyncio.run(
                 classify_trajectories(
-                    built["longitudinal_id"], method="sequence", threshold=0.25, response_format="json"
+                    built["longitudinal_id"],
+                    method="sequence",
+                    threshold=0.25,
+                    response_format="json",
                 )
             )
         )
@@ -486,7 +495,10 @@ class TestClassifyTrajectories:
         response = json.loads(
             asyncio.run(
                 classify_trajectories(
-                    built["longitudinal_id"], method="levenshtein", threshold=0.25, response_format="json"
+                    built["longitudinal_id"],
+                    method="levenshtein",
+                    threshold=0.25,
+                    response_format="json",
                 )
             )
         )
@@ -499,7 +511,10 @@ class TestClassifyTrajectories:
         response = json.loads(
             asyncio.run(
                 classify_trajectories(
-                    built["longitudinal_id"], method="dtw", threshold=0.25, response_format="json"
+                    built["longitudinal_id"],
+                    method="dtw",
+                    threshold=0.25,
+                    response_format="json",
                 )
             )
         )

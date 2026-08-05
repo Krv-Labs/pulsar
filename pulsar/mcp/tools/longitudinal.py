@@ -681,7 +681,9 @@ def _neighbors_to_markdown(payload: dict[str, Any]) -> str:
 
 async def classify_trajectories(
     longitudinal_id: str = "",
-    method: Literal["complexity", "transition", "sequence", "levenshtein", "dtw"] = "complexity",
+    method: Literal[
+        "complexity", "transition", "sequence", "levenshtein", "dtw"
+    ] = "complexity",
     threshold: float = 0.15,
     response_format: Literal["json", "markdown"] = "markdown",
     ctx: Context = None,
@@ -704,7 +706,8 @@ async def classify_trajectories(
         )
     if method not in {"complexity", "transition", "sequence", "levenshtein", "dtw"}:
         return mcp_error(
-            "classify_trajectories", "method must be 'complexity', 'transition', 'sequence', 'levenshtein', or 'dtw'."
+            "classify_trajectories",
+            "method must be 'complexity', 'transition', 'sequence', 'levenshtein', or 'dtw'.",
         )
     if threshold < 0.0:
         return mcp_error("classify_trajectories", "threshold must be >= 0.")
@@ -755,7 +758,9 @@ def _classification_to_markdown(payload: dict[str, Any]) -> str:
         "| Cohort Class | Patient Count | Population Share |",
         "|---|---|---|",
     ]
-    for p_class, info in sorted(payload["classes_summary"].items(), key=lambda x: -x[1]["count"]):
+    for p_class, info in sorted(
+        payload["classes_summary"].items(), key=lambda x: -x[1]["count"]
+    ):
         lines.append(f"| {p_class} | {info['count']} | {info['fraction']:.1%} |")
 
     lines += [
@@ -770,9 +775,11 @@ def _classification_to_markdown(payload: dict[str, Any]) -> str:
         lines.append(
             f"| {p_id} | {info['class']} | {info['length']} | {info['sequence']} |"
         )
-    
+
     if len(payload["classification"]) > 15:
-        lines.append(f"| ... | and {len(payload['classification']) - 15} more patients | | |")
+        lines.append(
+            f"| ... | and {len(payload['classification']) - 15} more patients | | |"
+        )
 
     lines += ["", "## Next Tools"] + [f"- `{t}`" for t in payload["next_tools"]]
     return "\n".join(lines)
