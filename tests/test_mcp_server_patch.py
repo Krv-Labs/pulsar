@@ -52,7 +52,18 @@ def test_mcp_server_main_cli(monkeypatch):
 
     # SSE with custom host, port, path
     mock_run.reset_mock()
-    main(["--transport", "sse", "--host", "127.0.0.1", "--port", "9000", "--path", "/mcp"])
+    main(
+        [
+            "--transport",
+            "sse",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9000",
+            "--path",
+            "/mcp",
+        ]
+    )
     mock_run.assert_called_with(
         transport="sse",
         host="127.0.0.1",
@@ -72,5 +83,3 @@ def test_cache_dir_env_override(monkeypatch, tmp_path):
 
     assert reg._CACHE_DIR == custom_dir
     assert reg.MCPRegistry().cache_dir == custom_dir
-
-
