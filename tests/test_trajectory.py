@@ -100,6 +100,17 @@ class TestPanelInvariants:
         assert ct.obs["entity_id"].tolist() == ids * 2
         assert ct.observation_index("p3", 1) == 6 + 3
 
+    def test_ragged_snapshot_entity_ids_are_carried_through(self):
+        snapshots = _migrating_panel(n_stay=2, n_move=1, n_times=2)
+        ct = CosmicTrajectory.from_snapshots(
+            [snapshots[0][:2], snapshots[1][:2]],
+            _config(),
+            entity_ids=[["p0", "p1"], ["p1", "p2"]],
+        )
+
+        assert ct.obs["entity_id"].tolist() == ["p0", "p1", "p1", "p2"]
+        assert ct.observation_index("p1", 1) == 2
+
     def test_mismatched_entity_ids_raise(self):
         snapshots = _migrating_panel(n_stay=2, n_move=2, n_times=2)
         with pytest.raises(ValueError, match="entity_ids has 2 entries"):
@@ -231,6 +242,24 @@ class TestTrajectories:
         for src, dst in edges:
             assert ct.obs.loc[src, "entity_id"] == ct.obs.loc[dst, "entity_id"]
             assert ct.obs.loc[dst, "t"] == ct.obs.loc[src, "t"] + 1
+
+    def test_trajectory_edges_do_not_bridge_missing_time_steps(self):
+        snapshots = _migrating_panel(n_stay=2, n_move=1, n_times=3)
+        ct = CosmicTrajectory.from_snapshots(
+            [snapshots[0][:2], snapshots[1][:2], snapshots[2][:2]],
+            _config(),
+            entity_ids=[["p0", "p1"], ["p1", "p2"], ["p0", "p2"]],
+        )
+
+        assert all(
+            ct.obs.loc[dst, "t"] == ct.obs.loc[src, "t"] + 1
+            for src, dst in ct.trajectory_edges()
+        )
+        p0_times = ct.obs[ct.obs["entity_id"] == "p0"]
+        assert not any(
+            src in p0_times.index and dst in p0_times.index
+            for src, dst in ct.trajectory_edges()
+        )
 
     def test_cluster_labels_align_with_observations(self):
         ct = CosmicTrajectory.from_snapshots(_migrating_panel(), _config())

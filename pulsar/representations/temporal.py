@@ -93,7 +93,7 @@ class TemporalCosmicGraph:
         if tensor.shape[0] != tensor.shape[1]:
             raise ValueError(f"Expected square slices, got shape {tensor.shape}")
 
-        self._tensor = tensor.astype(np.float64)
+        self._tensor = tensor.astype(np.float64, copy=False)
         self._threshold = threshold
         self._n = tensor.shape[0]
         self._t = tensor.shape[2]
@@ -154,12 +154,10 @@ class TemporalCosmicGraph:
             ball_maps_per_time.append(ball_maps)
 
         # Accumulate into 3D pseudo-Laplacian tensor
-        L_tensor = np.array(
-            accumulate_temporal_pseudo_laplacians(ball_maps_per_time, n)
-        )
+        L_tensor = accumulate_temporal_pseudo_laplacians(ball_maps_per_time, n)
 
         # Normalize to weighted adjacency
-        W_tensor = np.array(py_normalize_temporal_laplacian(L_tensor))
+        W_tensor = py_normalize_temporal_laplacian(L_tensor)
 
         return cls(W_tensor, threshold=threshold)
 

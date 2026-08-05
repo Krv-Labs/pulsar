@@ -134,6 +134,15 @@ class TestPivotPolicies:
         assert not panel.is_aligned
         assert panel.report["alignment"] == "ragged"
 
+    def test_allow_ragged_preserves_each_snapshot_entity_ids(self):
+        frame = _long_frame()
+        ragged = frame[~((frame["patient_id"] == "p0") & (frame["hour"] == 3))]
+
+        panel = pivot_panel(ragged, "patient_id", "hour", on_missing="allow_ragged")
+
+        assert panel.snapshot_entity_ids[0][:2] == ["p0", "p1"]
+        assert panel.snapshot_entity_ids[3][:2] == ["p1", "p2"]
+
     def test_structured_errors_for_bad_panels(self):
         frame = _long_frame()
 
@@ -182,17 +191,48 @@ class TestBuild:
         assert response["error_code"] == "RAGGED_PANEL_NOT_SUPPORTED"
         assert "trajectory" in response["agent_action"]
 
+    def test_same_size_ragged_panel_is_rejected_when_entity_ids_differ(self, tmp_path):
+        frame = _long_frame()
+        ragged = frame[
+            ~(
+                ((frame["patient_id"] == "p0") & (frame["hour"] == 1))
+                | ((frame["patient_id"] == "p1") & (frame["hour"] == 0))
+            )
+        ]
+
+        response = _build(
+            tmp_path,
+            path=_write_long(tmp_path, ragged),
+            representation="temporal",
+            on_missing="allow_ragged",
+        )
+
+        assert response["error_code"] == "RAGGED_PANEL_NOT_SUPPORTED"
+
     def test_tensor_cost_guard(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PULSAR_MCP_MAX_TENSOR_BYTES", "1000")
 
         blocked = _build(tmp_path, representation="temporal")
         assert blocked["error_code"] == "TENSOR_TOO_LARGE"
-        assert blocked["details"]["required_bytes"] == 30 * 30 * 4 * 8
+        assert blocked["details"]["tensor_bytes"] == 30 * 30 * 4 * 8
+        assert blocked["details"]["peak_required_bytes"] == 3 * 30 * 30 * 4 * 8
         assert blocked["details"]["limit_bytes"] == 1000
 
         # The sparse representation is unaffected by the dense ceiling.
         allowed = _build(tmp_path, representation="trajectory")
         assert allowed["status"] == "ok"
+
+    def test_tensor_guard_budgets_peak_working_memory(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PULSAR_MCP_MAX_TENSOR_BYTES", "30000")
+
+        blocked = _build(tmp_path, representation="temporal")
+
+        assert blocked["error_code"] == "TENSOR_TOO_LARGE"
+        assert blocked["details"]["tensor_bytes"] < blocked["details"]["limit_bytes"]
+        assert (
+            blocked["details"]["peak_required_bytes"]
+            > blocked["details"]["limit_bytes"]
+        )
 
     def test_missing_keys_and_config_are_structured_errors(self, tmp_path):
         no_keys = _build(tmp_path, entity_column="", time_column="")
@@ -337,6 +377,20 @@ class TestArchetypes:
             assert len(entities["preview"]) <= 3
             assert entities["total"] == 10
 
+    def test_negative_member_limit_is_rejected(self, tmp_path):
+        built = _build(tmp_path)
+        response = json.loads(
+            asyncio.run(
+                get_trajectory_archetypes(
+                    built["longitudinal_id"],
+                    max_entities_per_archetype=-1,
+                    response_format="json",
+                )
+            )
+        )
+
+        assert response["error_code"] == "INVALID_ARGUMENT"
+
 
 class TestCrossTimeNeighbors:
     def test_migrated_entity_matches_its_destination_cohort_earlier(self, tmp_path):
@@ -380,6 +434,25 @@ class TestCrossTimeNeighbors:
             )
         )
         assert all(n["delta_t"] > 0 for n in forward["neighbors"])
+
+    def test_original_time_labels_resolve_to_trajectory_observations(self, tmp_path):
+        frame = _long_frame()
+        frame["hour"] = frame["hour"].map({0: 24, 1: 48, 2: 72, 3: 96})
+        built = _build(tmp_path, path=_write_long(tmp_path, frame))
+
+        response = json.loads(
+            asyncio.run(
+                get_cross_time_neighbors(
+                    built["longitudinal_id"],
+                    entity_id="p25",
+                    t=48,
+                    response_format="json",
+                )
+            )
+        )
+
+        assert response["status"] == "ok"
+        assert response["source"]["t"] == 1
 
     def test_unresolvable_observation_is_structured(self, tmp_path):
         built = _build(tmp_path)

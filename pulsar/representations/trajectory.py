@@ -88,7 +88,7 @@ SCHEMA: dict[str, dict[str, Any]] = {
 
 def _stack_panel(
     snapshots: Sequence[np.ndarray],
-    entity_ids: Sequence[Hashable] | None,
+    entity_ids: Sequence[Hashable] | Sequence[Sequence[Hashable]] | None,
     timestamps: Sequence[Any] | None,
 ) -> tuple[np.ndarray, pd.DataFrame]:
     """Stack a panel into a pooled ``(N, F)`` matrix plus its observation frame.
@@ -117,14 +117,34 @@ def _stack_panel(
     if entity_ids is None:
         ids: np.ndarray = np.concatenate([np.arange(c) for c in counts])
     else:
-        ids_1d = np.asarray(list(entity_ids))
-        bad = [t for t, c in enumerate(counts) if c != ids_1d.shape[0]]
-        if bad:
-            raise ValueError(
-                f"entity_ids has {ids_1d.shape[0]} entries but snapshots {bad} have "
-                "different row counts; omit entity_ids for ragged panels"
-            )
-        ids = np.tile(ids_1d, len(arrays))
+        id_rows = list(entity_ids)
+        if id_rows and isinstance(id_rows[0], (list, tuple, np.ndarray, pd.Index)):
+            if len(id_rows) != len(arrays):
+                raise ValueError(
+                    f"entity_ids has {len(id_rows)} time slices but there are "
+                    f"{len(arrays)} snapshots"
+                )
+            per_snapshot = [np.asarray(list(row)) for row in id_rows]
+            bad = [
+                t
+                for t, (row, count) in enumerate(zip(per_snapshot, counts))
+                if row.shape[0] != count
+            ]
+            if bad:
+                raise ValueError(
+                    "per-snapshot entity_ids must match snapshot row counts; "
+                    f"mismatch at snapshots {bad}"
+                )
+            ids = np.concatenate(per_snapshot)
+        else:
+            ids_1d = np.asarray(id_rows)
+            bad = [t for t, c in enumerate(counts) if c != ids_1d.shape[0]]
+            if bad:
+                raise ValueError(
+                    f"entity_ids has {ids_1d.shape[0]} entries but snapshots {bad} have "
+                    "different row counts; pass per-snapshot entity IDs for ragged panels"
+                )
+            ids = np.tile(ids_1d, len(arrays))
 
     obs = pd.DataFrame(
         {"entity_id": ids, "t": np.repeat(np.arange(len(arrays)), counts)},
@@ -204,7 +224,7 @@ class CosmicTrajectory:
         snapshots: Sequence[np.ndarray],
         config: PulsarConfig,
         *,
-        entity_ids: Sequence[Hashable] | None = None,
+        entity_ids: Sequence[Hashable] | Sequence[Sequence[Hashable]] | None = None,
         timestamps: Sequence[Any] | None = None,
         similarity_threshold: float = 0.0,
         scale: bool = True,
@@ -215,8 +235,8 @@ class CosmicTrajectory:
         ----------
         snapshots
             Length-``T`` sequence of ``(n_t, F)`` arrays sharing a feature schema. Row
-            counts may differ across ``t`` (ragged panels) unless ``entity_ids`` is
-            given, in which case every snapshot must have ``len(entity_ids)`` rows.
+            counts may differ across ``t``. For ragged panels, pass one entity-ID
+            sequence per snapshot so rows retain their original identity.
         config
             Reused for the projection grid, BallMapper epsilons, and cosmic
             construction mode (``minhash`` or ``exact``).
@@ -354,7 +374,10 @@ class CosmicTrajectory:
         ordered = self.obs.sort_values(["entity_id", "t"])
         ids = ordered.index.to_numpy()
         entities = ordered["entity_id"].to_numpy()
-        pairs = np.column_stack([ids[:-1], ids[1:]])[entities[:-1] == entities[1:]]
+        times = ordered["t"].to_numpy()
+        pairs = np.column_stack([ids[:-1], ids[1:]])[
+            (entities[:-1] == entities[1:]) & (times[1:] == times[:-1] + 1)
+        ]
         return [(int(a), int(b)) for a, b in pairs]
 
     # ----------------------------------------------------------------- trajectories

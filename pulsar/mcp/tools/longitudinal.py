@@ -487,6 +487,12 @@ async def get_trajectory_archetypes(
         return mcp_error("get_trajectory_archetypes", "threshold must be >= 0.")
     if max_archetypes < 1:
         return mcp_error("get_trajectory_archetypes", "max_archetypes must be >= 1.")
+    if max_entities_per_archetype < 0:
+        return mcp_error(
+            "get_trajectory_archetypes",
+            "max_entities_per_archetype must be >= 0.",
+            error_code="INVALID_ARGUMENT",
+        )
 
     try:
         artifact = _resolve_longitudinal(session, longitudinal_id)
@@ -554,7 +560,7 @@ def _archetypes_to_markdown(payload: dict[str, Any]) -> str:
 async def get_cross_time_neighbors(
     longitudinal_id: str = "",
     entity_id: str = "",
-    t: int | None = None,
+    t: Any | None = None,
     observation_id: int | None = None,
     threshold: float = 0.0,
     max_neighbors: int = 20,
@@ -609,9 +615,31 @@ async def get_cross_time_neighbors(
             )
         # Entity ids survive the pivot as their original dtype; match on string form
         # so the agent can always pass a plain string.
+        panel_times = artifact.panel["times"]
+        time_index = next(
+            (i for i, value in enumerate(panel_times) if value == t),
+            None,
+        )
+        if time_index is None:
+            time_index = next(
+                (i for i, value in enumerate(panel_times) if str(value) == str(t)),
+                None,
+            )
+        if time_index is None:
+            return mcp_error(
+                "get_cross_time_neighbors",
+                f"No panel time label matches t={t!r}.",
+                error_code="OBSERVATION_NOT_FOUND",
+                agent_action="Pass a time label from the panel's time_column.",
+                details={
+                    "entity_id": entity_id,
+                    "t": t,
+                    "available_times": panel_times,
+                },
+            )
         matches = trajectory.obs.index[
             (trajectory.obs["entity_id"].astype(str) == str(entity_id))
-            & (trajectory.obs["t"] == t)
+            & (trajectory.obs["t"] == time_index)
         ]
         if len(matches) != 1:
             return mcp_error(
