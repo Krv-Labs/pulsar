@@ -100,12 +100,20 @@ class TestPanelInvariants:
         assert ct.obs["entity_id"].tolist() == ids * 2
         assert ct.observation_index("p3", 1) == 6 + 3
 
+    def test_composite_entity_ids_remain_a_flat_shared_sequence(self):
+        snapshots = _migrating_panel(n_stay=2, n_move=2, n_times=2)
+        ids = [("patient", i) for i in range(6)]
+
+        ct = CosmicTrajectory.from_snapshots(snapshots, _config(), entity_ids=ids)
+
+        assert ct.obs["entity_id"].tolist() == ids * 2
+
     def test_ragged_snapshot_entity_ids_are_carried_through(self):
         snapshots = _migrating_panel(n_stay=2, n_move=1, n_times=2)
         ct = CosmicTrajectory.from_snapshots(
             [snapshots[0][:2], snapshots[1][:2]],
             _config(),
-            entity_ids=[["p0", "p1"], ["p1", "p2"]],
+            snapshot_entity_ids=[["p0", "p1"], ["p1", "p2"]],
         )
 
         assert ct.obs["entity_id"].tolist() == ["p0", "p1", "p1", "p2"]
@@ -113,7 +121,9 @@ class TestPanelInvariants:
 
     def test_mismatched_entity_ids_raise(self):
         snapshots = _migrating_panel(n_stay=2, n_move=2, n_times=2)
-        with pytest.raises(ValueError, match="entity_ids has 2 entries"):
+        with pytest.raises(
+            ValueError, match="Entity IDs must match snapshot row counts"
+        ):
             CosmicTrajectory.from_snapshots(snapshots, _config(), entity_ids=["a", "b"])
 
     def test_empty_and_malformed_input_raise(self):
@@ -248,7 +258,7 @@ class TestTrajectories:
         ct = CosmicTrajectory.from_snapshots(
             [snapshots[0][:2], snapshots[1][:2], snapshots[2][:2]],
             _config(),
-            entity_ids=[["p0", "p1"], ["p1", "p2"], ["p0", "p2"]],
+            snapshot_entity_ids=[["p0", "p1"], ["p1", "p2"], ["p0", "p2"]],
         )
 
         assert all(

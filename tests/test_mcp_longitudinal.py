@@ -437,15 +437,15 @@ class TestCrossTimeNeighbors:
 
     def test_original_time_labels_resolve_to_trajectory_observations(self, tmp_path):
         frame = _long_frame()
-        frame["hour"] = frame["hour"].map({0: 24, 1: 48, 2: 72, 3: 96})
+        frame["hour"] = frame["hour"].map({0: 1, 1: 2, 2: 3, 3: 4})
         built = _build(tmp_path, path=_write_long(tmp_path, frame))
 
         response = json.loads(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"],
-                    entity_id="p25",
-                    t=48,
+                    entity_id="p0",
+                    t=2,
                     response_format="json",
                 )
             )
@@ -453,6 +453,21 @@ class TestCrossTimeNeighbors:
 
         assert response["status"] == "ok"
         assert response["source"]["t"] == 1
+        assert response["source"]["time_label"] == 2
+        assert all("time_label" in neighbor for neighbor in response["neighbors"])
+
+        replayed = json.loads(
+            asyncio.run(
+                get_cross_time_neighbors(
+                    built["longitudinal_id"],
+                    entity_id=response["source"]["entity_id"],
+                    t=response["source"]["time_label"],
+                    response_format="json",
+                )
+            )
+        )
+
+        assert replayed["source"]["obs_id"] == response["source"]["obs_id"]
 
     def test_unresolvable_observation_is_structured(self, tmp_path):
         built = _build(tmp_path)
@@ -469,6 +484,21 @@ class TestCrossTimeNeighbors:
             asyncio.run(get_cross_time_neighbors(built["longitudinal_id"]))
         )
         assert unspecified["error_code"] == "OBSERVATION_NOT_SPECIFIED"
+
+    def test_unmatched_time_label_returns_bounded_preview(self, tmp_path):
+        built = _build(tmp_path)
+
+        response = json.loads(
+            asyncio.run(
+                get_cross_time_neighbors(
+                    built["longitudinal_id"], entity_id="p0", t=999
+                )
+            )
+        )
+
+        available = response["details"]["available_times"]
+        assert set(available) == {"total", "preview", "omitted"}
+        assert available["total"] == 4
 
 
 class TestHandles:

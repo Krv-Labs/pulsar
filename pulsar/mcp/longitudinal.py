@@ -34,12 +34,12 @@ from pulsar.representations import CosmicTrajectory, TemporalCosmicGraph
 PIVOT_POLICIES = ("drop_entity", "forward_fill", "allow_ragged")
 REPRESENTATIONS = ("trajectory", "temporal", "both")
 
-#: Ceiling on the dense ``(n, n, T)`` float64 tensor TemporalCosmicGraph allocates.
-#: n=1000, T=50 is 400 GB, so this guard is load-bearing, not decorative.
+#: Ceiling on the peak temporal working set. The final dense ``(n, n, T)``
+#: float64 tensor uses one third of this budget.
 _DEFAULT_MAX_TENSOR_BYTES = 2 * 1024**3
 
-# The temporal build keeps the int64 pseudo-Laplacian, a Rust normalization copy,
-# and the float64 output alive together. Budget that peak, not only the output.
+# The build keeps three tensor-sized buffers alive during normalization. Budget the
+# peak working set, not only the final float64 output.
 _TEMPORAL_PEAK_TENSOR_MULTIPLIER = 3
 
 #: Self-scaled cut used to make the six aggregations comparable. Their value ranges
@@ -120,10 +120,10 @@ class Panel:
 
     snapshots: list[np.ndarray]
     entity_ids: list[Any]
-    snapshot_entity_ids: list[list[Any]]
     times: list[Any]
     feature_columns: list[str]
     report: dict[str, Any] = field(default_factory=dict)
+    snapshot_entity_ids: list[list[Any]] = field(default_factory=list)
 
     @property
     def n_entities(self) -> int:
@@ -136,13 +136,13 @@ class Panel:
     @property
     def is_aligned(self) -> bool:
         """True when every snapshot has the same entities in the same row order."""
-        return all(
+        return bool(self.snapshot_entity_ids) and all(
             ids == self.snapshot_entity_ids[0] for ids in self.snapshot_entity_ids[1:]
         )
 
 
 def max_tensor_bytes() -> int:
-    """Ceiling for the dense temporal tensor, overridable for large-memory hosts."""
+    """Peak temporal working-set ceiling, overridable for large-memory hosts."""
     raw = os.environ.get("PULSAR_MCP_MAX_TENSOR_BYTES")
     if not raw:
         return _DEFAULT_MAX_TENSOR_BYTES
@@ -357,7 +357,7 @@ def pivot_panel(
             np.ascontiguousarray(cube[:, t, :], dtype=np.float64)
             for t in range(len(times))
         ]
-        snapshot_entity_ids = [list(kept_entities) for _ in times]
+        snapshot_entity_ids = [kept_entities] * len(times)
 
     report = {
         "policy_applied": on_missing,
@@ -547,7 +547,8 @@ def guard_representation(panel: Panel, representation: str) -> None:
                 agent_action=(
                     "Use representation='trajectory' — it stays sparse and never "
                     "allocates an (n, n, T) tensor. Otherwise reduce entities or "
-                    "time steps, or raise PULSAR_MCP_MAX_TENSOR_BYTES."
+                    "time steps, or raise the peak-working-set limit "
+                    "PULSAR_MCP_MAX_TENSOR_BYTES."
                 ),
                 details={
                     "tensor_shape": [panel.n_entities, panel.n_entities, panel.n_times],
@@ -574,7 +575,7 @@ def build_representations(
         trajectory = CosmicTrajectory.from_snapshots(
             panel.snapshots,
             config,
-            entity_ids=panel.snapshot_entity_ids,
+            snapshot_entity_ids=panel.snapshot_entity_ids,
             timestamps=panel.times,
             similarity_threshold=similarity_threshold,
         )
@@ -820,6 +821,7 @@ def cross_time_payload(
     trajectory: CosmicTrajectory,
     *,
     obs_id: int,
+    time_labels: list[Any],
     threshold: float,
     max_neighbors: int,
     direction: str,
@@ -849,6 +851,7 @@ def cross_time_payload(
             "obs_id": int(cols[i]),
             "entity_id": str(entities[cols[i]]),
             "t": int(times[cols[i]]),
+            "time_label": time_labels[int(times[cols[i]])],
             "delta_t": int(deltas[i]),
             "weight": round(float(weights[i]), 6),
         }
@@ -864,6 +867,7 @@ def cross_time_payload(
             "obs_id": int(obs_id),
             "entity_id": str(source["entity_id"]),
             "t": int(source["t"]),
+            "time_label": time_labels[int(source["t"])],
         },
         "neighbors_returned": len(neighbors),
         "neighbors_omitted": max(int(cols.size) - len(neighbors), 0),

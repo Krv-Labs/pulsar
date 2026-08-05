@@ -93,7 +93,7 @@ class TemporalCosmicGraph:
         if tensor.shape[0] != tensor.shape[1]:
             raise ValueError(f"Expected square slices, got shape {tensor.shape}")
 
-        self._tensor = tensor.astype(np.float64, copy=False)
+        self._tensor = tensor.astype(np.float64)
         self._threshold = threshold
         self._n = tensor.shape[0]
         self._t = tensor.shape[2]
