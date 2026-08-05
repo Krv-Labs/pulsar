@@ -61,7 +61,7 @@ jobs:
             --allow-unauthenticated
             --memory=2Gi
             --cpu=2
-            --set-env-vars=PULSAR_MCP_TRANSPORT=sse,PULSAR_MCP_HOST=0.0.0.0,PULSAR_MCP_PORT=8000,PULSAR_MCP_ALLOWED_HOSTS=*
+            --set-env-vars=PULSAR_MCP_TRANSPORT=sse,PULSAR_MCP_HOST=0.0.0.0,PULSAR_MCP_PORT=8000,PULSAR_MCP_ALLOWED_HOSTS=*,PULSAR_MCP_CACHE_DIR=/tmp/pulsar_mcp
 
       - name: Output Service HTTPS Endpoint
         run: |

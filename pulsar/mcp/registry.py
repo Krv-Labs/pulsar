@@ -12,7 +12,8 @@ import time
 import uuid
 
 
-_CACHE_DIR = Path(tempfile.gettempdir()) / "pulsar_mcp"
+_CACHE_DIR_ENV = os.environ.get("PULSAR_MCP_CACHE_DIR")
+_CACHE_DIR = Path(_CACHE_DIR_ENV) if _CACHE_DIR_ENV else Path(tempfile.gettempdir()) / "pulsar_mcp"
 _DATASETS_PATH = _CACHE_DIR / "datasets.json"
 _DATASET_FILES_DIR = _CACHE_DIR / "datasets"
 _UPLOADS_DIR = _CACHE_DIR / "uploads"

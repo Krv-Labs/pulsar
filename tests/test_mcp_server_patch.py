@@ -61,3 +61,16 @@ def test_mcp_server_main_cli(monkeypatch):
         path="/mcp",
     )
 
+
+def test_cache_dir_env_override(monkeypatch, tmp_path):
+    import importlib
+    import pulsar.mcp.registry as reg
+
+    custom_dir = tmp_path / "custom_mcp_cache"
+    monkeypatch.setenv("PULSAR_MCP_CACHE_DIR", str(custom_dir))
+    importlib.reload(reg)
+
+    assert reg._CACHE_DIR == custom_dir
+    assert reg.MCPRegistry().cache_dir == custom_dir
+
+
