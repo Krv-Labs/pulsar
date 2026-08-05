@@ -25,6 +25,7 @@ from fastmcp import Context
 from pulsar.config import load_config
 from pulsar.mcp.config_tools import validate_config_yaml
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
+from pulsar.mcp.payloads import bounded_list
 from pulsar.mcp.longitudinal import (
     PanelError,
     adapt_config_to_panel,
@@ -481,12 +482,28 @@ async def get_trajectory_archetypes(
 
     if response_format not in {"json", "markdown"}:
         return mcp_error(
-            "get_trajectory_archetypes", "response_format must be 'json' or 'markdown'."
+            "get_trajectory_archetypes",
+            "response_format must be 'json' or 'markdown'.",
+            error_code="INVALID_ARGUMENT",
         )
     if threshold < 0.0:
-        return mcp_error("get_trajectory_archetypes", "threshold must be >= 0.")
+        return mcp_error(
+            "get_trajectory_archetypes",
+            "threshold must be >= 0.",
+            error_code="INVALID_ARGUMENT",
+        )
     if max_archetypes < 1:
-        return mcp_error("get_trajectory_archetypes", "max_archetypes must be >= 1.")
+        return mcp_error(
+            "get_trajectory_archetypes",
+            "max_archetypes must be >= 1.",
+            error_code="INVALID_ARGUMENT",
+        )
+    if max_entities_per_archetype < 0:
+        return mcp_error(
+            "get_trajectory_archetypes",
+            "max_entities_per_archetype must be >= 0.",
+            error_code="INVALID_ARGUMENT",
+        )
 
     try:
         artifact = _resolve_longitudinal(session, longitudinal_id)
@@ -554,7 +571,7 @@ def _archetypes_to_markdown(payload: dict[str, Any]) -> str:
 async def get_cross_time_neighbors(
     longitudinal_id: str = "",
     entity_id: str = "",
-    t: int | None = None,
+    t: int | float | str | None = None,
     observation_id: int | None = None,
     threshold: float = 0.0,
     max_neighbors: int = 20,
@@ -568,7 +585,9 @@ async def get_cross_time_neighbors(
     at this time look like, at a different time?" — e.g. a patient at admission
     matched against other patients at discharge.
 
-    Identify the observation either by ``observation_id`` or by ``entity_id`` + ``t``.
+    Identify the observation either by ``observation_id`` or by ``entity_id`` plus
+    ``t``, where ``t`` is an original label from the panel's time column. Responses
+    expose both that ``time_label`` and the trajectory's positional ``t`` index.
     ``direction`` restricts to later (``forward``) or earlier (``backward``) matches.
     """
     session = _get_session(ctx)
@@ -609,9 +628,29 @@ async def get_cross_time_neighbors(
             )
         # Entity ids survive the pivot as their original dtype; match on string form
         # so the agent can always pass a plain string.
+        panel_times = artifact.panel["times"]
+        try:
+            time_index = panel_times.index(t)
+        except ValueError:
+            time_index = next(
+                (i for i, value in enumerate(panel_times) if str(value) == str(t)),
+                None,
+            )
+        if time_index is None:
+            return mcp_error(
+                "get_cross_time_neighbors",
+                f"No panel time label matches t={t!r}.",
+                error_code="OBSERVATION_NOT_FOUND",
+                agent_action="Pass a time label from the panel's time_column.",
+                details={
+                    "entity_id": entity_id,
+                    "t": t,
+                    "available_times": bounded_list(panel_times),
+                },
+            )
         matches = trajectory.obs.index[
             (trajectory.obs["entity_id"].astype(str) == str(entity_id))
-            & (trajectory.obs["t"] == t)
+            & (trajectory.obs["t"] == time_index)
         ]
         if len(matches) != 1:
             return mcp_error(
@@ -619,8 +658,8 @@ async def get_cross_time_neighbors(
                 f"No unique observation for entity '{entity_id}' at t={t}.",
                 error_code="OBSERVATION_NOT_FOUND",
                 agent_action=(
-                    "Check the entity_id and t against the panel; call "
-                    "diagnose_longitudinal_graph for the panel shape."
+                    "Check entity_id and the original time label against the panel; "
+                    "call diagnose_longitudinal_graph for the panel shape."
                 ),
                 details={"entity_id": entity_id, "t": t, "matches": int(len(matches))},
             )
@@ -659,7 +698,8 @@ async def get_cross_time_neighbors(
 def _neighbors_to_markdown(payload: dict[str, Any]) -> str:
     source = payload["source"]
     lines = [
-        f"# Cross-Time Neighbors of entity `{source['entity_id']}` at t={source['t']}",
+        f"# Cross-Time Neighbors of entity `{source['entity_id']}` at time "
+        f"`{source['time_label']}` (trajectory index t={source['t']})",
         "",
         f"- Surface: {payload['surface']}",
         f"- Interpretation threshold: {payload['interpretation_threshold']}, "
@@ -667,12 +707,12 @@ def _neighbors_to_markdown(payload: dict[str, Any]) -> str:
         f"- Cross-time degree: {payload['cross_time_degree']} "
         f"({payload['neighbors_omitted']} not shown)",
         "",
-        "| Entity | t | delta_t | Weight |",
-        "|---|---|---|---|",
+        "| Entity | Time label | t index | delta steps | Weight |",
+        "|---|---|---|---|---|",
     ]
     for neighbor in payload["neighbors"]:
         lines.append(
-            f"| {neighbor['entity_id']} | {neighbor['t']} | "
+            f"| {neighbor['entity_id']} | {neighbor['time_label']} | {neighbor['t']} | "
             f"{neighbor['delta_t']:+d} | {neighbor['weight']:.4f} |"
         )
     lines += ["", "## Next Tools"] + [f"- `{t}`" for t in payload["next_tools"]]

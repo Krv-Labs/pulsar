@@ -78,8 +78,9 @@ Pick the representation by the question you are asking:
   other across time" and "how do entities move between cohorts". Stays sparse.
 - `representation="temporal"` — nodes are **entities**, edges live inside one time
   slice, collapsed by tensor aggregations. Answers "which entities are stably similar
-  over the window". Allocates a dense (n, n, T) tensor, so it is guarded by a memory
-  ceiling; prefer trajectory at scale.
+  over the window". Allocates a dense (n, n, T) tensor, so it is guarded by the peak
+  working-set ceiling `PULSAR_MCP_MAX_TENSOR_BYTES`; the final tensor uses about one
+  third of that budget. Prefer trajectory at scale.
 - `representation="both"` — build each and contrast them.
 
 Then:
@@ -91,7 +92,9 @@ Then:
 2. `get_trajectory_archetypes` — entities grouped by the cluster sequence they trace
    through time. This is trajectory classification.
 3. `get_cross_time_neighbors` — the cross-time lookalike query: who does this entity
-   at this time resemble at a *different* time?
+   at this time resemble at a *different* time? Pass `t` as an original time-column
+   label. Responses expose that value as `time_label` and separately expose `t` as
+   the trajectory's positional index.
 
 Longitudinal caveats:
 - `time_column` must already be discrete and orderable. Bin continuous timestamps

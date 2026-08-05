@@ -89,6 +89,7 @@ SCHEMA: dict[str, dict[str, Any]] = {
 def _stack_panel(
     snapshots: Sequence[np.ndarray],
     entity_ids: Sequence[Hashable] | None,
+    snapshot_entity_ids: Sequence[Sequence[Hashable]] | None,
     timestamps: Sequence[Any] | None,
 ) -> tuple[np.ndarray, pd.DataFrame]:
     """Stack a panel into a pooled ``(N, F)`` matrix plus its observation frame.
@@ -114,17 +115,32 @@ def _stack_panel(
     if sum(counts) == 0:
         raise ValueError("snapshots contain no rows")
 
-    if entity_ids is None:
-        ids: np.ndarray = np.concatenate([np.arange(c) for c in counts])
-    else:
-        ids_1d = np.asarray(list(entity_ids))
-        bad = [t for t, c in enumerate(counts) if c != ids_1d.shape[0]]
-        if bad:
+    if entity_ids is not None and snapshot_entity_ids is not None:
+        raise ValueError("Pass entity_ids or snapshot_entity_ids, not both")
+
+    if snapshot_entity_ids is not None:
+        if len(snapshot_entity_ids) != len(arrays):
             raise ValueError(
-                f"entity_ids has {ids_1d.shape[0]} entries but snapshots {bad} have "
-                "different row counts; omit entity_ids for ragged panels"
+                f"snapshot_entity_ids has {len(snapshot_entity_ids)} time slices "
+                f"but there are {len(arrays)} snapshots"
             )
-        ids = np.tile(ids_1d, len(arrays))
+        per_snapshot = [list(row) for row in snapshot_entity_ids]
+    elif entity_ids is not None:
+        shared_ids = list(entity_ids)
+        per_snapshot = [shared_ids] * len(arrays)
+    else:
+        per_snapshot = [list(range(count)) for count in counts]
+
+    bad = [
+        t
+        for t, (row, count) in enumerate(zip(per_snapshot, counts))
+        if len(row) != count
+    ]
+    if bad:
+        raise ValueError(
+            f"Entity IDs must match snapshot row counts; mismatch at snapshots {bad}"
+        )
+    ids = [entity_id for row in per_snapshot for entity_id in row]
 
     obs = pd.DataFrame(
         {"entity_id": ids, "t": np.repeat(np.arange(len(arrays)), counts)},
@@ -205,6 +221,7 @@ class CosmicTrajectory:
         config: PulsarConfig,
         *,
         entity_ids: Sequence[Hashable] | None = None,
+        snapshot_entity_ids: Sequence[Sequence[Hashable]] | None = None,
         timestamps: Sequence[Any] | None = None,
         similarity_threshold: float = 0.0,
         scale: bool = True,
@@ -214,9 +231,12 @@ class CosmicTrajectory:
         Parameters
         ----------
         snapshots
-            Length-``T`` sequence of ``(n_t, F)`` arrays sharing a feature schema. Row
-            counts may differ across ``t`` (ragged panels) unless ``entity_ids`` is
-            given, in which case every snapshot must have ``len(entity_ids)`` rows.
+            Length-``T`` sequence of ``(n_t, F)`` arrays sharing a feature schema.
+            Row counts may differ across ``t``.
+        entity_ids
+            One flat ID sequence shared by every snapshot.
+        snapshot_entity_ids
+            One ID sequence per snapshot, for ragged panels.
         config
             Reused for the projection grid, BallMapper epsilons, and cosmic
             construction mode (``minhash`` or ``exact``).
@@ -232,7 +252,9 @@ class CosmicTrajectory:
                 f"similarity_threshold must be >= 0, got {similarity_threshold}"
             )
 
-        pooled, obs = _stack_panel(snapshots, entity_ids, timestamps)
+        pooled, obs = _stack_panel(
+            snapshots, entity_ids, snapshot_entity_ids, timestamps
+        )
         if scale:
             pooled = np.array(StandardScaler().fit_transform(pooled))
         embeddings = projection_grid(pooled, config)
@@ -354,7 +376,10 @@ class CosmicTrajectory:
         ordered = self.obs.sort_values(["entity_id", "t"])
         ids = ordered.index.to_numpy()
         entities = ordered["entity_id"].to_numpy()
-        pairs = np.column_stack([ids[:-1], ids[1:]])[entities[:-1] == entities[1:]]
+        times = ordered["t"].to_numpy()
+        pairs = np.column_stack([ids[:-1], ids[1:]])[
+            (entities[:-1] == entities[1:]) & (times[1:] == times[:-1] + 1)
+        ]
         return [(int(a), int(b)) for a, b in pairs]
 
     # ----------------------------------------------------------------- trajectories

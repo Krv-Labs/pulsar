@@ -34,9 +34,13 @@ from pulsar.representations import CosmicTrajectory, TemporalCosmicGraph
 PIVOT_POLICIES = ("drop_entity", "forward_fill", "allow_ragged")
 REPRESENTATIONS = ("trajectory", "temporal", "both")
 
-#: Ceiling on the dense ``(n, n, T)`` float64 tensor TemporalCosmicGraph allocates.
-#: n=1000, T=50 is 400 GB, so this guard is load-bearing, not decorative.
+#: Ceiling on the peak temporal working set. The final dense ``(n, n, T)``
+#: float64 tensor uses one third of this budget.
 _DEFAULT_MAX_TENSOR_BYTES = 2 * 1024**3
+
+# The build keeps three tensor-sized buffers alive during normalization. Budget the
+# peak working set, not only the final float64 output.
+_TEMPORAL_PEAK_TENSOR_MULTIPLIER = 3
 
 #: Self-scaled cut used to make the six aggregations comparable. Their value ranges
 #: differ (persistence/mean/recency are [0,1]; volatility is a variance; trend is a
@@ -119,6 +123,7 @@ class Panel:
     times: list[Any]
     feature_columns: list[str]
     report: dict[str, Any] = field(default_factory=dict)
+    snapshot_entity_ids: list[list[Any]] = field(default_factory=list)
 
     @property
     def n_entities(self) -> int:
@@ -130,12 +135,14 @@ class Panel:
 
     @property
     def is_aligned(self) -> bool:
-        """True when every snapshot has the same row count (required by temporal)."""
-        return len({arr.shape[0] for arr in self.snapshots}) <= 1
+        """True when every snapshot has the same entities in the same row order."""
+        return bool(self.snapshot_entity_ids) and all(
+            ids == self.snapshot_entity_ids[0] for ids in self.snapshot_entity_ids[1:]
+        )
 
 
 def max_tensor_bytes() -> int:
-    """Ceiling for the dense temporal tensor, overridable for large-memory hosts."""
+    """Peak temporal working-set ceiling, overridable for large-memory hosts."""
     raw = os.environ.get("PULSAR_MCP_MAX_TENSOR_BYTES")
     if not raw:
         return _DEFAULT_MAX_TENSOR_BYTES
@@ -304,12 +311,16 @@ def pivot_panel(
 
     if on_missing == "allow_ragged":
         snapshots = []
+        snapshot_entity_ids = []
         for time_index, time_value in enumerate(times):
             rows = aligned.to_numpy(dtype=np.float64).reshape(
                 len(entities), len(times), len(features)
             )[:, time_index, :]
             keep = presence[:, time_index]
             snapshots.append(np.ascontiguousarray(rows[keep], dtype=np.float64))
+            snapshot_entity_ids.append(
+                [entity for entity, is_present in zip(entities, keep) if is_present]
+            )
         kept_entities = entities
     else:
         if on_missing == "forward_fill":
@@ -346,6 +357,7 @@ def pivot_panel(
             np.ascontiguousarray(cube[:, t, :], dtype=np.float64)
             for t in range(len(times))
         ]
+        snapshot_entity_ids = [kept_entities] * len(times)
 
     report = {
         "policy_applied": on_missing,
@@ -362,6 +374,7 @@ def pivot_panel(
     return Panel(
         snapshots=snapshots,
         entity_ids=list(kept_entities),
+        snapshot_entity_ids=snapshot_entity_ids,
         times=list(times),
         feature_columns=features,
         report=report,
@@ -473,6 +486,7 @@ def estimate_costs(panel: Panel, config: PulsarConfig) -> dict[str, Any]:
     n_entities = panel.n_entities
     n_times = panel.n_times
     tensor_bytes = n_entities * n_entities * n_times * 8
+    peak_tensor_bytes = tensor_bytes * _TEMPORAL_PEAK_TENSOR_MULTIPLIER
     projection = getattr(config, "projection", None)
     dimensions = list(getattr(projection, "dimensions", None) or config.pca.dimensions)
     seeds = list(getattr(projection, "seeds", None) or config.pca.seeds)
@@ -483,6 +497,8 @@ def estimate_costs(panel: Panel, config: PulsarConfig) -> dict[str, Any]:
         "n_times": n_times,
         "temporal_tensor_bytes": int(tensor_bytes),
         "temporal_tensor_mb": round(tensor_bytes / (1024 * 1024), 2),
+        "temporal_peak_bytes": int(peak_tensor_bytes),
+        "temporal_peak_mb": round(peak_tensor_bytes / (1024 * 1024), 2),
         "temporal_tensor_limit_mb": round(max_tensor_bytes() / (1024 * 1024), 2),
         "estimated_ball_maps_trajectory": len(dimensions) * len(seeds) * len(epsilons),
         "estimated_ball_maps_temporal": (
@@ -506,7 +522,7 @@ def guard_representation(panel: Panel, representation: str) -> None:
     wants_temporal = representation in {"temporal", "both"}
     if wants_temporal and not panel.is_aligned:
         raise PanelError(
-            "TemporalCosmicGraph requires the same entity count at every time step.",
+            "TemporalCosmicGraph requires the same entities in the same order at every time step.",
             error_code="RAGGED_PANEL_NOT_SUPPORTED",
             agent_action=(
                 "Use representation='trajectory' (tolerates ragged panels), or "
@@ -523,19 +539,23 @@ def guard_representation(panel: Panel, representation: str) -> None:
     if wants_temporal:
         limit = max_tensor_bytes()
         tensor_bytes = panel.n_entities * panel.n_entities * panel.n_times * 8
-        if tensor_bytes > limit:
+        peak_tensor_bytes = tensor_bytes * _TEMPORAL_PEAK_TENSOR_MULTIPLIER
+        if peak_tensor_bytes > limit:
             raise PanelError(
                 "Temporal tensor exceeds the configured memory ceiling.",
                 error_code="TENSOR_TOO_LARGE",
                 agent_action=(
                     "Use representation='trajectory' — it stays sparse and never "
                     "allocates an (n, n, T) tensor. Otherwise reduce entities or "
-                    "time steps, or raise PULSAR_MCP_MAX_TENSOR_BYTES."
+                    "time steps, or raise the peak-working-set limit "
+                    "PULSAR_MCP_MAX_TENSOR_BYTES."
                 ),
                 details={
                     "tensor_shape": [panel.n_entities, panel.n_entities, panel.n_times],
-                    "required_bytes": int(tensor_bytes),
-                    "required_mb": round(tensor_bytes / (1024 * 1024), 2),
+                    "tensor_bytes": int(tensor_bytes),
+                    "tensor_mb": round(tensor_bytes / (1024 * 1024), 2),
+                    "peak_required_bytes": int(peak_tensor_bytes),
+                    "peak_required_mb": round(peak_tensor_bytes / (1024 * 1024), 2),
                     "limit_bytes": int(limit),
                     "limit_mb": round(limit / (1024 * 1024), 2),
                 },
@@ -555,7 +575,7 @@ def build_representations(
         trajectory = CosmicTrajectory.from_snapshots(
             panel.snapshots,
             config,
-            entity_ids=panel.entity_ids if panel.is_aligned else None,
+            snapshot_entity_ids=panel.snapshot_entity_ids,
             timestamps=panel.times,
             similarity_threshold=similarity_threshold,
         )
@@ -812,6 +832,7 @@ def cross_time_payload(
 
     times = obs["t"].to_numpy()
     entities = obs["entity_id"].to_numpy()
+    time_labels = obs["timestamp"].to_numpy()
     deltas = times[row.col] - int(source["t"])
 
     keep = np.ones(row.col.shape, dtype=bool)
@@ -830,6 +851,7 @@ def cross_time_payload(
             "obs_id": int(cols[i]),
             "entity_id": str(entities[cols[i]]),
             "t": int(times[cols[i]]),
+            "time_label": time_labels[cols[i]],
             "delta_t": int(deltas[i]),
             "weight": round(float(weights[i]), 6),
         }
@@ -845,6 +867,7 @@ def cross_time_payload(
             "obs_id": int(obs_id),
             "entity_id": str(source["entity_id"]),
             "t": int(source["t"]),
+            "time_label": source["timestamp"],
         },
         "neighbors_returned": len(neighbors),
         "neighbors_omitted": max(int(cols.size) - len(neighbors), 0),

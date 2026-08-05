@@ -21,6 +21,7 @@ class TestTemporalCosmicGraphConstruction:
         assert tcg.T == 5
         assert tcg.shape == (10, 10, 5)
         assert tcg._threshold == 0.1
+        assert not np.shares_memory(tcg.tensor, tensor)
 
     def test_init_rejects_2d_tensor(self):
         """2D tensor should raise ValueError."""
