@@ -7,30 +7,37 @@
 
 ---
 
-## Part 0 — Do this before reading the rest
+## Part 0 — Exposure check: **RUN, CLEAR**
 
-One check, four commands, five minutes. It gates whether this is a planning exercise or an incident.
+The question this had to answer: `deploy-cloudrun.yml` fires on `push: main` and `workflow_dispatch` is enabled. The plan assumes nothing is publicly exposed, and the *reason* is an accident — `roles/run.developer` lacks `run.services.setIamPolicy`, so `--allow-unauthenticated` should have failed. That reasoning has a hole: if anyone widened `pulsar-mcp-deployer`'s role to get past a permission error (`roles/editor`, `roles/owner`, `roles/run.admin` — what people actually do), the deploy succeeded and the service is public *right now*, with unsandboxed `ingest_dataset`.
 
-`deploy-cloudrun.yml` has triggered on every push to `main` since `13243bb`, and `workflow_dispatch` is enabled. The plan below assumes nothing is publicly exposed yet, and the *reason* it assumes that is an accident: `roles/run.developer` lacks `run.services.setIamPolicy`, so `--allow-unauthenticated` should have failed.
+**Checked 2026-08-05. Nothing is deployed and nothing is exposed.** Three independent confirmations:
 
-That reasoning has a hole. If anyone widened `pulsar-mcp-deployer`'s role to get past a permission error — `roles/editor`, `roles/owner`, or `roles/run.admin`, which is what people actually do — then the deploy succeeded and the service is public **right now**, with unsandboxed `ingest_dataset` and caller-controlled export paths.
+| Check | Result |
+|---|---|
+| Artifact Registry images | **0 items, 0 MB.** No image was ever pushed — so no Cloud Run revision can exist. Decisive. |
+| `deploy-cloudrun.yml` on the default branch | **Absent** (`gh` returns HTTP 404). The workflow exists only on this feature branch, and pushes there don't match `branches: [main]`. It has never fired. |
+| `pulsar-mcp-deployer` project roles | Exactly `artifactregistry.writer`, `iam.serviceAccountUser`, `run.developer` — **never widened**. The escalation branch didn't happen. |
+
+The infrastructure *was* provisioned (`setup_gcloud_wif.sh` ran at `2026-08-04T17:55`): project `pulsar-mcp-prod` is ACTIVE, the AR repo exists, `run.googleapis.com` and `artifactregistry.googleapis.com` are enabled, and all three GitHub secrets are set. So the pipeline is fully wired and one merge to `main` away from firing. **That is the actual state: armed, not fired.**
+
+**Two findings that fall out of this check:**
+
+1. **The WIF script is not dead on arrival after all** — one of the review's blockers claimed the bare `gcloud projects create` yields a parentless, billing-disabled project so `gcloud services enable` hard-fails under `set -e`. Both APIs are enabled and the AR repo was created, so the script ran to completion against a project that had billing. Downgrade that finding from blocker to "requires a billed project; document the prerequisite." *(Whether the project was pre-created or the org supplies a default billing account is unresolved.)*
+2. **`sidney@krv.ai` cannot read Cloud Run in `pulsar-mcp-prod`** — `run.services.list`, `.get`, and `.getIamPolicy` are all denied, and the account holds **no direct role binding** on the project. So the person expected to operate this deployment currently cannot inspect it, and could not have run the exposure check above to completion without the Artifact Registry side-channel. Fix the operator's own IAM before Gate 3, or post-deploy verification and incident response both have no eyes.
+
+Re-run before any merge to `main` that carries the deploy workflow:
 
 ```bash
-P=pulsar-mcp-prod; R=us-central1   # or whatever GCP_PROJECT_ID resolves to
-
+P=pulsar-mcp-prod; R=us-central1
+gcloud artifacts docker images list "us-central1-docker.pkg.dev/$P/pulsar-mcp" --project="$P"
 gcloud run services list --project="$P" --region="$R"
 gcloud run services get-iam-policy pulsar-mcp --project="$P" --region="$R" 2>/dev/null | grep allUsers
 gcloud run services describe pulsar-mcp --project="$P" --region="$R" \
   --format='value(spec.template.metadata.annotations)' | grep -i invokerIamDisabled
-gcloud projects get-iam-policy "$P" --flatten=bindings \
-  --filter='bindings.members:pulsar-mcp-deployer'
 ```
 
-**If any of the first three returns anything:** stop planning. Set `--no-allow-unauthenticated` or delete the service today, then come back.
-
-The third command matters independently. `--no-invoker-iam-check` is what Google's troubleshooting docs now steer you toward when `--allow-unauthenticated` fails, and it makes a service fully public via a *service-spec field* rather than an IAM binding — so `get-iam-policy` shows no `allUsers` and an IAM audit reports the service as private. Grepping the annotation is the only way to see it.
-
-*Not yet run.* I have `gcloud` authenticated as `sidney@krv.ai` but no `pulsar*` project appeared in `gcloud projects list`, which is weak evidence the project was never created — not proof. Run the commands against the real `GCP_PROJECT_ID` before trusting Part 1's framing.
+The last command matters independently: `--no-invoker-iam-check` makes a service fully public via a *service-spec field* rather than an IAM binding, so `get-iam-policy` shows no `allUsers` and an IAM audit reports the service as private. Grepping the annotation is the only way to see it.
 
 ---
 
@@ -396,7 +403,7 @@ Eight findings need rewording before someone implements the wrong thing:
 Ordered, binary, all green before the first deploy.
 
 **Gate 0 — before any code**
-1. Part 0's exposure check returns clean.
+1. ✅ Part 0's exposure check — **done, clear.** Re-run before any merge to `main` carrying the deploy workflow. Also: grant `sidney@krv.ai` read access to Cloud Run in `pulsar-mcp-prod` (currently denied — see Part 0).
 2. Ten cheapest GCP verification commands **executed** against a scratch project, output pasted into the PR: `gcloud iam roles describe roles/run.developer`, `gcloud org-policies describe iam.allowedPolicyMemberDomains`, `gcloud projects describe --format='value(parent)'`, `bash scripts/setup_gcloud_wif.sh` on a throwaway. Half a day; converts ~15 inferences into facts and will likely delete two or three findings outright.
 3. `gcloud run services proxy` streaming test (§PR 10).
 4. `httpGet` startup probe under IAM-only verified (§PR 4.5).
@@ -454,7 +461,9 @@ One claim tagged `code-read-only` — "Windows registry locking is absent" — w
 
 Roughly **fifteen further `code-read-only` GCP/IAM claims** gate individual launch-checklist items and **none were executed**: org-policy defaults, `run.developer`'s permission set, DRS enforcement, `gcloud services enable` failure behavior under `set -e`, the default Compute SA's Editor grant (which the evidence itself downgrades to conditional — the automatic grant is off only for orgs created after 2024-05-03, and the script's bare `gcloud projects create` yields a parentless project with no org policy at all), and `--no-invoker-iam-check` semantics.
 
-Combined with Part 0 — nobody has confirmed whether a public service already exists — **the launch checklist's green state may certify facts about a different project than the one being deployed to.** Gate 0 item 2 exists to fix this. Half a day of running commands, before any code is written.
+**The launch checklist's green state may therefore certify facts about a different project than the one being deployed to.** Gate 0 item 2 exists to fix this: half a day of running commands, before any code is written.
+
+Part 0 is the worked example of why that half-day pays. Running four commands disproved the "already public" scenario on three independent grounds, **downgraded one blocker** (the WIF script is not dead on arrival — both APIs are enabled and the AR repo exists, so it ran to completion), and **surfaced a finding nobody predicted** (the intended operator has no read access to Cloud Run in the project). Two of those three outcomes were invisible to code reading.
 
 **Verified empirically** (trust these): the `allowed_hosts` `TypeError`; `run_http_async`'s signature and the absence of a `VAR_KEYWORD` sink; the SSE forged-session-key eviction DoS; per-request session churn under stateless mode; `ctx.session_id` never returning falsy; the INLINE 6 broken-wheel reproduction; the 2.006 s event-loop freeze; `probe_columns` exfiltration against `/etc/hosts`; the export-path traversals; FastMCP 3.2.0's auth inventory and `RequireAuthMiddleware` wiring; custom routes appended outside the `if auth:` branch (so `/health` is genuinely unauthenticated); `roles/run.developer`'s permission set against the live IAM API; `gh pr view 37 --json files` returning 10 files.
 
