@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-05
+
+### Added
+
+- **CosmicTrajectory**: observation-centric longitudinal representation that pools every `(entity, t)` observation into a single geometry, enabling cross-time BallMapper covers and similarity edges by construction. Sparse matrix storage (`obs`, `balls`, `similarity`, `incidence`) with hypergraph views via matrix products; `TemporalCosmicGraph` is unchanged. ([#35](https://github.com/Krv-Labs/pulsar/pull/35))
+- **Longitudinal MCP tools**: `build_longitudinal_graph`, `diagnose_longitudinal_graph`, `get_trajectory_archetypes`, and `get_cross_time_neighbors` — pivot long-format panels into snapshot lists, build temporal and/or trajectory representations, and expose cross-time lookalike queries with explicit alignment policies and cost guards. ([#36](https://github.com/Krv-Labs/pulsar/pull/36))
+- **macOS Intel CI smoke** for Pulsar MCP: PR CI now exercises the `macosx_*_x86_64` wheel path on `macos-15-intel`, matching the release matrix. ([#34](https://github.com/Krv-Labs/pulsar/pull/34))
+
 ### Fixed
 
+- **Longitudinal panel safety**: preserve per-snapshot entity IDs for ragged trajectories, require identity alignment for temporal graphs, budget temporal peak tensor memory, remove redundant tensor copies, resolve original neighbor time labels, reject negative member limits, and omit gap-spanning trajectory edges. ([#39](https://github.com/Krv-Labs/pulsar/pull/39))
 - **MCP setup documentation now describes a working no-clone install.** `pip install pulsar` installed an unrelated third-party package from PyPI; the correct distribution is `thema-pulsar`. The Claude Desktop JSON config specified `"command": "uv tool run"`, which can never resolve — MCP clients exec `command` directly with no shell, so a value containing a space is not an executable. Client commands now use `uvx`, and the Gemini registration documents workspace trust (stdio MCP servers stay dormant in an untrusted folder) plus `--timeout 60000` for the first-boot download. ([#33](https://github.com/Krv-Labs/pulsar/pull/33))
 - **Ruff rule selection is now explicit and the engine is version-bounded.** The project had no `[tool.ruff]` configuration, so CI enforced whatever the installed ruff defaulted to. Ruff 0.16 widened that default (adding `I`, `UP`, `SIM`, `BLE`, `RUF`, and more), and because `uv.lock` is not committed, CI resolves dependencies fresh on every run — so the unbounded `ruff>=0.15.7` picked up 0.16.1 and failed lint on unrelated pull requests with 231 pre-existing findings. `[tool.ruff.lint] select` now pins the pre-0.16 rule set and the dev group is bounded to `>=0.16.1,<0.17`. ([#33](https://github.com/Krv-Labs/pulsar/pull/33))
 
@@ -81,3 +90,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Initial v0.2.0 release marking the transition of the core architecture to Rust with Python bindings.
+

@@ -1,6 +1,6 @@
 [package]
 name = "thema-pulsar"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
 
 [lib]
@@ -21,3 +21,4 @@ ahash      = "0.8"
 [profile.release]
 lto = true
 codegen-units = 1
+
