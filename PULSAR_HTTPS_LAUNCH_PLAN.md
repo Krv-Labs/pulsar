@@ -7,11 +7,11 @@
 
 ---
 
-## Part 0 — Exposure check: **RUN, CLEAR**
+## Part 0 — Exposure check: **run; clear by convergent inference**
 
 The question this had to answer: `deploy-cloudrun.yml` fires on `push: main` and `workflow_dispatch` is enabled. The plan assumes nothing is publicly exposed, and the *reason* is an accident — `roles/run.developer` lacks `run.services.setIamPolicy`, so `--allow-unauthenticated` should have failed. That reasoning has a hole: if anyone widened `pulsar-mcp-deployer`'s role to get past a permission error (`roles/editor`, `roles/owner`, `roles/run.admin` — what people actually do), the deploy succeeded and the service is public *right now*, with unsandboxed `ingest_dataset`.
 
-**Checked 2026-08-05. Nothing is deployed and nothing is exposed.** Three independent confirmations:
+**Checked 2026-08-05. Nothing is deployed and nothing is exposed.** Stated precisely: **direct service enumeration was blocked** by finding 2 below (`run.services.list` → `PERMISSION_DENIED`), so this is three converging indirect signals, not a direct read. That distinction is the same one Appendix A insists on, and it applies here too.
 
 | Check | Result |
 |---|---|
@@ -21,10 +21,11 @@ The question this had to answer: `deploy-cloudrun.yml` fires on `push: main` and
 
 The infrastructure *was* provisioned (`setup_gcloud_wif.sh` ran at `2026-08-04T17:55`): project `pulsar-mcp-prod` is ACTIVE, the AR repo exists, `run.googleapis.com` and `artifactregistry.googleapis.com` are enabled, and all three GitHub secrets are set. So the pipeline is fully wired and one merge to `main` away from firing. **That is the actual state: armed, not fired.**
 
-**Two findings that fall out of this check:**
+**Three findings that fall out of this check — all of which restate a review finding:**
 
 1. **The WIF script is not dead on arrival after all** — one of the review's blockers claimed the bare `gcloud projects create` yields a parentless, billing-disabled project so `gcloud services enable` hard-fails under `set -e`. Both APIs are enabled and the AR repo was created, so the script ran to completion against a project that had billing. Downgrade that finding from blocker to "requires a billed project; document the prerequisite." *(Whether the project was pre-created or the org supplies a default billing account is unresolved.)*
-2. **`sidney@krv.ai` cannot read Cloud Run in `pulsar-mcp-prod`** — `run.services.list`, `.get`, and `.getIamPolicy` are all denied, and the account holds **no direct role binding** on the project. So the person expected to operate this deployment currently cannot inspect it, and could not have run the exposure check above to completion without the Artifact Registry side-channel. Fix the operator's own IAM before Gate 3, or post-deploy verification and incident response both have no eyes.
+2. **`sidney@krv.ai` cannot read Cloud Run in `pulsar-mcp-prod`** — `run.services.list`, `.get`, `.getIamPolicy`, and `iam.serviceAccounts.list` are all denied, and the account holds **no direct role binding** on the project. So the person expected to operate this deployment currently cannot inspect it, and could not have completed the exposure check without the Artifact Registry side-channel. Fix the operator's own IAM before Gate 3, or post-deploy verification and incident response both have no eyes.
+3. **INLINE 4's escalation chain does not apply to this project as provisioned.** The finding reads "the runtime identity is the default Compute Engine SA — granted project Editor on newly created projects," making "public reachability + metadata server + Editor" a full chain. But **`compute.googleapis.com` is not enabled** on `pulsar-mcp-prod`, and the default Compute SA is created when that API is enabled — so it very likely does not exist here. *(Cannot confirm directly: `iam.serviceAccounts.list` is denied per finding 2.)* The remedy is unchanged and still correct — pass an explicit `--service-account` with a dedicated minimal runtime SA — but the **severity framing needs restating**: this is "the runtime identity is unspecified and would default to something we haven't verified exists," not "we are one deploy away from handing Editor to the internet." Worth knowing before a deploy fails for the *other* reason: Cloud Run without `--service-account` needs that SA to exist.
 
 Re-run before any merge to `main` that carries the deploy workflow:
 
@@ -185,13 +186,13 @@ Break any of these and the documented model is silently false:
 | 2 | Path sandbox + settings module (read confinement) | ✅ | 1 | ~450 ln / 2–3 d |
 | 3 | Write confinement + sweep cost budget + error envelopes | ✅ | 2 | ~450 ln / 2–3 d |
 | 4 | Move blocking registry I/O off the event loop | — | — *(parallel)* | ~200 ln / 1 d |
-| 4.5 | **Observability**: structured logs, telemetry middleware, `/health` + `/ready`, SIGTERM drain | ✅ | 4, 5 | ~400 ln / 2–3 d |
 | 5 | Session lifecycle *(ownership half cut — see §2.3)* | ✅ | 4 | ~300 ln / 2 d |
+| 5.5 | **Observability**: structured logs, telemetry middleware, `/health` + `/ready`, SIGTERM drain | ✅ | 5 | ~400 ln / 2–3 d |
 | 6 | Container image, local-only, built in CI | — | 1, 2, 3 | ~350 ln / 2–3 d |
 | 7 | docker-compose + Caddy, loopback default | — | 6 | ~200 ln / 1–2 d |
 | 8 | Auth provider (`auth=` kwarg) | ✅ **the gate** | 1, 5 | ~400 ln / 4–6 d |
 | 9 | Remote data ingress (upload gate + byte caps) | — | 2, 3 | ~250 ln / 1–2 d |
-| 10 | Cloud Run deploy, IAM-only, no public URL | — | 6, 8, 9, 4.5 | ~300 ln / 4–5 d |
+| 10 | Cloud Run deploy, IAM-only, no public URL | — | 6, 8, 9, 5.5 | ~300 ln / 4–5 d |
 
 PRs 2, 3, 5, 8 must **all** land before any non-loopback binding is documented anywhere. PR 4 is independently valuable and parallelizable.
 
@@ -212,6 +213,7 @@ PRs 2, 3, 5, 8 must **all** land before any non-loopback binding is documented a
 | `tests/test_mcp_transport_args.py` | **New.** Assert `set(_build_run_kwargs(...)) - {"transport"} <= set(inspect.signature(FastMCP.run_http_async).parameters)`, with an explicit guard that no parameter is `VAR_KEYWORD` — a future `**kwargs` sink would make the subset check vacuous. |
 | `tests/test_mcp_remote_startup.py` | **New.** Per transport in `{sse, http, streamable-http}`: reserve port 0, `Popen`, poll `create_connection`, assert `proc.poll() is None`, surface child stderr via `pytest.fail`, then `fastmcp.Client` → `ping()` + `list_tools()`. Plus `--path /mcp` handshakes at `/mcp` and 404s at `/sse`; `PULSAR_MCP_PORT=notanint` raises the *specific* message. |
 | `README.md`, `CHANGELOG.md` | Revert the deploy section. Restore the persistent-install pointer (one line → `mcp.rst`). Collapse the triple blank line. Real `### Added` / `### Fixed` / `### Changed` / `### Deprecated` entries. |
+| `PULSAR_HTTPS_LAUNCH_PLAN.md` | **This file.** It now sits on the branch, so PR #37's diff carries an 11th file — and PR 1's job is rescoping that branch *down*. Move it to `docs/` (or delete it once the PRs it describes are filed) as part of the rescope, so the plan doesn't become the thing the plan forgot. |
 
 **Closes:** INLINE 1, 10, 11 *(host half)*, 12, 13, 14, 15 *(blank-line half)* · NIT (b), (e) *(all five sites)* · Review Body 1's test request · `missing-transport-kwarg-contract-test` · `missing-real-bind-startup-test` · `stateless-http-per-request-session-churn` · `changelog-describes-none-of-this-branch`
 
@@ -258,7 +260,7 @@ Wrap every synchronous `registry.*` call in `asyncio.to_thread`, highest value f
 
 **Closes:** `sync-registry-flock-in-async-def` · `gc-collect-inside-event-loop` · `flock-per-fd-rlock-false-reentrancy` · `no-registry-multiprocess-test`
 
-### PR 4.5 — Observability *(new — was entirely unowned)*
+### PR 5.5 — Observability *(new — was entirely unowned)*
 
 The acceptance criteria gate launch on structured logging, a telemetry middleware, `/ready`, and three log-based metrics. The PR split assigned **one** of those five artifacts. `grep -rn "add_middleware\|Middleware" pulsar/` → zero hits; `logger = logging.getLogger(__name__)` at `server.py:15` is the entire observability surface. The primary breakage-detection signal is downstream of a middleware nobody was scheduled to write, so **the whole detection story was unowned.**
 
@@ -333,7 +335,7 @@ Enforce caps in `append_upload_chunk`: max chunk bytes, max total per `upload_id
 
 **Drop `--allow-unauthenticated`.** That single change **dissolves** INLINE 2 rather than fixing it: with no invoker policy applied at deploy time, the deployer never calls `run.services.setIamPolicy` and the missing permission stops being reachable. Grant `roles/run.invoker` to named principals out-of-band, never in CI.
 
-Add `--service-account=<dedicated minimal runtime SA>`, `--max-instances=1`, small `--concurrency`, `--timeout=3600`, `--no-cpu-throttling`, `PULSAR_MCP_MAX_SESSIONS`, and an **`httpGet` startup probe** (§PR 4.5). **Drop `--session-affinity`** per §2.6.
+Add `--service-account=<dedicated minimal runtime SA>`, `--max-instances=1`, small `--concurrency`, `--timeout=3600`, `--no-cpu-throttling`, `PULSAR_MCP_MAX_SESSIONS`, and an **`httpGet` startup probe** (§PR 5.5). **Drop `--session-affinity`** per §2.6.
 
 Gate on CI via `workflow_run` or a folded `needs:`. Add `concurrency: { group: deploy-cloudrun-${{ github.ref }}, cancel-in-progress: true }`. Deploy by `@sha256:` digest, not a mutable tag; push `:latest` only after the deploy verifies. `--no-traffic --tag=sha-…`, probe, then promote. Record the previous revision to `$GITHUB_STEP_SUMMARY` for rollback. Move `id-token: write` to **job** scope. Add an Artifact Registry cleanup policy — every merge pushes an immortal multi-hundred-MB tag today.
 
@@ -406,7 +408,7 @@ Ordered, binary, all green before the first deploy.
 1. ✅ Part 0's exposure check — **done, clear.** Re-run before any merge to `main` carrying the deploy workflow. Also: grant `sidney@krv.ai` read access to Cloud Run in `pulsar-mcp-prod` (currently denied — see Part 0).
 2. Ten cheapest GCP verification commands **executed** against a scratch project, output pasted into the PR: `gcloud iam roles describe roles/run.developer`, `gcloud org-policies describe iam.allowedPolicyMemberDomains`, `gcloud projects describe --format='value(parent)'`, `bash scripts/setup_gcloud_wif.sh` on a throwaway. Half a day; converts ~15 inferences into facts and will likely delete two or three findings outright.
 3. `gcloud run services proxy` streaming test (§PR 10).
-4. `httpGet` startup probe under IAM-only verified (§PR 4.5).
+4. `httpGet` startup probe under IAM-only verified (§PR 5.5).
 5. **Launch client named** in writing.
 
 **Gate 1 — code correctness**
@@ -450,6 +452,8 @@ Linking a billing account. Creating the runtime SA. Granting `run.invoker` to na
 
 **Decision-only — nobody should delegate these**
 Which client must work at launch (gates PR 8's mechanism). Whether single-tenant is acceptable for the intended data. Whether the data-classification statement is a blocker.
+
+**Note on a wider delegation scope.** Asked how much an unattended agent should implement, the repo owner chose *"everything except GCP console work"* — which pulls PR 8's auth wiring and PR 10's deploy YAML into the agent's bucket. **This document recommends against that**, and the reason is Appendix A rather than caution about agents: PR 8 and PR 10 are precisely where the unverified `code-read-only` claims cluster, so an agent working there produces confident YAML and confident prose about infrastructure it cannot touch, and the review's demonstrated error rate says some of it will be wrong. The split above is the recommendation; the scope decision is the owner's. If the wider scope is taken, Gate 0 item 2 stops being a half-day nicety and becomes a hard prerequisite — the agent needs facts, not inferences, to write against.
 
 ---
 
