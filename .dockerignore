@@ -1,0 +1,14 @@
+.git
+.gitignore
+.dockerignore
+.venv
+target/
+dist/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+docs/build/
+.agent/
+.agents/

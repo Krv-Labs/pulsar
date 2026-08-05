@@ -1,0 +1,41 @@
+services:
+  pulsar-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pulsar-mcp
+    restart: unless-stopped
+    environment:
+      - PULSAR_MCP_TRANSPORT=sse
+      - PULSAR_MCP_HOST=0.0.0.0
+      - PULSAR_MCP_PORT=8000
+      - PULSAR_MCP_ALLOWED_HOSTS=*
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/sse\")' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: pulsar-mcp-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      pulsar-mcp:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

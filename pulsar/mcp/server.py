@@ -6,7 +6,9 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
 from typing import Any
 from fastmcp import FastMCP
 
@@ -68,9 +70,59 @@ for tool_fn in ALL_TOOLS_LIST:
     mcp.tool()(tool_fn)
 
 
-def main():
-    mcp.run()
+def main(args: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Pulsar FastMCP Server")
+    parser.add_argument(
+        "--transport",
+        type=str,
+        default=os.environ.get("PULSAR_MCP_TRANSPORT", "stdio"),
+        choices=["stdio", "sse", "http", "streamable-http"],
+        help="MCP transport protocol (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=os.environ.get("PULSAR_MCP_HOST", "0.0.0.0"),
+        help="Host address to bind to for HTTP/SSE transport (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("PULSAR_MCP_PORT", "8000")),
+        help="Port to bind to for HTTP/SSE transport (default: 8000)",
+    )
+    parser.add_argument(
+        "--path",
+        type=str,
+        default=os.environ.get("PULSAR_MCP_PATH"),
+        help="Custom path endpoint for HTTP/SSE transport (e.g. /sse or /mcp)",
+    )
+    parser.add_argument(
+        "--allowed-hosts",
+        type=str,
+        default=os.environ.get("PULSAR_MCP_ALLOWED_HOSTS", "*"),
+        help="Comma-separated allowed hosts for HTTP transport guard (default: *)",
+    )
+
+    parsed = parser.parse_args(args)
+
+    if parsed.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        allowed_hosts_list = [
+            h.strip() for h in parsed.allowed_hosts.split(",") if h.strip()
+        ]
+        run_kwargs: dict[str, Any] = {
+            "transport": parsed.transport,
+            "host": parsed.host,
+            "port": parsed.port,
+            "allowed_hosts": allowed_hosts_list,
+        }
+        if parsed.path:
+            run_kwargs["path"] = parsed.path
+        mcp.run(**run_kwargs)
 
 
 if __name__ == "__main__":
     main()
+

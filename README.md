@@ -50,11 +50,42 @@ claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
 gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
 ```
 
-`uvx` pulls `thema-pulsar[mcp]` straight from PyPI and runs `pulsar-mcp` in an isolated environment—no clone, manually managed Python environment, or `uv sync` required. If you prefer a persistent install, run `pipx install "thema-pulsar[mcp]"` and use `"command": "pulsar-mcp"` instead.
-
 Restart your client. Done.
 
 Two things that trip people up: the first launch can take up to a minute while `uvx` downloads Pulsar (hence Gemini's `--timeout 60000`), and Gemini will not start stdio MCP servers in an untrusted workspace—choose **Trust folder** when prompted. The [MCP setup guide](https://github.com/Krv-Labs/pulsar/blob/main/docs/source/userGuides/mcp.rst) covers both, per client.
+
+### Docker & HTTPS Endpoint Deployment
+
+To deploy Pulsar MCP as a remote, reachable endpoint accessible via HTTPS:
+
+1. **Launch with Docker Compose (Pulsar MCP + Caddy Reverse Proxy)**:
+   ```bash
+   # Set domain (defaults to localhost for automatic internal TLS)
+   DOMAIN=mcp.yourdomain.com docker compose up -d --build
+   ```
+
+2. **Connect Remote MCP Clients over HTTPS (SSE)**:
+   Configure your client to point to the SSE URL:
+   ```json
+   {
+     "mcpServers": {
+       "pulsar-remote": {
+         "url": "https://mcp.yourdomain.com/sse"
+       }
+     }
+   }
+   ```
+
+3. **Automated CI/CD Deployment to Google Cloud Run (WIF)**:
+   Run the setup script once after logging in with `gcloud auth login`:
+   ```bash
+   ./scripts/setup_gcloud_wif.sh pulsar-mcp-prod us-central1 Krv-Labs/pulsar
+   ```
+   Add the printed output variables to your GitHub Repository Secrets (`GCP_PROJECT_ID`, `GCP_SERVICE_ACCOUNT`, `GCP_WORKLOAD_IDENTITY_PROVIDER`).
+
+   Every push to `main` will automatically build the Docker image, push it to Artifact Registry, and deploy the service to Cloud Run via `.github/workflows/deploy-cloudrun.yml`.
+
+
 
 ### General Overview
 

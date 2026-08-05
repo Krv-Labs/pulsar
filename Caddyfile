@@ -1,0 +1,7 @@
+{$DOMAIN:localhost} {
+    # Reverse proxy to the Pulsar MCP container
+    reverse_proxy pulsar-mcp:8000 {
+        # Support long-lived SSE / HTTP streaming connections
+        flush_interval -1
+    }
+}

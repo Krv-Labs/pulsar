@@ -37,3 +37,27 @@ def test_agnostic_mcp_logs_unrecognized_keys(caplog):
         for record in caplog.records
     )
     assert any("const_threshold" in record.message for record in caplog.records)
+
+
+def test_mcp_server_main_cli(monkeypatch):
+    from unittest.mock import MagicMock
+    from pulsar.mcp.server import main, mcp
+
+    mock_run = MagicMock()
+    monkeypatch.setattr(mcp, "run", mock_run)
+
+    # Stdio default
+    main([])
+    mock_run.assert_called_with(transport="stdio")
+
+    # SSE with custom host, port, path
+    mock_run.reset_mock()
+    main(["--transport", "sse", "--host", "127.0.0.1", "--port", "9000", "--path", "/mcp"])
+    mock_run.assert_called_with(
+        transport="sse",
+        host="127.0.0.1",
+        port=9000,
+        allowed_hosts=["*"],
+        path="/mcp",
+    )
+

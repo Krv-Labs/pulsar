@@ -1,0 +1,71 @@
+name: Build and Deploy Pulsar MCP to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || 'pulsar-mcp-prod' }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  SERVICE_NAME: pulsar-mcp
+  ARTIFACT_REPO: pulsar-mcp
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authenticate Docker to Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and Push Docker Image
+        id: build-image
+        env:
+          IMAGE_URI: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+          LATEST_URI: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.SERVICE_NAME }}:latest
+        run: |
+          docker build -t "$IMAGE_URI" -t "$LATEST_URI" .
+          docker push "$IMAGE_URI"
+          docker push "$LATEST_URI"
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+      - name: Deploy to Google Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ steps.build-image.outputs.image_uri }}
+          flags: >-
+            --port=8000
+            --allow-unauthenticated
+            --memory=2Gi
+            --cpu=2
+            --set-env-vars=PULSAR_MCP_TRANSPORT=sse,PULSAR_MCP_HOST=0.0.0.0,PULSAR_MCP_PORT=8000,PULSAR_MCP_ALLOWED_HOSTS=*
+
+      - name: Output Service HTTPS Endpoint
+        run: |
+          echo "======================================================="
+          echo "Pulsar MCP deployed to Google Cloud Run!"
+          echo "HTTPS Endpoint: ${{ steps.deploy.outputs.url }}/sse"
+          echo "======================================================="
