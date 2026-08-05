@@ -42,6 +42,13 @@ from pulsar.mcp.tools.preprocessing import (
     repair_preprocessing_config,
     validate_preprocessing_config,
 )
+from pulsar.mcp.tools.longitudinal import (
+    build_longitudinal_graph,
+    diagnose_longitudinal_graph,
+    get_trajectory_archetypes,
+    get_cross_time_neighbors,
+    classify_trajectories,
+)
 from pulsar.mcp.tools.meta import (
     get_workflow_guide,
     get_runtime_context,
@@ -87,6 +94,12 @@ ALL_TOOLS_LIST = [
     recommend_preprocessing,
     repair_preprocessing_config,
     validate_preprocessing_config,
+    # Longitudinal
+    build_longitudinal_graph,
+    diagnose_longitudinal_graph,
+    get_trajectory_archetypes,
+    get_cross_time_neighbors,
+    classify_trajectories,
     # Meta
     get_workflow_guide,
     get_runtime_context,
@@ -121,6 +134,11 @@ __all__ = [
     "recommend_preprocessing",
     "repair_preprocessing_config",
     "validate_preprocessing_config",
+    "build_longitudinal_graph",
+    "diagnose_longitudinal_graph",
+    "get_trajectory_archetypes",
+    "get_cross_time_neighbors",
+    "classify_trajectories",
     "get_workflow_guide",
     "get_runtime_context",
     "characterize_dataset",

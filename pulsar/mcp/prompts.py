@@ -66,6 +66,50 @@ Reveal the dataset's topology; do not force convenient clusters.
    nodes, and `detail="full"` only when both raw graph arrays and config YAML are
    needed.
 
+## LONGITUDINAL DATA (PANELS)
+If the dataset is long-format — one row per (entity, time) — the static sweep is the
+wrong tool: it treats every row as an independent point and loses the panel structure.
+Use `build_longitudinal_graph(dataset_id, entity_column, time_column, ...)` instead.
+It pivots the table into per-time snapshots and returns a `longitudinal_id`.
+
+Pick the representation by the question you are asking:
+- `representation="trajectory"` (default) — nodes are **observations** `(entity, t)`,
+  so edges may join different time steps. Answers "which observations resemble each
+  other across time" and "how do entities move between cohorts". Stays sparse.
+- `representation="temporal"` — nodes are **entities**, edges live inside one time
+  slice, collapsed by tensor aggregations. Answers "which entities are stably similar
+  over the window". Allocates a dense (n, n, T) tensor, so it is guarded by a memory
+  ceiling; prefer trajectory at scale.
+- `representation="both"` — build each and contrast them.
+
+Then:
+1. `diagnose_longitudinal_graph` — measurement for whichever surfaces exist. For the
+   temporal surface it compares all six aggregations side by side with
+   `why`/`best_for`/`avoid_for`; choose the aggregation deliberately rather than
+   defaulting to `persistence`. Each is cut at its own q90 because their value ranges
+   are not comparable ([0,1] vs a variance vs a signed slope).
+2. `get_trajectory_archetypes` — entities grouped by the cluster sequence they trace
+   through time. This is trajectory classification.
+3. `get_cross_time_neighbors` — the cross-time lookalike query: who does this entity
+   at this time resemble at a *different* time?
+
+Longitudinal caveats:
+- `time_column` must already be discrete and orderable. Bin continuous timestamps
+  before ingest; Pulsar will not choose a bin width or an aggregator for you.
+- `on_missing` decides entities absent at some step: `drop_entity` (default, and
+  required for the temporal representation), `forward_fill`, or `allow_ragged`
+  (trajectory only).
+- `create_config` calibrates against the raw file, which counts the entity and time
+  columns. The build refits the projection grid and, when no epsilon lands in the
+  panel's k-NN domain, recalibrates epsilon — always disclosed under
+  `config_adaptation`. Read it; a silent single-ball cover is the failure mode it
+  prevents.
+- The threshold in these tools is an **interpretation** filter, not the construction
+  threshold. Cluster counts move steeply with it, so every response carries a
+  threshold ladder. Compare rows; do not treat one row as ground truth.
+- Longitudinal artifacts are session-local and do not feed the cluster dossier chain,
+  which assumes positional alignment against the static dataset.
+
 ## GRID GEOMETRY & EXPERT AGENT AUTONOMY
 The default config returned by `create_config` is ONLY a baseline starting guess. As the expert in the room, you have full autonomy—and the duty—to actively override, widen, and shift these parameters based on diagnostic feedback.
 
