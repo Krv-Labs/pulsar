@@ -23,6 +23,7 @@ from pulsar.mcp.tools.longitudinal import (  # noqa: E402
     diagnose_longitudinal_graph,
     get_cross_time_neighbors,
     get_trajectory_archetypes,
+    classify_trajectories,
 )
 
 
@@ -440,6 +441,73 @@ class TestHandles:
         assert session.clusters is not None
 
 
+class TestClassifyTrajectories:
+    def test_classify_complexity(self, tmp_path):
+        built = _build(tmp_path)
+        response = json.loads(
+            asyncio.run(
+                classify_trajectories(
+                    built["longitudinal_id"], method="complexity", threshold=0.25, response_format="json"
+                )
+            )
+        )
+        assert response["n_entities"] == 30
+        assert response["method"] == "complexity"
+        assert "Stable (0 entropy)" in response["classes_summary"]
+        assert "Volatile / Refractory" in response["classes_summary"]
+        
+    def test_classify_transition(self, tmp_path):
+        built = _build(tmp_path)
+        response = json.loads(
+            asyncio.run(
+                classify_trajectories(
+                    built["longitudinal_id"], method="transition", threshold=0.25, response_format="json"
+                )
+            )
+        )
+        assert response["n_entities"] == 30
+        assert response["method"] == "transition"
+        assert "Highly Stable (>=80% retention)" in response["classes_summary"]
+
+    def test_classify_sequence(self, tmp_path):
+        built = _build(tmp_path)
+        response = json.loads(
+            asyncio.run(
+                classify_trajectories(
+                    built["longitudinal_id"], method="sequence", threshold=0.25, response_format="json"
+                )
+            )
+        )
+        assert response["n_entities"] == 30
+        assert response["method"] == "sequence"
+
+    def test_classify_levenshtein(self, tmp_path):
+        built = _build(tmp_path)
+        response = json.loads(
+            asyncio.run(
+                classify_trajectories(
+                    built["longitudinal_id"], method="levenshtein", threshold=0.25, response_format="json"
+                )
+            )
+        )
+        assert response["n_entities"] == 30
+        assert response["method"] == "levenshtein"
+        assert len(response["classes_summary"]) > 0
+
+    def test_classify_dtw(self, tmp_path):
+        built = _build(tmp_path)
+        response = json.loads(
+            asyncio.run(
+                classify_trajectories(
+                    built["longitudinal_id"], method="dtw", threshold=0.25, response_format="json"
+                )
+            )
+        )
+        assert response["n_entities"] == 30
+        assert response["method"] == "dtw"
+        assert len(response["classes_summary"]) > 0
+
+
 def test_longitudinal_tools_are_registered():
     names = {tool.__name__ for tool in ALL_TOOLS_LIST}
     assert {
@@ -447,6 +515,7 @@ def test_longitudinal_tools_are_registered():
         "diagnose_longitudinal_graph",
         "get_trajectory_archetypes",
         "get_cross_time_neighbors",
+        "classify_trajectories",
     } <= names
 
 

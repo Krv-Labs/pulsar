@@ -764,13 +764,14 @@ def archetype_payload(
     archetypes = []
     for sequence, population in counts.head(max_archetypes).items():
         members = sequences.index[sequences == sequence].tolist()
+        observed_seq = [v for v in sequence if not pd.isna(v)]
         archetypes.append(
             {
-                "sequence": [int(value) for value in sequence],
+                "sequence": [None if pd.isna(value) else int(value) for value in sequence],
                 "n_entities": int(population),
                 "fraction": round(float(population) / len(sequences), 4),
                 "transitions": int(
-                    sum(1 for a, b in zip(sequence, sequence[1:]) if a != b)
+                    sum(1 for a, b in zip(observed_seq, observed_seq[1:]) if a != b)
                 ),
                 "entities": bounded_list(
                     [str(member) for member in members],
@@ -848,4 +849,220 @@ def cross_time_payload(
         "cross_time_degree": int(cols.size),
         "neighbors": neighbors,
         "next_tools": ["get_trajectory_archetypes"],
+    }
+
+
+def levenshtein_distance(seq1: list[int], seq2: list[int]) -> int:
+    """Pairwise edit distance (minimum insertions/deletions/substitutions) between sequences."""
+    n, m = len(seq1), len(seq2)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if seq1[i-1] == seq2[j-1] else 1
+            dp[i][j] = min(dp[i-1][j] + 1,      # deletion
+                           dp[i][j-1] + 1,      # insertion
+                           dp[i-1][j-1] + cost) # substitution
+    return dp[n][m]
+
+
+def dtw_distance(seq1: list[int], seq2: list[int]) -> float:
+    """Pairwise Dynamic Time Warping alignment distance, allowing time stretching/squeezing."""
+    n, m = len(seq1), len(seq2)
+    if n == 0 or m == 0:
+        return float(max(n, m))
+    dp = np.full((n, m), np.inf)
+    dp[0, 0] = 0.0 if seq1[0] == seq2[0] else 1.0
+    
+    for i in range(1, n):
+        dp[i, 0] = dp[i-1, 0] + (0.0 if seq1[i] == seq2[0] else 1.0)
+    for j in range(1, m):
+        dp[0, j] = dp[0, j-1] + (0.0 if seq1[0] == seq2[j] else 1.0)
+        
+    for i in range(1, n):
+        for j in range(1, m):
+            cost = 0.0 if seq1[i] == seq2[j] else 1.0
+            dp[i, j] = cost + min(dp[i-1, j],    # insertion
+                                  dp[i, j-1],    # deletion
+                                  dp[i-1, j-1])  # match/mismatch
+    return float(dp[n-1, m-1])
+
+
+def classify_trajectories_payload(
+    trajectory: CosmicTrajectory,
+    *,
+    method: str,
+    threshold: float,
+) -> dict[str, Any]:
+    """Classify patients based on their clinical trajectories.
+
+    Supported methods:
+      - 'complexity': entropy and transition count based classification (Stable, Gradual, Volatile)
+      - 'transition': Markov-chain self-retention probability based classification (Highly Stable, Transitioning, Volatile)
+      - 'levenshtein': Levenshtein edit distance matrix hierarchical complete-linkage clustering into 4 cohorts
+      - 'dtw': Dynamic Time Warping distance matrix hierarchical complete-linkage clustering into 4 cohorts
+      - 'sequence': trajectory structure-based classification (Singleton, Monostate, Multistate)
+    """
+    labels = trajectory.cluster_labels(threshold)
+    frame = trajectory.obs.assign(cluster=labels)
+    pivoted = frame.pivot(index="entity_id", columns="t", values="cluster")
+
+    classification = {}
+    classes_summary = {}
+
+    if method == "complexity":
+        # Calculate Shannon entropy and transition counts for each entity
+        for entity_id, row in pivoted.iterrows():
+            seq = [v for v in row if not pd.isna(v)]
+            if not seq:
+                classification[str(entity_id)] = {
+                    "class": "Unknown",
+                    "entropy": 0.0,
+                    "transitions": 0,
+                    "length": 0,
+                    "sequence": [],
+                }
+                continue
+
+            # Shannon entropy of cluster visits
+            counts = pd.Series(seq).value_counts()
+            probs = counts / len(seq)
+            entropy = float(-np.sum(probs * np.log2(probs))) if len(probs) > 1 else 0.0
+
+            # State-to-state transition count
+            transitions = sum(1 for a, b in zip(seq, seq[1:]) if a != b)
+
+            # Assign complexity class
+            if len(seq) <= 1:
+                p_class = "Singleton (1 visit)"
+            elif entropy == 0.0:
+                p_class = "Stable (0 entropy)"
+            elif transitions < 2:
+                p_class = "Gradual Transition"
+            else:
+                p_class = "Volatile / Refractory"
+
+            classification[str(entity_id)] = {
+                "class": p_class,
+                "entropy": round(entropy, 4),
+                "transitions": int(transitions),
+                "length": int(len(seq)),
+                "sequence": [int(v) for v in seq],
+            }
+
+    elif method == "transition":
+        # Calculate self-retention rate
+        for entity_id, row in pivoted.iterrows():
+            seq = [v for v in row if not pd.isna(v)]
+            if len(seq) <= 1:
+                classification[str(entity_id)] = {
+                    "class": "Insufficient Visits (<2)",
+                    "self_retention_rate": 1.0,
+                    "length": int(len(seq)),
+                    "sequence": [int(v) for v in seq],
+                }
+                continue
+
+            # Transitions that are self-loops (a == b)
+            self_loops = sum(1 for a, b in zip(seq, seq[1:]) if a == b)
+            self_retention_rate = float(self_loops / (len(seq) - 1))
+
+            if self_retention_rate >= 0.8:
+                p_class = "Highly Stable (>=80% retention)"
+            elif self_retention_rate >= 0.4:
+                p_class = "Transitioning (40%-80% retention)"
+            else:
+                p_class = "Highly Volatile (<40% retention)"
+
+            classification[str(entity_id)] = {
+                "class": p_class,
+                "self_retention_rate": round(self_retention_rate, 4),
+                "length": int(len(seq)),
+                "sequence": [int(v) for v in seq],
+            }
+
+    elif method in {"levenshtein", "dtw"}:
+        from scipy.cluster.hierarchy import linkage, fcluster
+        from scipy.spatial.distance import squareform
+
+        # Extract sequences
+        entities_list = []
+        seqs_list = []
+        for entity_id, row in pivoted.iterrows():
+            seq = [int(v) for v in row if not pd.isna(v)]
+            entities_list.append(entity_id)
+            seqs_list.append(seq)
+
+        # Pairwise distance matrix
+        n_ents = len(entities_list)
+        dist_matrix = np.zeros((n_ents, n_ents))
+        for i in range(n_ents):
+            for j in range(i + 1, n_ents):
+                if method == "levenshtein":
+                    d = levenshtein_distance(seqs_list[i], seqs_list[j])
+                else:
+                    d = dtw_distance(seqs_list[i], seqs_list[j])
+                dist_matrix[i, j] = d
+                dist_matrix[j, i] = d
+
+        # Hierarchical complete linkage clustering (robust on edit distances)
+        condensed_dist = squareform(dist_matrix)
+        Z = linkage(condensed_dist, method="complete")
+        # Define 4 cohorts based on distance cuts
+        cohort_labels = fcluster(Z, t=4, criterion="maxclust")
+
+        # Assign classes
+        for idx, entity_id in enumerate(entities_list):
+            cohort_id = int(cohort_labels[idx])
+            classification[str(entity_id)] = {
+                "class": f"Cohort Class {cohort_id}",
+                "length": int(len(seqs_list[idx])),
+                "sequence": seqs_list[idx],
+            }
+
+    elif method == "sequence":
+        # Classify by sequence profile type
+        for entity_id, row in pivoted.iterrows():
+            seq = [v for v in row if not pd.isna(v)]
+            unique_states = len(set(seq))
+
+            if len(seq) <= 1:
+                p_class = "Singleton Path"
+            elif unique_states == 1:
+                p_class = "Monostate Path"
+            else:
+                p_class = f"Multistate Transitioning Path ({unique_states} states)"
+
+            classification[str(entity_id)] = {
+                "class": p_class,
+                "unique_states": int(unique_states),
+                "length": int(len(seq)),
+                "sequence": [int(v) for v in seq],
+            }
+    else:
+        raise ValueError(f"Unknown classification method '{method}'")
+
+    # Aggregate classes summary
+    classes = [info["class"] for info in classification.values()]
+    counts = pd.Series(classes).value_counts()
+    for p_class, count in counts.items():
+        classes_summary[p_class] = {
+            "count": int(count),
+            "fraction": round(float(count) / len(classification), 4),
+        }
+
+    # Sort classifications by entity_id for deterministic return
+    sorted_classification = {k: classification[k] for k in sorted(classification.keys())}
+
+    return {
+        "representation": "trajectory",
+        "method": method,
+        "interpretation_threshold": threshold,
+        "n_entities": len(sorted_classification),
+        "classes_summary": classes_summary,
+        "classification": sorted_classification,
+        "next_tools": ["get_trajectory_archetypes", "diagnose_longitudinal_graph"],
     }

@@ -30,6 +30,7 @@ from pulsar.mcp.longitudinal import (
     adapt_config_to_panel,
     archetype_payload,
     build_representations,
+    classify_trajectories_payload,
     cross_time_payload,
     estimate_costs,
     guard_representation,
@@ -674,5 +675,104 @@ def _neighbors_to_markdown(payload: dict[str, Any]) -> str:
             f"| {neighbor['entity_id']} | {neighbor['t']} | "
             f"{neighbor['delta_t']:+d} | {neighbor['weight']:.4f} |"
         )
+    lines += ["", "## Next Tools"] + [f"- `{t}`" for t in payload["next_tools"]]
+    return "\n".join(lines)
+
+
+async def classify_trajectories(
+    longitudinal_id: str = "",
+    method: Literal["complexity", "transition", "sequence", "levenshtein", "dtw"] = "complexity",
+    threshold: float = 0.15,
+    response_format: Literal["json", "markdown"] = "markdown",
+    ctx: Context = None,
+) -> str:
+    """Classify patient longitudinal trajectories based on their clinical paths.
+
+    Allows downstream agents or clinical researchers to partition patients into
+    actionable cohorts using three distinct paradigms:
+      - 'complexity': Groups by Shannon entropy and state-transition counts (Stable, Gradual, Volatile).
+      - 'transition': Groups by Markov self-retention probability (Highly Stable, Transitioning, Volatile).
+      - 'levenshtein': Groups by Levenshtein edit distance matrix complete-linkage clustering.
+      - 'dtw': Groups by Dynamic Time Warping alignment complete-linkage clustering.
+      - 'sequence': Groups by structural path type (Singleton, Monostate, Multistate).
+    """
+    session = _get_session(ctx)
+
+    if response_format not in {"json", "markdown"}:
+        return mcp_error(
+            "classify_trajectories", "response_format must be 'json' or 'markdown'."
+        )
+    if method not in {"complexity", "transition", "sequence", "levenshtein", "dtw"}:
+        return mcp_error(
+            "classify_trajectories", "method must be 'complexity', 'transition', 'sequence', 'levenshtein', or 'dtw'."
+        )
+    if threshold < 0.0:
+        return mcp_error("classify_trajectories", "threshold must be >= 0.")
+
+    try:
+        artifact = _resolve_longitudinal(session, longitudinal_id)
+    except LookupError:
+        return _stale_handle("classify_trajectories", longitudinal_id)
+
+    unavailable = _require_trajectory("classify_trajectories", artifact)
+    if unavailable:
+        return unavailable
+
+    try:
+        payload = await asyncio.to_thread(
+            classify_trajectories_payload,
+            artifact.trajectory,
+            method=method,
+            threshold=threshold,
+        )
+        payload["status"] = "ok"
+        payload["longitudinal_id"] = artifact.longitudinal_id
+        if response_format == "json":
+            return json.dumps(payload, indent=2, default=str)
+        return _classification_to_markdown(payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("classify_trajectories failed: %s", exc, exc_info=True)
+        return mcp_error("classify_trajectories", str(exc))
+
+
+def _classification_to_markdown(payload: dict[str, Any]) -> str:
+    method_labels = {
+        "complexity": "Shannon Entropy & Transition Counts (Stable vs Volatile)",
+        "transition": "Markov Self-Retention Probabilities",
+        "sequence": "Structural Path Profile (Singleton vs Multistate)",
+        "levenshtein": "Levenshtein Edit Distance Complete-Linkage Clustering",
+        "dtw": "Dynamic Time Warping Complete-Linkage Clustering",
+    }
+    lines = [
+        f"# Trajectory Classification `{payload['longitudinal_id']}`",
+        "",
+        f"- **Method**: `{payload['method']}` ({method_labels[payload['method']]})",
+        f"- **Interpretation Threshold**: {payload['interpretation_threshold']}",
+        f"- **Total Patients Classified**: {payload['n_entities']}",
+        "",
+        "## Cohort Summary",
+        "",
+        "| Cohort Class | Patient Count | Population Share |",
+        "|---|---|---|",
+    ]
+    for p_class, info in sorted(payload["classes_summary"].items(), key=lambda x: -x[1]["count"]):
+        lines.append(f"| {p_class} | {info['count']} | {info['fraction']:.1%} |")
+
+    lines += [
+        "",
+        "## Patient Classification Samples (Top 15)",
+        "",
+        "| Patient ID | Cohort Class | Visits | Sequence (Observed) |",
+        "|---|---|---|---|",
+    ]
+    samples = list(payload["classification"].items())[:15]
+    for p_id, info in samples:
+        lines.append(
+            f"| {p_id} | {info['class']} | {info['length']} | {info['sequence']} |"
+        )
+    
+    if len(payload["classification"]) > 15:
+        lines.append(f"| ... | and {len(payload['classification']) - 15} more patients | | |")
+
     lines += ["", "## Next Tools"] + [f"- `{t}`" for t in payload["next_tools"]]
     return "\n".join(lines)

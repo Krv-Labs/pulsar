@@ -47,6 +47,7 @@ from pulsar.mcp.tools.longitudinal import (
     diagnose_longitudinal_graph,
     get_trajectory_archetypes,
     get_cross_time_neighbors,
+    classify_trajectories,
 )
 from pulsar.mcp.tools.meta import (
     get_workflow_guide,
@@ -98,6 +99,7 @@ ALL_TOOLS_LIST = [
     diagnose_longitudinal_graph,
     get_trajectory_archetypes,
     get_cross_time_neighbors,
+    classify_trajectories,
     # Meta
     get_workflow_guide,
     get_runtime_context,
@@ -136,6 +138,7 @@ __all__ = [
     "diagnose_longitudinal_graph",
     "get_trajectory_archetypes",
     "get_cross_time_neighbors",
+    "classify_trajectories",
     "get_workflow_guide",
     "get_runtime_context",
     "characterize_dataset",
