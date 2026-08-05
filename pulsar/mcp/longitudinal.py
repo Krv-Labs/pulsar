@@ -821,7 +821,6 @@ def cross_time_payload(
     trajectory: CosmicTrajectory,
     *,
     obs_id: int,
-    time_labels: list[Any],
     threshold: float,
     max_neighbors: int,
     direction: str,
@@ -833,6 +832,7 @@ def cross_time_payload(
 
     times = obs["t"].to_numpy()
     entities = obs["entity_id"].to_numpy()
+    time_labels = obs["timestamp"].to_numpy()
     deltas = times[row.col] - int(source["t"])
 
     keep = np.ones(row.col.shape, dtype=bool)
@@ -851,7 +851,7 @@ def cross_time_payload(
             "obs_id": int(cols[i]),
             "entity_id": str(entities[cols[i]]),
             "t": int(times[cols[i]]),
-            "time_label": time_labels[int(times[cols[i]])],
+            "time_label": time_labels[cols[i]],
             "delta_t": int(deltas[i]),
             "weight": round(float(weights[i]), 6),
         }
@@ -867,7 +867,7 @@ def cross_time_payload(
             "obs_id": int(obs_id),
             "entity_id": str(source["entity_id"]),
             "t": int(source["t"]),
-            "time_label": time_labels[int(source["t"])],
+            "time_label": source["timestamp"],
         },
         "neighbors_returned": len(neighbors),
         "neighbors_omitted": max(int(cols.size) - len(neighbors), 0),

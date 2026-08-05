@@ -681,7 +681,6 @@ async def get_cross_time_neighbors(
             cross_time_payload,
             trajectory,
             obs_id=obs_id,
-            time_labels=artifact.panel["times"],
             threshold=threshold,
             max_neighbors=max_neighbors,
             direction=direction,

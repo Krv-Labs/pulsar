@@ -444,30 +444,34 @@ class TestCrossTimeNeighbors:
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"],
-                    entity_id="p0",
-                    t=2,
+                    entity_id="p25",
+                    t=4,
+                    direction="backward",
+                    max_neighbors=5,
                     response_format="json",
                 )
             )
         )
 
         assert response["status"] == "ok"
-        assert response["source"]["t"] == 1
-        assert response["source"]["time_label"] == 2
+        assert response["source"]["t"] == 3
+        assert response["source"]["time_label"] == 4
+        assert response["neighbors"]
         assert all("time_label" in neighbor for neighbor in response["neighbors"])
 
+        neighbor = response["neighbors"][0]
         replayed = json.loads(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"],
-                    entity_id=response["source"]["entity_id"],
-                    t=response["source"]["time_label"],
+                    entity_id=neighbor["entity_id"],
+                    t=neighbor["time_label"],
                     response_format="json",
                 )
             )
         )
 
-        assert replayed["source"]["obs_id"] == response["source"]["obs_id"]
+        assert replayed["source"]["obs_id"] == neighbor["obs_id"]
 
     def test_unresolvable_observation_is_structured(self, tmp_path):
         built = _build(tmp_path)

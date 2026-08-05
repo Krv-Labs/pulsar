@@ -119,6 +119,17 @@ class TestPanelInvariants:
         assert ct.obs["entity_id"].tolist() == ["p0", "p1", "p1", "p2"]
         assert ct.observation_index("p1", 1) == 2
 
+    def test_entity_id_sources_are_mutually_exclusive(self):
+        snapshots = _migrating_panel(n_stay=2, n_move=2, n_times=2)
+
+        with pytest.raises(ValueError, match="not both"):
+            CosmicTrajectory.from_snapshots(
+                snapshots,
+                _config(),
+                entity_ids=list(range(6)),
+                snapshot_entity_ids=[list(range(6))] * 2,
+            )
+
     def test_mismatched_entity_ids_raise(self):
         snapshots = _migrating_panel(n_stay=2, n_move=2, n_times=2)
         with pytest.raises(
