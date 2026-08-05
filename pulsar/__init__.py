@@ -19,7 +19,7 @@ from pulsar._pulsar import (
 )
 from pulsar.pipeline import ThemaRS
 from pulsar.config import PulsarConfig, load_config, config_to_yaml
-from pulsar.representations import TemporalCosmicGraph
+from pulsar.representations import CosmicTrajectory, TemporalCosmicGraph
 from pulsar.analysis import (
     label_points,
     membership_matrix,
@@ -53,6 +53,7 @@ __all__ = [
     # Cosmic Graph
     "CosmicGraph",
     "TemporalCosmicGraph",
+    "CosmicTrajectory",
     # Threshold stability
     "find_stable_thresholds",
     "find_stable_thresholds_sparse",
