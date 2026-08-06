@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +108,7 @@ def _read_optional(path: Path) -> str | None:
 def strip_jsonc(text: str) -> tuple[str, bool]:
     """Strip // and /* */ comments; return (stripped_text, had_comments)."""
     out: list[str] = []
+    commas: list[int] = []
     index = 0
     had_comments = False
     in_string = False
@@ -146,14 +146,26 @@ def strip_jsonc(text: str) -> tuple[str, bool]:
                 out.extend([" ", " "])
                 index += 2
             continue
+        if ch == ",":
+            commas.append(len(out))
         out.append(ch)
         index += 1
-    stripped = "".join(out)
-    return _drop_trailing_commas(stripped), had_comments
+    return _drop_trailing_commas(out, commas), had_comments
 
 
-def _drop_trailing_commas(text: str) -> str:
-    return re.sub(r",(\s*[}\]])", r"\1", text)
+def _drop_trailing_commas(chars: list[str], commas: list[int]) -> str:
+    """Blank commas that precede a closing brace/bracket.
+
+    Only the positions collected outside string literals are considered — a
+    regex over the whole document would also eat a `, }` inside a string value.
+    """
+    for start in commas:
+        index = start + 1
+        while index < len(chars) and chars[index].isspace():
+            index += 1
+        if index < len(chars) and chars[index] in "}]":
+            chars[start] = " "
+    return "".join(chars)
 
 
 def prune_dirs(dirs: list[Path]) -> None:

@@ -12,7 +12,7 @@ from packaging.requirements import Requirement
 
 from pulsar.cli.install.artifact import State
 from pulsar.cli.install.command import LaunchSpec, uvx_args
-from pulsar.cli.install.fsops import backup_path
+from pulsar.cli.install.fsops import backup_path, strip_jsonc
 from pulsar.cli.install.harness import get_harness
 from pulsar.cli.install import configure, paths, state, uninstall
 from pulsar.cli.main import main
@@ -225,6 +225,24 @@ def test_cli_status_json(home: Path, fake_uvx: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["active"] >= 1
     assert any(row["id"] == "cursor" for row in payload["harnesses"])
+
+
+def test_jsonc_strip_preserves_commas_inside_strings() -> None:
+    source = '{"servers": {}, "note": "a, }", "trailing": [1, 2,],}'
+    stripped, had_comments = strip_jsonc(source)
+    assert had_comments is False
+    assert json.loads(stripped) == {
+        "servers": {},
+        "note": "a, }",
+        "trailing": [1, 2],
+    }
+
+
+def test_jsonc_strip_removes_comments_and_trailing_commas() -> None:
+    source = '{\n  // lead\n  "servers": {}, /* mid */\n  "x": 1,\n}\n'
+    stripped, had_comments = strip_jsonc(source)
+    assert had_comments is True
+    assert json.loads(stripped) == {"servers": {}, "x": 1}
 
 
 def test_uninstall_prunes_directories_install_created(
