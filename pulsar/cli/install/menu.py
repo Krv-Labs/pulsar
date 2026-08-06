@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import sys
-import termios
-import tty
 from dataclasses import dataclass
 from enum import Enum
 
 from pulsar.cli.install.artifact import State
+
+try:
+    import termios
+    import tty
+except ImportError:  # Windows: no termios, so no raw-mode prompting
+    termios = None  # type: ignore[assignment]
+    tty = None  # type: ignore[assignment]
+
+
+def can_prompt() -> bool:
+    """True when we can render a menu and read a keypress."""
+    return termios is not None and sys.stderr.isatty() and sys.stdin.isatty()
 
 
 class HintStyle(Enum):
@@ -30,7 +40,7 @@ class MenuOption:
 def run_menu(title: str, options: list[MenuOption]) -> list[str] | None:
     if not options:
         return []
-    if not sys.stderr.isatty() or not sys.stdin.isatty():
+    if not can_prompt():
         return None
 
     working = [MenuOption(**option.__dict__) for option in options]
@@ -63,7 +73,7 @@ def run_menu(title: str, options: list[MenuOption]) -> list[str] | None:
 
 
 def run_confirm(title: str, plan: list[str]) -> bool:
-    if not sys.stderr.isatty() or not sys.stdin.isatty():
+    if not can_prompt():
         return False
     print(title, file=sys.stderr)
     for line in plan:

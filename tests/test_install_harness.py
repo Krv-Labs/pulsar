@@ -178,11 +178,24 @@ def test_install_all_headless(home: Path, fake_uvx: Path) -> None:
     assert (home / ".claude.json").is_file()
 
 
-def test_validate_unknown_harness(capsys) -> None:
+def test_validate_unknown_harness(home: Path, fake_uvx: Path, capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["install", "nope"])
     assert exc.value.code == 1
     assert "unknown harness" in capsys.readouterr().err
+
+
+def test_install_with_piped_stdin_errors_rather_than_no_op(
+    home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # A TTY on stderr alone is not enough — the menu also reads stdin.
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["install"])
+    assert exc.value.code == 1
+    assert "non-interactive" in capsys.readouterr().err
 
 
 def test_gemini_directory_does_not_imply_antigravity(home: Path) -> None:

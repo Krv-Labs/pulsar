@@ -15,7 +15,13 @@ from pulsar.cli.install.command import (
 )
 from pulsar.cli.install.harness import HARNESSES, get_harness, harness_ids
 from pulsar.cli.install.interactivity import Interactivity, detect_interactivity
-from pulsar.cli.install.menu import MenuOption, menu_hint, run_confirm, run_menu
+from pulsar.cli.install.menu import (
+    MenuOption,
+    can_prompt,
+    menu_hint,
+    run_confirm,
+    run_menu,
+)
 from pulsar.cli.install.paths import home_dir
 
 
@@ -77,6 +83,7 @@ def _run_install(args: argparse.Namespace) -> None:
     launch = resolve_launch_spec(mode=args.mode, pin_version=args.pin_version)
     selected = _select_install_targets(args, home, launch)
     if selected is None:
+        print("Cancelled.")
         return
     if not selected:
         print("No integrations selected.")
@@ -89,8 +96,9 @@ def _run_uninstall(args: argparse.Namespace) -> None:
     mode = detect_interactivity()
     # Removal never needs a launcher — uninstalling must stay possible after
     # uv itself is gone.
-    selected = _select_uninstall_targets(args, home, mode)
+    selected = _select_uninstall_targets(args, home)
     if selected is None:
+        print("Cancelled.")
         return
     if not selected:
         print("No integrations selected for removal.")
@@ -104,18 +112,20 @@ def _run_uninstall(args: argparse.Namespace) -> None:
         uninstall.run(home, selected, False, args.purge_backups)
         return
 
-    if mode == Interactivity.INTERACTIVE:
+    if can_prompt():
         plan = uninstall.plan(home, selected, args.purge_backups)
         if run_confirm(
             "Uninstall Pulsar from these agents?",
             [action.summary for action in plan],
         ):
             uninstall.run(home, selected, False, args.purge_backups)
+        else:
+            print("Cancelled.")
         return
 
     raise RuntimeError(
-        "stderr is not a terminal, so there is nowhere to confirm — "
-        "re-run with --yes to apply, or --dry-run to preview"
+        "there is nowhere to confirm (stdin and stderr must both be a "
+        "terminal) — re-run with --yes to apply, or --dry-run to preview"
     )
 
 
@@ -129,7 +139,7 @@ def _select_install_targets(
 ) -> list[str] | None:
     if args.harnesses or args.all:
         return _validate_ids(args.harnesses, args.all)
-    if detect_interactivity() != Interactivity.INTERACTIVE:
+    if not can_prompt():
         raise RuntimeError(
             "non-interactive shells must pass explicit harness names or --all "
             "(see `pulsar install --help`)"
@@ -140,11 +150,10 @@ def _select_install_targets(
 def _select_uninstall_targets(
     args: argparse.Namespace,
     home: Path,
-    mode: Interactivity,
 ) -> list[str] | None:
     if args.harnesses or args.all:
         return _validate_ids(args.harnesses, args.all)
-    if mode == Interactivity.INTERACTIVE:
+    if can_prompt():
         return _interactive_select(home, None, install=False)
     return [
         spec.id
