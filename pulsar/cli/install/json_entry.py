@@ -12,9 +12,16 @@ from pulsar.cli.install.artifact import (
     SERVER_KEY,
     State,
 )
-from pulsar.cli.install.command import LaunchSpec, drift, entry_args, owns_entry
+from pulsar.cli.install.command import (
+    LaunchSpec,
+    drift,
+    entry_args,
+    owns_entry,
+    recorded_drift,
+)
 from pulsar.cli.install.fsops import (
     WriteOutcome,
+    is_dangling_symlink,
     read_json_object,
     read_jsonc_object,
     write_json_object,
@@ -22,12 +29,10 @@ from pulsar.cli.install.fsops import (
 
 
 def inspect(artifact: Artifact, path: Path, launch: LaunchSpec) -> Inspection:
+    if is_dangling_symlink(path):
+        return Inspection.conflict(f"{path} is a dangling symlink")
     try:
-        if artifact.is_jsonc():
-            data, comments = read_jsonc_object(path)
-        else:
-            data = read_json_object(path)
-            comments = False
+        data, comments = _read_data(artifact, path)
     except (ValueError, json.JSONDecodeError) as exc:
         return Inspection.conflict(str(exc))
 
@@ -45,12 +50,10 @@ def inspect(artifact: Artifact, path: Path, launch: LaunchSpec) -> Inspection:
 
 
 def inspect_loose(artifact: Artifact, path: Path) -> Inspection:
+    if is_dangling_symlink(path):
+        return Inspection.conflict(f"{path} is a dangling symlink")
     try:
-        if artifact.is_jsonc():
-            data, comments = read_jsonc_object(path)
-        else:
-            data = read_json_object(path)
-            comments = False
+        data, comments = _read_data(artifact, path)
     except (ValueError, json.JSONDecodeError) as exc:
         return Inspection.conflict(str(exc))
 
@@ -70,11 +73,19 @@ def inspect_loose(artifact: Artifact, path: Path) -> Inspection:
             f"`{SERVER_KEY}` in {path} is an MCP entry pulsar did not write "
             "— inspect it by hand"
         )
+    if reason := recorded_drift(command):
+        return Inspection.incomplete(reason)
     if artifact.wants_stdio_type() and entry.get("type") != "stdio":
         return Inspection.incomplete(
             f'`{SERVER_KEY}` in {path} is missing "type": "stdio"'
         )
     return Inspection.plain(State.ACTIVE)
+
+
+def _read_data(artifact: Artifact, path: Path) -> tuple[dict, bool]:
+    if artifact.is_jsonc():
+        return read_jsonc_object(path)
+    return read_json_object(path), False
 
 
 def write(
@@ -87,9 +98,7 @@ def write(
 
     container = data.setdefault(artifact.container_key(), {})
     if not isinstance(container, dict):
-        raise RuntimeError(
-            f"{path} `{artifact.container_key()}` must be an object"
-        )
+        raise RuntimeError(f"{path} `{artifact.container_key()}` must be an object")
     entry = container.setdefault(SERVER_KEY, {})
     if not isinstance(entry, dict):
         raise RuntimeError(f"{path} `{SERVER_KEY}` must be an object")
@@ -176,7 +185,9 @@ def _is_removable_entry(artifact: Artifact, data: dict[str, Any]) -> bool:
     return owns_entry(command, entry_args(entry.get("args")))
 
 
-def _set_owned_fields(entry: dict[str, Any], artifact: Artifact, launch: LaunchSpec) -> None:
+def _set_owned_fields(
+    entry: dict[str, Any], artifact: Artifact, launch: LaunchSpec
+) -> None:
     if artifact.wants_stdio_type():
         entry["type"] = "stdio"
     entry["command"] = launch.command_str

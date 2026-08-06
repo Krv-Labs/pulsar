@@ -30,10 +30,7 @@ def plan(home: Path, selected: list[str], purge_backups: bool) -> list[str]:
             detail = inspection.detail or "conflict"
             summary = f"{spec.name} — left untouched ({detail})"
         else:
-            summary = (
-                f"{spec.name} — remove MCP entry from "
-                f"{_display_path(home, path)}"
-            )
+            summary = f"{spec.name} — remove MCP entry from {_display_path(home, path)}"
         actions.append(summary)
         if purge_backups:
             backup = backup_path(resolve_symlink(path))
@@ -125,18 +122,19 @@ def _delete_if_emptied_and_ours(home: Path, harness_id: str, path: Path) -> None
 def _clean_up(
     home: Path, selected: list[str], dry_run: bool, purge_backups: bool
 ) -> None:
+    if dry_run:
+        return
     dirs = state.created_dirs(home)
     for harness_id in selected:
         state.clear_created_files(home, harness_id)
-    if not dry_run:
-        prune_dirs(dirs)
-        if purge_backups:
-            for spec in HARNESSES:
-                if spec.id not in selected:
-                    continue
-                backup = backup_path(resolve_symlink(spec.config_path(home)))
-                backup.unlink(missing_ok=True)
-        prune_dirs([state.state_dir(home)])
+    prune_dirs(dirs)
+    if purge_backups:
+        for spec in HARNESSES:
+            if spec.id not in selected:
+                continue
+            backup = backup_path(resolve_symlink(spec.config_path(home)))
+            backup.unlink(missing_ok=True)
+    prune_dirs([state.state_dir(home)])
 
 
 def _display_path(home: Path, path: Path) -> str:

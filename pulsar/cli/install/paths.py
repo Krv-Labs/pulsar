@@ -8,13 +8,14 @@ from pathlib import Path
 
 
 def home_dir() -> Path:
-    for key in ("HOME", "USERPROFILE"):
+    keys = (
+        ("USERPROFILE", "HOME") if sys.platform == "win32" else ("HOME", "USERPROFILE")
+    )
+    for key in keys:
         value = os.environ.get(key)
         if value:
             return Path(value)
-    raise RuntimeError(
-        "cannot resolve home directory (HOME and USERPROFILE are unset)"
-    )
+    raise RuntimeError("cannot resolve home directory (HOME and USERPROFILE are unset)")
 
 
 def app_data(home: Path) -> Path:

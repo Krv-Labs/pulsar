@@ -49,20 +49,6 @@ def resolve_launch_spec(
     return _resolve_uvx(pin_version=pin_version)
 
 
-def resolve_launch_spec_optional() -> LaunchSpec | None:
-    """Best-effort launch spec for read-only commands.
-
-    `status` should still report when neither uv nor a pipx-installed
-    server is present; callers fall back to a launch-agnostic inspection.
-    """
-    for mode in ("uvx", "pipx"):
-        try:
-            return resolve_launch_spec(mode=mode)
-        except RuntimeError:
-            continue
-    return None
-
-
 def _resolve_uvx(*, pin_version: bool) -> LaunchSpec:
     found = shutil.which("uvx")
     if not found:
@@ -73,15 +59,16 @@ def _resolve_uvx(*, pin_version: bool) -> LaunchSpec:
     command = Path(found)
     if not command.is_absolute():
         command = command.resolve()
-    return LaunchSpec(command=command, args=uvx_args(pin_version=pin_version), mode="uvx")
+    return LaunchSpec(
+        command=command, args=uvx_args(pin_version=pin_version), mode="uvx"
+    )
 
 
 def _resolve_pipx() -> LaunchSpec:
     found = shutil.which(SERVER_SCRIPT)
     if not found:
         raise RuntimeError(
-            f"{SERVER_SCRIPT} is not on PATH — run "
-            f'pipx install "{PACKAGE_SPEC}" first'
+            f'{SERVER_SCRIPT} is not on PATH — run pipx install "{PACKAGE_SPEC}" first'
         )
     command = Path(found)
     if not command.is_absolute():
@@ -116,12 +103,26 @@ def owns_entry(command: str, args: list[str] | None) -> bool:
         return False
     if Path(command).name in {SERVER_SCRIPT, f"{SERVER_SCRIPT}.exe"}:
         return args in (None, [])
-    if args is None:
+    if args is None or len(args) != 3:
         return False
-    return len(args) >= 3 and args[0] == "--from" and args[-1] == SERVER_SCRIPT
+    package = args[1].partition("==")[0]
+    return args[0] == "--from" and package == PACKAGE_SPEC and args[2] == SERVER_SCRIPT
 
 
 def drift(recorded: str, args: list[str] | None, expected: LaunchSpec) -> str | None:
+    if reason := recorded_drift(recorded):
+        return reason
+    if not same_file(Path(recorded), expected.command):
+        return (
+            f"`{recorded}` is a different binary than the expected {expected.command}"
+        )
+    if list(args or []) != list(expected.args):
+        expected_args = " ".join(expected.args) or "(none)"
+        return f"recorded args differ from the expected `{expected_args}`"
+    return None
+
+
+def recorded_drift(recorded: str) -> str | None:
     path = Path(recorded)
     if not path.is_absolute():
         return f"`{recorded}` is not an absolute path"
@@ -133,14 +134,6 @@ def drift(recorded: str, args: list[str] | None, expected: LaunchSpec) -> str | 
         mode = path.stat().st_mode
         if not (mode & stat.S_IXUSR):
             return f"`{recorded}` is not executable"
-    if not same_file(path, expected.command):
-        return (
-            f"`{recorded}` is a different binary than the expected "
-            f"{expected.command}"
-        )
-    if list(args or []) != list(expected.args):
-        expected_args = " ".join(expected.args) or "(none)"
-        return f"recorded args differ from the expected `{expected_args}`"
     return None
 
 

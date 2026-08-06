@@ -111,11 +111,7 @@ def test_foreign_pulsar_entry_is_conflict(home: Path, fake_uvx: Path) -> None:
     config = home / ".cursor" / "mcp.json"
     config.write_text(
         json.dumps(
-            {
-                "mcpServers": {
-                    "pulsar": {"command": "uvx", "args": ["other-mcp"]}
-                }
-            }
+            {"mcpServers": {"pulsar": {"command": "uvx", "args": ["other-mcp"]}}}
         )
         + "\n",
         encoding="utf-8",
@@ -270,9 +266,7 @@ def test_install_repairs_arg_drift_instead_of_conflicting(
     assert data["mcpServers"]["pulsar"]["args"] == list(launch.args)
 
 
-def test_install_repairs_pipx_entry_and_backs_it_up(
-    home: Path, fake_uvx: Path
-) -> None:
+def test_install_repairs_pipx_entry_and_backs_it_up(home: Path, fake_uvx: Path) -> None:
     server = fake_uvx.parent / "pulsar-mcp"
     server.write_text("#!/bin/sh\n", encoding="utf-8")
     server.chmod(server.stat().st_mode | stat.S_IXUSR)
@@ -306,16 +300,12 @@ def test_uninstall_removes_a_pinned_entry_install_would_repair(
     assert spec.artifact.inspect_loose(config).state == State.ABSENT
 
 
-def test_vscode_config_with_comments_is_a_conflict(
-    home: Path, fake_uvx: Path
-) -> None:
+def test_vscode_config_with_comments_is_a_conflict(home: Path, fake_uvx: Path) -> None:
     launch = _launch(fake_uvx)
     config_dir = home / "Library" / "Application Support" / "Code" / "User"
     config_dir.mkdir(parents=True)
     config = config_dir / "mcp.json"
-    config.write_text(
-        '{\n  // hand-maintained\n  "servers": {}\n}\n', encoding="utf-8"
-    )
+    config.write_text('{\n  // hand-maintained\n  "servers": {}\n}\n', encoding="utf-8")
     pristine = config.read_text(encoding="utf-8")
 
     spec = get_harness("vscode")
@@ -402,3 +392,108 @@ def test_pin_version_emits_a_parseable_requirement() -> None:
     assert args[-1] == "pulsar-mcp"
     # extras precede the version specifier in PEP 508
     Requirement(args[1])
+
+
+def test_uninstall_dry_run_preserves_ownership_state(
+    home: Path, fake_uvx: Path
+) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    config = home / ".cursor" / "mcp.json"
+    configure.run(home, launch, ["cursor"], dry_run=False)
+
+    uninstall.run(home, ["cursor"], dry_run=True, purge_backups=False)
+    assert state.was_created_by_install(home, "cursor", config)
+
+    uninstall.run(home, ["cursor"], dry_run=False, purge_backups=False)
+    assert not config.exists()
+
+
+def test_noninteractive_uninstall_requires_targets_and_yes(
+    home: Path,
+    fake_uvx: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    (home / ".cursor").mkdir()
+    configure.run(home, _launch(fake_uvx), ["cursor"], dry_run=False)
+    config = home / ".cursor" / "mcp.json"
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        monkeypatch.setattr(stream, "isatty", lambda: False)
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as missing_targets:
+        main(["uninstall", "--yes"])
+    assert missing_targets.value.code == 1
+    assert config.exists()
+
+    with pytest.raises(SystemExit) as missing_confirmation:
+        main(["uninstall", "cursor"])
+    assert missing_confirmation.value.code == 1
+    assert config.exists()
+
+
+def test_uvx_entry_from_another_package_is_a_conflict(
+    home: Path, fake_uvx: Path
+) -> None:
+    config = _write_cursor_entry(
+        home,
+        str(fake_uvx.resolve()),
+        ["--from", "another-package[mcp]", "pulsar-mcp"],
+    )
+    spec = get_harness("cursor")
+    assert spec is not None
+    assert spec.artifact.inspect(config, _launch(fake_uvx)).state == State.CONFLICT
+    assert spec.artifact.inspect_loose(config).state == State.CONFLICT
+
+
+def test_install_refuses_a_dangling_config_symlink(home: Path, fake_uvx: Path) -> None:
+    (home / ".cursor").mkdir()
+    target = home / "missing-target.json"
+    config = home / ".cursor" / "mcp.json"
+    config.symlink_to(target)
+
+    with pytest.raises(SystemExit) as exc:
+        configure.run(home, _launch(fake_uvx), ["cursor"], dry_run=False)
+    assert exc.value.code == 1
+    assert config.is_symlink()
+    assert not target.exists()
+
+
+def test_status_accepts_pipx_registration_when_uvx_is_also_available(
+    home: Path, fake_uvx: Path, capsys
+) -> None:
+    server = fake_uvx.parent / "pulsar-mcp"
+    server.write_text("#!/bin/sh\n", encoding="utf-8")
+    server.chmod(server.stat().st_mode | stat.S_IXUSR)
+    _write_cursor_entry(home, str(server.resolve()), [])
+
+    main(["status", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    cursor = next(row for row in payload["harnesses"] if row["id"] == "cursor")
+    assert cursor["state"] == "active"
+
+
+def test_codex_toml_comments_survive_install_and_uninstall(
+    home: Path, fake_uvx: Path
+) -> None:
+    (home / ".codex").mkdir()
+    config = home / ".codex" / "config.toml"
+    config.write_text('# keep this comment\nmodel = "gpt-5"\n', encoding="utf-8")
+
+    configure.run(home, _launch(fake_uvx), ["codex"], dry_run=False)
+    assert "# keep this comment" in config.read_text(encoding="utf-8")
+
+    uninstall.run(home, ["codex"], dry_run=False, purge_backups=False)
+    assert "# keep this comment" in config.read_text(encoding="utf-8")
+
+
+def test_windows_home_prefers_userprofile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native_home = tmp_path / "native"
+    git_home = tmp_path / "git-style"
+    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setenv("USERPROFILE", str(native_home))
+    monkeypatch.setenv("HOME", str(git_home))
+    assert paths.home_dir() == native_home

@@ -26,6 +26,10 @@ def _tmp_path(path: Path) -> Path:
     return path.with_name(path.name + TMP_SUFFIX)
 
 
+def is_dangling_symlink(path: Path) -> bool:
+    return path.is_symlink() and not path.exists()
+
+
 def resolve_symlink(path: Path) -> Path:
     if path.is_symlink():
         try:
@@ -36,6 +40,8 @@ def resolve_symlink(path: Path) -> Path:
 
 
 def atomic_write(path: Path, contents: str, backup: bool) -> WriteOutcome:
+    if is_dangling_symlink(path):
+        raise RuntimeError(f"{path} is a dangling symlink; refusing to replace it")
     created_dirs = _create_parents(path)
     target = resolve_symlink(path)
     created_file = not target.exists()
@@ -106,7 +112,7 @@ def _read_optional(path: Path) -> str | None:
 
 
 def strip_jsonc(text: str) -> tuple[str, bool]:
-    """Strip // and /* */ comments; return (stripped_text, had_comments)."""
+    """Strip comments and trailing commas without touching string contents."""
     out: list[str] = []
     commas: list[int] = []
     index = 0
@@ -117,40 +123,44 @@ def strip_jsonc(text: str) -> tuple[str, bool]:
         ch = text[index]
         if in_string:
             out.append(ch)
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
+            in_string, escape = _string_state(ch, escape)
             index += 1
             continue
         if ch == '"':
             in_string = True
-            out.append(ch)
-            index += 1
-            continue
-        if text.startswith("//", index):
-            had_comments = True
-            while index < len(text) and text[index] != "\n":
-                out.append(" ")
-                index += 1
-            continue
-        if text.startswith("/*", index):
-            had_comments = True
-            index += 2
-            while index < len(text) and not text.startswith("*/", index):
-                out.append("\n" if text[index] == "\n" else " ")
-                index += 1
-            if text.startswith("*/", index):
-                out.extend([" ", " "])
-                index += 2
-            continue
-        if ch == ",":
-            commas.append(len(out))
+        else:
+            comment = _consume_comment(text, index)
+            if comment is not None:
+                index, replacement = comment
+                out.extend(replacement)
+                had_comments = True
+                continue
+            if ch == ",":
+                commas.append(len(out))
         out.append(ch)
         index += 1
     return _drop_trailing_commas(out, commas), had_comments
+
+
+def _string_state(ch: str, escape: bool) -> tuple[bool, bool]:
+    if escape:
+        return True, False
+    if ch == "\\":
+        return True, True
+    return ch != '"', False
+
+
+def _consume_comment(text: str, index: int) -> tuple[int, list[str]] | None:
+    if text.startswith("//", index):
+        end = text.find("\n", index)
+        end = len(text) if end == -1 else end
+        return end, [" "] * (end - index)
+    if not text.startswith("/*", index):
+        return None
+    end = text.find("*/", index + 2)
+    end = len(text) if end == -1 else end + 2
+    replacement = ["\n" if ch == "\n" else " " for ch in text[index:end]]
+    return end, replacement
 
 
 def _drop_trailing_commas(chars: list[str], commas: list[int]) -> str:

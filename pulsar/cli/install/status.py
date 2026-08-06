@@ -6,38 +6,24 @@ import json
 from pathlib import Path
 
 from pulsar.cli.install.artifact import Inspection, State
-from pulsar.cli.install.command import LaunchSpec
 from pulsar.cli.install.harness import HARNESSES, HarnessSpec
 from pulsar.cli.install import report
 
 
-def run(home: Path, launch: LaunchSpec | None, json_output: bool) -> None:
-    rows: list[tuple[HarnessSpec, Inspection]] = []
-    for spec in HARNESSES:
-        path = spec.config_path(home)
-        # Without a resolvable launcher there is nothing to compare against,
-        # so report presence only rather than failing the whole command.
-        inspection = (
-            spec.artifact.inspect(path, launch)
-            if launch is not None
-            else spec.artifact.inspect_loose(path)
-        )
-        rows.append((spec, inspection))
-
+def run(home: Path, json_output: bool) -> None:
+    rows = [
+        (spec, spec.artifact.inspect_loose(spec.config_path(home)))
+        for spec in HARNESSES
+    ]
     if json_output:
-        _print_json(home, launch, rows)
+        _print_json(home, rows)
         return
-    _print_human(home, launch, rows)
+    _print_human(home, rows)
 
 
-def _print_human(
-    home: Path, launch: LaunchSpec | None, rows: list[tuple[HarnessSpec, Inspection]]
-) -> None:
+def _print_human(home: Path, rows: list[tuple[HarnessSpec, Inspection]]) -> None:
     report.header("Pulsar Harness Status", dry_run=False)
-    if launch is None:
-        print("│  Launch: none found — install uv, or pipx install thema-pulsar[mcp]")
-    else:
-        print(f"│  Launch: {launch.command} {' '.join(launch.args)}")
+    print("│  Launch: validated from each registration")
     print("│")
 
     for spec, inspection in _sorted(rows):
@@ -51,7 +37,9 @@ def _print_human(
     report.footer(f"{active}/{len(rows)} harness integrations active.")
 
 
-def _sorted(rows: list[tuple[HarnessSpec, Inspection]]) -> list[tuple[HarnessSpec, Inspection]]:
+def _sorted(
+    rows: list[tuple[HarnessSpec, Inspection]],
+) -> list[tuple[HarnessSpec, Inspection]]:
     order = {
         State.ACTIVE: 0,
         State.INCOMPLETE: 1,
@@ -72,18 +60,10 @@ def _describe(spec: HarnessSpec, inspection: Inspection) -> str:
     return inspection.detail or "needs manual attention"
 
 
-def _print_json(
-    home: Path, launch: LaunchSpec | None, rows: list[tuple[HarnessSpec, Inspection]]
-) -> None:
+def _print_json(home: Path, rows: list[tuple[HarnessSpec, Inspection]]) -> None:
     active = sum(1 for _, inspection in rows if inspection.state == State.ACTIVE)
     payload = {
-        "launch": None
-        if launch is None
-        else {
-            "command": launch.command_str,
-            "args": list(launch.args),
-            "mode": launch.mode,
-        },
+        "launch": None,
         "active": active,
         "total": len(rows),
         "harnesses": [

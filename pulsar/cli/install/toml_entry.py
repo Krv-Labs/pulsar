@@ -2,28 +2,32 @@
 
 from __future__ import annotations
 
-import sys
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any
 
+import tomlkit
+from tomlkit.exceptions import ParseError
+
 from pulsar.cli.install.artifact import Artifact, Inspection, SERVER_KEY, State
-from pulsar.cli.install.command import LaunchSpec, drift, entry_args, owns_entry
-from pulsar.cli.install.fsops import WriteOutcome, atomic_write
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib  # type: ignore[no-redef]
-
-import tomli_w
+from pulsar.cli.install.command import (
+    LaunchSpec,
+    drift,
+    entry_args,
+    owns_entry,
+    recorded_drift,
+)
+from pulsar.cli.install.fsops import WriteOutcome, atomic_write, is_dangling_symlink
 
 
 def inspect(artifact: Artifact, path: Path, launch: LaunchSpec) -> Inspection:
+    if is_dangling_symlink(path):
+        return Inspection.conflict(f"{path} is a dangling symlink")
     if not path.is_file():
         return Inspection.plain(State.ABSENT)
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        data = tomlkit.parse(path.read_text(encoding="utf-8"))
+    except ParseError as exc:
         return Inspection.conflict(f"parsing {path}: {exc}")
 
     entry = _entry_of(artifact, data)
@@ -48,11 +52,13 @@ def inspect(artifact: Artifact, path: Path, launch: LaunchSpec) -> Inspection:
 
 
 def inspect_loose(artifact: Artifact, path: Path) -> Inspection:
+    if is_dangling_symlink(path):
+        return Inspection.conflict(f"{path} is a dangling symlink")
     if not path.is_file():
         return Inspection.plain(State.ABSENT)
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        data = tomlkit.parse(path.read_text(encoding="utf-8"))
+    except ParseError as exc:
         return Inspection.conflict(f"parsing {path}: {exc}")
 
     entry = _entry_of(artifact, data)
@@ -67,6 +73,8 @@ def inspect_loose(artifact: Artifact, path: Path) -> Inspection:
             f"[mcp_servers.{SERVER_KEY}] in {path} is an entry pulsar did not "
             "write — inspect it by hand"
         )
+    if reason := recorded_drift(command):
+        return Inspection.incomplete(reason)
     return Inspection.plain(State.ACTIVE)
 
 
@@ -75,21 +83,24 @@ def write(
 ) -> WriteOutcome:
     if path.is_file():
         try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-        except tomllib.TOMLDecodeError as exc:
+            data = tomlkit.parse(path.read_text(encoding="utf-8"))
+        except ParseError as exc:
             raise RuntimeError(f"parsing {path}: {exc}") from exc
     else:
-        data = {}
+        data = tomlkit.document()
 
     container = artifact.container_key()
-    servers = data.setdefault(container, {})
-    if not isinstance(servers, dict):
+    servers = data.get(container)
+    if servers is None:
+        servers = tomlkit.table()
+        data.add(container, servers)
+    if not isinstance(servers, MutableMapping):
         raise RuntimeError(f"{path} `{container}` must be a table")
-    servers[SERVER_KEY] = {
-        "command": launch.command_str,
-        "args": list(launch.args),
-    }
-    contents = tomli_w.dumps(data)
+    entry = tomlkit.table()
+    entry.add("command", launch.command_str)
+    entry.add("args", list(launch.args))
+    servers[SERVER_KEY] = entry
+    contents = tomlkit.dumps(data)
     if not contents.endswith("\n"):
         contents += "\n"
     return atomic_write(path, contents, backup)
@@ -99,15 +110,15 @@ def remove(artifact: Artifact, path: Path, dry_run: bool) -> bool:
     if not path.is_file():
         return False
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError:
+        data = tomlkit.parse(path.read_text(encoding="utf-8"))
+    except ParseError:
         return False
 
     servers = data.get(artifact.container_key())
-    if not isinstance(servers, dict):
+    if not isinstance(servers, MutableMapping):
         return False
     entry = servers.get(SERVER_KEY)
-    if not isinstance(entry, dict):
+    if not isinstance(entry, MutableMapping):
         return False
 
     command = entry.get("command", "")
@@ -121,20 +132,18 @@ def remove(artifact: Artifact, path: Path, dry_run: bool) -> bool:
         data.pop(artifact.container_key(), None)
     if dry_run:
         return True
-    contents = tomli_w.dumps(data)
+    contents = tomlkit.dumps(data)
     if not contents.endswith("\n"):
         contents += "\n"
     atomic_write(path, contents, backup=False)
     return True
 
 
-def _entry_of(artifact: Artifact, data: dict[str, Any]) -> dict[str, Any] | None:
+def _entry_of(artifact: Artifact, data: Any) -> MutableMapping[str, Any] | None:
     servers = data.get(artifact.container_key())
-    if not isinstance(servers, dict):
+    if not isinstance(servers, MutableMapping):
         return None
     entry = servers.get(SERVER_KEY)
-    if isinstance(entry, dict):
+    if isinstance(entry, MutableMapping):
         return entry
     return None
-
-

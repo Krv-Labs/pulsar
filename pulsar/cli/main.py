@@ -8,11 +8,7 @@ from pathlib import Path
 
 from pulsar.cli.install import configure, status, uninstall
 from pulsar.cli.install.artifact import State
-from pulsar.cli.install.command import (
-    LaunchSpec,
-    resolve_launch_spec,
-    resolve_launch_spec_optional,
-)
+from pulsar.cli.install.command import LaunchSpec, resolve_launch_spec
 from pulsar.cli.install.harness import HARNESSES, get_harness, harness_ids
 from pulsar.cli.install.menu import (
     MenuOption,
@@ -22,13 +18,6 @@ from pulsar.cli.install.menu import (
     run_menu,
 )
 from pulsar.cli.install.paths import home_dir
-
-
-def _is_headless() -> bool:
-    """No terminal anywhere: safe to act without asking for confirmation."""
-    return not any(
-        stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)
-    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -56,7 +45,9 @@ def _build_parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install", help="Configure agent harnesses to use Pulsar")
     install.add_argument("harnesses", nargs="*", help="Harness ids to configure")
     install.add_argument("--all", action="store_true", help="Configure every harness")
-    install.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    install.add_argument(
+        "--dry-run", action="store_true", help="Preview without writing"
+    )
     install.add_argument(
         "--mode",
         choices=("uvx", "pipx"),
@@ -113,7 +104,7 @@ def _run_uninstall(args: argparse.Namespace) -> None:
         uninstall.run(home, selected, True, args.purge_backups)
         return
 
-    if args.yes or _is_headless():
+    if args.yes:
         uninstall.run(home, selected, False, args.purge_backups)
         return
 
@@ -132,8 +123,7 @@ def _run_uninstall(args: argparse.Namespace) -> None:
 
 
 def _run_status(args: argparse.Namespace) -> None:
-    home = home_dir()
-    status.run(home, resolve_launch_spec_optional(), json_output=args.json)
+    status.run(home_dir(), json_output=args.json)
 
 
 def _select_install_targets(
@@ -157,11 +147,10 @@ def _select_uninstall_targets(
         return _validate_ids(args.harnesses, args.all)
     if can_prompt():
         return _interactive_select(home, None, install=False)
-    return [
-        spec.id
-        for spec in HARNESSES
-        if spec.artifact.inspect_loose(spec.config_path(home)).state != State.ABSENT
-    ]
+    raise RuntimeError(
+        "non-interactive shells must pass explicit harness names or --all "
+        "(see `pulsar uninstall --help`)"
+    )
 
 
 def _interactive_select(

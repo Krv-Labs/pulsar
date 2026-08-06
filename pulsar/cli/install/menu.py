@@ -48,28 +48,30 @@ def run_menu(title: str, options: list[MenuOption]) -> list[str] | None:
     print(title, file=sys.stderr)
     _render(working, cursor)
     while True:
-        key = _read_key()
-        if key in ("\x1b[A", "k"):  # up
-            cursor = (cursor - 1) % len(working)
-        elif key in ("\x1b[B", "j"):  # down
-            cursor = (cursor + 1) % len(working)
-        elif key == " ":
-            working[cursor].checked = not working[cursor].checked
-        elif key == "a":
-            if all(option.checked for option in working):
-                for option in working:
-                    option.checked = False
-            else:
-                for option in working:
-                    option.checked = True
-        elif key in ("\r", "\n"):
-            selected = [option.id for option in working if option.checked]
+        cursor, done, selected = _handle_key(working, cursor, _read_key())
+        if done:
             print(file=sys.stderr)
             return selected
-        elif key in ("\x03", "q"):
-            print(file=sys.stderr)
-            return None
         _render(working, cursor)
+
+
+def _handle_key(
+    options: list[MenuOption], cursor: int, key: str
+) -> tuple[int, bool, list[str] | None]:
+    movement = {"\x1b[A": -1, "k": -1, "\x1b[B": 1, "j": 1}.get(key)
+    if movement is not None:
+        return (cursor + movement) % len(options), False, None
+    if key == " ":
+        options[cursor].checked = not options[cursor].checked
+    elif key == "a":
+        checked = not all(option.checked for option in options)
+        for option in options:
+            option.checked = checked
+    elif key in ("\r", "\n"):
+        return cursor, True, [option.id for option in options if option.checked]
+    elif key in ("\x03", "q"):
+        return cursor, True, None
+    return cursor, False, None
 
 
 def run_confirm(title: str, plan: list[str]) -> bool:
