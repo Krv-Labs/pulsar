@@ -78,14 +78,15 @@ class Artifact:
         if inspection.state == State.CONFLICT:
             detail = inspection.detail or f"{path} cannot be updated safely"
             raise RuntimeError(detail)
-        backup = inspection.state == State.ABSENT
+        # Back up on repair too: a drifted entry may have been hand-written or
+        # left by another launch mode. atomic_write skips absent files.
         if self.kind == ArtifactKind.MCP_TOML:
             from pulsar.cli.install import toml_entry
 
-            return toml_entry.write(path, launch, backup)
+            return toml_entry.write(path, launch, backup=True)
         from pulsar.cli.install import json_entry
 
-        return json_entry.write(self, path, launch, backup)
+        return json_entry.write(self, path, launch, backup=True)
 
     def inspect_loose(self, path: Path) -> Inspection:
         if self.kind == ArtifactKind.MCP_TOML:

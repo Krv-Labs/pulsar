@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pulsar.cli.install.artifact import Inspection, SERVER_KEY, State
-from pulsar.cli.install.command import LaunchSpec, drift, names_pulsar, owns_entry
+from pulsar.cli.install.command import LaunchSpec, drift, entry_args, owns_entry
 from pulsar.cli.install.fsops import WriteOutcome, atomic_write
 
 if sys.version_info >= (3, 11):
@@ -33,15 +33,15 @@ def inspect(path: Path, launch: LaunchSpec) -> Inspection:
     command = entry.get("command", "")
     if not isinstance(command, str):
         command = ""
-    args = _args_list(entry.get("args"))
+    args = entry_args(entry.get("args"))
 
-    if not names_pulsar(command) or not owns_entry(launch, command, args):
+    if not owns_entry(command, args):
         return Inspection.conflict(
             f"[mcp_servers.{SERVER_KEY}] in {path} is an entry pulsar did not "
             "write — inspect it by hand"
         )
 
-    if reason := drift(command, launch):
+    if reason := drift(command, args, launch):
         return Inspection.incomplete(reason)
 
     return Inspection.plain(State.ACTIVE)
@@ -62,7 +62,7 @@ def inspect_loose(path: Path) -> Inspection:
     command = entry.get("command", "")
     if not isinstance(command, str):
         command = ""
-    if not _is_removable(command, _args_list(entry.get("args"))):
+    if not owns_entry(command, entry_args(entry.get("args"))):
         return Inspection.conflict(
             f"[mcp_servers.{SERVER_KEY}] in {path} is an entry pulsar did not "
             "write — inspect it by hand"
@@ -110,7 +110,7 @@ def remove(path: Path, dry_run: bool) -> bool:
     command = entry.get("command", "")
     if not isinstance(command, str):
         return False
-    if not _is_removable(command, _args_list(entry.get("args"))):
+    if not owns_entry(command, entry_args(entry.get("args"))):
         return False
 
     servers.pop(SERVER_KEY, None)
@@ -135,24 +135,3 @@ def _entry_of(data: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _is_removable(command: str, args: list[str] | None) -> bool:
-    if not names_pulsar(command):
-        return False
-    if Path(command).name in {"pulsar-mcp", "pulsar-mcp.exe"}:
-        return args in (None, [])
-    if args is None:
-        return False
-    return len(args) >= 3 and args[0] == "--from" and args[-1] == "pulsar-mcp"
-
-
-def _args_list(value: Any) -> list[str] | None:
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        return None
-    out: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            return None
-        out.append(item)
-    return out

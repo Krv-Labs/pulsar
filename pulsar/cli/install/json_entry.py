@@ -12,7 +12,7 @@ from pulsar.cli.install.artifact import (
     SERVER_KEY,
     State,
 )
-from pulsar.cli.install.command import LaunchSpec, drift, names_pulsar, owns_entry
+from pulsar.cli.install.command import LaunchSpec, drift, entry_args, owns_entry
 from pulsar.cli.install.fsops import (
     WriteOutcome,
     read_json_object,
@@ -65,7 +65,7 @@ def inspect_loose(artifact: Artifact, path: Path) -> Inspection:
     command = entry.get("command")
     if not isinstance(command, str):
         command = ""
-    if not _is_removable(command, _args_list(entry.get("args"))):
+    if not owns_entry(command, entry_args(entry.get("args"))):
         return Inspection.conflict(
             f"`{SERVER_KEY}` in {path} is an MCP entry pulsar did not write "
             "— inspect it by hand"
@@ -137,15 +137,15 @@ def _classify(
     command = entry.get("command")
     if not isinstance(command, str):
         command = ""
-    args = _args_list(entry.get("args"))
+    args = entry_args(entry.get("args"))
 
-    if not names_pulsar(command) or not owns_entry(launch, command, args):
+    if not owns_entry(command, args):
         return Inspection.conflict(
             f"`{SERVER_KEY}` in {path} is an MCP entry pulsar did not write "
             "— inspect it by hand"
         )
 
-    if reason := drift(command, launch):
+    if reason := drift(command, args, launch):
         return Inspection.incomplete(reason)
 
     if artifact.wants_stdio_type() and entry.get("type") != "stdio":
@@ -166,19 +166,6 @@ def _entry_of(artifact: Artifact, data: dict[str, Any]) -> dict[str, Any] | None
     return None
 
 
-def _args_list(value: Any) -> list[str] | None:
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        return None
-    out: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            return None
-        out.append(item)
-    return out
-
-
 def _is_removable_entry(artifact: Artifact, data: dict[str, Any]) -> bool:
     entry = _entry_of(artifact, data)
     if entry is None:
@@ -186,17 +173,7 @@ def _is_removable_entry(artifact: Artifact, data: dict[str, Any]) -> bool:
     command = entry.get("command")
     if not isinstance(command, str):
         return False
-    return _is_removable(command, _args_list(entry.get("args")))
-
-
-def _is_removable(command: str, args: list[str] | None) -> bool:
-    if not names_pulsar(command):
-        return False
-    if Path(command).name in {"pulsar-mcp", "pulsar-mcp.exe"}:
-        return args in (None, [])
-    if args is None:
-        return False
-    return len(args) >= 3 and args[0] == "--from" and args[-1] == "pulsar-mcp"
+    return owns_entry(command, entry_args(entry.get("args")))
 
 
 def _set_owned_fields(entry: dict[str, Any], artifact: Artifact, launch: LaunchSpec) -> None:

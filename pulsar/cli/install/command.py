@@ -7,6 +7,7 @@ import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pulsar._version import get_version
 
@@ -93,20 +94,34 @@ def names_pulsar(command: str) -> bool:
     return name in {"uvx", "uvx.exe", SERVER_SCRIPT, f"{SERVER_SCRIPT}.exe"}
 
 
-def args_match(spec: LaunchSpec, args: list[str] | None) -> bool:
-    if spec.mode == "pipx":
+def entry_args(value: Any) -> list[str] | None:
+    """Normalize a config `args` value to a list of strings, or None."""
+    if not isinstance(value, list):
+        return None
+    if not all(isinstance(item, str) for item in value):
+        return None
+    return list(value)
+
+
+def owns_entry(command: str, args: list[str] | None) -> bool:
+    """True when an entry is recognizably a Pulsar MCP launch.
+
+    Deliberately loose: it matches the *shape* of a launch we wrote, not the
+    exact arguments. Exact-argument matching would classify a pipx entry, a
+    pinned entry, or an entry from an older release as someone else's config
+    and refuse to touch it — while uninstall removed it happily. Argument
+    differences are drift, and drift is repairable.
+    """
+    if not names_pulsar(command):
+        return False
+    if Path(command).name in {SERVER_SCRIPT, f"{SERVER_SCRIPT}.exe"}:
         return args in (None, [])
-    expected = list(spec.args)
     if args is None:
         return False
-    return list(args) == expected
+    return len(args) >= 3 and args[0] == "--from" and args[-1] == SERVER_SCRIPT
 
 
-def owns_entry(spec: LaunchSpec, command: str, args: list[str] | None) -> bool:
-    return names_pulsar(command) and args_match(spec, args)
-
-
-def drift(recorded: str, expected: LaunchSpec) -> str | None:
+def drift(recorded: str, args: list[str] | None, expected: LaunchSpec) -> str | None:
     path = Path(recorded)
     if not path.is_absolute():
         return f"`{recorded}` is not an absolute path"
@@ -123,6 +138,9 @@ def drift(recorded: str, expected: LaunchSpec) -> str | None:
             f"`{recorded}` is a different binary than the expected "
             f"{expected.command}"
         )
+    if list(args or []) != list(expected.args):
+        expected_args = " ".join(expected.args) or "(none)"
+        return f"recorded args differ from the expected `{expected_args}`"
     return None
 
 

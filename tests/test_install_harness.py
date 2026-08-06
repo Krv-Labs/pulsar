@@ -227,6 +227,72 @@ def test_cli_status_json(home: Path, fake_uvx: Path, capsys) -> None:
     assert any(row["id"] == "cursor" for row in payload["harnesses"])
 
 
+def _write_cursor_entry(home: Path, command: str, args: list[str]) -> Path:
+    (home / ".cursor").mkdir(exist_ok=True)
+    config = home / ".cursor" / "mcp.json"
+    config.write_text(
+        json.dumps({"mcpServers": {"pulsar": {"command": command, "args": args}}})
+        + "\n",
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_install_repairs_arg_drift_instead_of_conflicting(
+    home: Path, fake_uvx: Path
+) -> None:
+    launch = _launch(fake_uvx)
+    config = _write_cursor_entry(
+        home,
+        str(fake_uvx.resolve()),
+        ["--from", "thema-pulsar[mcp]==0.1.0", "pulsar-mcp"],
+    )
+    spec = get_harness("cursor")
+    assert spec is not None
+    assert spec.artifact.inspect(config, launch).state == State.INCOMPLETE
+
+    configure.run(home, launch, ["cursor"], dry_run=False)
+    assert spec.artifact.inspect(config, launch).state == State.ACTIVE
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["pulsar"]["args"] == list(launch.args)
+
+
+def test_install_repairs_pipx_entry_and_backs_it_up(
+    home: Path, fake_uvx: Path
+) -> None:
+    server = fake_uvx.parent / "pulsar-mcp"
+    server.write_text("#!/bin/sh\n", encoding="utf-8")
+    server.chmod(server.stat().st_mode | stat.S_IXUSR)
+
+    launch = _launch(fake_uvx)
+    config = _write_cursor_entry(home, str(server.resolve()), [])
+    pristine = config.read_text(encoding="utf-8")
+
+    spec = get_harness("cursor")
+    assert spec is not None
+    # A pipx-mode entry is ours, so it is repairable — not a conflict.
+    assert spec.artifact.inspect(config, launch).state == State.INCOMPLETE
+
+    configure.run(home, launch, ["cursor"], dry_run=False)
+    assert spec.artifact.inspect(config, launch).state == State.ACTIVE
+    assert backup_path(config).read_text(encoding="utf-8") == pristine
+
+
+def test_uninstall_removes_a_pinned_entry_install_would_repair(
+    home: Path, fake_uvx: Path
+) -> None:
+    config = _write_cursor_entry(
+        home,
+        str(fake_uvx.resolve()),
+        ["--from", "thema-pulsar[mcp]==0.1.0", "pulsar-mcp"],
+    )
+    spec = get_harness("cursor")
+    assert spec is not None
+
+    uninstall.run(home, ["cursor"], dry_run=False, purge_backups=False)
+    assert spec.artifact.inspect_loose(config).state == State.ABSENT
+
+
 def test_uninstall_and_status_work_without_a_launcher(
     home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
