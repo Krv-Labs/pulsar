@@ -306,6 +306,43 @@ def test_uninstall_removes_a_pinned_entry_install_would_repair(
     assert spec.artifact.inspect_loose(config).state == State.ABSENT
 
 
+def test_vscode_config_with_comments_is_a_conflict(
+    home: Path, fake_uvx: Path
+) -> None:
+    launch = _launch(fake_uvx)
+    config_dir = home / "Library" / "Application Support" / "Code" / "User"
+    config_dir.mkdir(parents=True)
+    config = config_dir / "mcp.json"
+    config.write_text(
+        '{\n  // hand-maintained\n  "servers": {}\n}\n', encoding="utf-8"
+    )
+    pristine = config.read_text(encoding="utf-8")
+
+    spec = get_harness("vscode")
+    assert spec is not None
+    inspection = spec.artifact.inspect(config, launch)
+    assert inspection.state == State.CONFLICT
+    assert "comments" in (inspection.detail or "")
+
+    with pytest.raises(SystemExit) as exc:
+        configure.run(home, launch, ["vscode"], dry_run=False)
+    assert exc.value.code == 1
+    assert config.read_text(encoding="utf-8") == pristine
+
+
+def test_purge_backups_deletes_the_backup(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    config = home / ".cursor" / "mcp.json"
+    config.write_text('{"other": true}\n', encoding="utf-8")
+
+    configure.run(home, launch, ["cursor"], dry_run=False)
+    assert backup_path(config).is_file()
+
+    uninstall.run(home, ["cursor"], dry_run=False, purge_backups=True)
+    assert not backup_path(config).exists()
+
+
 def test_uninstall_and_status_work_without_a_launcher(
     home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
