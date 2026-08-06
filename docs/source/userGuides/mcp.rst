@@ -55,7 +55,28 @@ Claude handles all the messy parts: imputation, categorical encoding, parameter 
 Setup
 -----
 
-Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of the published ``thema-pulsar`` package. You do **not** need to clone the repo or create a Python environment. Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then choose your client below. ``uvx`` downloads the released package from PyPI and runs it in an isolated environment.
+Easy install (recommended)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then register Pulsar with every agent tool you use:
+
+.. code-block:: bash
+
+   uvx --from thema-pulsar pulsar install
+
+The installer detects Claude Code, Claude Desktop, Codex CLI, Gemini CLI, Copilot CLI, Cursor, VS Code, and Antigravity. It writes the ``pulsar`` MCP entry each client expects, using an absolute path to ``uvx`` so GUI-launched apps can spawn the server. Inspect registrations with ``pulsar status``; remove them cleanly with ``pulsar uninstall``.
+
+In non-interactive environments, pass harness ids or ``--all``:
+
+.. code-block:: bash
+
+   uvx --from thema-pulsar pulsar install --all
+   uvx --from thema-pulsar pulsar uninstall --all --yes
+
+Manual per-client setup
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Pulsar ships an MCP server entry point (``pulsar-mcp``) via the ``mcp`` extra of the published ``thema-pulsar`` package. You do **not** need to clone the repo or create a Python environment. If you prefer to configure clients by hand, choose your client below. ``uvx`` downloads the released package from PyPI and runs it in an isolated environment.
 
 .. note::
   Pulsar works with any MCP-capable client, including Cursor and Gemini CLI, where you can add Pulsar as an MCP server/tool.

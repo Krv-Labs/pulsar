@@ -1,0 +1,226 @@
+"""End-to-end tests for the Pulsar MCP install harness."""
+
+from __future__ import annotations
+
+import json
+import stat
+import sys
+from pathlib import Path
+
+import pytest
+
+from pulsar.cli.install.artifact import State
+from pulsar.cli.install.command import LaunchSpec
+from pulsar.cli.install.fsops import backup_path
+from pulsar.cli.install.harness import get_harness
+from pulsar.cli.install import configure, state, uninstall
+from pulsar.cli.main import main
+
+
+@pytest.fixture
+def fake_uvx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    uvx = tmp_path / "bin" / "uvx"
+    uvx.parent.mkdir(parents=True)
+    uvx.write_text("#!/bin/sh\n", encoding="utf-8")
+    uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(uvx.parent))
+    return uvx
+
+
+@pytest.fixture
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    if sys.platform == "win32":
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    return tmp_path
+
+
+def _launch(uvx: Path) -> LaunchSpec:
+    return LaunchSpec(
+        command=uvx,
+        args=("--from", "thema-pulsar[mcp]", "pulsar-mcp"),
+        mode="uvx",
+    )
+
+
+def test_install_and_uninstall_cursor_round_trip(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+
+    configure.run(home, launch, ["cursor"], dry_run=False)
+
+    config = home / ".cursor" / "mcp.json"
+    assert config.is_file()
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["pulsar"]["command"] == str(fake_uvx.resolve())
+    assert data["mcpServers"]["pulsar"]["args"] == list(launch.args)
+
+    spec = get_harness("cursor")
+    assert spec is not None
+    assert spec.artifact.inspect(config, launch).state == State.ACTIVE
+
+    uninstall.run(home, launch, ["cursor"], dry_run=False, purge_backups=False)
+    assert spec.artifact.inspect_loose(config).state == State.ABSENT
+
+
+def test_install_creates_backup_on_first_write(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    config = home / ".cursor" / "mcp.json"
+    config.write_text('{"other": true}\n', encoding="utf-8")
+    pristine = config.read_text(encoding="utf-8")
+
+    configure.run(home, launch, ["cursor"], dry_run=False)
+
+    backup = backup_path(config)
+    assert backup.is_file()
+    assert backup.read_text(encoding="utf-8") == pristine
+
+
+def test_install_repairs_relative_uvx_path(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    config = home / ".cursor" / "mcp.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pulsar": {
+                        "command": "uvx",
+                        "args": list(launch.args),
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    spec = get_harness("cursor")
+    assert spec is not None
+    assert spec.artifact.inspect(config, launch).state == State.INCOMPLETE
+
+    configure.run(home, launch, ["cursor"], dry_run=False)
+    assert spec.artifact.inspect(config, launch).state == State.ACTIVE
+
+
+def test_foreign_pulsar_entry_is_conflict(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    config = home / ".cursor" / "mcp.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pulsar": {"command": "uvx", "args": ["other-mcp"]}
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    spec = get_harness("cursor")
+    assert spec is not None
+    assert spec.artifact.inspect(config, launch).state == State.CONFLICT
+
+
+def test_codex_toml_round_trip(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".codex").mkdir()
+
+    configure.run(home, launch, ["codex"], dry_run=False)
+
+    config = home / ".codex" / "config.toml"
+    assert config.is_file()
+    assert "pulsar" in config.read_text(encoding="utf-8")
+
+    uninstall.run(home, launch, ["codex"], dry_run=False, purge_backups=False)
+    spec = get_harness("codex")
+    assert spec is not None
+    assert spec.artifact.inspect_loose(config).state == State.ABSENT
+
+
+def test_vscode_jsonc_writes_stdio_type(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    config_dir = home / "Library" / "Application Support" / "Code" / "User"
+    config_dir.mkdir(parents=True)
+
+    configure.run(home, launch, ["vscode"], dry_run=False)
+
+    config = config_dir / "mcp.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["servers"]["pulsar"]["type"] == "stdio"
+
+
+def test_noninteractive_install_requires_harness_ids(
+    home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["install"])
+    assert exc.value.code == 1
+    assert "non-interactive" in capsys.readouterr().err
+
+
+def test_install_all_headless(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    (home / ".claude").mkdir()
+
+    configure.run(home, launch, ["cursor", "claude"], dry_run=False)
+
+    assert (home / ".cursor" / "mcp.json").is_file()
+    assert (home / ".claude.json").is_file()
+
+
+def test_validate_unknown_harness(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["install", "nope"])
+    assert exc.value.code == 1
+    assert "unknown harness" in capsys.readouterr().err
+
+
+def test_gemini_directory_does_not_imply_antigravity(home: Path) -> None:
+    (home / ".gemini").mkdir()
+    spec = get_harness("antigravity")
+    assert spec is not None
+    assert spec.detect(home) is False
+
+
+def test_state_tracks_created_files(home: Path, fake_uvx: Path) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    config = home / ".cursor" / "mcp.json"
+
+    configure.run(home, launch, ["cursor"], dry_run=False)
+
+    assert state.was_created_by_install(home, "cursor", config)
+
+
+def test_cli_status_json(home: Path, fake_uvx: Path, capsys) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    config = home / ".cursor" / "mcp.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pulsar": {
+                        "command": str(fake_uvx.resolve()),
+                        "args": list(launch.args),
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    main(["status", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["active"] >= 1
+    assert any(row["id"] == "cursor" for row in payload["harnesses"])
