@@ -48,6 +48,20 @@ def resolve_launch_spec(
     return _resolve_uvx(pin_version=pin_version)
 
 
+def resolve_launch_spec_optional() -> LaunchSpec | None:
+    """Best-effort launch spec for read-only commands.
+
+    `status` should still report when neither uv nor a pipx-installed
+    server is present; callers fall back to a launch-agnostic inspection.
+    """
+    for mode in ("uvx", "pipx"):
+        try:
+            return resolve_launch_spec(mode=mode)
+        except RuntimeError:
+            continue
+    return None
+
+
 def _resolve_uvx(*, pin_version: bool) -> LaunchSpec:
     found = shutil.which("uvx")
     if not found:

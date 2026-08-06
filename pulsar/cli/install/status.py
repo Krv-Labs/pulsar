@@ -11,11 +11,18 @@ from pulsar.cli.install.harness import HARNESSES, HarnessSpec
 from pulsar.cli.install import report
 
 
-def run(home: Path, launch: LaunchSpec, json_output: bool) -> None:
+def run(home: Path, launch: LaunchSpec | None, json_output: bool) -> None:
     rows: list[tuple[HarnessSpec, Inspection]] = []
     for spec in HARNESSES:
         path = spec.config_path(home)
-        rows.append((spec, spec.artifact.inspect(path, launch)))
+        # Without a resolvable launcher there is nothing to compare against,
+        # so report presence only rather than failing the whole command.
+        inspection = (
+            spec.artifact.inspect(path, launch)
+            if launch is not None
+            else spec.artifact.inspect_loose(path)
+        )
+        rows.append((spec, inspection))
 
     if json_output:
         _print_json(home, launch, rows)
@@ -24,10 +31,13 @@ def run(home: Path, launch: LaunchSpec, json_output: bool) -> None:
 
 
 def _print_human(
-    home: Path, launch: LaunchSpec, rows: list[tuple[HarnessSpec, Inspection]]
+    home: Path, launch: LaunchSpec | None, rows: list[tuple[HarnessSpec, Inspection]]
 ) -> None:
     report.header("Pulsar Harness Status", dry_run=False)
-    print(f"│  Launch: {launch.command} {' '.join(launch.args)}")
+    if launch is None:
+        print("│  Launch: none found — install uv, or pipx install thema-pulsar[mcp]")
+    else:
+        print(f"│  Launch: {launch.command} {' '.join(launch.args)}")
     print("│")
 
     for spec, inspection in _sorted(rows):
@@ -63,11 +73,13 @@ def _describe(spec: HarnessSpec, inspection: Inspection) -> str:
 
 
 def _print_json(
-    home: Path, launch: LaunchSpec, rows: list[tuple[HarnessSpec, Inspection]]
+    home: Path, launch: LaunchSpec | None, rows: list[tuple[HarnessSpec, Inspection]]
 ) -> None:
     active = sum(1 for _, inspection in rows if inspection.state == State.ACTIVE)
     payload = {
-        "launch": {
+        "launch": None
+        if launch is None
+        else {
             "command": launch.command_str,
             "args": list(launch.args),
             "mode": launch.mode,

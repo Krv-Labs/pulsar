@@ -7,7 +7,6 @@ from pathlib import Path
 
 from pulsar.cli.install import report, state
 from pulsar.cli.install.artifact import State
-from pulsar.cli.install.command import LaunchSpec
 from pulsar.cli.install.fsops import (
     backup_path,
     is_empty_json_config,
@@ -23,9 +22,8 @@ class PlannedAction:
 
 
 def plan(
-    home: Path, launch: LaunchSpec, selected: list[str], purge_backups: bool
+    home: Path, selected: list[str], purge_backups: bool
 ) -> list[PlannedAction]:
-    del launch  # loose inspect does not need launch spec
     actions: list[PlannedAction] = []
     for harness_id in selected:
         spec = get_harness(harness_id)
@@ -61,12 +59,10 @@ def plan(
 
 def run(
     home: Path,
-    launch: LaunchSpec,
     selected: list[str],
     dry_run: bool,
     purge_backups: bool,
 ) -> None:
-    del launch
     report.header("Pulsar Harness Uninstall", dry_run)
 
     outcomes = [_remove_one(home, harness_id, dry_run) for harness_id in selected]
@@ -153,10 +149,7 @@ def _clean_up(
                     continue
                 backup = backup_path(resolve_symlink(spec.config_path(home)))
                 backup.unlink(missing_ok=True)
-        if not state.state_file_path(home).exists():
-            state.remove_state_file(home)
-        else:
-            prune_dirs([state.state_dir(home)])
+        prune_dirs([state.state_dir(home)])
 
 
 def _display_path(home: Path, path: Path) -> str:

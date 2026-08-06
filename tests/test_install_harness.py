@@ -60,7 +60,7 @@ def test_install_and_uninstall_cursor_round_trip(home: Path, fake_uvx: Path) -> 
     assert spec is not None
     assert spec.artifact.inspect(config, launch).state == State.ACTIVE
 
-    uninstall.run(home, launch, ["cursor"], dry_run=False, purge_backups=False)
+    uninstall.run(home, ["cursor"], dry_run=False, purge_backups=False)
     assert spec.artifact.inspect_loose(config).state == State.ABSENT
 
 
@@ -136,7 +136,7 @@ def test_codex_toml_round_trip(home: Path, fake_uvx: Path) -> None:
     assert config.is_file()
     assert "pulsar" in config.read_text(encoding="utf-8")
 
-    uninstall.run(home, launch, ["codex"], dry_run=False, purge_backups=False)
+    uninstall.run(home, ["codex"], dry_run=False, purge_backups=False)
     spec = get_harness("codex")
     assert spec is not None
     assert spec.artifact.inspect_loose(config).state == State.ABSENT
@@ -227,6 +227,25 @@ def test_cli_status_json(home: Path, fake_uvx: Path, capsys) -> None:
     assert any(row["id"] == "cursor" for row in payload["harnesses"])
 
 
+def test_uninstall_and_status_work_without_a_launcher(
+    home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    launch = _launch(fake_uvx)
+    (home / ".cursor").mkdir()
+    configure.run(home, launch, ["cursor"], dry_run=False)
+    config = home / ".cursor" / "mcp.json"
+
+    # uv has been uninstalled since registration.
+    monkeypatch.setenv("PATH", str(home / "empty"))
+    capsys.readouterr()
+
+    main(["status", "--json"])
+    assert json.loads(capsys.readouterr().out)["launch"] is None
+
+    main(["uninstall", "cursor", "--yes"])
+    assert not config.exists()
+
+
 def test_jsonc_strip_preserves_commas_inside_strings() -> None:
     source = '{"servers": {}, "note": "a, }", "trailing": [1, 2,],}'
     stripped, had_comments = strip_jsonc(source)
@@ -255,9 +274,7 @@ def test_uninstall_prunes_directories_install_created(
     assert config.is_file()
     assert state.created_dirs(home), "install recorded no directories"
 
-    uninstall.run(
-        home, launch, ["claude-desktop"], dry_run=False, purge_backups=False
-    )
+    uninstall.run(home, ["claude-desktop"], dry_run=False, purge_backups=False)
     assert not config.exists()
     assert not config.parent.exists()
     assert home.is_dir()

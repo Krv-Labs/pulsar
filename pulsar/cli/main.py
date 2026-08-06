@@ -8,7 +8,11 @@ from pathlib import Path
 
 from pulsar.cli.install import configure, status, uninstall
 from pulsar.cli.install.artifact import State
-from pulsar.cli.install.command import LaunchSpec, resolve_launch_spec
+from pulsar.cli.install.command import (
+    LaunchSpec,
+    resolve_launch_spec,
+    resolve_launch_spec_optional,
+)
 from pulsar.cli.install.harness import HARNESSES, get_harness, harness_ids
 from pulsar.cli.install.interactivity import Interactivity, detect_interactivity
 from pulsar.cli.install.menu import MenuOption, menu_hint, run_confirm, run_menu
@@ -83,7 +87,8 @@ def _run_install(args: argparse.Namespace) -> None:
 def _run_uninstall(args: argparse.Namespace) -> None:
     home = home_dir()
     mode = detect_interactivity()
-    launch = resolve_launch_spec(mode="uvx")
+    # Removal never needs a launcher — uninstalling must stay possible after
+    # uv itself is gone.
     selected = _select_uninstall_targets(args, home, mode)
     if selected is None:
         return
@@ -92,20 +97,20 @@ def _run_uninstall(args: argparse.Namespace) -> None:
         return
 
     if args.dry_run:
-        uninstall.run(home, launch, selected, True, args.purge_backups)
+        uninstall.run(home, selected, True, args.purge_backups)
         return
 
     if args.yes or mode == Interactivity.HEADLESS:
-        uninstall.run(home, launch, selected, False, args.purge_backups)
+        uninstall.run(home, selected, False, args.purge_backups)
         return
 
     if mode == Interactivity.INTERACTIVE:
-        plan = uninstall.plan(home, launch, selected, args.purge_backups)
+        plan = uninstall.plan(home, selected, args.purge_backups)
         if run_confirm(
             "Uninstall Pulsar from these agents?",
             [action.summary for action in plan],
         ):
-            uninstall.run(home, launch, selected, False, args.purge_backups)
+            uninstall.run(home, selected, False, args.purge_backups)
         return
 
     raise RuntimeError(
@@ -116,8 +121,7 @@ def _run_uninstall(args: argparse.Namespace) -> None:
 
 def _run_status(args: argparse.Namespace) -> None:
     home = home_dir()
-    launch = resolve_launch_spec(mode="uvx")
-    status.run(home, launch, json_output=args.json)
+    status.run(home, resolve_launch_spec_optional(), json_output=args.json)
 
 
 def _select_install_targets(
@@ -141,7 +145,7 @@ def _select_uninstall_targets(
     if args.harnesses or args.all:
         return _validate_ids(args.harnesses, args.all)
     if mode == Interactivity.INTERACTIVE:
-        return _interactive_select(home, resolve_launch_spec(mode="uvx"), install=False)
+        return _interactive_select(home, None, install=False)
     return [
         spec.id
         for spec in HARNESSES
@@ -150,7 +154,7 @@ def _select_uninstall_targets(
 
 
 def _interactive_select(
-    home: Path, launch: LaunchSpec, *, install: bool
+    home: Path, launch: LaunchSpec | None, *, install: bool
 ) -> list[str] | None:
     title = (
         "Which agent integrations do you want to configure?"
@@ -159,7 +163,7 @@ def _interactive_select(
     )
     options: list[MenuOption] = []
     for spec in HARNESSES:
-        if install:
+        if install and launch is not None:
             inspection = spec.artifact.inspect(spec.config_path(home), launch)
         else:
             inspection = spec.artifact.inspect_loose(spec.config_path(home))

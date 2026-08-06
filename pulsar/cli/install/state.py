@@ -73,10 +73,6 @@ def clear_created_files(home: Path, harness_id: str) -> None:
     _remove_state_file(home)
 
 
-def remove_state_file(home: Path) -> None:
-    _remove_state_file(home)
-
-
 def _load(home: Path) -> dict:
     path = state_file_path(home)
     if not path.is_file():
