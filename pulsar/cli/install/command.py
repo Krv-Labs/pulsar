@@ -31,7 +31,7 @@ def uvx_args(*, pin_version: bool = False) -> tuple[str, ...]:
     if pin_version:
         version = get_version()
         if version and not version.endswith("+unknown"):
-            spec = f"thema-pulsar=={version}[mcp]"
+            spec = f"thema-pulsar[mcp]=={version}"
             return ("--from", spec, SERVER_SCRIPT)
     return ("--from", PACKAGE_SPEC, SERVER_SCRIPT)
 

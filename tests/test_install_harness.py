@@ -8,9 +8,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 from pulsar.cli.install.artifact import State
-from pulsar.cli.install.command import LaunchSpec
+from pulsar.cli.install.command import LaunchSpec, uvx_args
 from pulsar.cli.install.fsops import backup_path
 from pulsar.cli.install.harness import get_harness
 from pulsar.cli.install import configure, state, uninstall
@@ -224,3 +225,11 @@ def test_cli_status_json(home: Path, fake_uvx: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["active"] >= 1
     assert any(row["id"] == "cursor" for row in payload["harnesses"])
+
+
+def test_pin_version_emits_a_parseable_requirement() -> None:
+    args = uvx_args(pin_version=True)
+    assert args[0] == "--from"
+    assert args[-1] == "pulsar-mcp"
+    # extras precede the version specifier in PEP 508
+    Requirement(args[1])
