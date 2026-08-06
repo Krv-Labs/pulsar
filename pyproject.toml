@@ -59,6 +59,10 @@ dev = [
     "maturin>=1.12.6",
     "pytest>=9.0.2",
     "pytest-cov>=7.1.0",
+    # Terminal emulator used by tests/test_install_menu.py to replay a real
+    # `pulsar install` session and assert the prompt leaves no stale rows and
+    # destroys no scrollback. Without it that test skips silently.
+    "pyte>=0.8.2",
     "rich>=14.3.3",
     # Bounded to one minor series: ruff's *default* rule set expands between
     # minors (0.16 added I/UP/SIM/BLE/RUF/...), which silently changes what CI

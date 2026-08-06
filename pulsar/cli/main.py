@@ -36,6 +36,12 @@ def main(argv: list[str] | None = None) -> None:
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    except KeyboardInterrupt as exc:
+        # The full TUI runs under raw mode, which clears ISIG, so Ctrl-C
+        # arrives there as an ordinary key. The no-ANSI prompt does not, so
+        # SIGINT is live and would otherwise print a traceback.
+        print("\nCancelled.", file=sys.stderr)
+        raise SystemExit(130) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -117,8 +123,8 @@ def _run_uninstall(args: argparse.Namespace) -> None:
         return
 
     raise RuntimeError(
-        "there is nowhere to confirm (stdin and stderr must both be a "
-        "terminal) — re-run with --yes to apply, or --dry-run to preview"
+        "there is no console to confirm on — re-run with --yes to apply, "
+        "or --dry-run to preview"
     )
 
 
@@ -133,7 +139,7 @@ def _select_install_targets(
         return _validate_ids(args.harnesses, args.all)
     if not can_prompt():
         raise RuntimeError(
-            "non-interactive shells must pass explicit harness names or --all "
+            "no console available — pass explicit harness names or --all "
             "(see `pulsar install --help`)"
         )
     return _interactive_select(home, launch, install=True)
@@ -148,7 +154,7 @@ def _select_uninstall_targets(
     if can_prompt():
         return _interactive_select(home, None, install=False)
     raise RuntimeError(
-        "non-interactive shells must pass explicit harness names or --all "
+        "no console available — pass explicit harness names or --all "
         "(see `pulsar uninstall --help`)"
     )
 

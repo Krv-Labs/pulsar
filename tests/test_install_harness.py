@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from pulsar.cli.install.artifact import State
 from pulsar.cli.install.command import LaunchSpec, uvx_args
 from pulsar.cli.install.fsops import backup_path, strip_jsonc
 from pulsar.cli.install.harness import get_harness
+from pulsar.cli.install.terminal import Tier
 from pulsar.cli.install import configure, paths, state, uninstall
 from pulsar.cli.main import main
 
@@ -150,17 +152,17 @@ def test_vscode_jsonc_writes_stdio_type(home: Path, fake_uvx: Path) -> None:
     assert data["servers"]["pulsar"]["type"] == "stdio"
 
 
-def test_noninteractive_install_requires_harness_ids(
+def test_consoleless_install_requires_harness_ids(
     home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    # No controlling console at all (CI, systemd) — there is nowhere to draw a
+    # menu, so the CLI must say so rather than silently configure nothing.
+    monkeypatch.setattr("pulsar.cli.install.menu.open_console", lambda: None)
 
     with pytest.raises(SystemExit) as exc:
         main(["install"])
     assert exc.value.code == 1
-    assert "non-interactive" in capsys.readouterr().err
+    assert "no console available" in capsys.readouterr().err
 
 
 def test_install_all_headless(home: Path, fake_uvx: Path) -> None:
@@ -181,17 +183,57 @@ def test_validate_unknown_harness(home: Path, fake_uvx: Path, capsys) -> None:
     assert "unknown harness" in capsys.readouterr().err
 
 
-def test_install_with_piped_stdin_errors_rather_than_no_op(
-    home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    # A TTY on stderr alone is not enough — the menu also reads stdin.
-    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+class FakeConsole:
+    """A scripted stand-in for the controlling console."""
 
-    with pytest.raises(SystemExit) as exc:
-        main(["install"])
-    assert exc.value.code == 1
-    assert "non-interactive" in capsys.readouterr().err
+    tier = Tier.FULL
+
+    def __init__(self, keys: list[str]) -> None:
+        self._keys = list(keys)
+        self.written: list[str] = []
+
+    def write(self, text: str) -> None:
+        self.written.append(text)
+
+    def columns(self) -> int:
+        return 80
+
+    def read_key(self) -> str:
+        return self._keys.pop(0)
+
+    def read_line(self) -> str:
+        return ""
+
+    @contextmanager
+    def raw(self):
+        yield
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> FakeConsole:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+def test_install_with_piped_stdin_still_prompts(
+    home: Path, fake_uvx: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Deliberate reversal of 094f776, which errored out whenever stdin was not
+    # a TTY. The prompts now talk to the controlling console rather than to
+    # stdin, so `pulsar install | tee log` gets a real menu. That commit's
+    # intent — never silently no-op — is better served by prompting than by
+    # refusing, and the consoleless case above still errors.
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    console = FakeConsole(["ENTER"])
+    monkeypatch.setattr("pulsar.cli.install.menu.open_console", lambda: console)
+
+    main(["install", "--dry-run"])
+
+    frames = "".join(console.written)
+    assert "Which agent integrations do you want to configure?" in frames
 
 
 def test_gemini_directory_does_not_imply_antigravity(home: Path) -> None:

@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`import pulsar` is now lazy, cutting CLI startup ~20x.** The package eagerly
+  imported scikit-learn, SciPy, pandas, pyarrow, and NetworkX — about 1.6s — and
+  because `pulsar.cli` is a subpackage, every CLI invocation paid it to write a
+  few JSON config files. `pulsar --help` took 1659&nbsp;ms; the Rust extension
+  itself accounts for ~1&nbsp;ms of that. Public names now resolve through a
+  PEP 562 `__getattr__`, so `from pulsar import ThemaRS`, `pulsar.PCA`, and
+  `from pulsar import *` behave exactly as before — only the timing moves.
+  `pulsar --help` 1659→82&nbsp;ms, `pulsar status` 1722→100&nbsp;ms,
+  `import pulsar` 1679→38&nbsp;ms.
+- **`pulsar.analysis.characterization` defers scikit-learn** into the two
+  functions that use it. It sits on `pulsar.pipeline`'s import path, so every
+  consumer paid ~1s for `SimpleImputer`, `NearestNeighbors`, and a scaler that
+  most never called. `import pulsar` plus `ThemaRS` is now 520&nbsp;ms, down
+  from 1763&nbsp;ms.
+
+### Fixed
+
+- **`pulsar install` no longer corrupts the terminal it draws in.** The prompt
+  advanced eight rows per frame and then moved the cursor up nine, so the anchor
+  crept upward on every keypress and `\033[J` erased a line of scrollback each
+  time. The title was printed outside the redrawn block and so could never be
+  counted; on exit the cursor was parked back inside the list, and the install
+  report printed on top of its own option rows (`Cancelled. Code (detected)`),
+  leaving the remainder on screen. Escape sequences were also parsed with a
+  blocking two-byte read, which consumed the *next* keypress and hung forever on
+  a bare <kbd>Esc</kbd>. The renderer now holds one invariant — the cursor-up
+  count equals the rows the frame advanced, and every line the prompt owns lives
+  inside the redrawn frame — measured in soft-wrapped rows rather than logical
+  lines, and collapses to a one-line summary so the report starts on a clean row.
+
+### Added
+
+- **Interactive install/uninstall on Windows.** Console access is now a capability
+  ladder: a full redrawn TUI (`/dev/tty` + termios on POSIX, `CONIN$`/`CONOUT$`
+  with `msvcrt` and `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on Windows), a numbered
+  ASCII prompt where ANSI will not render (`TERM=dumb`, or a console whose VT mode
+  cannot be set), and the existing error where there is no console at all. Key
+  reading is normalized to abstract names, because Windows reports arrow keys as a
+  scancode pair rather than as CSI sequences.
+- **Windows CI job** running the CLI test suite and a console-detection probe.
+  Windows wheels ship from `release.yml`, but CI ran only on Linux, so this code
+  path was previously shipped unverified.
+
+### Changed
+
+- **`pulsar install` and `pulsar uninstall` now prompt when stdin is redirected.**
+  They talk to the controlling console rather than to `sys.stdin`, so
+  `pulsar install | tee install.log` gets a working menu instead of
+  `error: non-interactive shells must pass explicit harness names or --all`.
+  This reverses the piped-stdin behavior added in "Stop crashing on Windows and
+  no-opping on piped stdin"; that change's intent — never silently no-op — is
+  better served by prompting than by refusing. A genuinely consoleless
+  environment still errors, now with `no console available`.
+- **Ctrl-C now exits 130 everywhere.** It previously exited 0 in the interactive
+  menu (where raw mode delivers it as an ordinary key) and printed a traceback
+  in line mode (where SIGINT is still live). `q` and <kbd>Esc</kbd> remain a
+  clean cancel with exit 0, so scripts that check `$?` can tell the two apart.
+
 ## [0.3.0] - 2026-08-05
 
 ### Added

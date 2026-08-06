@@ -66,7 +66,10 @@ Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then re
 
 The installer detects Claude Code, Claude Desktop, Codex CLI, Gemini CLI, Copilot CLI, Cursor, VS Code, and Antigravity. It writes the ``pulsar`` MCP entry each client expects, using an absolute path to ``uvx`` so GUI-launched apps can spawn the server. Inspect registrations with ``pulsar status``; remove them cleanly with ``pulsar uninstall``.
 
-In non-interactive environments, pass harness ids or ``--all``:
+The prompt talks to your terminal directly, so it still appears when output is
+redirected (``pulsar install | tee install.log``). Where escape codes will not
+render (``TERM=dumb``) it falls back to a numbered list. Where there is no
+terminal at all — CI, a systemd unit — pass harness ids or ``--all``:
 
 .. code-block:: bash
 
