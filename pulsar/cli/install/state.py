@@ -44,12 +44,14 @@ def was_created_by_install(home: Path, harness_id: str, path: Path) -> bool:
 def record_created_dirs(home: Path, dirs: list[Path]) -> None:
     ledger = _load(home)
     existing = ledger.get(CREATED_DIRS_KEY, [])
-    shared = _never_prune(home)
     for directory in dirs:
         key = str(directory)
         if key in existing:
             continue
-        if any(part in shared for part in directory.parts):
+        # Never prune the home directory or the shared roots we may have had
+        # to create on the way to a config file. Test the directory itself —
+        # testing every ancestor part matches home.name and skips everything.
+        if directory == home or directory.name in NEVER_PRUNE:
             continue
         existing.append(key)
     ledger[CREATED_DIRS_KEY] = existing
@@ -73,10 +75,6 @@ def clear_created_files(home: Path, harness_id: str) -> None:
 
 def remove_state_file(home: Path) -> None:
     _remove_state_file(home)
-
-
-def _never_prune(home: Path) -> set[str]:
-    return NEVER_PRUNE | {home.name}
 
 
 def _load(home: Path) -> dict:

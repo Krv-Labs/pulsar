@@ -14,7 +14,7 @@ from pulsar.cli.install.artifact import State
 from pulsar.cli.install.command import LaunchSpec, uvx_args
 from pulsar.cli.install.fsops import backup_path
 from pulsar.cli.install.harness import get_harness
-from pulsar.cli.install import configure, state, uninstall
+from pulsar.cli.install import configure, paths, state, uninstall
 from pulsar.cli.main import main
 
 
@@ -225,6 +225,24 @@ def test_cli_status_json(home: Path, fake_uvx: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["active"] >= 1
     assert any(row["id"] == "cursor" for row in payload["harnesses"])
+
+
+def test_uninstall_prunes_directories_install_created(
+    home: Path, fake_uvx: Path
+) -> None:
+    launch = _launch(fake_uvx)
+    config = paths.claude_desktop_config(home)
+
+    configure.run(home, launch, ["claude-desktop"], dry_run=False)
+    assert config.is_file()
+    assert state.created_dirs(home), "install recorded no directories"
+
+    uninstall.run(
+        home, launch, ["claude-desktop"], dry_run=False, purge_backups=False
+    )
+    assert not config.exists()
+    assert not config.parent.exists()
+    assert home.is_dir()
 
 
 def test_pin_version_emits_a_parseable_requirement() -> None:
