@@ -82,17 +82,8 @@ def _load(home: Path) -> dict:
     except (ValueError, json.JSONDecodeError):
         return {HARNESSES_KEY: {}, CREATED_DIRS_KEY: []}
 
-    if HARNESSES_KEY in data:
-        harnesses = data.get(HARNESSES_KEY, {})
-        dirs = data.get(CREATED_DIRS_KEY, [])
-    else:
-        harnesses = {
-            key: value
-            for key, value in data.items()
-            if key != CREATED_DIRS_KEY and isinstance(value, dict)
-        }
-        dirs = data.get(CREATED_DIRS_KEY, [])
-
+    harnesses = data.get(HARNESSES_KEY, {})
+    dirs = data.get(CREATED_DIRS_KEY, [])
     if not isinstance(harnesses, dict):
         harnesses = {}
     if not isinstance(dirs, list):

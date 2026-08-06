@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from pulsar.cli.install.artifact import Inspection, SERVER_KEY, State
+from pulsar.cli.install.artifact import Artifact, Inspection, SERVER_KEY, State
 from pulsar.cli.install.command import LaunchSpec, drift, entry_args, owns_entry
 from pulsar.cli.install.fsops import WriteOutcome, atomic_write
 
@@ -18,7 +18,7 @@ else:
 import tomli_w
 
 
-def inspect(path: Path, launch: LaunchSpec) -> Inspection:
+def inspect(artifact: Artifact, path: Path, launch: LaunchSpec) -> Inspection:
     if not path.is_file():
         return Inspection.plain(State.ABSENT)
     try:
@@ -26,7 +26,7 @@ def inspect(path: Path, launch: LaunchSpec) -> Inspection:
     except tomllib.TOMLDecodeError as exc:
         return Inspection.conflict(f"parsing {path}: {exc}")
 
-    entry = _entry_of(data)
+    entry = _entry_of(artifact, data)
     if entry is None:
         return Inspection.plain(State.ABSENT)
 
@@ -47,7 +47,7 @@ def inspect(path: Path, launch: LaunchSpec) -> Inspection:
     return Inspection.plain(State.ACTIVE)
 
 
-def inspect_loose(path: Path) -> Inspection:
+def inspect_loose(artifact: Artifact, path: Path) -> Inspection:
     if not path.is_file():
         return Inspection.plain(State.ABSENT)
     try:
@@ -55,7 +55,7 @@ def inspect_loose(path: Path) -> Inspection:
     except tomllib.TOMLDecodeError as exc:
         return Inspection.conflict(f"parsing {path}: {exc}")
 
-    entry = _entry_of(data)
+    entry = _entry_of(artifact, data)
     if entry is None:
         return Inspection.plain(State.ABSENT)
 
@@ -70,7 +70,9 @@ def inspect_loose(path: Path) -> Inspection:
     return Inspection.plain(State.ACTIVE)
 
 
-def write(path: Path, launch: LaunchSpec, backup: bool) -> WriteOutcome:
+def write(
+    artifact: Artifact, path: Path, launch: LaunchSpec, backup: bool
+) -> WriteOutcome:
     if path.is_file():
         try:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -79,9 +81,10 @@ def write(path: Path, launch: LaunchSpec, backup: bool) -> WriteOutcome:
     else:
         data = {}
 
-    servers = data.setdefault("mcp_servers", {})
+    container = artifact.container_key()
+    servers = data.setdefault(container, {})
     if not isinstance(servers, dict):
-        raise RuntimeError(f"{path} `mcp_servers` must be a table")
+        raise RuntimeError(f"{path} `{container}` must be a table")
     servers[SERVER_KEY] = {
         "command": launch.command_str,
         "args": list(launch.args),
@@ -92,7 +95,7 @@ def write(path: Path, launch: LaunchSpec, backup: bool) -> WriteOutcome:
     return atomic_write(path, contents, backup)
 
 
-def remove(path: Path, dry_run: bool) -> bool:
+def remove(artifact: Artifact, path: Path, dry_run: bool) -> bool:
     if not path.is_file():
         return False
     try:
@@ -100,7 +103,7 @@ def remove(path: Path, dry_run: bool) -> bool:
     except tomllib.TOMLDecodeError:
         return False
 
-    servers = data.get("mcp_servers")
+    servers = data.get(artifact.container_key())
     if not isinstance(servers, dict):
         return False
     entry = servers.get(SERVER_KEY)
@@ -115,7 +118,7 @@ def remove(path: Path, dry_run: bool) -> bool:
 
     servers.pop(SERVER_KEY, None)
     if not servers:
-        data.pop("mcp_servers", None)
+        data.pop(artifact.container_key(), None)
     if dry_run:
         return True
     contents = tomli_w.dumps(data)
@@ -125,8 +128,8 @@ def remove(path: Path, dry_run: bool) -> bool:
     return True
 
 
-def _entry_of(data: dict[str, Any]) -> dict[str, Any] | None:
-    servers = data.get("mcp_servers")
+def _entry_of(artifact: Artifact, data: dict[str, Any]) -> dict[str, Any] | None:
+    servers = data.get(artifact.container_key())
     if not isinstance(servers, dict):
         return None
     entry = servers.get(SERVER_KEY)

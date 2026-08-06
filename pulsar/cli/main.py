@@ -14,7 +14,6 @@ from pulsar.cli.install.command import (
     resolve_launch_spec_optional,
 )
 from pulsar.cli.install.harness import HARNESSES, get_harness, harness_ids
-from pulsar.cli.install.interactivity import Interactivity, detect_interactivity
 from pulsar.cli.install.menu import (
     MenuOption,
     can_prompt,
@@ -23,6 +22,13 @@ from pulsar.cli.install.menu import (
     run_menu,
 )
 from pulsar.cli.install.paths import home_dir
+
+
+def _is_headless() -> bool:
+    """No terminal anywhere: safe to act without asking for confirmation."""
+    return not any(
+        stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -93,7 +99,6 @@ def _run_install(args: argparse.Namespace) -> None:
 
 def _run_uninstall(args: argparse.Namespace) -> None:
     home = home_dir()
-    mode = detect_interactivity()
     # Removal never needs a launcher — uninstalling must stay possible after
     # uv itself is gone.
     selected = _select_uninstall_targets(args, home)
@@ -108,16 +113,13 @@ def _run_uninstall(args: argparse.Namespace) -> None:
         uninstall.run(home, selected, True, args.purge_backups)
         return
 
-    if args.yes or mode == Interactivity.HEADLESS:
+    if args.yes or _is_headless():
         uninstall.run(home, selected, False, args.purge_backups)
         return
 
     if can_prompt():
         plan = uninstall.plan(home, selected, args.purge_backups)
-        if run_confirm(
-            "Uninstall Pulsar from these agents?",
-            [action.summary for action in plan],
-        ):
+        if run_confirm("Uninstall Pulsar from these agents?", plan):
             uninstall.run(home, selected, False, args.purge_backups)
         else:
             print("Cancelled.")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 from pulsar.cli.install import report, state
@@ -16,19 +15,12 @@ from pulsar.cli.install.fsops import (
 from pulsar.cli.install.harness import HARNESSES, HarnessSpec, get_harness
 
 
-@dataclass
-class PlannedAction:
-    summary: str
-
-
-def plan(
-    home: Path, selected: list[str], purge_backups: bool
-) -> list[PlannedAction]:
-    actions: list[PlannedAction] = []
+def plan(home: Path, selected: list[str], purge_backups: bool) -> list[str]:
+    actions: list[str] = []
     for harness_id in selected:
         spec = get_harness(harness_id)
         if spec is None:
-            actions.append(PlannedAction(summary=f"unknown harness: {harness_id}"))
+            actions.append(f"unknown harness: {harness_id}")
             continue
         path = spec.config_path(home)
         inspection = spec.artifact.inspect_loose(path)
@@ -42,17 +34,12 @@ def plan(
                 f"{spec.name} — remove MCP entry from "
                 f"{_display_path(home, path)}"
             )
-        actions.append(PlannedAction(summary=summary))
+        actions.append(summary)
         if purge_backups:
             backup = backup_path(resolve_symlink(path))
             if backup.is_file():
                 actions.append(
-                    PlannedAction(
-                        summary=(
-                            f"{spec.name} — delete backup "
-                            f"{_display_path(home, backup)}"
-                        )
-                    )
+                    f"{spec.name} — delete backup {_display_path(home, backup)}"
                 )
     return actions
 
@@ -83,7 +70,7 @@ def run(
 def _remove_one(home: Path, harness_id: str, dry_run: bool) -> bool:
     spec = get_harness(harness_id)
     if spec is None:
-        report.detail(report.failed(), f"unknown harness: {harness_id}")
+        report.detail(report.FAILED, f"unknown harness: {harness_id}")
         return False
 
     report.harness_line(spec.name)
@@ -97,17 +84,17 @@ def _remove_spec(home: Path, spec: HarnessSpec, dry_run: bool) -> bool:
     inspection = spec.artifact.inspect_loose(path)
 
     if inspection.state == State.ABSENT:
-        report.detail(report.absent(), spec.absent_msg)
+        report.detail(report.ABSENT, spec.absent_msg)
         return True
 
     if inspection.state == State.CONFLICT:
         detail = inspection.detail or f"{path} left untouched"
-        report.detail(report.conflict(), detail)
+        report.detail(report.CONFLICT, detail)
         return True
 
     if dry_run:
         report.detail(
-            report.removed(),
+            report.REMOVED,
             f"would remove the MCP server entry from {_display_path(home, path)}",
         )
         return True
@@ -115,11 +102,11 @@ def _remove_spec(home: Path, spec: HarnessSpec, dry_run: bool) -> bool:
     try:
         spec.artifact.remove(path, dry_run=False)
     except RuntimeError as exc:
-        report.detail(report.failed(), str(exc))
+        report.detail(report.FAILED, str(exc))
         return False
 
     _delete_if_emptied_and_ours(home, spec.id, path)
-    report.detail(report.removed(), f"removed the MCP server entry from {path}")
+    report.detail(report.REMOVED, f"removed the MCP server entry from {path}")
     return True
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pulsar.cli.install.command import LaunchSpec
@@ -62,14 +62,17 @@ class Artifact:
     def is_jsonc(self) -> bool:
         return self.kind == ArtifactKind.VSCODE_JSONC
 
+    def _backend(self) -> Any:
+        """The read/write module for this artifact's file format.
+
+        Imported lazily: both backends import this module for Artifact.
+        """
+        from pulsar.cli.install import json_entry, toml_entry
+
+        return toml_entry if self.kind == ArtifactKind.MCP_TOML else json_entry
+
     def inspect(self, path: Path, spec: LaunchSpec) -> Inspection:
-        if self.kind == ArtifactKind.MCP_TOML:
-            from pulsar.cli.install import toml_entry
-
-            return toml_entry.inspect(path, spec)
-        from pulsar.cli.install import json_entry
-
-        return json_entry.inspect(self, path, spec)
+        return self._backend().inspect(self, path, spec)
 
     def apply(self, path: Path, launch: LaunchSpec) -> WriteOutcome | None:
         inspection = self.inspect(path, launch)
@@ -80,28 +83,10 @@ class Artifact:
             raise RuntimeError(detail)
         # Back up on repair too: a drifted entry may have been hand-written or
         # left by another launch mode. atomic_write skips absent files.
-        if self.kind == ArtifactKind.MCP_TOML:
-            from pulsar.cli.install import toml_entry
-
-            return toml_entry.write(path, launch, backup=True)
-        from pulsar.cli.install import json_entry
-
-        return json_entry.write(self, path, launch, backup=True)
+        return self._backend().write(self, path, launch, backup=True)
 
     def inspect_loose(self, path: Path) -> Inspection:
-        if self.kind == ArtifactKind.MCP_TOML:
-            from pulsar.cli.install import toml_entry
-
-            return toml_entry.inspect_loose(path)
-        from pulsar.cli.install import json_entry
-
-        return json_entry.inspect_loose(self, path)
+        return self._backend().inspect_loose(self, path)
 
     def remove(self, path: Path, dry_run: bool) -> bool:
-        if self.kind == ArtifactKind.MCP_TOML:
-            from pulsar.cli.install import toml_entry
-
-            return toml_entry.remove(path, dry_run)
-        from pulsar.cli.install import json_entry
-
-        return json_entry.remove(self, path, dry_run)
+        return self._backend().remove(self, path, dry_run)

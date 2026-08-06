@@ -43,7 +43,7 @@ def _configure_one(
 ) -> bool:
     spec = get_harness(harness_id)
     if spec is None:
-        report.detail(report.failed(), f"unknown harness: {harness_id}")
+        report.detail(report.FAILED, f"unknown harness: {harness_id}")
         return False
 
     report.harness_line(spec.name)
@@ -61,23 +61,23 @@ def _configure_spec(
     inspection = spec.artifact.inspect(path, launch)
 
     if inspection.state == State.ACTIVE:
-        report.detail(report.ok(), spec.active_msg)
+        report.detail(report.OK, spec.active_msg)
         return True
 
     if inspection.state == State.CONFLICT:
         detail = inspection.detail or f"{path} needs manual attention"
-        report.detail(report.conflict(), detail)
+        report.detail(report.CONFLICT, detail)
         return False
 
     if dry_run:
         if inspection.detail:
             report.detail(
-                report.pending(),
+                report.PENDING,
                 f"[dry run] would repair {path}: {inspection.detail}",
             )
         else:
             report.detail(
-                report.pending(),
+                report.PENDING,
                 f"[dry run] would register the MCP server in {path}",
             )
         return True
@@ -86,7 +86,7 @@ def _configure_spec(
     try:
         outcome = spec.artifact.apply(path, launch)
     except RuntimeError as exc:
-        report.detail(report.failed(), str(exc))
+        report.detail(report.FAILED, str(exc))
         return False
 
     wrote = outcome is not None
@@ -96,7 +96,7 @@ def _configure_spec(
         if outcome.created_dirs:
             state.record_created_dirs(home, outcome.created_dirs)
 
-    report.detail(report.ok(), _applied_message(spec, repair, wrote))
+    report.detail(report.OK, _applied_message(spec, repair, wrote))
     return True
 
 

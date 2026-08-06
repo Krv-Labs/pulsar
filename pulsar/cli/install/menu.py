@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from pulsar.cli.install.artifact import State
@@ -43,7 +43,7 @@ def run_menu(title: str, options: list[MenuOption]) -> list[str] | None:
     if not can_prompt():
         return None
 
-    working = [MenuOption(**option.__dict__) for option in options]
+    working = [replace(option) for option in options]
     cursor = 0
     print(title, file=sys.stderr)
     _render(working, cursor)

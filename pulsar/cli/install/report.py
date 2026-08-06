@@ -4,6 +4,21 @@ from __future__ import annotations
 
 from pulsar.cli.install.artifact import State
 
+OK = "✓"
+FAILED = "✗"
+CONFLICT = "!"
+ABSENT = "○"
+PENDING = "…"
+REMOVED = "−"
+INCOMPLETE = "▲"
+
+_GLYPHS = {
+    State.ACTIVE: OK,
+    State.INCOMPLETE: INCOMPLETE,
+    State.CONFLICT: CONFLICT,
+    State.ABSENT: ABSENT,
+}
+
 
 def header(title: str, dry_run: bool) -> None:
     suffix = " (dry run)" if dry_run else ""
@@ -27,38 +42,8 @@ def note(message: str) -> None:
     print(f"│      note: {message}")
 
 
-def ok() -> str:
-    return "✓"
-
-
-def failed() -> str:
-    return "✗"
-
-
-def conflict() -> str:
-    return "!"
-
-
-def absent() -> str:
-    return "○"
-
-
-def pending() -> str:
-    return "…"
-
-
-def removed() -> str:
-    return "−"
-
-
 def glyph(state: State) -> str:
-    if state == State.ACTIVE:
-        return ok()
-    if state == State.INCOMPLETE:
-        return "▲"
-    if state == State.CONFLICT:
-        return conflict()
-    return absent()
+    return _GLYPHS[state]
 
 
 def label(state: State) -> str:
