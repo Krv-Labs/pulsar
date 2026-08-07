@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-07
+
 ### Changed
 
 - **`import pulsar` is now lazy, cutting CLI startup ~20x.** The package eagerly
@@ -66,6 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   menu (where raw mode delivers it as an ordinary key) and printed a traceback
   in line mode (where SIGINT is still live). `q` and <kbd>Esc</kbd> remain a
   clean cancel with exit 0, so scripts that check `$?` can tell the two apart.
+
+### Documentation
+
+- Refreshed the README and Sphinx user guides for the `pulsar install` harness
+  (correct client names, `uvx`-prefixed `status`/`uninstall`, `--mode pipx`,
+  explicit harness ids) and corrected several stale `ThemaRS` API references
+  (`ThemaRS(config)` instead of a nonexistent `from_dict`, `ball_maps` instead
+  of `ball_mapper_graphs_`, `weighted_adjacency`, `select_representatives(n_reps=...)`).
+  The MCP guide's tool table now documents the full server surface, including
+  longitudinal/temporal tools, graph artifacts, and export tools that existed
+  in code but were previously undocumented.
 
 ## [0.3.0] - 2026-08-05
 
