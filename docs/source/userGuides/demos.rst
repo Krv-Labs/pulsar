@@ -21,7 +21,7 @@ Each demo is self-contained and runnable in minutes. Pick one that matches your 
 
 **The Data**
 
-The `Palmer Penguins <https://allisonhorst.com/project/penguins/>`_ dataset contains 333 penguins from three species (Adelie, Chinstrap, Gentoo) with 8 morphological measurements: bill length, bill depth, flipper length, body mass, and more. It's the ideal educational dataset — real biology, no missing structure, universally understood.
+The `Palmer Penguins <https://allisonhorst.com/project/penguins/>`_ dataset contains 344 penguins from three species (Adelie, Chinstrap, Gentoo) with 8 morphological measurements: bill length, bill depth, flipper length, body mass, and more. It's the ideal educational dataset — real biology, no missing structure, universally understood.
 
 **The Discovery**
 
@@ -50,7 +50,7 @@ This is the fastest way to see Pulsar in action. No dataset to download.
    uv run python -c "
    from pulsar.pipeline import ThemaRS
    config = {'run': {'name': 'penguins', 'data': 'demos/penguins/penguins.csv'}}
-   model = ThemaRS.from_dict(config)
+   model = ThemaRS(config)
    model.fit()
    print(f'Discovered {len(model.cosmic_graph.nodes())} nodes and {len(model.cosmic_graph.edges())} edges')
    "
