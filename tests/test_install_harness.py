@@ -22,11 +22,18 @@ from pulsar.cli.main import main
 
 @pytest.fixture
 def fake_uvx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    uvx = tmp_path / "bin" / "uvx"
-    uvx.parent.mkdir(parents=True)
-    uvx.write_text("#!/bin/sh\n", encoding="utf-8")
-    uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", str(uvx.parent))
+    # Windows shutil.which only finds PATHEXT-suffixed names (uvx.exe), so an
+    # extensionless script is invisible there even when it sits on PATH.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    if sys.platform == "win32":
+        uvx = bin_dir / "uvx.exe"
+        uvx.write_bytes(b"")
+    else:
+        uvx = bin_dir / "uvx"
+        uvx.write_text("#!/bin/sh\n", encoding="utf-8")
+        uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bin_dir))
     return uvx
 
 
@@ -35,6 +42,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     if sys.platform == "win32":
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        # paths.app_data() prefers APPDATA over home/AppData/Roaming — without
+        # this, vscode/claude-desktop tests write into the runner's real profile.
+        monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     return tmp_path
 
 
