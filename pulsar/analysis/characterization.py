@@ -12,11 +12,14 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import StandardScaler as SkScaler
 
 from pulsar._pulsar import pca_grid
+
+# scikit-learn is imported inside the two functions that use it rather than
+# here. It costs ~1s to import (it pulls in scipy.stats), and this module sits
+# on the import path of `pulsar.pipeline`, so every consumer paid that —
+# including `pulsar --help` and the MCP server's startup handshake — whether or
+# not it ever characterized a dataset. Subsequent calls hit sys.modules.
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +99,8 @@ def profile_numeric_matrix(
     Returns:
         NumericProfile with k-NN means and PCA cumulative variance.
     """
+    from sklearn.neighbors import NearestNeighbors
+
     rng = np.random.default_rng(seed)
     n_sub = min(subsample, len(X))
     indices = rng.choice(len(X), n_sub, replace=False)
@@ -192,6 +197,9 @@ def characterize_dataset(
     n_samples = len(df)
     n_features = len(numeric_cols)
     missingness_pct = float(df[numeric_cols].isna().mean().mean() * 100)
+
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler as SkScaler
 
     X = SimpleImputer(strategy="mean").fit_transform(
         df[numeric_cols].to_numpy(dtype=np.float64)

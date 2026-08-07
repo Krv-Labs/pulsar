@@ -56,6 +56,41 @@ jobs:
         if: matrix.python-version == '3.13'
         run: uv run ruff format --check pulsar tests demos
 
+  # `pulsar install` hand-rolls Windows console access (CONIN$/CONOUT$, msvcrt,
+  # ENABLE_VIRTUAL_TERMINAL_PROCESSING) that no POSIX runner can reach. Windows
+  # wheels ship from release.yml, so without this job that code is shipped
+  # unverified. Needs the full Rust build because `pulsar.cli.main` imports
+  # `pulsar`, which imports the `pulsar._pulsar` extension.
+  windows-cli:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --group dev --python 3.12
+
+      - name: Build Rust extension
+        run: uv run maturin develop --release
+
+      - name: Probe console detection
+        run: uv run python scripts/probe_console.py
+
+      - name: Run CLI install tests
+        run: uv run pytest tests/test_install_menu.py tests/test_install_harness.py -v
+
   # Native macOS Intel (x86_64) smoke for the MCP packaging path users hit via
   # `uvx --from "thema-pulsar[mcp]" pulsar-mcp`. Linux CI never exercises this ABI.
   # Runner: macos-15-intel (GitHub's last hosted Intel image; retires ~Aug 2027).

@@ -24,7 +24,25 @@ The Pulsar MCP (Model Context Protocol) Server is our attempt to give you what y
 
 ### Setup
 
-You do **not** need to clone this repository. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then point your client at the published package.
+You do **not** need to clone this repository. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then register Pulsar with your agent tools:
+
+```sh
+uvx --from thema-pulsar pulsar install
+```
+
+`pulsar install` detects Claude Code, Claude Desktop, Codex, Gemini CLI, Copilot CLI, Cursor, VS Code, and Antigravity, then writes the MCP server entry each client expects (absolute-path `uvx` by default). Re-run anytime to repair drifted configs. Check status with `pulsar status`; remove every registration with `pulsar uninstall`.
+
+Non-interactive shells need explicit harness ids or `--all`:
+
+```sh
+uvx --from thema-pulsar pulsar install --all
+uvx --from thema-pulsar pulsar uninstall --all --yes
+```
+
+Prefer a persistent server binary? Use `pipx install "thema-pulsar[mcp]"` and `pulsar install --mode pipx`.
+
+<details>
+<summary>Manual client configuration</summary>
 
 For clients configured with JSON (Claude Desktop, Cursor, Windsurf):
 
@@ -40,19 +58,16 @@ For clients configured with JSON (Claude Desktop, Cursor, Windsurf):
 }
 ```
 
-For CLI clients, one command:
+For CLI clients:
 
 ```sh
-# Claude Code
 claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
-
-# Gemini CLI — user scope works from any directory; use --scope project to limit it to one project
 gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
 ```
 
-`uvx` pulls `thema-pulsar[mcp]` straight from PyPI and runs `pulsar-mcp` in an isolated environment—no clone, manually managed Python environment, or `uv sync` required. If you prefer a persistent install, run `pipx install "thema-pulsar[mcp]"` and use `"command": "pulsar-mcp"` instead.
+GUI-launched apps on macOS often do not inherit your shell `PATH`. If a client cannot find `uvx`, run `which uvx` and use that absolute path as `"command"`, or use `pulsar install` which resolves it for you.
 
-Restart your client. Done.
+</details>
 
 Two things that trip people up: the first launch can take up to a minute while `uvx` downloads Pulsar (hence Gemini's `--timeout 60000`), and Gemini will not start stdio MCP servers in an untrusted workspace—choose **Trust folder** when prompted. The [MCP setup guide](https://github.com/Krv-Labs/pulsar/blob/main/docs/source/userGuides/mcp.rst) covers both, per client.
 
