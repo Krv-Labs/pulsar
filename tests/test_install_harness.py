@@ -142,12 +142,11 @@ def test_codex_toml_round_trip(home: Path, fake_uvx: Path) -> None:
 
 def test_vscode_jsonc_writes_stdio_type(home: Path, fake_uvx: Path) -> None:
     launch = _launch(fake_uvx)
-    config_dir = home / "Library" / "Application Support" / "Code" / "User"
-    config_dir.mkdir(parents=True)
+    config = paths.vscode_config(home)
+    config.parent.mkdir(parents=True)
 
     configure.run(home, launch, ["vscode"], dry_run=False)
 
-    config = config_dir / "mcp.json"
     data = json.loads(config.read_text(encoding="utf-8"))
     assert data["servers"]["pulsar"]["type"] == "stdio"
 
@@ -344,9 +343,8 @@ def test_uninstall_removes_a_pinned_entry_install_would_repair(
 
 def test_vscode_config_with_comments_is_a_conflict(home: Path, fake_uvx: Path) -> None:
     launch = _launch(fake_uvx)
-    config_dir = home / "Library" / "Application Support" / "Code" / "User"
-    config_dir.mkdir(parents=True)
-    config = config_dir / "mcp.json"
+    config = paths.vscode_config(home)
+    config.parent.mkdir(parents=True)
     config.write_text('{\n  // hand-maintained\n  "servers": {}\n}\n', encoding="utf-8")
     pristine = config.read_text(encoding="utf-8")
 
