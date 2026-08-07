@@ -129,6 +129,14 @@ Key Capabilities
 Installation
 -------------
 
+Agent / MCP (recommended) — install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then:
+
+.. code-block:: bash
+
+   uvx --from thema-pulsar pulsar install
+
+Python library:
+
 .. code-block:: bash
 
    pip install thema-pulsar
@@ -142,7 +150,7 @@ For development (requires Rust toolchain):
    uv sync
    uv run maturin develop --release
 
-Supports Python 3.10, 3.11, 3.12.
+Supports Python 3.10, 3.11, 3.12. See :ref:`mcp` and :ref:`installation` for details.
 
 Next Steps
 ----------

@@ -4,15 +4,35 @@
 Installation
 ============
 
-For the no-code MCP server, install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_ and follow the :ref:`mcp` guide. ``uvx`` runs the published package without cloning this repository or creating a Python environment.
+Agent / MCP (recommended)
+-------------------------
 
-For Python users:
+Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then register Pulsar with your agent tools:
+
+.. code-block:: bash
+
+   uvx --from thema-pulsar pulsar install
+
+No clone, venv, or Rust toolchain required. ``pulsar install`` detects Claude Code, Claude Desktop, Codex CLI, Gemini CLI, GitHub Copilot CLI, Cursor, VS Code, and Google Antigravity. See :ref:`mcp` for status/uninstall, pipx mode, headless ``--all``, and manual per-client setup.
+
+Python API
+----------
 
 .. code-block:: bash
 
    pip install thema-pulsar
 
-For development from a source checkout:
+Or with the MCP extra for a persistent ``pulsar-mcp`` binary:
+
+.. code-block:: bash
+
+   pipx install "thema-pulsar[mcp]"
+   # then: pulsar install --mode pipx
+
+From source
+-----------
+
+For development from a source checkout (requires a Rust toolchain):
 
 .. code-block:: bash
 

@@ -64,12 +64,14 @@ Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then re
 
    uvx --from thema-pulsar pulsar install
 
-The installer detects Claude Code, Claude Desktop, Codex CLI, Gemini CLI, Copilot CLI, Cursor, VS Code, and Antigravity. It writes the ``pulsar`` MCP entry each client expects, using an absolute path to ``uvx`` so GUI-launched apps can spawn the server. Inspect registrations with ``pulsar status``; remove them cleanly with ``pulsar uninstall``.
+The installer detects Claude Code, Claude Desktop, Codex CLI, Gemini CLI, GitHub Copilot CLI, Cursor, VS Code, and Google Antigravity. It writes the ``pulsar`` MCP entry each client expects, using an absolute path to ``uvx`` so GUI-launched apps can spawn the server. Inspect registrations with ``uvx --from thema-pulsar pulsar status``; remove them cleanly with ``uvx --from thema-pulsar pulsar uninstall``.
 
 The prompt talks to your terminal directly, so it still appears when output is
 redirected (``pulsar install | tee install.log``). Where escape codes will not
 render (``TERM=dumb``) it falls back to a numbered list. Where there is no
-terminal at all — CI, a systemd unit — pass harness ids or ``--all``:
+terminal at all — CI, a systemd unit — pass explicit harness ids (``claude``,
+``claude-desktop``, ``codex``, ``gemini``, ``copilot``, ``cursor``, ``vscode``,
+``antigravity``) or ``--all``:
 
 .. code-block:: bash
 
@@ -147,9 +149,10 @@ If you prefer a persistent install over ephemeral ``uv`` invocations:
 
 .. code-block:: bash
 
-   pipx install "thema-pulsar[mcp]"   # then use command: pulsar-mcp
-   # or
-   pip install "thema-pulsar[mcp]"    # in any venv
+   pipx install "thema-pulsar[mcp]"
+   pulsar install --mode pipx
+
+Or ``pip install "thema-pulsar[mcp]"`` in any venv, then point clients at ``pulsar-mcp`` directly (or run ``pulsar install --mode pipx`` from that environment).
 
 Developing against a local clone
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -187,7 +190,10 @@ Under the hood the AI will:
 Available MCP Tools
 -------------------
 
-The server exposes these tools to the AI client. Claude automatically chains them together:
+The server exposes these tools to the AI client, which chains them together automatically. Call ``get_workflow_guide`` once at the start of a session for the full opinionated procedure — the tables below are a reference, not a sequence.
+
+Core loop
+~~~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -195,24 +201,130 @@ The server exposes these tools to the AI client. Claude automatically chains the
 
    * - Tool
      - What It Does
+   * - **get_workflow_guide**
+     - Returns the full end-to-end procedure as markdown. Opt-in — not injected into every session automatically.
+   * - **ingest_dataset**
+     - Registers a host-visible CSV/Parquet path and returns the stable ``dataset_id`` every other tool keys off of.
    * - **characterize_dataset**
-     - Quick exploratory summary: k-NN distances (is your data sparse or dense?), projection dimensions, missing value patterns. On large datasets (``n`` above the advisor threshold), may include ``minhash_advisory`` with suggested ``minhash_d``, memory estimate, and error bounds. Claude uses this to make smart initial parameter guesses instead of random choices.
+     - Quick exploratory summary: k-NN distances (is your data sparse or dense?), projection dimensions, missing value patterns. On large datasets (``n`` above the advisor threshold), may include ``minhash_advisory`` with suggested ``minhash_d``, memory estimate, and error bounds.
+   * - **create_config**
+     - Builds a baseline sweep config calibrated against the *processed* feature space (after preprocessing + scaling) for a given ``dataset_id``. The mandatory first config-generation step — never let the agent guess parameters.
    * - **run_topological_sweep**
-     - Execute the full Pulsar pipeline: imputation → projection → Ball Mapper → cosmic graph, all from inline YAML config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
-   * - **generate_cluster_dossier**
-     - Deep statistical report per discovered cluster: trait profiles, homogeneity scores, separation metrics, concentration measures. Answers "What makes this cluster distinct?" and "How confident are we in the boundaries?"
-   * - **compare_clusters**
-     - Pairwise statistical tests (Welch's t-test, Kolmogorov-Smirnov, Cohen's d, effect sizes) between clusters. Answers "Are these really different, or just noise?"
-   * - **export_labeled_data**
-     - Return your original dataframe with labels from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. Ready for downstream analysis, visualization, or handoff to domain experts.
+     - Execute the full Pulsar pipeline: imputation → projection → Ball Mapper → cosmic graph, from inline YAML or a session's active config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
    * - **diagnose_cosmic_graph**
      - Current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. When ``construction: minhash``, includes ``minhash_profile`` (realized weight accuracy and confidence interval at the configured signature depth). The agent interprets these measurements against the user's objective.
+   * - **refine_config**
+     - Applies targeted dotted-path overrides (or key deletions) to a config instead of regenerating the whole YAML — the normal way to iterate after a diagnosis.
+   * - **generate_cluster_dossier**
+     - Computes clusters on the interpretation-threshold slice and returns per-cluster statistical evidence: trait profiles, homogeneity scores, separation metrics, concentration measures, plus clustering method metadata (method used, silhouette score). Persists a ``cluster_assignment_id``.
+   * - **compare_clusters**
+     - Pairwise statistical tests (Welch's t-test, Kolmogorov-Smirnov, Cohen's d, effect sizes) between two cached clusters. Answers "Are these really different, or just noise?"
+   * - **export_labeled_data**
+     - Return your original dataframe with labels from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. Ready for downstream analysis, visualization, or handoff to domain experts.
+
+Preprocessing helpers
+~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Tool
+     - What It Does
+   * - **probe_columns**
+     - Per-column drilldown (≤20 columns per call): sample values, missingness, distributions. Use after ``characterize_dataset`` when a specific column needs a closer look.
    * - **recommend_preprocessing**
      - Analyze column profiles and return a complete ``preprocessing:`` YAML block with per-column rationale. Call this before the first sweep to avoid hand-writing impute/encode rules from raw stats.
-   * - **repair_preprocessing_config**
-     - Parse a preprocessing error from ``run_topological_sweep``, look up the offending column in the dataset profile, and return a patched config with a change log. Fixes most errors in one call.
    * - **validate_preprocessing_config**
      - Dry-run only the preprocessing stage against the session data — no projection, no sweep cost. Returns PASS with a schema summary, or a structured error ready to pass to ``repair_preprocessing_config``.
+   * - **repair_preprocessing_config**
+     - Parse a preprocessing error from ``run_topological_sweep``, look up the offending column in the dataset profile, and return a patched config with a change log. Fixes most errors in one call.
+   * - **validate_config**
+     - Validates and normalizes a complete config into canonical YAML, independent of running a sweep.
+
+Sweep history and graph structure
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Tool
+     - What It Does
+   * - **get_sweep_history**
+     - The session's sweep table plus pattern synthesis across runs — what's been tried and how outcomes shifted.
+   * - **compare_sweeps**
+     - Markdown diff of two persisted runs' config and metrics.
+   * - **get_threshold_stability_curve**
+     - The H0 persistence-stability curve, structural breakpoints, and candidate threshold "lenses" (balanced / report-ready / detail-seeking / outlier-mining) for choosing ``construction_threshold`` deliberately instead of guessing.
+   * - **get_topological_skeleton**
+     - Graph connectivity structure — hub/bridge summary, capped node/edge preview — for the live run or a stored artifact.
+   * - **create_graph_artifact**
+     - Estimates or builds a read-only spectral-sparsifier artifact from the current live run. Costly and opt-in; defaults to ``estimate_only=True`` so the agent can see the cost before paying it.
+
+Cluster interpretation
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Tool
+     - What It Does
+   * - **get_cluster_profile**
+     - Targeted evidence for a single cluster from the cached dossier state.
+   * - **get_feature_signal**
+     - Cross-cluster evidence for specific named features (numeric or categorical).
+   * - **get_cluster_signal_matrix**
+     - Cross-cluster signal matrix ranked by discriminative power — which features actually separate the clusters.
+
+Export
+~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Tool
+     - What It Does
+   * - **export_html_report**
+     - Renders a full standalone HTML report from the cached dossier. Pass ``cluster_names`` for readable output; falls back to auto-generated names otherwise.
+   * - **export_dataset_bundle**
+     - Writes a Parquet bundle (raw/clean tabular data, graph nodes/edges/cosmic/groups) plus an ``export_manifest.json`` for downstream pipelines.
+
+Longitudinal and temporal panels
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For entity × time data (patients over visits, sensors over readings). Requires ``create_config`` first for calibration.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Tool
+     - What It Does
+   * - **build_longitudinal_graph**
+     - Pivots a long-format table into a panel and builds a ``trajectory`` (sparse observation-node) and/or ``temporal`` (dense entity × feature × time tensor) representation. Returns a ``longitudinal_id``.
+   * - **diagnose_longitudinal_graph**
+     - Measurements for whichever representation was built: trajectory similarity/cross-time stats, or the temporal tensor's aggregation modes side by side.
+   * - **get_trajectory_archetypes**
+     - Groups entities by the cluster-sequence they trace over time (trajectory surface only), with a threshold ladder.
+   * - **get_cross_time_neighbors**
+     - Finds observations at other time steps resembling a given ``(entity, time)`` observation.
+   * - **classify_trajectories**
+     - Classifies entity trajectories into cohorts via complexity (Shannon entropy), transition (Markov self-retention), sequence (structural path type), Levenshtein, or DTW distance.
+
+Meta
+~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Tool
+     - What It Does
+   * - **get_runtime_context**
+     - Server cwd, cache directory, session state, and path-visibility guidance — useful for sandboxed clients that need to know what the server can actually see on disk.
 
 Example: Palmer Penguins
 ------------------------

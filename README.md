@@ -30,9 +30,9 @@ You do **not** need to clone this repository. Install [uv](https://docs.astral.s
 uvx --from thema-pulsar pulsar install
 ```
 
-`pulsar install` detects Claude Code, Claude Desktop, Codex, Gemini CLI, Copilot CLI, Cursor, VS Code, and Antigravity, then writes the MCP server entry each client expects (absolute-path `uvx` by default). Re-run anytime to repair drifted configs. Check status with `pulsar status`; remove every registration with `pulsar uninstall`.
+`pulsar install` detects Claude Code, Claude Desktop, Codex CLI, Gemini CLI, GitHub Copilot CLI, Cursor, VS Code, and Google Antigravity, then writes the MCP server entry each client expects (absolute-path `uvx` by default). Re-run anytime to repair drifted configs. Check status with `uvx --from thema-pulsar pulsar status`; remove registrations with `uvx --from thema-pulsar pulsar uninstall`.
 
-Non-interactive shells need explicit harness ids or `--all`:
+The installer prompts on your terminal directly, so it still appears when output is piped (`pulsar install | tee install.log`). Where there is no console at all — CI, a systemd unit — pass explicit harness ids (`claude`, `claude-desktop`, `codex`, `gemini`, `copilot`, `cursor`, `vscode`, `antigravity`) or `--all`:
 
 ```sh
 uvx --from thema-pulsar pulsar install --all
@@ -93,12 +93,16 @@ Here is the exact loop the agent should run:
 
 We didn't just wrap our Python functions in JSON schemas. We built *Thick Tools*—stateful, workflow-aware engines that pass configuration directly between each other so you don't have to watch the agent screw up file I/O.
 
+*   `ingest_dataset(path)`: Registers a host-visible CSV/Parquet path and returns the stable `dataset_id` every other tool keys off of.
 *   `create_config(dataset_id)`: The primary config generation tool. Analyzes k-NN distances and projection dimensions in the *processed* feature space (after preprocessing + scaling) to produce a calibrated YAML config. Never let the agent guess parameters.
 *   `run_topological_sweep`: Runs the heavy Rust pipeline. Takes inline YAML and returns structured JSON with metrics and experiment diff. Config persistence is opt-in via `save_config=True`.
 *   `diagnose_cosmic_graph`: Returns current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets those measurements against the user's objective.
+*   `refine_config`: Applies targeted overrides (or deletions) to a config by dotted path instead of regenerating the whole YAML, for iterating after a diagnosis.
 *   `generate_cluster_dossier`: Returns structured JSON with per-cluster profiles (Z-scores, homogeneity, concentration) plus a Markdown summary. Includes clustering method metadata (method used, silhouette score).
 *   `compare_clusters`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
 *   `export_labeled_data`: Maps semantic names to a `cluster_assignment_id` from `generate_cluster_dossier` and dumps that exact clustering to a CSV.
+
+That's the core loop — there's a much larger surface for longitudinal/temporal panels, graph artifacts, threshold tuning, and HTML/Parquet exports. See the [MCP guide](https://github.com/Krv-Labs/pulsar/blob/main/docs/source/userGuides/mcp.rst) for the full tool table, or call `get_workflow_guide` from the agent itself for the opinionated end-to-end procedure.
 
 ### Pitfalls & Annoyances
 
@@ -138,6 +142,18 @@ If you use this package in your research, please cite:
 Which introduced the original [`Thema`](https://github.com/Krv-Labs/Thema) algorithm.
 
 ## Installation
+
+### Agent / MCP (recommended)
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
+
+```sh
+uvx --from thema-pulsar pulsar install
+```
+
+That registers Pulsar with the agent tools on your machine. No clone, venv, or Rust toolchain required. See the MCP Setup section above for status/uninstall, pipx mode, and manual client config.
+
+### Library (from source)
 
 Requires Rust and Python 3.10+.
 

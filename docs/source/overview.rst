@@ -131,7 +131,7 @@ Output                    Description
 ``cosmic_graph``          NetworkX graph with weighted edges
 ``weighted_adjacency``    Dense similarity matrix
 ``_embeddings``           List of projection embeddings
-``ball_mapper_graphs_``   List of Ball Mapper graphs
+``ball_maps``             List of Ball Mapper graphs
 ``stability_result``      Threshold selection diagnostics (if ``auto``)
 ========================= ========================================================
 
