@@ -458,8 +458,9 @@ def test_noninteractive_uninstall_requires_targets_and_yes(
     (home / ".cursor").mkdir()
     configure.run(home, _launch(fake_uvx), ["cursor"], dry_run=False)
     config = home / ".cursor" / "mcp.json"
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        monkeypatch.setattr(stream, "isatty", lambda: False)
+    # Prompts talk to the controlling console, not stdin — so a redirected
+    # stdin alone is not enough. Simulate a consoleless environment.
+    monkeypatch.setattr("pulsar.cli.install.menu.open_console", lambda: None)
     capsys.readouterr()
 
     with pytest.raises(SystemExit) as missing_targets:
