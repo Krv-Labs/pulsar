@@ -297,12 +297,25 @@ Longitudinal and temporal panels
 
 For entity × time data (patients over visits, sensors over readings). Requires ``create_config`` first for calibration.
 
+Longitudinal builds apply configured numeric imputation and ``drop_columns``
+before constructing the panel. Entity and time columns remain panel keys even
+when listed in ``drop_columns``; imputation must not target either key. Explicit
+``feature_columns`` must not include a dropped column. Text redaction markers
+are not converted to missing values for imputation.
+
+``on_missing`` still determines how incomplete histories are handled. With
+``allow_ragged``, any remaining missing feature values produce a structured
+error before calibration. Numeric longitudinal features are supported;
+categorical encoding is not applied to them.
+
 .. list-table::
    :header-rows: 1
    :widths: 30 70
 
    * - Tool
      - What It Does
+   * - **sample_longitudinal_entities**
+     - Selects a deterministic subset of entities while retaining all their observations. Returns a new ``dataset_id`` backed by Parquet, preserving column types. Generate a config for that sample before building its graph.
    * - **build_longitudinal_graph**
      - Pivots a long-format table into a panel and builds a ``trajectory`` (sparse observation-node) and/or ``temporal`` (dense entity × feature × time tensor) representation. Returns a ``longitudinal_id``.
    * - **diagnose_longitudinal_graph**

@@ -35,6 +35,7 @@ from pulsar.mcp.longitudinal import (
     cross_time_payload,
     estimate_costs,
     guard_representation,
+    prepare_panel_frame,
     pivot_panel,
     temporal_diagnosis,
     trajectory_diagnosis,
@@ -197,6 +198,14 @@ async def build_longitudinal_graph(
         # Deliberately NOT _bind_session_data: a panel is n*T observation rows and
         # rebinding would invalidate the static cluster and feature-evidence caches.
         df = await asyncio.to_thread(_read_dataset_file, dataset_path)
+        df = await asyncio.to_thread(
+            prepare_panel_frame,
+            df,
+            cfg,
+            entity_column,
+            time_column,
+            feature_columns,
+        )
 
         await report("pivot panel", 0.25)
         panel = await asyncio.to_thread(

@@ -10,19 +10,23 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
-import shutil
 import sys
+import sysconfig
+from pathlib import Path
 
 
 _REQUIRED_TOOLS = frozenset(
     {
         "ingest_dataset",
+        "sample_longitudinal_entities",
         "create_config",
         "run_topological_sweep",
         "diagnose_cosmic_graph",
         "generate_cluster_dossier",
         "get_workflow_guide",
+        "get_runtime_context",
     }
 )
 
@@ -53,10 +57,8 @@ def _check_imports() -> None:
 
 
 async def _assert_healthy(client, label: str) -> None:
-    if not await client.ping():
-        raise SystemExit(f"{label}: ping failed")
     if not client.is_connected():
-        raise SystemExit(f"{label}: client not connected after ping")
+        raise SystemExit(f"{label}: client not connected")
 
     tools = await client.list_tools()
     names = {t.name for t in tools}
@@ -64,12 +66,19 @@ async def _assert_healthy(client, label: str) -> None:
     if missing:
         raise SystemExit(f"{label}: missing tools from list_tools: {sorted(missing)}")
 
-    result = await client.call_tool("get_workflow_guide", {})
+    result = await client.call_tool("get_workflow_guide", {"wait_for_previous": True})
     text = str(result)
     if "Pulsar Topological Analysis Workflow" not in text:
         raise SystemExit(f"{label}: get_workflow_guide returned unexpected payload")
 
-    print(f"ok: {label} (ping + {len(names)} tools + get_workflow_guide)")
+    runtime = await client.call_tool("get_runtime_context", {})
+    context = json.loads(runtime.content[0].text)
+    if not context.get("session_id") or "session_model_loaded" not in context:
+        raise SystemExit(f"{label}: get_runtime_context returned incomplete context")
+
+    print(
+        f"ok: {label} ({len(names)} tools + get_workflow_guide + get_runtime_context)"
+    )
 
 
 async def _check_inprocess() -> None:
@@ -81,11 +90,13 @@ async def _check_inprocess() -> None:
 
 
 def _pulsar_mcp_command() -> tuple[str, list[str]]:
-    """Resolve the installed entry point, with a module fallback for Windows PATH quirks."""
-    command = shutil.which("pulsar-mcp")
-    if command is not None:
-        return command, []
-    return sys.executable, ["-m", "pulsar.mcp.server"]
+    """Resolve the entry point from this Python environment, independent of cwd/PATH."""
+    scripts = Path(sysconfig.get_path("scripts"))
+    for name in ("pulsar-mcp", "pulsar-mcp.exe"):
+        command = scripts / name
+        if command.is_file():
+            return str(command), []
+    return sys.executable, ["-I", "-m", "pulsar.mcp.server"]
 
 
 async def _check_stdio_launch() -> None:

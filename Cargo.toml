@@ -21,4 +21,6 @@ ahash      = "0.8"
 [profile.release]
 lto = true
 codegen-units = 1
-
+# rustc's macOS debuginfo-stripping path can misalign Mach-O LINKEDIT string
+# pools and make the extension unloadable (rust-lang/rust#157750).
+strip = "none"

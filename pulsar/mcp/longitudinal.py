@@ -30,6 +30,7 @@ from scipy.sparse.csgraph import connected_components
 from pulsar.config import PulsarConfig
 from pulsar.mcp.payloads import bounded_list, size_summary
 from pulsar.representations import CosmicTrajectory, TemporalCosmicGraph
+from pulsar._pulsar import impute_column
 
 PIVOT_POLICIES = ("drop_entity", "forward_fill", "allow_ragged")
 REPRESENTATIONS = ("trajectory", "temporal", "both")
@@ -164,6 +165,148 @@ def _numeric_feature_columns(
     ]
 
 
+def prepare_panel_frame(
+    df: pd.DataFrame,
+    config: PulsarConfig,
+    entity_column: str,
+    time_column: str,
+    feature_columns: list[str] | None,
+) -> pd.DataFrame:
+    """Apply the supported numeric preprocessing rules without changing keys."""
+    keys = {entity_column, time_column}
+    drop_columns = set(config.drop_columns) - keys
+    selected_keys = sorted(keys.intersection(feature_columns or []))
+    if selected_keys:
+        raise PanelError(
+            f"Explicit feature selection includes panel key column(s) {selected_keys}.",
+            error_code="PANEL_FEATURE_KEY_SELECTED",
+            agent_action=(
+                "Remove entity_column and time_column from feature_columns; they "
+                "are preserved as panel keys and cannot be geometry features."
+            ),
+            details={"columns": selected_keys},
+        )
+    # Pivot validation owns key presence; this check only protects configured
+    # rules from changing values that define row identity and ordering.
+    imputed_keys = sorted(keys.intersection(config.impute))
+    if imputed_keys:
+        raise PanelError(
+            f"Imputation rules target panel key column(s) {imputed_keys}.",
+            error_code="PANEL_PREPROCESSING_KEY_IMPUTE",
+            agent_action=(
+                "Remove entity_column and time_column from preprocessing.impute; "
+                "panel keys are preserved as identifiers."
+            ),
+            details={"columns": imputed_keys},
+        )
+
+    prepared = df.drop(
+        columns=[col for col in drop_columns if col in df.columns]
+    ).copy()
+    if feature_columns:
+        selected_features = set(feature_columns)
+    else:
+        # Configured impute targets join the default set even when they load as
+        # text, so the impute loop coerces or rejects them instead of dropping.
+        selected_features = set(
+            _numeric_feature_columns(prepared, entity_column, time_column)
+        ) | (set(config.impute) & set(prepared.columns))
+
+    encoded_features = sorted(
+        col
+        for col in config.encode
+        if col not in drop_columns
+        and col not in keys
+        and col in df.columns
+        and col in selected_features
+    )
+    if encoded_features:
+        raise PanelError(
+            "Categorical encoding is not supported for longitudinal features.",
+            error_code="PANEL_CATEGORICAL_UNSUPPORTED",
+            agent_action=(
+                "Use numeric feature columns, or remove preprocessing.encode "
+                "rules for this longitudinal build."
+            ),
+            details={"columns": encoded_features},
+        )
+
+    if feature_columns:
+        conflicting = sorted(set(feature_columns).intersection(drop_columns))
+        if conflicting:
+            raise PanelError(
+                f"Explicit feature selection includes dropped column(s) {conflicting}.",
+                error_code="PANEL_FEATURE_DROPPED",
+                agent_action=(
+                    "Remove these columns from feature_columns or from "
+                    "preprocessing.drop_columns so the selection is unambiguous."
+                ),
+                details={"columns": conflicting},
+            )
+
+    numeric_methods = {
+        "fill_mean",
+        "fill_median",
+        "sample_normal",
+        "fill_mode",
+        "sample_categorical",
+    }
+    for column, spec in config.impute.items():
+        if column not in selected_features or column not in prepared.columns:
+            continue
+        if spec.method not in numeric_methods:
+            raise PanelError(
+                f"Imputation method '{spec.method}' for '{column}' is not numeric.",
+                error_code="PANEL_IMPUTE_METHOD_UNSUPPORTED",
+                agent_action=(
+                    "Longitudinal preprocessing supports numeric imputation only; "
+                    "use a method supported for numeric values."
+                ),
+                details={"column": column, "method": spec.method},
+            )
+
+        values = prepared[column]
+        if not pd.api.types.is_numeric_dtype(values):
+            coerced = pd.to_numeric(values, errors="coerce")
+            invalid = values.notna() & coerced.isna()
+            if bool(invalid.any()):
+                raise PanelError(
+                    f"Imputation target '{column}' contains non-numeric values.",
+                    error_code="PANEL_IMPUTE_NON_NUMERIC_VALUES",
+                    agent_action=(
+                        "Clean the column or drop it. Redaction and other text "
+                        "values are not treated as ordinary missing data."
+                    ),
+                    details={
+                        "column": column,
+                        "invalid_value_count": int(invalid.sum()),
+                    },
+                )
+            prepared[column] = coerced
+            values = prepared[column]
+
+        missing = values.isna()
+        if not bool(missing.any()):
+            continue
+        if bool(missing.all()):
+            raise PanelError(
+                f"Feature column '{column}' is all-missing.",
+                error_code="PANEL_FEATURE_ALL_MISSING",
+                agent_action=(
+                    "Drop the all-missing column or provide observed numeric values "
+                    "before imputing it."
+                ),
+                details={"column": column},
+            )
+        prepared[column] = impute_column(
+            values.to_numpy(dtype=np.float64, na_value=np.nan),
+            spec.method,
+            spec.seed,
+        )
+
+    return prepared
+
+
 def pivot_panel(
     df: pd.DataFrame,
     entity_column: str,
@@ -243,6 +386,17 @@ def pivot_panel(
 
     frame = df[[entity_column, time_column, *features]].copy()
 
+    all_missing = [col for col in features if frame[col].isna().all()]
+    if all_missing:
+        raise PanelError(
+            f"Feature column(s) {all_missing} are all-missing.",
+            error_code="PANEL_FEATURE_ALL_MISSING",
+            agent_action=(
+                "Drop all-missing columns or provide observed numeric values before "
+                "building the panel."
+            ),
+            details={"columns": all_missing},
+        )
     duplicated = frame.duplicated([entity_column, time_column])
     if bool(duplicated.any()):
         raise PanelError(
@@ -312,10 +466,11 @@ def pivot_panel(
     if on_missing == "allow_ragged":
         snapshots = []
         snapshot_entity_ids = []
+        aligned_cube = aligned.to_numpy(dtype=np.float64).reshape(
+            len(entities), len(times), len(features)
+        )
         for time_index, time_value in enumerate(times):
-            rows = aligned.to_numpy(dtype=np.float64).reshape(
-                len(entities), len(times), len(features)
-            )[:, time_index, :]
+            rows = aligned_cube[:, time_index, :]
             keep = presence[:, time_index]
             snapshots.append(np.ascontiguousarray(rows[keep], dtype=np.float64))
             snapshot_entity_ids.append(
@@ -358,6 +513,23 @@ def pivot_panel(
             for t in range(len(times))
         ]
         snapshot_entity_ids = [kept_entities] * len(times)
+
+    nan_counts = np.zeros(len(features), dtype=np.int64)
+    for snapshot in snapshots:
+        nan_counts += np.isnan(snapshot).sum(axis=0)
+    remaining_nan = {
+        feature: int(count) for feature, count in zip(features, nan_counts) if count
+    }
+    if remaining_nan:
+        raise PanelError(
+            "Missing values remain in longitudinal feature columns.",
+            error_code="PANEL_NAN_REMAINS",
+            agent_action=(
+                "Add numeric imputation rules in preprocessing.impute or remove "
+                "the affected columns with preprocessing.drop_columns."
+            ),
+            details={"missing_by_column": remaining_nan},
+        )
 
     report = {
         "policy_applied": on_missing,

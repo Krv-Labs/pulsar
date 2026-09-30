@@ -47,7 +47,7 @@ jobs:
           WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
           test -n "$WHEEL"
           python -m pip install --upgrade pip
-          python -m pip install "${WHEEL}" 'fastmcp>=2.0'
+          python -m pip install "${WHEEL}[mcp]"
           python scripts/smoke_mcp.py
 
       - name: Upload wheels
@@ -86,7 +86,7 @@ jobs:
           WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
           test -n "$WHEEL"
           python -m pip install --upgrade pip
-          python -m pip install "${WHEEL}" 'fastmcp>=2.0'
+          python -m pip install "${WHEEL}[mcp]"
           python scripts/smoke_mcp.py
 
       - name: Upload wheels
@@ -132,7 +132,7 @@ jobs:
           WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
           test -n "$WHEEL"
           python -m pip install --upgrade pip
-          python -m pip install "${WHEEL}" 'fastmcp>=2.0'
+          python -m pip install "${WHEEL}[mcp]"
           python scripts/smoke_mcp.py
 
       - name: Upload wheels

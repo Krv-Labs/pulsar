@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `sample_longitudinal_entities` creates a deterministic subset of whole entity
+  histories as a new Parquet-backed dataset, preserving column types.
+
+### Changed
+
+- The MCP extra and development/docs environments use FastMCP 4
+  (`>=4.0.10,<5`). CI checks a fresh wheel installation with the latest allowed
+  dependencies through in-process and stdio tool calls.
+
+### Fixed
+
+- Release wheels disable symbol stripping to avoid a Rust bug that
+  produces native libraries rejected by current macOS loaders.
+- MCP wheel smoke tests launch the server from the active Python environment,
+  including when run from a source checkout.
+- Longitudinal builds honor configured numeric imputation and excluded feature
+  columns while preserving entity and time keys. Missing feature values that
+  remain produce an actionable panel error before calibration.
+- Ragged-panel pivoting converts the aligned table to a numeric array once,
+  instead of repeating the conversion for every time point.
+
 ## [0.3.1] - 2026-08-07
 
 ### Changed
@@ -163,4 +186,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Initial v0.2.0 release marking the transition of the core architecture to Rust with Python bindings.
-
