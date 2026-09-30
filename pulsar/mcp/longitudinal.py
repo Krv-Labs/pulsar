@@ -206,9 +206,11 @@ def prepare_panel_frame(
     if feature_columns:
         selected_features = set(feature_columns)
     else:
+        # Configured impute targets join the default set even when they load as
+        # text, so the impute loop coerces or rejects them instead of dropping.
         selected_features = set(
             _numeric_feature_columns(prepared, entity_column, time_column)
-        )
+        ) | (set(config.impute) & set(prepared.columns))
 
     encoded_features = sorted(
         col

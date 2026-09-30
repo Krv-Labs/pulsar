@@ -168,6 +168,17 @@ def test_redaction_text_is_not_coerced_and_imputed(tmp_path):
     assert result["error_code"] == "PANEL_IMPUTE_NON_NUMERIC_VALUES"
 
 
+def test_default_selection_keeps_text_typed_impute_target():
+    frame = _frame()
+    frame["x"] = frame["x"].map(lambda v: None if pd.isna(v) else str(v))
+    config = load_config(yaml.safe_load(_config(impute={"x": {"method": "fill_mean"}})))
+
+    prepared = prepare_panel_frame(frame, config, "entity", "time", None)
+
+    assert pd.api.types.is_numeric_dtype(prepared["x"])
+    assert not prepared["x"].isna().any()
+
+
 def test_all_missing_feature_has_clear_structured_error(tmp_path):
     frame = _frame()
     frame["x"] = None
