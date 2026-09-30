@@ -121,6 +121,34 @@ def test_sampling_is_deterministic_preserves_histories_and_parquet_dtypes(tmp_pa
     assert not list(registry_module.registry.cache_dir.glob("sample_*.parquet"))
 
 
+def test_csv_source_with_mixed_type_column_samples_as_csv(tmp_path):
+    # read_csv parses ~262k-row chunks; an all-int first chunk followed by
+    # strings yields an int/str object column that pyarrow cannot write.
+    n_rows = 300_000
+    source_path = tmp_path / "source.csv"
+    pd.DataFrame(
+        {
+            "patient_id": [i // 3 for i in range(n_rows)],
+            "lab": [i if i < 270_000 else "high" for i in range(n_rows)],
+        }
+    ).to_csv(source_path, index=False)
+    assert {type(v) for v in pd.read_csv(source_path)["lab"]} == {int, str}
+    dataset = json.loads(asyncio.run(ingest_dataset(str(source_path))))
+
+    result = json.loads(
+        asyncio.run(
+            sample_longitudinal_entities(
+                dataset["dataset_id"], "patient_id", max_entities=5
+            )
+        )
+    )
+
+    assert result["sampled_entities"] == 5
+    assert result["sampled_rows"] == 15
+    assert _resolve_dataset_path(result["dataset_id"]).endswith("_sample.csv")
+    assert not list(registry_module.registry.cache_dir.glob("sample_*"))
+
+
 def test_min_time_points_requires_existing_time_column(tmp_path):
     source_path = tmp_path / "source.csv"
     pd.DataFrame(

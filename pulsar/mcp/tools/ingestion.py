@@ -165,11 +165,15 @@ async def sample_longitudinal_entities(
                 },
             )
 
-        staging_path = registry.cache_dir / f"sample_{uuid.uuid4().hex}.parquet"
+        # CSV sources stay CSV: pyarrow rejects the mixed-type object columns
+        # read_csv can produce, and a CSV round-trip re-reads like the source.
+        suffix = ".parquet" if source_path.lower().endswith(".parquet") else ".csv"
+        writer = sampled.to_parquet if suffix == ".parquet" else sampled.to_csv
+        staging_path = registry.cache_dir / f"sample_{uuid.uuid4().hex}{suffix}"
         try:
-            await asyncio.to_thread(sampled.to_parquet, staging_path, index=False)
+            await asyncio.to_thread(writer, staging_path, index=False)
             record = registry.register_dataset_from_file(
-                f"{Path(source_path).stem}_sample.parquet",
+                f"{Path(source_path).stem}_sample{suffix}",
                 staging_path,
                 source="entity_sample",
             )
