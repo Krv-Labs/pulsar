@@ -12,8 +12,9 @@ import asyncio
 import importlib
 import json
 import os
-import shutil
 import sys
+import sysconfig
+from pathlib import Path
 
 
 _REQUIRED_TOOLS = frozenset(
@@ -89,11 +90,13 @@ async def _check_inprocess() -> None:
 
 
 def _pulsar_mcp_command() -> tuple[str, list[str]]:
-    """Resolve the installed entry point, with a module fallback for Windows PATH quirks."""
-    command = shutil.which("pulsar-mcp")
-    if command is not None:
-        return command, []
-    return sys.executable, ["-m", "pulsar.mcp.server"]
+    """Resolve the entry point from this Python environment, independent of cwd/PATH."""
+    scripts = Path(sysconfig.get_path("scripts"))
+    for name in ("pulsar-mcp", "pulsar-mcp.exe"):
+        command = scripts / name
+        if command.is_file():
+            return str(command), []
+    return sys.executable, ["-I", "-m", "pulsar.mcp.server"]
 
 
 async def _check_stdio_launch() -> None:

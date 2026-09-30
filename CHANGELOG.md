@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release wheels disable symbol stripping to avoid a Rust bug that
+  produces native libraries rejected by current macOS loaders.
+- MCP wheel smoke tests launch the server from the active Python environment,
+  including when run from a source checkout.
 - Longitudinal builds honor configured numeric imputation and excluded feature
   columns while preserving entity and time keys. Missing feature values that
   remain produce an actionable panel error before calibration.
@@ -182,4 +186,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Initial v0.2.0 release marking the transition of the core architecture to Rust with Python bindings.
-
