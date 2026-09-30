@@ -16,6 +16,11 @@ Reveal the dataset's topology; do not force convenient clusters.
 
 ## PHASE I: INGEST & CALIBRATE
 1. Ingest: Use `ingest_dataset(path)` handles. Prefer `dataset_id` everywhere.
+   For a quick longitudinal run, use `sample_longitudinal_entities(dataset_id, entity_column)`
+   after ingestion; it returns a derived dataset handle without exposing rows.
+   `min_observations` counts rows. For a distinct-timepoint minimum, also pass
+   `time_column` and `min_time_points`; this filters entities but does not ensure
+   `drop_entity` retains complete coverage across every timepoint in the dataset.
 2. Characterize: `characterize_dataset(dataset_id)` returns a compact,
    summary-first map: raw numeric geometry, schema counts, and a capped preview
    of interesting columns. Full per-column profiles are intentionally omitted

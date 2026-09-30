@@ -4,6 +4,7 @@ import os
 
 from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
+    sample_longitudinal_entities,
     begin_dataset_upload,
     append_dataset_chunk,
     finalize_dataset_upload,
@@ -61,6 +62,7 @@ _ENABLE_UPLOAD = os.environ.get("PULSAR_MCP_ENABLE_UPLOAD") == "1"
 ALL_TOOLS_LIST = [
     # Ingestion
     ingest_dataset,
+    sample_longitudinal_entities,
     *(
         [begin_dataset_upload, append_dataset_chunk, finalize_dataset_upload]
         if _ENABLE_UPLOAD
@@ -109,6 +111,7 @@ ALL_TOOLS_LIST = [
 __all__ = [
     "ALL_TOOLS_LIST",
     "ingest_dataset",
+    "sample_longitudinal_entities",
     "begin_dataset_upload",
     "append_dataset_chunk",
     "finalize_dataset_upload",
