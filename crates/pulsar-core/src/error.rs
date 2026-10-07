@@ -3,7 +3,8 @@ use thiserror::Error;
 /// All errors that can originate from the Pulsar Rust backend.
 ///
 /// Every variant maps to a Python `ValueError` when propagated across the
-/// PyO3 boundary (see the `From<PulsarError> for pyo3::PyErr` impl below).
+/// PyO3 boundary (see the `From<PulsarError> for pyo3::PyErr` impl below,
+/// available behind the `python` feature).
 #[derive(Debug, Error)]
 pub enum PulsarError {
     /// Raised when an array passed to a function has the wrong number of rows
@@ -42,7 +43,10 @@ pub enum PulsarError {
 ///
 /// This impl is required by PyO3: any `Result<_, PulsarError>` returned from
 /// a `#[pyfunction]` or `#[pymethods]` method is automatically converted to a
-/// Python exception by this conversion.
+/// Python exception by this conversion. It lives in this crate (behind the
+/// `python` feature) because the orphan rule forbids implementing it in the
+/// extension crate.
+#[cfg(feature = "python")]
 impl From<PulsarError> for pyo3::PyErr {
     fn from(e: PulsarError) -> pyo3::PyErr {
         pyo3::exceptions::PyValueError::new_err(e.to_string())

@@ -1,0 +1,15 @@
+[package]
+name = "thema-pulsar"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# extension-module is enabled by maturin (see [tool.maturin] features in
+# pyproject.toml), not here, so `cargo check --workspace` can link a host
+# Python during development.
+pyo3        = { version = "0.22" }
+numpy       = "0.22"
+pulsar-core = { path = "../pulsar-core", features = ["python"] }

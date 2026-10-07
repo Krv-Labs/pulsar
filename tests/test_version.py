@@ -32,7 +32,13 @@ def test_cargo_version_matches_repo():
 
     cargo_path = Path(__file__).resolve().parent.parent / "Cargo.toml"
     with cargo_path.open("rb") as f:
-        expected = tomllib.load(f)["package"]["version"]
+        manifest = tomllib.load(f)
+    # Repo root is a cargo workspace; member crates inherit its version.
+    expected = (
+        manifest["workspace"]["package"]["version"]
+        if "workspace" in manifest
+        else manifest["package"]["version"]
+    )
     assert version_mod._cargo_version() == expected
 
 

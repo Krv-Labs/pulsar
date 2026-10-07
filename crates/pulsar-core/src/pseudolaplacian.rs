@@ -1,15 +1,13 @@
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2};
-use pyo3::prelude::*;
 use rayon::prelude::*;
 
-use crate::ballmapper::BallMapper;
+use crate::error::PulsarError;
 
 /// Compute pseudo-Laplacian matrix from Ball Mapper node membership.
 ///
 /// Given n data points and a list of balls, the pseudo-Laplacian L is n×n where:
-/// - L[i,i] = number of balls containing point i
-/// - L[i,j] for i≠j = negative count of balls containing both i and j
+/// - `L[i,i]` = number of balls containing point i
+/// - `L[i,j]` for i≠j = negative count of balls containing both i and j
 ///
 /// This reflects topological proximity: frequently co-occurring points have
 /// strong negative off-diagonal entries.
@@ -33,20 +31,8 @@ pub fn pseudo_laplacian_inner(nodes: &[Vec<usize>], n: usize) -> Array2<i64> {
 ///
 /// This is the optimized entry point that replaces sequential Python loops.
 /// Uses rayon parallel map-reduce for maximum throughput.
-///
-/// ```python
-/// # Single call replaces 4000+ Python/Rust crossings
-/// galactic_L = accumulate_pseudo_laplacians(ball_maps, n)
-/// ```
-#[pyfunction]
-pub fn accumulate_pseudo_laplacians<'py>(
-    py: Python<'py>,
-    ball_maps: Vec<PyRef<'py, BallMapper>>,
-    n: usize,
-) -> PyResult<Bound<'py, PyArray2<i64>>> {
-    let all_nodes: Vec<&Vec<Vec<usize>>> = ball_maps.iter().map(|bm| &bm.nodes).collect();
-
-    let galactic_l: Array2<i64> = all_nodes
+pub fn accumulate_pseudo_laplacians(all_nodes: &[&[Vec<usize>]], n: usize) -> Array2<i64> {
+    all_nodes
         .par_iter()
         .map(|nodes| pseudo_laplacian_inner(nodes, n))
         .reduce(
@@ -55,9 +41,7 @@ pub fn accumulate_pseudo_laplacians<'py>(
                 acc += &l;
                 acc
             },
-        );
-
-    Ok(galactic_l.into_pyarray_bound(py))
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -81,13 +65,36 @@ struct SparseLaplacianContribution {
 }
 
 /// Sparse pseudo-Laplacian: diagonal counts + deduped, `(i,j)`-sorted upper-triangle
-/// off-diagonal co-occurrence counts. Feeds `CosmicGraph.from_pseudo_laplacian_sparse`
+/// off-diagonal co-occurrence counts. Feeds `CosmicGraphInner::from_pseudo_laplacian_sparse`
 /// directly without densifying.
-#[pyclass]
 pub struct SparsePseudoLaplacian {
     pub n: usize,
     pub diag: Vec<i64>,
     pub offdiag: Vec<(usize, usize, i64)>,
+}
+
+impl SparsePseudoLaplacian {
+    /// Number of stored off-diagonal entries (nonzeros in the upper triangle).
+    pub fn nnz(&self) -> usize {
+        self.offdiag.len()
+    }
+
+    /// Fold another sparse Laplacian (same n) into this one: sum diagonals and
+    /// merge off-diagonal counts. Used to accumulate across datasets in `fit_multi`
+    /// without ever building an n×n matrix.
+    pub fn merge_in_place(&mut self, other: &SparsePseudoLaplacian) -> Result<(), PulsarError> {
+        if other.n != self.n {
+            return Err(PulsarError::ShapeMismatch {
+                expected: format!("n = {}", self.n),
+                got: format!("n = {}", other.n),
+            });
+        }
+        for (acc, &add) in self.diag.iter_mut().zip(other.diag.iter()) {
+            *acc += add;
+        }
+        self.offdiag = merge_sorted(std::mem::take(&mut self.offdiag), other.offdiag.clone());
+        Ok(())
+    }
 }
 
 /// Sort a COO buffer by `(i, j)` and merge duplicate entries by summing counts,
@@ -207,55 +214,6 @@ fn pseudo_laplacian_inner_sparse(nodes: &[Vec<usize>], n: usize) -> SparseLaplac
     }
 }
 
-#[pymethods]
-impl SparsePseudoLaplacian {
-    /// Number of points (matrix dimension n).
-    #[getter]
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    /// Diagonal counts `diag[i]` = number of (ball-map, ball) pairs containing i.
-    #[getter]
-    pub fn diag<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
-        self.diag.clone().into_pyarray_bound(py)
-    }
-
-    /// Upper-triangle off-diagonal co-occurrence counts `(i, j, count)` with `i < j`,
-    /// sorted by `(i, j)`.
-    #[getter]
-    pub fn offdiag(&self) -> Vec<(usize, usize, i64)> {
-        self.offdiag.clone()
-    }
-
-    /// Number of stored off-diagonal entries (nonzeros in the upper triangle).
-    #[getter]
-    pub fn nnz(&self) -> usize {
-        self.offdiag.len()
-    }
-
-    /// Fold another sparse Laplacian (same n) into this one: sum diagonals and
-    /// merge off-diagonal counts. Used to accumulate across datasets in `fit_multi`
-    /// without ever building an n×n matrix.
-    pub fn merge_in_place(&mut self, other: PyRef<SparsePseudoLaplacian>) -> PyResult<()> {
-        if other.n != self.n {
-            return Err(crate::error::PulsarError::ShapeMismatch {
-                expected: format!("n = {}", self.n),
-                got: format!("n = {}", other.n),
-            }
-            .into());
-        }
-        for (acc, &add) in self.diag.iter_mut().zip(other.diag.iter()) {
-            *acc += add;
-        }
-        self.offdiag = merge_sorted(
-            std::mem::take(&mut self.offdiag),
-            other.offdiag.clone(),
-        );
-        Ok(())
-    }
-}
-
 /// Sparse counterpart of [`accumulate_pseudo_laplacians`]. Accumulates the
 /// co-membership pseudo-Laplacian across all ball maps as a COO edge list plus an
 /// O(n) diagonal, never allocating an n×n matrix.
@@ -264,14 +222,10 @@ impl SparsePseudoLaplacian {
 /// contribution; every contribution is sorted/merged locally, and the rayon reduce
 /// merges sorted COO buffers while adding diagonals. This avoids carrying raw
 /// duplicate co-membership pairs across the whole sweep.
-#[pyfunction]
-pub fn accumulate_pseudo_laplacians_sparse<'py>(
-    _py: Python<'py>,
-    ball_maps: Vec<PyRef<'py, BallMapper>>,
+pub fn accumulate_pseudo_laplacians_sparse(
+    all_nodes: &[&[Vec<usize>]],
     n: usize,
-) -> PyResult<SparsePseudoLaplacian> {
-    let all_nodes: Vec<&Vec<Vec<usize>>> = ball_maps.iter().map(|bm| &bm.nodes).collect();
-
+) -> SparsePseudoLaplacian {
     let (diag, raw_offdiag): (Vec<i64>, Vec<(usize, usize, i64)>) = all_nodes
         .par_iter()
         .map(|nodes| {
@@ -291,7 +245,7 @@ pub fn accumulate_pseudo_laplacians_sparse<'py>(
         );
 
     let offdiag = raw_offdiag;
-    Ok(SparsePseudoLaplacian { n, diag, offdiag })
+    SparsePseudoLaplacian { n, diag, offdiag }
 }
 
 #[cfg(test)]

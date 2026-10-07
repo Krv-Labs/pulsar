@@ -1,25 +1,20 @@
 use std::collections::{HashMap, VecDeque};
 
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
-use pyo3::prelude::*;
 use rand::prelude::*;
 use rand_distr::StandardNormal;
 
-use crate::ballmapper::BallMapper;
 use crate::error::PulsarError;
-use crate::minhash::{cosmic_edges_minhash, MinHashSignatures};
-use crate::pseudolaplacian::SparsePseudoLaplacian;
 
-type WeightedEdge = (usize, usize, f64);
+pub type WeightedEdge = (usize, usize, f64);
 
 #[derive(Copy, Clone)]
-struct PcgOptions {
-    tol: f64,
-    max_iter: usize,
+pub struct PcgOptions {
+    pub tol: f64,
+    pub max_iter: usize,
 }
 
-/// Internal Cosmic Graph data.
+/// Cosmic Graph data.
 ///
 /// Dense storage preserves the historical construction path. Sparse storage is
 /// used by spectral sparsification and materializes dense arrays only when a
@@ -68,7 +63,7 @@ impl CosmicGraphInner {
     /// ever materializing the n×n matrix. Computes weights only for the nonzero
     /// off-diagonal entries.
     ///
-    /// Parity with [`from_pseudo_laplacian`]: with `l[i,j] = -count`, the dense
+    /// Parity with [`Self::from_pseudo_laplacian`]: with `l[i,j] = -count`, the dense
     /// denominator `l[i,i] + l[j,j] + l[i,j]` equals `diag[i] + diag[j] - count`,
     /// and `wadj[i,j] = -l[i,j]/denom = count/denom`. Pairs with no shared ball have
     /// `count = 0` → weight 0 in the dense path, so iterating only nonzero entries
@@ -95,13 +90,13 @@ impl CosmicGraphInner {
         CosmicGraphInner::Sparse { n, edges }
     }
 
-    fn n(&self) -> usize {
+    pub fn n(&self) -> usize {
         match self {
             CosmicGraphInner::Dense { n, .. } | CosmicGraphInner::Sparse { n, .. } => *n,
         }
     }
 
-    fn weighted_edges(&self) -> Vec<WeightedEdge> {
+    pub fn weighted_edges(&self) -> Vec<WeightedEdge> {
         match self {
             CosmicGraphInner::Sparse { edges, .. } => edges.clone(),
             CosmicGraphInner::Dense {
@@ -121,7 +116,7 @@ impl CosmicGraphInner {
         }
     }
 
-    fn weighted_adj(&self) -> Array2<f64> {
+    pub fn weighted_adj(&self) -> Array2<f64> {
         match self {
             CosmicGraphInner::Dense { weighted_adj, .. } => weighted_adj.clone(),
             CosmicGraphInner::Sparse { n, edges } => {
@@ -135,7 +130,7 @@ impl CosmicGraphInner {
         }
     }
 
-    fn adj(&self) -> Array2<u8> {
+    pub fn adj(&self) -> Array2<u8> {
         match self {
             CosmicGraphInner::Dense { adj, .. } => adj.clone(),
             CosmicGraphInner::Sparse { n, edges } => {
@@ -150,78 +145,8 @@ impl CosmicGraphInner {
             }
         }
     }
-}
-
-#[pyclass]
-pub struct CosmicGraph {
-    inner: CosmicGraphInner,
-}
-
-#[pymethods]
-impl CosmicGraph {
-    #[staticmethod]
-    pub fn from_pseudo_laplacian<'py>(
-        _py: Python<'py>,
-        l: PyReadonlyArray2<'py, i64>,
-        threshold: f64,
-    ) -> PyResult<Self> {
-        let arr = l.as_array().to_owned();
-        let inner = CosmicGraphInner::from_pseudo_laplacian(&arr, threshold);
-        Ok(CosmicGraph { inner })
-    }
-
-    /// Build a CosmicGraph from a sparse pseudo-Laplacian (see
-    /// [`accumulate_pseudo_laplacians_sparse`]) without materializing an n×n matrix.
-    /// Pass `threshold = 0.0` for exact parity with the dense construction path.
-    #[staticmethod]
-    pub fn from_pseudo_laplacian_sparse(
-        spl: PyRef<SparsePseudoLaplacian>,
-        threshold: f64,
-    ) -> PyResult<Self> {
-        let inner = CosmicGraphInner::from_pseudo_laplacian_sparse(
-            spl.n,
-            &spl.diag,
-            &spl.offdiag,
-            threshold,
-        );
-        Ok(CosmicGraph { inner })
-    }
-
-    /// Build a CosmicGraph directly from ball memberships via MinHash + LSH, the
-    /// approximate construction path. Bypasses the exact pseudo-Laplacian (whose
-    /// Σ_c |B_c|² pair materialization is the real bottleneck): edge weights are
-    /// unbiased Jaccard estimates of the points' ball-sets with `Var = J(1−J)/d`.
-    ///
-    /// `d` is the signature depth (accuracy/speed knob; error is size-independent).
-    /// `seed` makes the (randomized) construction reproducible. Output is the same
-    /// sparse representation as [`from_pseudo_laplacian_sparse`], so the downstream
-    /// interpretation layer (threshold selection, components) is unchanged.
-    #[staticmethod]
-    #[pyo3(signature = (ball_maps, n, d=256, seed=42))]
-    pub fn from_ball_maps_minhash(
-        ball_maps: Vec<PyRef<BallMapper>>,
-        n: usize,
-        d: usize,
-        seed: u64,
-    ) -> PyResult<Self> {
-        if d == 0 {
-            return Err(PulsarError::InvalidParameter {
-                msg: "minhash signature depth d must be >= 1".to_string(),
-            }
-            .into());
-        }
-        let balls: Vec<&[usize]> = ball_maps
-            .iter()
-            .flat_map(|bm| bm.nodes.iter().map(|v| v.as_slice()))
-            .collect();
-        let edges = cosmic_edges_minhash(&balls, n, d, seed);
-        Ok(CosmicGraph {
-            inner: CosmicGraphInner::Sparse { n, edges },
-        })
-    }
 
     /// Spielman-Srivastava style spectral sparsifier using JL resistance sketches.
-    #[pyo3(signature = (epsilon, seed=42, sketch_dim=None, sample_count=None, pcg_tol=1e-6, max_iter=1000))]
     pub fn spectral_sparsify(
         &self,
         epsilon: f64,
@@ -230,33 +155,28 @@ impl CosmicGraph {
         sample_count: Option<usize>,
         pcg_tol: f64,
         max_iter: usize,
-    ) -> PyResult<Self> {
+    ) -> Result<CosmicGraphInner, PulsarError> {
         if !epsilon.is_finite() || epsilon <= 0.0 {
             return Err(PulsarError::InvalidParameter {
                 msg: "epsilon must be finite and positive".to_string(),
-            }
-            .into());
+            });
         }
         if !pcg_tol.is_finite() || pcg_tol <= 0.0 {
             return Err(PulsarError::InvalidParameter {
                 msg: "pcg_tol must be finite and positive".to_string(),
-            }
-            .into());
+            });
         }
 
-        let n = self.inner.n();
+        let n = self.n();
         let edges: Vec<WeightedEdge> = self
-            .inner
             .weighted_edges()
             .into_iter()
             .filter(|&(i, j, w)| i != j && w.is_finite() && w > 0.0)
             .collect();
         if n <= 1 || edges.is_empty() {
-            return Ok(CosmicGraph {
-                inner: CosmicGraphInner::Sparse {
-                    n,
-                    edges: Vec::new(),
-                },
+            return Ok(CosmicGraphInner::Sparse {
+                n,
+                edges: Vec::new(),
             });
         }
 
@@ -353,87 +273,14 @@ impl CosmicGraph {
             .collect();
         sparse_edges.sort_by_key(|&(u, v, _)| (u, v));
 
-        Ok(CosmicGraph {
-            inner: CosmicGraphInner::Sparse {
-                n,
-                edges: sparse_edges,
-            },
+        Ok(CosmicGraphInner::Sparse {
+            n,
+            edges: sparse_edges,
         })
     }
-
-    #[getter]
-    pub fn weighted_adj<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        Ok(self.inner.weighted_adj().into_pyarray_bound(py))
-    }
-
-    #[getter]
-    pub fn adj<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u8>>> {
-        Ok(self.inner.adj().into_pyarray_bound(py))
-    }
-
-    #[getter]
-    pub fn n(&self) -> usize {
-        self.inner.n()
-    }
-
-    pub fn weighted_edges(&self) -> Vec<WeightedEdge> {
-        self.inner.weighted_edges()
-    }
-
-    #[getter]
-    pub fn n_edges(&self) -> usize {
-        self.inner.weighted_edges().len()
-    }
 }
 
-/// Streaming MinHash signature accumulator for memory-bounded multi-dataset
-/// construction (`fit_multi`). Folds batches of ball maps into a constant-size `d×n`
-/// signature via element-wise `min`, then builds the cosmic graph in one shot — the
-/// signature never grows with the number of ball maps, so batches can be discarded as
-/// they are consumed (matching the exact path's `merge_in_place` streaming).
-#[pyclass]
-pub struct MinHashAccumulator {
-    inner: MinHashSignatures,
-}
-
-#[pymethods]
-impl MinHashAccumulator {
-    #[new]
-    #[pyo3(signature = (n, d=256, seed=42))]
-    pub fn new(n: usize, d: usize, seed: u64) -> PyResult<Self> {
-        if d == 0 {
-            return Err(PulsarError::InvalidParameter {
-                msg: "minhash signature depth d must be >= 1".to_string(),
-            }
-            .into());
-        }
-        Ok(MinHashAccumulator {
-            inner: MinHashSignatures::new(n, d, seed),
-        })
-    }
-
-    /// Fold a batch of ball maps into the running signature.
-    pub fn accumulate(&mut self, ball_maps: Vec<PyRef<BallMapper>>) {
-        let balls: Vec<&[usize]> = ball_maps
-            .iter()
-            .flat_map(|bm| bm.nodes.iter().map(|v| v.as_slice()))
-            .collect();
-        self.inner.accumulate(&balls);
-    }
-
-    /// Build the cosmic graph (LSH banding + candidate weight estimation) from the
-    /// accumulated signature.
-    pub fn to_cosmic_graph(&self) -> CosmicGraph {
-        CosmicGraph {
-            inner: CosmicGraphInner::Sparse {
-                n: self.inner.n(),
-                edges: self.inner.edges(),
-            },
-        }
-    }
-}
-
-fn laplacian_diag(n: usize, edges: &[WeightedEdge]) -> Vec<f64> {
+pub fn laplacian_diag(n: usize, edges: &[WeightedEdge]) -> Vec<f64> {
     let mut diag = vec![0.0; n];
     for &(u, v, w) in edges {
         diag[u] += w;
@@ -442,7 +289,7 @@ fn laplacian_diag(n: usize, edges: &[WeightedEdge]) -> Vec<f64> {
     diag
 }
 
-fn connected_components(n: usize, edges: &[WeightedEdge]) -> Vec<Vec<usize>> {
+pub fn connected_components(n: usize, edges: &[WeightedEdge]) -> Vec<Vec<usize>> {
     let mut adj = vec![Vec::new(); n];
     for &(u, v, _) in edges {
         adj[u].push(v);
