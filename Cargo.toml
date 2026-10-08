@@ -1,22 +1,12 @@
-[package]
-name = "thema-pulsar"
-version = "0.3.2"
+[workspace]
+resolver = "2"
+members = ["crates/pulsar-core", "crates/pulsar-python"]
+
+# Single source of truth for the version (scripts/check_versions.py and
+# pulsar/_version.py both read this table); member crates inherit it.
+[workspace.package]
+version = "0.4.0"
 edition = "2021"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-pyo3       = { version = "0.22", features = ["extension-module"] }
-numpy      = "0.22"
-ndarray    = "0.16"
-nalgebra   = "0.33"
-rand       = "0.8"
-rand_distr = "0.4"
-rayon      = "1"
-thiserror  = "2"
-kiddo      = "5.3"
-ahash      = "0.8"
 
 [profile.release]
 lto = true

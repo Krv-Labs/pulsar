@@ -1,0 +1,23 @@
+[package]
+name = "pulsar-core"
+version.workspace = true
+edition.workspace = true
+description = "Pure-Rust core of the Pulsar topological data analysis engine."
+license = "MIT"
+
+[features]
+default = []
+# Enables the `From<PulsarError> for pyo3::PyErr` conversion the Python
+# extension crate needs. The orphan rule forces that impl to live here.
+python = ["dep:pyo3"]
+
+[dependencies]
+ndarray    = "0.16"
+nalgebra   = "0.33"
+rand       = "0.8"
+rand_distr = "0.4"
+rayon      = "1"
+thiserror  = "2"
+kiddo      = "5.3"
+ahash      = "0.8"
+pyo3       = { version = "0.22", optional = true }

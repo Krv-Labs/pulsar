@@ -1,7 +1,5 @@
 use kiddo::{KdTree, SquaredEuclidean};
 use ndarray::{Array2, ArrayView2};
-use numpy::PyReadonlyArray2;
-use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashSet;
 
@@ -20,7 +18,7 @@ fn l2_sq(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// Complexity: O(n * k) for centre selection + O(n * k) for membership
 /// where k = number of balls (typically k << n for reasonable epsilon).
-fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
+pub fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
     let n = points.nrows();
     let d = points.ncols();
     let eps_sq = eps * eps;
@@ -134,17 +132,14 @@ fn point_array<const K: usize>(points: ArrayView2<f64>, row: usize) -> [f64; K] 
 ///
 /// Ball Mapper decomposes a point cloud into overlapping balls and
 /// represents connectivity as a graph. Designed for large-scale EHR data.
-#[pyclass]
 pub struct BallMapper {
     pub eps: f64,
     pub nodes: Vec<Vec<usize>>,
     pub edges: Vec<(usize, usize)>,
 }
 
-#[pymethods]
 impl BallMapper {
     /// Create a new Ball Mapper with given radius.
-    #[new]
     pub fn new(eps: f64) -> Self {
         BallMapper {
             eps,
@@ -154,27 +149,10 @@ impl BallMapper {
     }
 
     /// Fit the Ball Mapper to a point cloud.
-    pub fn fit(&mut self, points: PyReadonlyArray2<f64>) -> PyResult<()> {
-        let arr = points.as_array();
-        let (nodes, edges) = fit_inner(arr, self.eps);
+    pub fn fit(&mut self, points: ArrayView2<f64>) {
+        let (nodes, edges) = fit_inner(points, self.eps);
         self.nodes = nodes;
         self.edges = edges;
-        Ok(())
-    }
-
-    #[getter]
-    pub fn nodes(&self) -> Vec<Vec<usize>> {
-        self.nodes.clone()
-    }
-
-    #[getter]
-    pub fn edges(&self) -> Vec<(usize, usize)> {
-        self.edges.clone()
-    }
-
-    #[getter]
-    pub fn eps(&self) -> f64 {
-        self.eps
     }
 
     pub fn n_nodes(&self) -> usize {
@@ -193,17 +171,11 @@ impl BallMapper {
 ///
 /// Complexity per fit: O(n * k) where k = number of balls.
 /// No O(n²) memory allocation - scales to large EHR datasets.
-#[pyfunction]
-pub fn ball_mapper_grid(
-    embeddings: Vec<PyReadonlyArray2<f64>>,
-    epsilons: Vec<f64>,
-) -> PyResult<Vec<BallMapper>> {
-    let owned: Vec<Array2<f64>> = embeddings.iter().map(|e| e.as_array().to_owned()).collect();
-
-    let results: Vec<BallMapper> = owned
+pub fn ball_mapper_grid(embeddings: &[Array2<f64>], epsilons: &[f64]) -> Vec<BallMapper> {
+    embeddings
         .par_iter()
         .flat_map(|emb| {
-            let eps_clone = epsilons.clone();
+            let eps_clone = epsilons.to_vec();
             eps_clone
                 .into_par_iter()
                 .map(move |eps| {
@@ -212,7 +184,5 @@ pub fn ball_mapper_grid(
                 })
                 .collect::<Vec<_>>()
         })
-        .collect();
-
-    Ok(results)
+        .collect()
 }

@@ -4,8 +4,9 @@
 
 //! # `pulsar._pulsar` — Rust extension module for large-scale topological data analysis
 //!
-//! Optimized for large EHR datasets. All algorithms avoid O(n²) memory where possible
-//! and use parallel execution via rayon.
+//! Thin numpy wrappers over the pure-Rust [`pulsar_core`] crate, which holds the
+//! algorithms. Optimized for large EHR datasets. All algorithms avoid O(n²)
+//! memory where possible and use parallel execution via rayon.
 //!
 //! ## Core functions
 //!
@@ -32,10 +33,8 @@ use pyo3::prelude::*;
 
 mod ballmapper;
 mod cosmic;
-mod error;
 mod impute;
 mod jl;
-mod minhash;
 mod pca;
 mod ph;
 mod pseudolaplacian;

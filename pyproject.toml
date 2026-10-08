@@ -31,7 +31,9 @@ pulsar-mcp = "pulsar.mcp.server:main"
 mcp = ["fastmcp>=4.0.10,<5"]
 
 [tool.maturin]
-# Version comes from [package].version in Cargo.toml (see scripts/check_versions.py).
+# Version comes from [workspace.package].version in the root Cargo.toml, which
+# crates/pulsar-python inherits (see scripts/check_versions.py).
+manifest-path   = "crates/pulsar-python/Cargo.toml"
 features        = ["pyo3/extension-module"]
 module-name     = "pulsar._pulsar"
 python-packages = ["pulsar"]

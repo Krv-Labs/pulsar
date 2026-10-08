@@ -20,9 +20,11 @@ from pathlib import Path
 _PACKAGE = "thema-pulsar"
 _FALLBACK_VERSION = "0.0.0+unknown"
 
-# The ``[package]`` table of Cargo.toml, up to the next table header or EOF.
+# The ``[package]`` or ``[workspace.package]`` table of Cargo.toml (the repo
+# root is a workspace whose members inherit the version), up to the next table
+# header or EOF.
 _PACKAGE_TABLE_RE = re.compile(
-    r"^\[package\]\s*$(?P<body>.*?)(?=^\[|\Z)",
+    r"^\[(?:workspace\.)?package\]\s*$(?P<body>.*?)(?=^\[|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 # ``version = "x.y.z"`` on its own line within that table.
