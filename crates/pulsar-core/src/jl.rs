@@ -1,4 +1,4 @@
-use ndarray::{s, Array1, Array2, Axis};
+use ndarray::{s, Array1, Array2, ArrayBase, Axis, Data, Ix2};
 use rand::prelude::*;
 use rand_distr::StandardNormal;
 use rayon::prelude::*;
@@ -79,8 +79,9 @@ fn gaussian_components(
 /// Compute JL embeddings for multiple dimensions and seeds in parallel.
 ///
 /// Returns arrays in row-major grid order: seed outer, dimensions inner.
-pub fn jl_grid(
-    data: &Array2<f64>,
+/// Borrows the input, including strided views; centering allocates one copy.
+pub fn jl_grid<S: Data<Elem = f64>>(
+    data: &ArrayBase<S, Ix2>,
     dimensions: &[usize],
     seeds: &[u64],
     center: bool,
@@ -105,17 +106,21 @@ pub fn jl_grid(
 
     // Centering is invariant to seed and dimension, so do it once up front
     // rather than cloning + re-centering inside every grid cell.
-    let source = if center {
+    let centered = if center {
         let means = data
             .mean_axis(Axis(0))
             .expect("non-empty axis guaranteed above");
-        let mut centered = data.clone();
+        let mut centered = data.to_owned();
         for mut row in centered.rows_mut() {
             row -= &means;
         }
-        centered
+        Some(centered)
     } else {
-        data.clone()
+        None
+    };
+    let source = match &centered {
+        Some(centered) => centered.view(),
+        None => data.view(),
     };
 
     let embeddings: Vec<Vec<Array2<f64>>> = seeds

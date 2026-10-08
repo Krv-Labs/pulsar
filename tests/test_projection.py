@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from unittest import mock
 import yaml
 
@@ -31,6 +32,21 @@ def test_jl_grid_seed_outer_dimension_inner_order(small_array):
     assert [emb.shape[1] for emb in grid] == [2, 3, 2, 3]
     assert not np.allclose(grid[0], grid[2])
     assert not np.allclose(grid[1], grid[3])
+
+
+@pytest.mark.parametrize("center", [False, True])
+def test_jl_grid_borrows_strided_input_without_mutating_it(center):
+    data = np.random.default_rng(0).standard_normal((30, 8))
+    original = data.copy()
+    view = data[::-2, ::2]
+    view.setflags(write=False)
+    expected = jl_grid(view.copy(), [2, 3], [42, 7], center=center)
+    actual = jl_grid(view, [2, 3], [42, 7], center=center)
+
+    assert len(actual) == len(expected) == 4
+    for result, reference in zip(actual, expected):
+        np.testing.assert_allclose(result, reference)
+    np.testing.assert_array_equal(data, original)
 
 
 def test_load_config_projection_default_from_legacy_pca():

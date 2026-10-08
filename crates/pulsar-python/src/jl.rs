@@ -61,7 +61,7 @@ pub fn jl_grid<'py>(
     seeds: Vec<u64>,
     center: bool,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
-    let arr = data.as_array().to_owned();
+    let arr = data.as_array();
     let embeddings = pulsar_core::jl_grid(&arr, &dimensions, &seeds, center)?;
     Ok(embeddings
         .into_iter()
