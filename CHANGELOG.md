@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Include the repository license in source distributions so PyPI accepts the
+  declared license metadata.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

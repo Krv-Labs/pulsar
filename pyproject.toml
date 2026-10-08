@@ -37,6 +37,7 @@ manifest-path   = "crates/pulsar-python/Cargo.toml"
 features        = ["pyo3/extension-module"]
 module-name     = "pulsar._pulsar"
 python-packages = ["pulsar"]
+include = [{ path = "LICENSE", format = "sdist" }]
 
 [tool.ruff]
 line-length = 88

@@ -9,6 +9,12 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to refresh (for example v0.4.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -152,6 +158,9 @@ jobs:
           command: sdist
           args: --out dist
 
+      - name: Verify sdist license
+        run: tar -tzf dist/*.tar.gz | grep -E '/LICENSE$'
+
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
@@ -161,7 +170,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [linux, windows, macos, sdist]
     permissions:
       id-token: write
@@ -174,14 +183,23 @@ jobs:
           pattern: wheels-*
           merge-multiple: true
 
+      - name: Verify requested release version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pulsar-core") | .version')
+          test "${{ inputs.release_tag }}" = "v${version}"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: dist/*
           fail_on_unmatched_files: true
+          overwrite_files: true
           generate_release_notes: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: ${{ github.event_name == 'workflow_dispatch' || github.run_attempt > 1 }}
