@@ -186,7 +186,11 @@ jobs:
       - name: Verify requested release version
         if: github.event_name == 'workflow_dispatch'
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pulsar-core") | .version')
+          sdists=(dist/thema_pulsar-*.tar.gz)
+          test "${#sdists[@]}" -eq 1
+          filename="${sdists[0]##*/}"
+          version="${filename#thema_pulsar-}"
+          version="${version%.tar.gz}"
           test "${{ inputs.release_tag }}" = "v${version}"
 
       - name: Create GitHub Release
