@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
+### Added
+
+- `pulsar-core`: the algorithmic engine is available as a pure-Rust crate
+  with ndarray APIs and no Python dependency by default. Rust services can
+  use the same algorithms as the Python package.
+
+### Changed
+
+- Split the Rust package into a Cargo workspace containing `pulsar-core`
+  and the `thema-pulsar` Python extension. Both inherit the workspace version;
+  the Python API and `pulsar._pulsar` module remain unchanged.
+- Empty dimension lists in `jl_grid` and `pca_grid` still raise `ValueError`,
+  with the standard `Invalid parameter:` prefix in the error message.
+
+### Fixed
+
+- `jl_grid` borrows input arrays, including read-only and strided NumPy views,
+  instead of making duplicate dense copies. Centering allocates one copy;
+  uncentered projection uses the input directly without modifying it.
+
 ## [0.3.2] - 2026-09-30
 
 ### Added

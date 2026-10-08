@@ -5,7 +5,7 @@ members = ["crates/pulsar-core", "crates/pulsar-python"]
 # Single source of truth for the version (scripts/check_versions.py and
 # pulsar/_version.py both read this table); member crates inherit it.
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 
 [profile.release]
