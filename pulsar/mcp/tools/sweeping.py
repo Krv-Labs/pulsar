@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import dataclasses
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Literal
 
@@ -28,14 +30,15 @@ from pulsar.mcp.payloads import (
 )
 from pulsar.mcp.registry import registry
 from pulsar.mcp.session import (
+    OperationCancelledError,
     SweepRecord,
-    _bind_session_data,
     _dataset_id_for_path,
     _get_session,
     _graph_health_summary,
     _normalize_data_path,
     _projection_cache_status,
     _resolve_dataset_path,
+    run_session_worker,
 )
 from pulsar.pipeline import ThemaRS
 from pulsar.runtime.fingerprint import projection_fingerprint
@@ -229,6 +232,165 @@ async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
         return mcp_error("compare_sweeps", str(e))
 
 
+def _compute_sweep_diff(
+    prev_record: SweepRecord | None,
+    current_yaml: str,
+    persisted_dataset_id: str | None,
+    current_metrics: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if prev_record is None:
+        return []
+    diff: list[dict[str, Any]] = []
+    prev_cfg = yaml.safe_load(prev_record.config_yaml)
+    curr_cfg = yaml.safe_load(current_yaml)
+
+    p_projection = _projection_dimensions_from_config(prev_cfg)
+    c_projection = _projection_dimensions_from_config(curr_cfg)
+    if str(p_projection) != str(c_projection):
+        diff.append(
+            {
+                "field": "projection_dimensions",
+                "previous": p_projection,
+                "current": c_projection,
+            }
+        )
+
+    p_eps = _format_epsilon(prev_cfg)
+    c_eps = _format_epsilon(curr_cfg)
+    if p_eps != c_eps:
+        diff.append({"field": "epsilon", "previous": p_eps, "current": c_eps})
+
+    p_dataset = getattr(prev_record, "dataset_id", None)
+    c_dataset = persisted_dataset_id
+    if p_dataset and c_dataset and p_dataset != c_dataset:
+        diff.append(
+            {"field": "dataset_id", "previous": p_dataset, "current": c_dataset}
+        )
+
+    pm = prev_record.metrics
+    cm = current_metrics
+    for key in ("n_edges", "component_count", "giant_fraction"):
+        pv, cv = pm.get(key, 0), cm.get(key, 0)
+        if pv != cv:
+            diff.append({"field": key, "previous": pv, "current": cv})
+    return diff
+
+
+_POST_FIT_PROGRESS_STAGES = frozenset(
+    {
+        "finalize session",
+        "diagnostics",
+        "threshold stability summary",
+        "build response",
+        "persist run",
+    }
+)
+
+
+def _execute_sweep_worker(
+    session: Any,
+    expected_revision: int,
+    current_yaml: str,
+    resolved_config_dataset_id: str | None,
+    model: ThemaRS,
+    cfg: Any,
+    dataset_id: str,
+    session_dataset_id: str | None,
+    precomputed: list[Any] | None,
+    save_config: bool,
+    progress_callback: Callable[[str, float], None],
+    cancel_event: threading.Event,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    str | None,
+    Any,
+    str | None,
+]:
+    from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
+
+    if session.revision != expected_revision:
+        raise RuntimeError(
+            "Session state changed before sweep started; refusing to execute stale sweep."
+        )
+    model.fit(
+        _precomputed_embeddings=precomputed,
+        progress_callback=progress_callback,
+    )
+    progress_callback("finalize session", 0.91)
+
+    bound_data_path = _normalize_data_path(cfg.data) if cfg.data else None
+    bound_dataset_id = dataset_id or _dataset_id_for_path(
+        session_dataset_id, bound_data_path
+    )
+    if precomputed is None:
+        new_embeddings = model._embeddings
+        new_fp = projection_fingerprint(cfg, len(model.data), model.data)
+        new_pca_fp = new_fp
+    else:
+        new_embeddings = session.embeddings
+        new_fp = session.projection_fingerprint
+        new_pca_fp = session.pca_fingerprint
+
+    progress_callback("diagnostics", 0.92)
+    current_metrics_obj = diagnose_model(model)
+    current_metrics = dataclasses.asdict(current_metrics_obj)
+    graph_summary = _build_graph_summary(model)
+    progress_callback("threshold stability summary", 0.95)
+    threshold_curve_summary = _threshold_curve_payload(
+        model,
+        detail="summary",
+        threshold_candidate_policy="balanced",
+    )
+    progress_callback("build response", 0.97)
+    progress_callback("persist run", 0.98)
+    if cancel_event.is_set():
+        raise OperationCancelledError("Topological sweep cancelled before publication.")
+    if session.revision != expected_revision:
+        raise RuntimeError(
+            "Session state changed during sweep; refusing to publish stale sweep revision."
+        )
+
+    saved_path = _auto_save_config(cfg) if save_config else None
+    record = SweepRecord(
+        timestamp=time.time(),
+        config_yaml=current_yaml,
+        metrics=current_metrics,
+        dataset_id=bound_dataset_id,
+    )
+    run_record = registry.save_run(
+        dataset_id=bound_dataset_id,
+        config_yaml=current_yaml,
+        metrics=current_metrics,
+        resolved_construction_threshold=model.resolved_construction_threshold,
+        graph_summary=graph_summary,
+        threshold_stability_summary=threshold_curve_summary,
+    )
+    session.publish_sweep(
+        expected_revision=expected_revision,
+        config_yaml=current_yaml,
+        config_dataset_id=resolved_config_dataset_id,
+        model=model,
+        data=model.data,
+        dataset_id=bound_dataset_id,
+        data_path=bound_data_path,
+        embeddings=new_embeddings,
+        projection_fingerprint=new_fp,
+        pca_fingerprint=new_pca_fp,
+        record=record,
+        run_id=run_record.run_id,
+    )
+    return (
+        current_metrics,
+        graph_summary,
+        threshold_curve_summary,
+        saved_path,
+        run_record,
+        bound_dataset_id,
+    )
+
+
 async def run_topological_sweep(
     config_path: str = "",
     config_yaml: str = "",
@@ -284,14 +446,16 @@ async def run_topological_sweep(
 
         current_yaml = validation.normalized_yaml
         config_dict = yaml.safe_load(current_yaml)
-        session.active_config_yaml = current_yaml
         resolved_dataset_id = dataset_id or _dataset_id_for_path(
             session.active_config_dataset_id,
             validation.resolved_dataset_path,
         )
-        session.active_config_dataset_id = (
+        resolved_config_dataset_id = (
             resolved_dataset_id or session.active_config_dataset_id
         )
+        expected_revision = session.revision
+        prev_record = session.sweep_history[-1] if session.sweep_history else None
+        session_dataset_id = session.dataset_id
 
         logger.info("Starting topological sweep from normalized YAML")
         model = ThemaRS(config_dict)
@@ -308,6 +472,7 @@ async def run_topological_sweep(
 
         loop = asyncio.get_running_loop()
         progress_futures = []
+        cancel_event = threading.Event()
 
         async def report_progress(stage: str, fraction: float) -> None:
             if ctx is None:
@@ -315,9 +480,17 @@ async def run_topological_sweep(
             await ctx.report_progress(progress=fraction, total=1.0, message=stage)
 
         def progress_callback(stage: str, fraction: float) -> None:
+            if cancel_event.is_set():
+                raise OperationCancelledError(
+                    f"Topological sweep cancelled at stage '{stage}'."
+                )
             if ctx is None:
                 return
-            scaled_fraction = min(float(fraction), 1.0) * 0.9
+            scaled_fraction = (
+                float(fraction)
+                if stage in _POST_FIT_PROGRESS_STAGES
+                else min(float(fraction), 1.0) * 0.9
+            )
             try:
                 progress_futures.append(
                     asyncio.run_coroutine_threadsafe(
@@ -332,116 +505,45 @@ async def run_topological_sweep(
             except RuntimeError:
                 pass
 
-        await asyncio.to_thread(
-            model.fit,
-            _precomputed_embeddings=precomputed,
-            progress_callback=progress_callback,
+        (
+            current_metrics,
+            _graph_summary,
+            threshold_curve_summary,
+            saved_path,
+            run_record,
+            persisted_dataset_id,
+        ) = await run_session_worker(
+            session,
+            _execute_sweep_worker,
+            session,
+            expected_revision,
+            current_yaml,
+            resolved_config_dataset_id,
+            model,
+            cfg,
+            dataset_id,
+            session_dataset_id,
+            precomputed,
+            save_config,
+            progress_callback,
+            cancel_event,
+            heavy=True,
+            mutates_session=True,
+            cancel_event=cancel_event,
         )
         if progress_futures:
             await asyncio.gather(
                 *(asyncio.wrap_future(future) for future in progress_futures),
                 return_exceptions=True,
             )
-        await report_progress("finalize session", 0.91)
-
-        session.model = model
-        bound_data_path = _normalize_data_path(cfg.data) if cfg.data else None
-        bound_dataset_id = dataset_id or _dataset_id_for_path(
-            session.dataset_id, bound_data_path
-        )
-        _bind_session_data(
-            session,
-            model.data,  # raw pre-preprocessing DataFrame
-            dataset_id=bound_dataset_id,
-            data_path=bound_data_path,
-        )
-        # _bind_session_data drops the feature-evidence cache on rebind.
-
-        if precomputed is None:
-            session.embeddings = model._embeddings
-            session.projection_fingerprint = projection_fingerprint(
-                cfg, len(model.data), model.data
-            )
-            session.pca_fingerprint = session.projection_fingerprint
-
-        saved_path = _auto_save_config(cfg) if save_config else None
-
-        # Calculate metrics for diff
-        await report_progress("diagnostics", 0.92)
-        current_metrics_obj = diagnose_model(model)
-        current_metrics = dataclasses.asdict(current_metrics_obj)
-        graph_summary = _build_graph_summary(model)
-        await report_progress("threshold stability summary", 0.95)
-        from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
-
-        # Blocking Rust stability analysis — keep it off the event loop, mirroring
-        # the to_thread wrapping used in get_threshold_stability_curve.
-        threshold_curve_summary = await asyncio.to_thread(
-            _threshold_curve_payload,
-            model,
-            detail="summary",
-            threshold_candidate_policy="balanced",
-        )
-        await report_progress("build response", 0.97)
-
-        # Build structured diff
-        persisted_dataset_id = bound_dataset_id
-        diff: list[dict[str, Any]] = []
-        if session.sweep_history:
-            prev_record = session.sweep_history[-1]
-            prev_cfg = yaml.safe_load(prev_record.config_yaml)
-            curr_cfg = yaml.safe_load(current_yaml)
-
-            p_projection = _projection_dimensions_from_config(prev_cfg)
-            c_projection = _projection_dimensions_from_config(curr_cfg)
-            if str(p_projection) != str(c_projection):
-                diff.append(
-                    {
-                        "field": "projection_dimensions",
-                        "previous": p_projection,
-                        "current": c_projection,
-                    }
-                )
-
-            p_eps = _format_epsilon(prev_cfg)
-            c_eps = _format_epsilon(curr_cfg)
-            if p_eps != c_eps:
-                diff.append({"field": "epsilon", "previous": p_eps, "current": c_eps})
-
-            p_dataset = getattr(prev_record, "dataset_id", None)
-            c_dataset = persisted_dataset_id
-            if p_dataset and c_dataset and p_dataset != c_dataset:
-                diff.append(
-                    {"field": "dataset_id", "previous": p_dataset, "current": c_dataset}
-                )
-
-            pm = prev_record.metrics
-            cm = current_metrics
-            for key in ("n_edges", "component_count", "giant_fraction"):
-                pv, cv = pm.get(key, 0), cm.get(key, 0)
-                if pv != cv:
-                    diff.append({"field": key, "previous": pv, "current": cv})
-
-        # Record history
-        session.sweep_history.append(
-            SweepRecord(
-                timestamp=time.time(),
-                config_yaml=current_yaml,
-                metrics=current_metrics,
-                dataset_id=persisted_dataset_id,
-            )
-        )
-        await report_progress("persist run", 0.98)
-        run_record = registry.save_run(
-            dataset_id=persisted_dataset_id,
-            config_yaml=current_yaml,
-            metrics=current_metrics,
-            resolved_construction_threshold=model.resolved_construction_threshold,
-            graph_summary=graph_summary,
-            threshold_stability_summary=threshold_curve_summary,
-        )
-        session.latest_run_id = run_record.run_id
         await report_progress("format response", 0.99)
+
+        diff = _compute_sweep_diff(
+            prev_record,
+            current_yaml,
+            persisted_dataset_id,
+            current_metrics,
+        )
 
         # Build configuration advisory message
         if save_config and saved_path:
@@ -462,7 +564,7 @@ async def run_topological_sweep(
             "diff": diff,
             "config_advisory": config_advisory,
             "config_yaml_normalized": current_yaml,
-            "data_shape": list(session.data.shape),
+            "data_shape": list(model.data.shape),
         }
         graph_health, is_connected, _ = _graph_health_summary(current_metrics)
         unthresholded_component_count = threshold_curve_summary.get(

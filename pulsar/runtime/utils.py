@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from contextlib import contextmanager
 
@@ -75,22 +74,11 @@ class ProgressTracker:
 
 @contextmanager
 def rayon_thread_override(workers: int | None):
+    """Thread-safe no-op context manager retained for backward compatibility.
+
+    Rayon uses its process-wide thread pool without mutating global ``os.environ``.
     """
-    Temporarily override Rayon worker count for Rust ops that respect
-    RAYON_NUM_THREADS. Restores the previous value on exit.
-    """
-    if workers is None:
-        yield
-        return
-    prev = os.environ.get("RAYON_NUM_THREADS")
-    os.environ["RAYON_NUM_THREADS"] = str(workers)
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop("RAYON_NUM_THREADS", None)
-        else:
-            os.environ["RAYON_NUM_THREADS"] = prev
+    yield
 
 
 # ---------------------------------------------------------------------------

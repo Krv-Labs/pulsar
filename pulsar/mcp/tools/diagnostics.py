@@ -23,7 +23,7 @@ from pulsar.mcp.diagnostics import (
 )
 from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.registry import registry
-from pulsar.mcp.session import GraphArtifact, _get_session
+from pulsar.mcp.session import GraphArtifact, _get_session, run_session_worker
 from pulsar.mcp.thresholds import (
     THRESHOLD_CANDIDATE_POLICIES,
     agent_threshold_options,
@@ -341,7 +341,7 @@ async def diagnose_cosmic_graph(
                 artifact_staleness=staleness,
             )
         else:
-            result = diagnose_model(session.model)
+            result = await asyncio.to_thread(diagnose_model, session.model)
             metrics = dataclasses.asdict(result)
             payload = _diagnosis_payload(
                 metrics,
@@ -1052,6 +1052,60 @@ async def get_threshold_stability_curve(
         return mcp_error("get_threshold_stability_curve", str(e))
 
 
+def _build_sparsifier_artifact_worker(
+    session: Any,
+    model: Any,
+    target_run_id: str,
+    kind: str,
+    epsilon: float,
+    seed: int,
+    sketch_dim: int | None,
+    sample_count: int | None,
+    pcg_tol: float,
+    max_iter: int,
+    params: dict[str, Any],
+) -> tuple[GraphArtifact, float, int]:
+    started = time.perf_counter()
+    sparse = model.spectral_sparsify(
+        epsilon,
+        seed=seed,
+        sketch_dim=sketch_dim,
+        sample_count=sample_count,
+        pcg_tol=pcg_tol,
+        max_iter=max_iter,
+        update=False,
+    )
+    elapsed = time.perf_counter() - started
+    raw_edges = sparse.weighted_edges()
+    scale = max(1.0, max((float(w) for _, _, w in raw_edges), default=0.0))
+    graph = cosmic_to_networkx(sparse, threshold=0.0, scale=scale)
+    normalized_edges = [(int(i), int(j), float(w) / scale) for i, j, w in raw_edges]
+    metrics = dataclasses.asdict(
+        _graph_metrics_from_graph(
+            graph,
+            resolved_construction_threshold=0.0,
+            n_ball_maps=0,
+            full_weight_edges=normalized_edges,
+        )
+    )
+    artifact_id = f"graph_{uuid.uuid4().hex[:12]}"
+    graph_summary = _build_graph_summary_from_graph(
+        graph,
+        resolved_construction_threshold=0.0,
+    )
+    artifact = GraphArtifact(
+        artifact_id=artifact_id,
+        run_id=target_run_id,
+        kind=kind,
+        created_at=time.time(),
+        params=params,
+        graph_summary=graph_summary,
+        metrics=metrics,
+    )
+    session.publish_graph_artifact(artifact, expected_run_id=target_run_id)
+    return artifact, elapsed, graph.number_of_edges()
+
+
 async def create_graph_artifact(
     kind: Literal["spectral_sparsifier"] = "spectral_sparsifier",
     run_id: str = "",
@@ -1098,8 +1152,9 @@ async def create_graph_artifact(
             "create_graph_artifact", "epsilon must be finite and positive."
         )
 
-    n_nodes = int(session.model.cosmic_rust.n)
-    edge_count = int(session.model.cosmic_rust.n_edges)
+    model = session.model
+    n_nodes = int(model.cosmic_rust.n)
+    edge_count = int(model.cosmic_rust.n_edges)
     estimate = _artifact_estimate(n_nodes, edge_count, epsilon)
     params = {
         "epsilon": epsilon,
@@ -1133,55 +1188,33 @@ async def create_graph_artifact(
             indent=2,
         )
 
-    started = time.perf_counter()
-    sparse = await asyncio.to_thread(
-        session.model.spectral_sparsify,
+    artifact, elapsed, artifact_edge_count = await run_session_worker(
+        session,
+        _build_sparsifier_artifact_worker,
+        session,
+        model,
+        target_run_id,
+        kind,
         epsilon,
-        seed=seed,
-        sketch_dim=sketch_dim,
-        sample_count=sample_count,
-        pcg_tol=pcg_tol,
-        max_iter=max_iter,
-        update=False,
+        seed,
+        sketch_dim,
+        sample_count,
+        pcg_tol,
+        max_iter,
+        params,
+        heavy=True,
+        mutates_session=True,
     )
-    elapsed = time.perf_counter() - started
-    raw_edges = sparse.weighted_edges()
-    scale = max(1.0, max((float(w) for _, _, w in raw_edges), default=0.0))
-    graph = cosmic_to_networkx(sparse, threshold=0.0, scale=scale)
-    normalized_edges = [(int(i), int(j), float(w) / scale) for i, j, w in raw_edges]
-    metrics = dataclasses.asdict(
-        _graph_metrics_from_graph(
-            graph,
-            resolved_construction_threshold=0.0,
-            n_ball_maps=0,
-            full_weight_edges=normalized_edges,
-        )
-    )
-    artifact_id = f"graph_{uuid.uuid4().hex[:12]}"
-    graph_summary = _build_graph_summary_from_graph(
-        graph,
-        resolved_construction_threshold=0.0,
-    )
-    artifact = GraphArtifact(
-        artifact_id=artifact_id,
-        run_id=target_run_id,
-        kind=kind,
-        created_at=time.time(),
-        params=params,
-        graph_summary=graph_summary,
-        metrics=metrics,
-    )
-    session.graph_artifacts[artifact_id] = artifact
     return json.dumps(
         {
             "status": "ok",
             "estimate_only": False,
-            "artifact_id": artifact_id,
+            "artifact_id": artifact.artifact_id,
             "kind": kind,
             "run_id": target_run_id,
             "runtime_s": round(elapsed, 3),
             "input_edge_count": edge_count,
-            "artifact_edge_count": graph.number_of_edges(),
+            "artifact_edge_count": artifact_edge_count,
             "params": params,
             "staleness": _artifact_staleness(artifact, session.latest_run_id),
         },

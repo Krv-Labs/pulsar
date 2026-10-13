@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 import gc
 import hashlib
@@ -9,7 +11,8 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+import threading
+from typing import Any, TypeVar
 
 import pandas as pd
 from fastmcp import Context
@@ -21,6 +24,16 @@ from pulsar.mcp.registry import registry
 from pulsar.mcp.interpreter import FeatureEvidenceIndex
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+_MAX_CONCURRENT_HEAVY = max(
+    1, int(os.environ.get("PULSAR_MCP_MAX_CONCURRENT_HEAVY", "1"))
+)
+_HEAVY_COMPUTE_SEMAPHORE = threading.BoundedSemaphore(_MAX_CONCURRENT_HEAVY)
+
+
+class OperationCancelledError(RuntimeError):
+    """Raised when a cooperative cancellation checkpoint fires in a worker thread."""
 
 
 @dataclass
@@ -88,45 +101,206 @@ class _PulsarSession:
     active_config_dataset_id: str | None = None
     graph_artifacts: dict[str, GraphArtifact] = field(default_factory=dict)
     longitudinal: dict[str, LongitudinalArtifact] = field(default_factory=dict)
+    revision: int = 0
+    active_ops: int = 0
+    _worker_mutation_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
+
+    def publish_sweep(
+        self,
+        *,
+        expected_revision: int,
+        config_yaml: str | None = None,
+        config_dataset_id: str | None = None,
+        model: ThemaRS,
+        data: pd.DataFrame,
+        dataset_id: str | None = None,
+        data_path: str | None = None,
+        dataset_path: str | None = None,
+        dataset_fingerprint: str | None = None,
+        embeddings: list[Any] | None = None,
+        projection_fingerprint: str | None = None,
+        pca_fingerprint: str | None = None,
+        record: SweepRecord,
+        run_id: str,
+    ) -> None:
+        if self.revision != expected_revision:
+            raise RuntimeError(
+                "Session state changed during sweep; refusing to publish stale sweep revision."
+            )
+        if config_yaml is not None:
+            self.active_config_yaml = config_yaml
+            self.active_config_dataset_id = config_dataset_id
+        self.model = model
+        _bind_session_data(
+            self,
+            data,
+            dataset_id=dataset_id,
+            data_path=data_path if data_path is not None else dataset_path,
+        )
+        self.embeddings = embeddings
+        self.projection_fingerprint = projection_fingerprint
+        self.pca_fingerprint = (
+            pca_fingerprint if pca_fingerprint is not None else projection_fingerprint
+        )
+        self.sweep_history.append(record)
+        self.latest_run_id = run_id
+        self.revision += 1
+
+    def publish_dossier(
+        self,
+        *,
+        expected_run_id: str | None,
+        clusters: pd.Series,
+        report_exclude_columns: list[str] | None,
+        feature_evidence_cluster_meta: dict[int, dict[str, Any]] | dict[str, Any],
+        cluster_assignment_id: str | None = None,
+        feature_evidence_index: FeatureEvidenceIndex | None = None,
+        feature_evidence_fingerprint: str | None = None,
+    ) -> None:
+        if self.latest_run_id != expected_run_id:
+            raise RuntimeError(
+                "Active run changed while computing cluster dossier; refusing to publish stale clusters."
+            )
+        self.clusters = clusters
+        self.clusters_run_id = expected_run_id
+        self.report_exclude_columns = (
+            list(report_exclude_columns)
+            if report_exclude_columns is not None
+            else None
+        )
+        self.feature_evidence_cluster_meta = dict(feature_evidence_cluster_meta)
+        if cluster_assignment_id is not None:
+            self.cluster_assignment_id = cluster_assignment_id
+        if feature_evidence_index is not None:
+            self.feature_evidence_index = feature_evidence_index
+        if feature_evidence_fingerprint is not None:
+            self.feature_evidence_fingerprint = feature_evidence_fingerprint
+        self.revision += 1
+
+    def publish_graph_artifact(
+        self,
+        artifact: GraphArtifact,
+        *,
+        expected_run_id: str | None,
+    ) -> None:
+        if self.latest_run_id != expected_run_id:
+            raise RuntimeError(
+                "Active run changed while building graph artifact; refusing to publish stale artifact."
+            )
+        self.graph_artifacts[artifact.artifact_id] = artifact
+        self.revision += 1
+
+    def publish_longitudinal(self, artifact: LongitudinalArtifact) -> None:
+        self.longitudinal[artifact.longitudinal_id] = artifact
+        self.revision += 1
 
     def calculate_memory_mb(self) -> float:
         """Estimate current session memory footprint in MB."""
-        bytes_total = 0
-        if self.data is not None:
-            # Deep memory usage for Pandas (captures string objects etc)
-            bytes_total += self.data.memory_usage(deep=True).sum()
-
-        if self.model is not None:
-            if self.model._weighted_adjacency is not None:
-                # Dense view has been materialized (lazily, on first access).
-                bytes_total += self.model._weighted_adjacency.nbytes
-            elif self.model._cosmic_rust is not None:
-                # Hot path keeps the graph sparse; size the edge list instead of
-                # forcing an n×n densification just to report memory.
-                bytes_total += self.model._cosmic_rust.n_edges * 24
-
-        if self.embeddings is not None:
-            for emb in self.embeddings:
-                if hasattr(emb, "nbytes"):
-                    bytes_total += emb.nbytes
-
-        for artifact in self.longitudinal.values():
-            if artifact.trajectory is not None:
-                # Sparse stores: size the data/index buffers, never densify.
-                for matrix in (
-                    artifact.trajectory.similarity,
-                    artifact.trajectory.incidence,
-                ):
-                    bytes_total += matrix.data.nbytes + matrix.indices.nbytes
-                bytes_total += artifact.trajectory.obs.memory_usage(deep=True).sum()
-            if artifact.temporal is not None:
-                bytes_total += artifact.temporal.tensor.nbytes
-
+        bytes_total = (
+            int(self.data.memory_usage(deep=True).sum())
+            if self.data is not None
+            else 0
+        )
+        bytes_total += _model_memory_bytes(self.model)
+        bytes_total += _embeddings_memory_bytes(self.embeddings)
+        bytes_total += _longitudinal_memory_bytes(self.longitudinal)
         return round(float(bytes_total) / (1024 * 1024), 2)
+
+
+def _model_memory_bytes(model: ThemaRS | None) -> int:
+    if model is None:
+        return 0
+    if model._weighted_adjacency is not None:
+        return int(model._weighted_adjacency.nbytes)
+    if model._cosmic_rust is not None:
+        return int(model._cosmic_rust.n_edges * 24)
+    return 0
+
+
+def _embeddings_memory_bytes(embeddings: list | None) -> int:
+    if not embeddings:
+        return 0
+    return sum(int(getattr(emb, "nbytes", 0)) for emb in embeddings)
+
+
+def _longitudinal_memory_bytes(
+    longitudinal: dict[str, LongitudinalArtifact],
+) -> int:
+    total = 0
+    for artifact in longitudinal.values():
+        if artifact.trajectory is not None:
+            for matrix in (
+                artifact.trajectory.similarity,
+                artifact.trajectory.incidence,
+            ):
+                total += int(matrix.data.nbytes + matrix.indices.nbytes)
+            total += int(artifact.trajectory.obs.memory_usage(deep=True).sum())
+        if artifact.temporal is not None:
+            total += int(artifact.temporal.tensor.nbytes)
+    return total
 
 
 _sessions: OrderedDict[str, _PulsarSession] = OrderedDict()
 _MAX_SESSIONS = int(os.environ.get("PULSAR_MAX_SESSIONS", "3"))
+
+
+def _execute_in_session_worker(
+    session: _PulsarSession,
+    fn: Callable[..., T],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    heavy: bool,
+    mutates_session: bool,
+    cancel_event: threading.Event | None,
+) -> T:
+    try:
+        with ExitStack() as stack:
+            if mutates_session:
+                stack.enter_context(session._worker_mutation_lock)
+            if heavy:
+                stack.enter_context(_HEAVY_COMPUTE_SEMAPHORE)
+            if cancel_event is not None and cancel_event.is_set():
+                raise OperationCancelledError(
+                    "Operation cancelled before start."
+                )
+            return fn(*args, **kwargs)
+    finally:
+        session.active_ops = max(0, session.active_ops - 1)
+
+
+async def run_session_worker(
+    session: _PulsarSession,
+    fn: Callable[..., T],
+    *args: Any,
+    heavy: bool = True,
+    mutates_session: bool = False,
+    cancel_event: threading.Event | None = None,
+    **kwargs: Any,
+) -> T:
+    """Run blocking work in a worker thread with session/admission guards.
+
+    Locking and semaphore acquisition happen inside the worker thread so the
+    asyncio event loop is never blocked by ``threading.Lock`` or semaphore waits.
+    """
+    session.active_ops += 1
+    try:
+        return await asyncio.to_thread(
+            _execute_in_session_worker,
+            session,
+            fn,
+            args,
+            kwargs,
+            heavy=heavy,
+            mutates_session=mutates_session,
+            cancel_event=cancel_event,
+        )
+    except asyncio.CancelledError:
+        if cancel_event is not None:
+            cancel_event.set()
+        raise
 
 
 def _session_key(ctx: Context | None) -> str:
@@ -147,16 +321,17 @@ def _get_session(ctx: Context) -> _PulsarSession:
 
     # Create new session
     if len(_sessions) >= _MAX_SESSIONS:
-        # Evict oldest session
-        evicted_key, evicted_session = _sessions.popitem(last=False)
-        logger.info(
-            "Evicting oldest session '%s' to free memory (Max sessions: %d)",
-            evicted_key,
-            _MAX_SESSIONS,
-        )
-        # Cleanup
-        del evicted_session
-        gc.collect()
+        evict_key = next((k for k, s in _sessions.items() if s.active_ops == 0), None)
+        if evict_key is not None:
+            evicted_session = _sessions.pop(evict_key)
+            logger.info(
+                "Evicting oldest idle session '%s' to free memory (Max sessions: %d)",
+                evict_key,
+                _MAX_SESSIONS,
+            )
+            # Cleanup
+            del evicted_session
+            gc.collect()
 
     session = _PulsarSession()
     _sessions[key] = session
@@ -175,7 +350,7 @@ def _resolve_longitudinal(
 ) -> LongitudinalArtifact:
     """Resolve a longitudinal handle, or raise LookupError for the error envelope.
 
-    Falls back to the most recent artifact when the caller omits the handle, so a
+    Falls back to the most recent artifact when the caller omits the id, so a
     single-panel session does not have to thread the id through every call.
     """
     if not longitudinal_id:
@@ -235,45 +410,62 @@ def _dataset_id_for_path(dataset_id: str | None, data_path: str | None) -> str |
     return dataset_id if dataset_path == normalized_path else None
 
 
+def _resolve_dataframe_source(
+    dataset_id: str, data_path: str
+) -> tuple[str | None, str]:
+    if dataset_id:
+        resolved_path = _resolve_dataset_path(dataset_id)
+        return dataset_id, _normalize_data_path(resolved_path)
+    if not data_path:
+        raise ToolError("Provide either data_path or dataset_id.")
+    return None, _normalize_data_path(data_path)
+
+
+def _try_cached_session_dataframe(
+    session: _PulsarSession,
+    target_dataset_id: str | None,
+    normalized_path: str,
+) -> pd.DataFrame | None:
+    if (
+        session.data is None
+        or session.data_dataset_id != target_dataset_id
+        or session.data_path != normalized_path
+    ):
+        return None
+    if target_dataset_id is not None:
+        session.dataset_id = target_dataset_id
+    return session.data
+
+
 async def _load_session_dataframe(
     session: _PulsarSession,
     *,
     dataset_id: str = "",
     data_path: str = "",
 ) -> tuple[pd.DataFrame, str]:
-    if dataset_id:
-        resolved_path = _resolve_dataset_path(dataset_id)
-        normalized_path = _normalize_data_path(resolved_path)
-        if (
-            session.data is not None
-            and session.data_dataset_id == dataset_id
-            and session.data_path == normalized_path
-        ):
-            session.dataset_id = dataset_id
-            return session.data, normalized_path
+    target_dataset_id, normalized_path = _resolve_dataframe_source(
+        dataset_id, data_path
+    )
+    cached_df = _try_cached_session_dataframe(
+        session, target_dataset_id, normalized_path
+    )
+    if cached_df is not None:
+        return cached_df, normalized_path
 
-        df = await asyncio.to_thread(_read_dataset_file, normalized_path)
+    df = await run_session_worker(
+        session,
+        _read_dataset_file,
+        normalized_path,
+        heavy=False,
+        mutates_session=False,
+    )
+    with session._worker_mutation_lock:
         _bind_session_data(
             session,
             df,
-            dataset_id=dataset_id,
+            dataset_id=target_dataset_id,
             data_path=normalized_path,
         )
-        return df, normalized_path
-
-    if not data_path:
-        raise ToolError("Provide either data_path or dataset_id.")
-
-    normalized_path = _normalize_data_path(data_path)
-    if (
-        session.data is not None
-        and session.data_dataset_id is None
-        and session.data_path == normalized_path
-    ):
-        return session.data, normalized_path
-
-    df = await asyncio.to_thread(_read_dataset_file, normalized_path)
-    _bind_session_data(session, df, data_path=normalized_path)
     return df, normalized_path
 
 
