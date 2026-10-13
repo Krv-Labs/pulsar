@@ -30,8 +30,11 @@ impl JLProjection {
         data: PyReadonlyArray2<'py, f64>,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let arr = data.as_array().to_owned();
-        let inner = JLProjectionInner::fit(&arr, self.n_components, self.seed, self.center)?;
-        let projection = inner.transform(&arr)?;
+        let (n_components, seed, center) = (self.n_components, self.seed, self.center);
+        let (inner, projection) = py.allow_threads(|| {
+            JLProjectionInner::fit(&arr, n_components, seed, center)
+                .and_then(|inner| inner.transform(&arr).map(|proj| (inner, proj)))
+        })?;
         self.inner = Some(inner);
         Ok(projection.into_pyarray_bound(py))
     }
@@ -45,7 +48,8 @@ impl JLProjection {
             pyo3::exceptions::PyValueError::new_err("call fit_transform before transform")
         })?;
         let arr = data.as_array().to_owned();
-        Ok(inner.transform(&arr)?.into_pyarray_bound(py))
+        let out = py.allow_threads(|| inner.transform(&arr))?;
+        Ok(out.into_pyarray_bound(py))
     }
 }
 
@@ -61,8 +65,9 @@ pub fn jl_grid<'py>(
     seeds: Vec<u64>,
     center: bool,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
-    let arr = data.as_array();
-    let embeddings = pulsar_core::jl_grid(&arr, &dimensions, &seeds, center)?;
+    let arr = data.as_array().to_owned();
+    let embeddings =
+        py.allow_threads(|| pulsar_core::jl_grid(&arr.view(), &dimensions, &seeds, center))?;
     Ok(embeddings
         .into_iter()
         .map(|arr| arr.into_pyarray_bound(py))

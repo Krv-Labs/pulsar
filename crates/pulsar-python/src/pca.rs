@@ -46,14 +46,16 @@ impl PCA {
         data: PyReadonlyArray2<'py, f64>,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let arr = data.as_array().to_owned();
-        let inner = PCAInner::fit(
-            &arr,
+        let (n_components, seed, n_oversamples, n_power_iter) = (
             self.n_components,
             self.seed,
             self.n_oversamples,
             self.n_power_iter,
-        )?;
-        let projection = inner.transform(&arr)?;
+        );
+        let (inner, projection) = py.allow_threads(|| {
+            PCAInner::fit(&arr, n_components, seed, n_oversamples, n_power_iter)
+                .and_then(|inner| inner.transform(&arr).map(|proj| (inner, proj)))
+        })?;
         self.inner = Some(inner);
         Ok(projection.into_pyarray_bound(py))
     }
@@ -68,7 +70,7 @@ impl PCA {
             pyo3::exceptions::PyValueError::new_err("call fit_transform before transform")
         })?;
         let arr = data.as_array().to_owned();
-        let out = inner.transform(&arr)?;
+        let out = py.allow_threads(|| inner.transform(&arr))?;
         Ok(out.into_pyarray_bound(py))
     }
 
@@ -105,8 +107,9 @@ pub fn pca_grid<'py>(
     n_power_iter: usize,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     let arr = data.as_array().to_owned();
-    let embeddings =
-        pulsar_core::pca_grid(&arr, &dimensions, &seeds, n_oversamples, n_power_iter)?;
+    let embeddings = py.allow_threads(|| {
+        pulsar_core::pca_grid(&arr, &dimensions, &seeds, n_oversamples, n_power_iter)
+    })?;
     Ok(embeddings
         .into_iter()
         .map(|arr| arr.into_pyarray_bound(py))
