@@ -303,11 +303,31 @@ async def run_session_worker(
         raise
 
 
+def _extract_context_session_id(ctx: Context) -> str:
+    from fastmcp.server.dependencies import get_http_headers
+
+    rc = ctx.request_context
+    sess = getattr(rc, "session", None) or getattr(ctx, "_session", None)
+    sid = getattr(getattr(sess, "_connection", None), "session_id", None)
+    if isinstance(sid, str) and sid:
+        return sid
+    headers = getattr(getattr(rc, "request", None), "headers", None)
+    header_sid = (
+        headers.get("mcp-session-id")
+        if headers is not None
+        else get_http_headers(include={"mcp-session-id"}).get("mcp-session-id")
+    )
+    return header_sid if isinstance(header_sid, str) and header_sid else "default"
+
+
 def _session_key(ctx: Context | None) -> str:
     """Get the session key from context (session_id or 'default' for STDIO)."""
     if ctx is None:
         return "default"
-    return ctx.session_id or "default"
+    if isinstance(ctx, Context):
+        return _extract_context_session_id(ctx)
+    sid = getattr(ctx, "session_id", None)
+    return sid if isinstance(sid, str) and sid else "default"
 
 
 def _get_session(ctx: Context) -> _PulsarSession:
@@ -502,7 +522,6 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
     density = float(metrics.get("density", 0.0))
     component_count = int(metrics.get("component_count", 0))
     singleton_fraction = float(metrics.get("singleton_fraction", 0.0))
-    giant_fraction = float(metrics.get("giant_fraction", 0.0))
     is_connected = component_count <= 1
     if density > 0.8:
         return (
@@ -517,12 +536,6 @@ def _graph_health_summary(metrics: dict[str, Any]) -> tuple[str, bool, str]:
             "fragmented",
             is_connected,
             "Increase epsilon support or fall back to component-based clustering.",
-        )
-    if giant_fraction > 0.95:
-        return (
-            "connected",
-            is_connected,
-            "Proceed to clustering; graph structure is suitable for interpretive analysis.",
         )
     return (
         "connected",
