@@ -29,6 +29,9 @@ pub fn impute_column<'py>(
     seed: u64,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let mut arr = values.as_array().as_standard_layout().into_owned();
-    py.allow_threads(|| impute_column_inplace(arr.as_slice_mut().unwrap(), method, seed))?;
+    let slice = arr
+        .as_slice_mut()
+        .expect("standard-layout owned array is contiguous");
+    py.allow_threads(|| impute_column_inplace(slice, method, seed))?;
     Ok(arr.into_pyarray_bound(py))
 }

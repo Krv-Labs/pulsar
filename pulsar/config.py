@@ -204,7 +204,7 @@ class PulsarConfig:
 def load_config(path_or_dict: str | dict) -> PulsarConfig:
     """Load a PulsarConfig from a YAML file path or a raw dict."""
     if isinstance(path_or_dict, str):
-        with open(path_or_dict) as f:
+        with open(path_or_dict, encoding="utf-8") as f:
             raw = yaml.safe_load(f)
     else:
         raw = dict(path_or_dict)

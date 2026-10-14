@@ -175,6 +175,13 @@ def _validate_config_path(path: str) -> None:
         raise ValueError(f"Config must be a YAML file (*.yaml or *.yml), got: {path}")
 
 
+def _read_config_file(path: str) -> str:
+    """Validate and read a YAML config file from disk."""
+    _validate_config_path(path)
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 def _auto_save_config(cfg) -> str:
     """Save resolved config to disk for reproducibility. Returns saved path."""
     name = cfg.run_name or "pulsar"
@@ -183,7 +190,7 @@ def _auto_save_config(cfg) -> str:
     else:
         save_dir = os.getcwd()
     save_path = os.path.join(save_dir, f"{name}_params.yaml")
-    with open(save_path, "w") as f:
+    with open(save_path, "w", encoding="utf-8") as f:
         f.write(config_to_yaml(cfg))
     logger.info("Config saved to %s", save_path)
     return save_path
@@ -359,8 +366,9 @@ async def compare_sweeps(
     nodes, edges, components, giant fraction and weight p95; the text view is a
     markdown table. Measurement only: it does not rank the runs."""
     try:
-        record_a = registry.get_run(run_a)
-        record_b = registry.get_run(run_b)
+        record_a, record_b = await asyncio.to_thread(
+            lambda: (registry.get_run(run_a), registry.get_run(run_b))
+        )
         if record_a is None:
             return unknown_handle_error("compare_sweeps", "run_id", run_a)
         if record_b is None:
@@ -473,6 +481,7 @@ class _SweepComputation:
     embeddings: list[Any] | None
     projection_fingerprint: str | None
     pca_fingerprint: str | None
+    saved_path: str | None = None
 
 
 def _execute_sweep_worker(
@@ -486,13 +495,14 @@ def _execute_sweep_worker(
     cached_fingerprints: tuple[str | None, str | None],
     progress_callback: Callable[[str, float], None],
     cancel_event: threading.Event,
+    save_config: bool = False,
 ) -> _SweepComputation:
     """Compute a sweep. Never mutates ``session``; only stages a run file.
 
-    Publication (session state, saved config, run-file commit) happens on the
-    loop in ``run_topological_sweep`` so loop-side readers never see
-    half-published state. The run record is only *staged* here (serialized and
-    fsynced to a temp file); it becomes visible when the loop commits it.
+    Publication (session state, run-file commit) happens on the loop in
+    ``run_topological_sweep`` so loop-side readers never see half-published
+    state. The run record is only *staged* here (serialized and fsynced to a
+    temp file); it becomes visible when the loop commits it.
     """
     from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
 
@@ -537,6 +547,7 @@ def _execute_sweep_worker(
     if cancel_event.is_set():
         registry.discard_staged(staged_run)
         raise OperationCancelledError("Topological sweep cancelled before publication.")
+    saved_path = _auto_save_config(cfg) if save_config else None
     return _SweepComputation(
         staged_run=staged_run,
         model=model,
@@ -548,6 +559,7 @@ def _execute_sweep_worker(
         embeddings=new_embeddings,
         projection_fingerprint=new_fp,
         pca_fingerprint=new_pca_fp,
+        saved_path=saved_path,
     )
 
 
@@ -557,8 +569,6 @@ def _publish_sweep_on_loop(
     *,
     current_yaml: str,
     resolved_config_dataset_id: str | None,
-    cfg: Any,
-    save_config: bool,
 ) -> tuple[Any, str | None]:
     """Commit the staged run and publish a finished sweep, synchronously.
 
@@ -595,8 +605,7 @@ def _publish_sweep_on_loop(
         record=record,
         run_id=run_record.run_id,
     )
-    saved_path = _auto_save_config(cfg) if save_config else None
-    return run_record, saved_path
+    return run_record, computation.saved_path
 
 
 @tool_meta(
@@ -676,9 +685,7 @@ async def run_topological_sweep(
         if config_yaml:
             current_yaml = config_yaml
         elif config_path:
-            _validate_config_path(config_path)
-            with open(config_path) as f:
-                current_yaml = f.read()
+            current_yaml = await asyncio.to_thread(_read_config_file, config_path)
         elif session.active_config_yaml:
             current_yaml = session.active_config_yaml
         else:
@@ -781,6 +788,7 @@ async def run_topological_sweep(
             cached_fingerprints,
             progress_callback,
             cancel_event,
+            save_config,
             heavy=True,
             mutates_session=True,
             cancel_event=cancel_event,
@@ -791,8 +799,6 @@ async def run_topological_sweep(
             computation,
             current_yaml=current_yaml,
             resolved_config_dataset_id=resolved_config_dataset_id,
-            cfg=cfg,
-            save_config=save_config,
         )
         current_metrics = computation.current_metrics
         threshold_curve_summary = computation.threshold_curve_summary

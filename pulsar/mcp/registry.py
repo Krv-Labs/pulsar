@@ -227,7 +227,7 @@ class MCPRegistry:
         path = self._upload_meta_path(upload_id)
         if not path.exists():
             return None
-        return UploadRecord(**json.loads(path.read_text()))
+        return UploadRecord(**json.loads(path.read_text(encoding="utf-8")))
 
     def get_dataset(self, dataset_id: str) -> DatasetRecord | None:
         raw = self._load_datasets().get(dataset_id)
@@ -304,7 +304,7 @@ class MCPRegistry:
         path = self._run_path(run_id)
         if not path.exists():
             return None
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
         if "resolved_threshold" in raw:
             raise ValueError(STALE_RUN_RECORD_MESSAGE)
         return RunRecord(**raw)
@@ -393,7 +393,7 @@ class MCPRegistry:
         path = self._cluster_assignment_path(cluster_assignment_id)
         if not path.exists():
             return None
-        return ClusterAssignmentRecord(**json.loads(path.read_text()))
+        return ClusterAssignmentRecord(**json.loads(path.read_text(encoding="utf-8")))
 
     def _load_datasets(self) -> dict[str, dict]:
         with self._locked_registry():
@@ -402,7 +402,7 @@ class MCPRegistry:
     def _load_datasets_unlocked(self) -> dict[str, dict]:
         if not _DATASETS_PATH.exists():
             return {}
-        return json.loads(_DATASETS_PATH.read_text())
+        return json.loads(_DATASETS_PATH.read_text(encoding="utf-8"))
 
     def _run_path(self, run_id: str) -> Path:
         return _RUNS_DIR / f"{run_id}.json"

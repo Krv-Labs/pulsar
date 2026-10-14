@@ -401,6 +401,45 @@ def _run_worker_job(
     return fn(*args, **kwargs)
 
 
+class _WorkerAdmission:
+    """Loop-side admission lease for a single ``run_session_worker`` invocation."""
+
+    __slots__ = ("_releasers", "_session")
+
+    def __init__(self, session: _PulsarSession) -> None:
+        self._session = session
+        session.active_ops += 1
+        self._releasers: list[Callable[[], None]] = [self._decrement_active_ops]
+
+    def _decrement_active_ops(self) -> None:
+        self._session.active_ops = max(0, self._session.active_ops - 1)
+
+    async def acquire(
+        self,
+        *,
+        mutates_session: bool,
+        heavy_sem: asyncio.Semaphore | None,
+        cancel_event: threading.Event,
+    ) -> None:
+        if mutates_session:
+            await self._session._worker_mutation_lock.acquire()
+            self._releasers.append(self._session._worker_mutation_lock.release)
+        if heavy_sem is not None:
+            await heavy_sem.acquire()
+            self._releasers.append(heavy_sem.release)
+        if cancel_event.is_set():
+            raise OperationCancelledError("Operation cancelled before start.")
+
+    def release(self) -> None:
+        while self._releasers:
+            self._releasers.pop()()
+
+    def on_done(self, done: asyncio.Future[Any]) -> None:
+        if not done.cancelled():
+            done.exception()  # mark retrieved; the awaiter may be gone
+        self.release()
+
+
 async def run_session_worker(
     session: _PulsarSession,
     fn: Callable[..., T],
@@ -426,31 +465,13 @@ async def run_session_worker(
     loop = asyncio.get_running_loop()
     cancel_event = cancel_event if cancel_event is not None else threading.Event()
     heavy_sem = _heavy_semaphore() if heavy else None
-    held_lock = False
-    held_sem = False
-    released = False
-
-    def release() -> None:
-        nonlocal released
-        if released:
-            return
-        released = True
-        if held_sem and heavy_sem is not None:
-            heavy_sem.release()
-        if held_lock:
-            session._worker_mutation_lock.release()
-        session.active_ops = max(0, session.active_ops - 1)
-
-    session.active_ops += 1
+    admission = _WorkerAdmission(session)
     try:
-        if mutates_session:
-            await session._worker_mutation_lock.acquire()
-            held_lock = True
-        if heavy_sem is not None:
-            await heavy_sem.acquire()
-            held_sem = True
-        if cancel_event.is_set():
-            raise OperationCancelledError("Operation cancelled before start.")
+        await admission.acquire(
+            mutates_session=mutates_session,
+            heavy_sem=heavy_sem,
+            cancel_event=cancel_event,
+        )
         # Unlike asyncio.to_thread, run_in_executor does not copy contextvars.
         # Without them FastMCP's request context is unset in the worker and
         # ctx.report_progress silently no-ops.
@@ -461,15 +482,10 @@ async def run_session_worker(
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):
             cancel_event.set()
-        release()
+        admission.release()
         raise
 
-    def _on_done(done: asyncio.Future[Any]) -> None:
-        if not done.cancelled():
-            done.exception()  # mark retrieved; the awaiter may be gone
-        release()
-
-    fut.add_done_callback(_on_done)
+    fut.add_done_callback(admission.on_done)
     try:
         return await asyncio.shield(fut)
     except asyncio.CancelledError:
