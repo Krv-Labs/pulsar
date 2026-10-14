@@ -714,3 +714,26 @@ def test_repair_config_source_returns_coded_errors():
         res = repair_config(cfg, msg, {})
         assert res.structured_content["error_code"] == code
         assert res.structured_content["agent_action"]
+
+
+def test_validate_preprocessing_config_malformed_yaml_is_config_yaml_invalid(
+    tmp_path: Path,
+) -> None:
+    """Malformed YAML gets the shared CONFIG_YAML_INVALID code, not a generic failure."""
+
+    async def _run() -> None:
+        csv = _write_csv(tmp_path / "v.csv")
+        async with Client(_server()) as client:
+            dataset_id = (
+                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ).structured_content["dataset_id"]
+            res = await _call(
+                client,
+                "validate_preprocessing_config",
+                {"config_yaml": "nope: [", "dataset_id": dataset_id},
+                error="CONFIG_YAML_INVALID",
+            )
+            assert res.content[0].text.strip().startswith("{")
+            assert res.structured_content["details"] == {"valid": False}
+
+    asyncio.run(_run())

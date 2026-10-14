@@ -505,6 +505,17 @@ async def validate_preprocessing_config(
             }
         )
 
+    except yaml.YAMLError as e:
+        return mcp_error(
+            "validate_preprocessing_config",
+            f"config_yaml is not valid YAML: {e}",
+            error_code="CONFIG_YAML_INVALID",
+            agent_action=(
+                "Pass raw YAML (no Markdown fences) and fix the syntax error, "
+                "then retry."
+            ),
+            details={"valid": False},
+        )
     except (ValueError, TypeError) as e:
         return mcp_error(
             "validate_preprocessing_config",

@@ -1534,7 +1534,7 @@ async def create_graph_artifact(
     ] = True,
     ctx: Context = None,
 ) -> ToolResult:
-    """Estimate or build a spectral-sparsifier graph artifact for the latest run.
+    """Estimate or build a spectral-sparsifier graph artifact (estimates for any cached run; builds for the latest).
 
     Expensive by design: estimate_only defaults true. A built artifact gets an
     artifact_id usable with diagnose_cosmic_graph and get_topological_skeleton

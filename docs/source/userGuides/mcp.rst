@@ -419,7 +419,7 @@ Server operators tune the MCP server through environment variables, set in the M
      - Per-call timeout in seconds on long tools (sweep, longitudinal build, dossier, characterize, HTML report, dataset bundle).
    * - ``PULSAR_MCP_MAX_RESPONSE_BYTES``
      - ``100000``
-     - Backstop on a single response's size (about 25k tokens). A larger result is replaced, never truncated, by an ``is_error`` envelope with ``error_code: RESPONSE_TOO_LARGE`` (``details.size_bytes`` / ``details.limit_bytes``); retry with ``detail="summary"``, lower ``max_*`` / preview limits, or a narrower tool.
+     - Backstop on a single response's size, measured as the text view plus the serialized structured content together (so roughly 2x the text an agent reads; about 25k tokens combined). ``0`` or a negative value disables it. A larger result is replaced, never truncated, by an ``is_error`` envelope with ``error_code: RESPONSE_TOO_LARGE`` (``details.size_bytes`` / ``details.limit_bytes``); retry with ``detail="summary"``, lower ``max_*`` / preview limits, or a narrower tool.
    * - ``PULSAR_MCP_MODEL_CACHE_SIZE``
      - ``3``
      - Number of fitted runs kept addressable by ``run_id`` (minimum 1).

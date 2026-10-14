@@ -73,11 +73,13 @@ class ArgumentSanitizerMiddleware(Middleware):
 DEFAULT_MAX_RESPONSE_BYTES = 100_000  # ~25k tokens, Claude Code's tool-result cap
 
 
-def _max_response_bytes() -> int:
+def _max_response_bytes() -> int | None:
+    """Byte budget from the environment; ``<= 0`` disables the backstop."""
     try:
-        return max(1, int(os.environ.get("PULSAR_MCP_MAX_RESPONSE_BYTES", "")))
+        value = int(os.environ.get("PULSAR_MCP_MAX_RESPONSE_BYTES", ""))
     except ValueError:
         return DEFAULT_MAX_RESPONSE_BYTES
+    return value if value > 0 else None
 
 
 def _result_size_bytes(result: ToolResult) -> int:
@@ -109,7 +111,7 @@ class ResponseBudgetMiddleware(Middleware):
             return result
         size = _result_size_bytes(result)
         limit = _max_response_bytes()
-        if size <= limit:
+        if limit is None or size <= limit:
             return result
         logger.warning(
             "Tool %r response %d bytes exceeds limit %d; returning error envelope",

@@ -113,6 +113,19 @@ def test_response_under_limit_passes_through(monkeypatch):
     assert "guide" in result.structured_content
 
 
+def test_response_limit_zero_disables_backstop(monkeypatch):
+    monkeypatch.setenv("PULSAR_MCP_MAX_RESPONSE_BYTES", "0")
+    assert server_mod._max_response_bytes() is None
+
+    async def go():
+        async with Client(server_mod.mcp) as client:
+            return await client.call_tool("get_workflow_guide", {})
+
+    result = asyncio.run(go())
+    assert not result.is_error
+    assert "guide" in result.structured_content
+
+
 def test_timing_lines_reach_stderr(capsys):
     import logging
 
