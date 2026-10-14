@@ -52,10 +52,93 @@ def _select_longitudinal_entities(
     return sorted(eligible, key=entity_order)[:max_entities], len(eligible)
 
 
+def _sample_longitudinal_entities_worker(
+    *,
+    dataset_id: str,
+    source_path: str,
+    entity_column: str,
+    max_entities: int,
+    min_observations: int,
+    time_column: str | None,
+    min_time_points: int | None,
+) -> str:
+    frame = _read_dataset_file(source_path)
+    if entity_column not in frame.columns:
+        return mcp_error(
+            "sample_longitudinal_entities",
+            f"Entity column '{entity_column}' is not present in the dataset.",
+            error_code="ENTITY_COLUMN_UNKNOWN",
+            agent_action="Call characterize_dataset or probe_columns and pass an existing entity column.",
+            details={"dataset_id": dataset_id, "entity_column": entity_column},
+        )
+    if time_column is not None and time_column not in frame.columns:
+        return mcp_error(
+            "sample_longitudinal_entities",
+            f"Time column '{time_column}' is not present in the dataset.",
+            error_code="TIME_COLUMN_UNKNOWN",
+            agent_action="Pass an existing discrete time column or omit time_column.",
+            details={"dataset_id": dataset_id, "time_column": time_column},
+        )
+
+    selected, eligible_count = _select_longitudinal_entities(
+        frame,
+        entity_column,
+        max_entities,
+        min_observations,
+        time_column,
+        min_time_points,
+    )
+    sampled = frame[frame[entity_column].isin(selected)]
+    if sampled.empty:
+        return mcp_error(
+            "sample_longitudinal_entities",
+            "No entities meet the requested minimum observation and timepoint counts.",
+            error_code="NO_ELIGIBLE_ENTITIES",
+            agent_action="Lower the minimum counts or use different entity and time columns.",
+            details={
+                "dataset_id": dataset_id,
+                "entity_column": entity_column,
+                "min_observations": min_observations,
+                "time_column": time_column,
+                "min_time_points": min_time_points,
+            },
+        )
+
+    # CSV sources stay CSV: pyarrow rejects the mixed-type object columns
+    # read_csv can produce, and a CSV round-trip re-reads like the source.
+    suffix = ".parquet" if source_path.lower().endswith(".parquet") else ".csv"
+    writer = sampled.to_parquet if suffix == ".parquet" else sampled.to_csv
+    staging_path = registry.cache_dir / f"sample_{uuid.uuid4().hex}{suffix}"
+    try:
+        writer(staging_path, index=False)
+        record = registry.register_dataset_from_file(
+            f"{Path(source_path).stem}_sample{suffix}",
+            staging_path,
+            source="entity_sample",
+        )
+    finally:
+        staging_path.unlink(missing_ok=True)
+    return json.dumps(
+        {
+            "dataset_id": record.dataset_id,
+            "source_dataset_id": dataset_id,
+            "entity_column": entity_column,
+            "max_entities": max_entities,
+            "min_observations": min_observations,
+            "time_column": time_column,
+            "min_time_points": min_time_points,
+            "eligible_entities": eligible_count,
+            "sampled_entities": len(selected),
+            "sampled_rows": int(len(sampled)),
+        },
+        indent=2,
+    )
+
+
 async def ingest_dataset(path: str, ctx: Context = None) -> str:
     """Register a host-visible absolute dataset path; returns a `dataset_id`."""
     try:
-        record = registry.register_dataset(path)
+        record = await asyncio.to_thread(registry.register_dataset, path)
         session = _get_session(ctx)
         session.dataset_id = record.dataset_id
         return json.dumps(dataclasses.asdict(record), indent=2)
@@ -123,76 +206,15 @@ async def sample_longitudinal_entities(
         )
 
     try:
-        frame = await asyncio.to_thread(_read_dataset_file, source_path)
-        if entity_column not in frame.columns:
-            return mcp_error(
-                "sample_longitudinal_entities",
-                f"Entity column '{entity_column}' is not present in the dataset.",
-                error_code="ENTITY_COLUMN_UNKNOWN",
-                agent_action="Call characterize_dataset or probe_columns and pass an existing entity column.",
-                details={"dataset_id": dataset_id, "entity_column": entity_column},
-            )
-        if time_column is not None and time_column not in frame.columns:
-            return mcp_error(
-                "sample_longitudinal_entities",
-                f"Time column '{time_column}' is not present in the dataset.",
-                error_code="TIME_COLUMN_UNKNOWN",
-                agent_action="Pass an existing discrete time column or omit time_column.",
-                details={"dataset_id": dataset_id, "time_column": time_column},
-            )
-
-        selected, eligible_count = _select_longitudinal_entities(
-            frame,
-            entity_column,
-            max_entities,
-            min_observations,
-            time_column,
-            min_time_points,
-        )
-        sampled = frame[frame[entity_column].isin(selected)]
-        if sampled.empty:
-            return mcp_error(
-                "sample_longitudinal_entities",
-                "No entities meet the requested minimum observation and timepoint counts.",
-                error_code="NO_ELIGIBLE_ENTITIES",
-                agent_action="Lower the minimum counts or use different entity and time columns.",
-                details={
-                    "dataset_id": dataset_id,
-                    "entity_column": entity_column,
-                    "min_observations": min_observations,
-                    "time_column": time_column,
-                    "min_time_points": min_time_points,
-                },
-            )
-
-        # CSV sources stay CSV: pyarrow rejects the mixed-type object columns
-        # read_csv can produce, and a CSV round-trip re-reads like the source.
-        suffix = ".parquet" if source_path.lower().endswith(".parquet") else ".csv"
-        writer = sampled.to_parquet if suffix == ".parquet" else sampled.to_csv
-        staging_path = registry.cache_dir / f"sample_{uuid.uuid4().hex}{suffix}"
-        try:
-            await asyncio.to_thread(writer, staging_path, index=False)
-            record = registry.register_dataset_from_file(
-                f"{Path(source_path).stem}_sample{suffix}",
-                staging_path,
-                source="entity_sample",
-            )
-        finally:
-            staging_path.unlink(missing_ok=True)
-        return json.dumps(
-            {
-                "dataset_id": record.dataset_id,
-                "source_dataset_id": dataset_id,
-                "entity_column": entity_column,
-                "max_entities": max_entities,
-                "min_observations": min_observations,
-                "time_column": time_column,
-                "min_time_points": min_time_points,
-                "eligible_entities": eligible_count,
-                "sampled_entities": len(selected),
-                "sampled_rows": int(len(sampled)),
-            },
-            indent=2,
+        return await asyncio.to_thread(
+            _sample_longitudinal_entities_worker,
+            dataset_id=dataset_id,
+            source_path=source_path,
+            entity_column=entity_column,
+            max_entities=max_entities,
+            min_observations=min_observations,
+            time_column=time_column,
+            min_time_points=min_time_points,
         )
     except Exception as e:
         logger.exception("Could not sample longitudinal entities")
@@ -206,7 +228,9 @@ async def begin_dataset_upload(
 ) -> str:
     """Begin staged upload (sandboxed clients only). Then append chunks + finalize."""
     try:
-        record = registry.begin_upload(filename, media_type=media_type)
+        record = await asyncio.to_thread(
+            registry.begin_upload, filename, media_type=media_type
+        )
         return json.dumps(dataclasses.asdict(record), indent=2)
     except Exception as e:
         return mcp_error("begin_dataset_upload", str(e))
@@ -240,7 +264,9 @@ async def append_dataset_chunk(
                 agent_action="Use encoding='base64' for binary-safe chunk transport.",
             )
 
-        record = registry.append_upload_chunk(upload_id, chunk_bytes)
+        record = await asyncio.to_thread(
+            registry.append_upload_chunk, upload_id, chunk_bytes
+        )
         if record is None:
             return unknown_handle_error("append_dataset_chunk", "upload_id", upload_id)
         return json.dumps(dataclasses.asdict(record), indent=2)
@@ -251,7 +277,7 @@ async def append_dataset_chunk(
 async def finalize_dataset_upload(upload_id: str, ctx: Context = None) -> str:
     """Finalize a staged upload; returns a `dataset_id`."""
     try:
-        record = registry.finalize_upload(upload_id)
+        record = await asyncio.to_thread(registry.finalize_upload, upload_id)
         if record is None:
             return unknown_handle_error(
                 "finalize_dataset_upload", "upload_id", upload_id

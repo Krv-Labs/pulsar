@@ -306,7 +306,9 @@ async def validate_config(
     """Validate full Pulsar config and normalize into canonical YAML."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
-        report = validate_config_yaml(config_yaml, dataset_path=dataset_path)
+        report = await asyncio.to_thread(
+            validate_config_yaml, config_yaml, dataset_path=dataset_path
+        )
         if dataset_id:
             _get_session(ctx).dataset_id = dataset_id
         return render_validation_report(report)

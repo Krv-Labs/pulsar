@@ -5,7 +5,9 @@ import dataclasses
 import json
 import logging
 import os
-from typing import Any, Literal
+from pathlib import Path
+import tempfile
+from typing import Any, Callable, Literal
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -18,6 +20,7 @@ from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.interpreter import build_dossier, build_feature_evidence_index
 from pulsar.mcp.report import dossier_to_html
 from pulsar.mcp.registry import registry
+from pulsar.runtime.utils import default_file_mode
 from pulsar.mcp.session import (
     _get_session,
     _load_session_dataframe,
@@ -26,6 +29,29 @@ from pulsar.mcp.session import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_text_or_df(
+    dest_path: Path,
+    write_fn: Callable[[Path], None],
+) -> None:
+    """Write via a sibling temporary file in dest_path.parent and atomically replace."""
+    dest_path = Path(dest_path)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=dest_path.parent,
+        prefix=f".{dest_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+    try:
+        write_fn(tmp_path)
+        os.chmod(tmp_path, default_file_mode())
+        os.replace(tmp_path, dest_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _missing_session_state_error(tool: str, session: Any) -> str:
@@ -100,6 +126,23 @@ def _normalize_cluster_names(
             )
 
     return normalized
+
+
+def _write_labeled_csv_worker(
+    df: Any,
+    labels: Any,
+    names_map: dict[int, str],
+    output_path: str,
+) -> int:
+    dest_path = Path(output_path)
+    out_df = df.copy()
+    out_df["topological_cluster_id"] = labels
+    out_df["topological_cluster_name"] = out_df["topological_cluster_id"].map(names_map)
+    _atomic_write_text_or_df(
+        dest_path,
+        lambda tmp_path: out_df.to_csv(tmp_path, index=False),
+    )
+    return len(out_df)
 
 
 async def export_labeled_data(
@@ -196,10 +239,13 @@ async def export_labeled_data(
     )
 
     try:
-        df = df.copy()
-        df["topological_cluster_id"] = assignment.labels
-        df["topological_cluster_name"] = df["topological_cluster_id"].map(names_map)
-        df.to_csv(output_path, index=False)
+        row_count = await asyncio.to_thread(
+            _write_labeled_csv_worker,
+            df,
+            assignment.labels,
+            names_map,
+            output_path,
+        )
         return json.dumps(
             {
                 "status": "ok",
@@ -207,7 +253,7 @@ async def export_labeled_data(
                 "cluster_assignment_id": cluster_assignment_id,
                 "run_id": assignment.run_id,
                 "dataset_id": assignment.dataset_id,
-                "row_count": len(df),
+                "row_count": row_count,
                 "cluster_ids": assignment.cluster_ids,
             },
             indent=2,
@@ -216,6 +262,68 @@ async def export_labeled_data(
     except Exception as e:
         logger.error(f"Error exporting data: {e}")
         return mcp_error("export_labeled_data", str(e))
+
+
+def _export_html_report_worker(
+    *,
+    model: Any,
+    data: Any,
+    clusters: Any,
+    cached_evidence_index: Any,
+    cols_to_exclude: list[str] | None,
+    report_exclude_columns: list[str] | None,
+    cluster_names: dict[str, str] | None,
+    config_yaml: str | None,
+    dataset_id: str,
+) -> str:
+    if cached_evidence_index is not None and cols_to_exclude == report_exclude_columns:
+        evidence_index = cached_evidence_index
+    else:
+        evidence_index = build_feature_evidence_index(
+            model,
+            data,
+            clusters,
+            exclude_columns=cols_to_exclude,
+        )
+
+    dossier = build_dossier(
+        model,
+        data,
+        clusters,
+        detail="full",
+        evidence_index=evidence_index,
+    )
+
+    valid_ids = {int(profile.cluster_id) for profile in dossier.clusters}
+    normalized_names = _normalize_cluster_names(
+        cluster_names,
+        valid_cluster_ids=valid_ids,
+        require_all=False,
+    )
+    for profile in dossier.clusters:
+        if profile.cluster_id in normalized_names:
+            profile.semantic_name = normalized_names[profile.cluster_id]
+
+    html = dossier_to_html(
+        dossier,
+        model=model,
+        config_yaml=config_yaml,
+    )
+
+    # Save to a file near the dataset if possible, or current dir
+    dataset_path = (
+        _resolve_dataset_path(dataset_id) if dataset_id else "pulsar_report.html"
+    )
+    if os.path.isfile(dataset_path):
+        report_path = os.path.splitext(dataset_path)[0] + "_report.html"
+    else:
+        report_path = os.path.join(os.getcwd(), "pulsar_report.html")
+
+    _atomic_write_text_or_df(
+        Path(report_path),
+        lambda tmp_path: tmp_path.write_text(html, encoding="utf-8"),
+    )
+    return report_path
 
 
 async def export_html_report(
@@ -249,57 +357,21 @@ async def export_html_report(
     )
 
     try:
-        if (
-            session.feature_evidence_index is not None
-            and cols_to_exclude == session.report_exclude_columns
-        ):
-            evidence_index = session.feature_evidence_index
-        else:
-            evidence_index = build_feature_evidence_index(
-                session.model,
-                session.data,
-                session.clusters,
-                exclude_columns=cols_to_exclude,
-            )
-
-        dossier = build_dossier(
-            session.model,
-            session.data,
-            session.clusters,
-            detail="full",
-            evidence_index=evidence_index,
-        )
-
-        valid_ids = {int(profile.cluster_id) for profile in dossier.clusters}
-        normalized_names = _normalize_cluster_names(
-            cluster_names,
-            valid_cluster_ids=valid_ids,
-            require_all=False,
-        )
-        for profile in dossier.clusters:
-            if profile.cluster_id in normalized_names:
-                profile.semantic_name = normalized_names[profile.cluster_id]
-
         config_yaml = (
             session.sweep_history[-1].config_yaml if session.sweep_history else None
         )
-        html = dossier_to_html(
-            dossier,
+        report_path = await asyncio.to_thread(
+            _export_html_report_worker,
             model=session.model,
+            data=session.data,
+            clusters=session.clusters,
+            cached_evidence_index=session.feature_evidence_index,
+            cols_to_exclude=cols_to_exclude,
+            report_exclude_columns=session.report_exclude_columns,
+            cluster_names=cluster_names,
             config_yaml=config_yaml,
+            dataset_id=dataset_id,
         )
-
-        # Save to a file near the dataset if possible, or current dir
-        dataset_path = (
-            _resolve_dataset_path(dataset_id) if dataset_id else "pulsar_report.html"
-        )
-        if os.path.isfile(dataset_path):
-            report_path = os.path.splitext(dataset_path)[0] + "_report.html"
-        else:
-            report_path = os.path.join(os.getcwd(), "pulsar_report.html")
-
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(html)
 
         response: dict[str, Any] = {
             "status": "ok",
@@ -319,6 +391,20 @@ async def export_html_report(
         return mcp_error("export_html_report", str(e))
 
 
+def _probe_columns_worker(df: Any, columns: list[str]) -> dict[str, Any]:
+    from pulsar.analysis.characterization import profile_column_details
+
+    profiles = []
+    missing_columns = []
+    for col in columns:
+        if col not in df.columns:
+            missing_columns.append(col)
+            continue
+        profiles.append(dataclasses.asdict(profile_column_details(df, col)))
+
+    return probe_columns_payload(profiles, columns, missing_columns)
+
+
 async def probe_columns(
     dataset_id: str,
     columns: list[str],
@@ -328,8 +414,6 @@ async def probe_columns(
     """Targeted column drilldown: sample values, missingness, and distributions.
     Use after `characterize_dataset`; max 20 columns.
     """
-    from pulsar.analysis.characterization import profile_column_details
-
     if len(columns) > 20:
         return mcp_error(
             "probe_columns", "Too many columns requested. Max 20 at a time."
@@ -344,15 +428,7 @@ async def probe_columns(
         return mcp_error("probe_columns", f"Could not load data: {e}")
 
     try:
-        profiles = []
-        missing_columns = []
-        for col in columns:
-            if col not in df.columns:
-                missing_columns.append(col)
-                continue
-            profiles.append(dataclasses.asdict(profile_column_details(df, col)))
-
-        payload = probe_columns_payload(profiles, columns, missing_columns)
+        payload = await asyncio.to_thread(_probe_columns_worker, df, columns)
         if response_format == "markdown":
             return probe_columns_payload_to_markdown(payload)
         return json.dumps(payload, indent=2)

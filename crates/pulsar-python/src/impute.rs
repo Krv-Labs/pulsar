@@ -28,7 +28,7 @@ pub fn impute_column<'py>(
     method: &str,
     seed: u64,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let mut arr = values.as_array().to_owned();
-    impute_column_inplace(arr.as_slice_mut().unwrap(), method, seed)?;
+    let mut arr = values.as_array().as_standard_layout().into_owned();
+    py.allow_threads(|| impute_column_inplace(arr.as_slice_mut().unwrap(), method, seed))?;
     Ok(arr.into_pyarray_bound(py))
 }

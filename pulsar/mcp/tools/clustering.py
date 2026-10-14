@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import threading
 from typing import Any, Literal
 
 import numpy as np
@@ -42,8 +43,13 @@ from pulsar.mcp.payloads import (
     size_summary,
     summary_evidence_payload_to_markdown,
 )
-from pulsar.mcp.registry import registry
-from pulsar.mcp.session import _get_session
+from pulsar.mcp.registry import StagedWrite, registry
+from pulsar.mcp.session import (
+    OperationCancelledError,
+    SessionConflictError,
+    _get_session,
+    run_session_worker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,40 +185,149 @@ def _feature_evidence_fingerprint(
     ).hexdigest()
 
 
-def _get_or_build_evidence_index(
-    session: Any,
+def _compute_evidence_index(
+    model: Any,
+    data: pd.DataFrame,
+    latest_run_id: str | None,
+    cached_index: FeatureEvidenceIndex | None,
+    cached_fingerprint: str | None,
     *,
     cluster_result: Any,
     exclude_columns: list[str] | None,
     max_clusters_to_characterize: int | None = None,
-) -> FeatureEvidenceIndex:
+) -> tuple[FeatureEvidenceIndex, str]:
     fingerprint = _feature_evidence_fingerprint(
-        run_id=session.latest_run_id,
+        run_id=latest_run_id,
         labels=cluster_result.labels,
         method=cluster_result.method_used,
         interpretation_edge_weight_threshold=cluster_result.interpretation_edge_weight_threshold_applied,
         exclude_columns=exclude_columns,
         max_clusters_to_characterize=max_clusters_to_characterize,
     )
-    if (
-        session.feature_evidence_index is not None
-        and session.feature_evidence_fingerprint == fingerprint
-    ):
-        return session.feature_evidence_index
+    if cached_index is not None and cached_fingerprint == fingerprint:
+        return cached_index, fingerprint
 
     evidence_index = build_feature_evidence_index(
-        session.model,
-        session.data,
+        model,
+        data,
         cluster_result.labels,
         exclude_columns=exclude_columns,
         max_clusters_to_characterize=max_clusters_to_characterize,
     )
-    session.feature_evidence_index = evidence_index
-    session.feature_evidence_fingerprint = fingerprint
-    # cluster_meta is owned by generate_cluster_dossier (built once per call and
-    # assigned to the session), so it is not (re)built here. Building it on the
-    # cache-miss path only would also leave it stale on a cache hit.
-    return evidence_index
+    return evidence_index, fingerprint
+
+
+def _compute_dossier_worker(
+    session: Any,
+    model: Any,
+    data: pd.DataFrame,
+    expected_run_id: str | None,
+    data_dataset_id: str | None,
+    cached_index: FeatureEvidenceIndex | None,
+    cached_fingerprint: str | None,
+    method: str,
+    max_k: int,
+    resolved_interpretation_threshold: float,
+    threshold_source: str,
+    construction_threshold: float,
+    exclude_columns: list[str] | None,
+    max_char_cap: int,
+    detail: Literal["summary", "standard", "full"],
+    cancel_event: threading.Event | None = None,
+) -> tuple[Any, dict[str, Any], FeatureEvidenceIndex, str, Any, StagedWrite]:
+    """Compute clusters/evidence/dossier. Never mutates ``session``.
+
+    The cluster assignment is only *staged* (serialized + fsynced to a temp
+    file; O(rows)). The caller commits it and publishes on the event loop
+    (``_publish_dossier_on_loop``), or discards it if the publish is refused.
+    """
+    if expected_run_id is not None and session.latest_run_id != expected_run_id:
+        raise SessionConflictError(
+            "Session run changed before dossier computation started; "
+            "refusing to publish stale cluster dossier."
+        )
+    result = resolve_clusters(
+        model,
+        method=method,
+        max_k=max_k,
+        interpretation_edge_weight_threshold=resolved_interpretation_threshold,
+    )
+    cluster_meta = cluster_result_payload(result)
+    evidence_index, fingerprint = _compute_evidence_index(
+        model,
+        data,
+        expected_run_id,
+        cached_index,
+        cached_fingerprint,
+        cluster_result=result,
+        exclude_columns=exclude_columns,
+        max_clusters_to_characterize=max_char_cap,
+    )
+    dossier = (
+        None
+        if detail == "summary"
+        else build_dossier(
+            model,
+            data,
+            result.labels,
+            detail=detail,
+            evidence_index=evidence_index,
+        )
+    )
+    staged_assignment = registry.stage_cluster_assignment(
+        run_id=expected_run_id,
+        dataset_id=data_dataset_id,
+        method=str(cluster_meta["method_used"]),
+        interpretation_edge_weight_threshold=resolved_interpretation_threshold,
+        threshold_source=threshold_source,
+        construction_threshold=construction_threshold,
+        labels=result.labels.astype(int).tolist(),
+    )
+    # A cancel that arrived during staging would otherwise orphan the temp
+    # file: the awaiting coroutine is gone, so nobody would discard it.
+    if cancel_event is not None and cancel_event.is_set():
+        registry.discard_staged(staged_assignment)
+        raise OperationCancelledError("Cluster dossier cancelled before publication.")
+    return result, cluster_meta, evidence_index, fingerprint, dossier, staged_assignment
+
+
+def _publish_dossier_on_loop(
+    session: Any,
+    *,
+    result: Any,
+    cluster_meta: dict[str, Any],
+    evidence_index: FeatureEvidenceIndex,
+    fingerprint: str,
+    staged_assignment: StagedWrite,
+    expected_run_id: str | None,
+    exclude_columns: list[str] | None,
+) -> Any:
+    """Commit the staged assignment and publish dossier state synchronously.
+
+    The run check precedes the commit and no ``await`` separates them from
+    ``publish_dossier``. A refused dossier discards its staged file, so nothing
+    is persisted unless it is published.
+    """
+    try:
+        if session.latest_run_id != expected_run_id:
+            raise SessionConflictError(
+                "Active run changed while computing cluster dossier; "
+                "refusing to publish stale clusters."
+            )
+        assignment = registry.commit_staged(staged_assignment)
+    except BaseException:
+        registry.discard_staged(staged_assignment)
+        raise
+    session.publish_dossier(
+        expected_run_id=expected_run_id,
+        clusters=result.labels,
+        report_exclude_columns=exclude_columns,
+        feature_evidence_cluster_meta=cluster_meta,
+        cluster_assignment_id=assignment.cluster_assignment_id,
+        feature_evidence_index=evidence_index,
+        feature_evidence_fingerprint=fingerprint,
+    )
+    return assignment
 
 
 def _graph_metrics_payload(model: Any) -> dict[str, Any]:
@@ -318,8 +433,15 @@ async def generate_cluster_dossier(
         )
 
     try:
+        model = session.model
+        data = session.data
+        expected_run_id = session.latest_run_id
+        data_dataset_id = session.data_dataset_id
+        cached_index = session.feature_evidence_index
+        cached_fingerprint = session.feature_evidence_fingerprint
+
         construction_threshold = _validate_unit_threshold(
-            session.model.resolved_construction_threshold,
+            model.resolved_construction_threshold,
             name="resolved_construction_threshold",
         )
         threshold_inherited = interpretation_edge_weight_threshold is None
@@ -342,54 +464,53 @@ async def generate_cluster_dossier(
             threshold_inherited=threshold_inherited,
             threshold_source=threshold_source,
         )
-        result = await asyncio.to_thread(
-            resolve_clusters,
-            session.model,
-            method=method,
-            max_k=max_k,
-            interpretation_edge_weight_threshold=resolved_interpretation_threshold,
-        )
-        session.clusters = result.labels
-        # Stamp the cluster cache with the run it was computed from so reads can
-        # detect when a newer sweep has advanced session.latest_run_id without
-        # recomputing clusters. generate_cluster_dossier recomputes here, so the
-        # stamp is always refreshed to the active fitted model's run.
-        session.clusters_run_id = session.latest_run_id
-        session.report_exclude_columns = exclude_columns
-
-        # Single source of truth for cluster metadata: build the O(n) size table
-        # once, store it on the session, and reuse it for every downstream reader
-        # (compacted header, cluster_selection ID universe, sibling tools).
-        cluster_meta = cluster_result_payload(result)
-        session.feature_evidence_cluster_meta = cluster_meta
-        assignment = registry.save_cluster_assignment(
-            run_id=session.latest_run_id,
-            # Only the dataset the current data was actually loaded from backs a
-            # durable export. session.dataset_id can linger from a prior ingest
-            # while session.data came from a raw data_path, so falling back to it
-            # would record a dataset that does not match these labels. None here
-            # correctly routes export_labeled_data to its in-session fallback.
-            dataset_id=session.data_dataset_id,
-            method=str(cluster_meta["method_used"]),
-            interpretation_edge_weight_threshold=resolved_interpretation_threshold,
-            threshold_source=threshold_source,
-            construction_threshold=construction_threshold,
-            labels=result.labels.astype(int).tolist(),
-        )
-        session.cluster_assignment_id = assignment.cluster_assignment_id
-        assignment_summary = _cluster_assignment_summary(assignment)
 
         # Safety cap: only characterize top N clusters to prevent O(K*F) hang
         # on shattered graphs. Small singletons/noise are omitted from profiling.
         max_char_cap = max(50, max_clusters * 2)
 
-        evidence_index = await asyncio.to_thread(
-            _get_or_build_evidence_index,
+        cancel_event = threading.Event()
+        (
+            result,
+            cluster_meta,
+            evidence_index,
+            fingerprint,
+            dossier,
+            staged_assignment,
+        ) = await run_session_worker(
             session,
-            cluster_result=result,
-            exclude_columns=exclude_columns,
-            max_clusters_to_characterize=max_char_cap,
+            _compute_dossier_worker,
+            session,
+            model,
+            data,
+            expected_run_id,
+            data_dataset_id,
+            cached_index,
+            cached_fingerprint,
+            method,
+            max_k,
+            resolved_interpretation_threshold,
+            threshold_source,
+            construction_threshold,
+            exclude_columns,
+            max_char_cap,
+            detail,
+            cancel_event,
+            heavy=True,
+            mutates_session=True,
+            cancel_event=cancel_event,
         )
+        assignment = _publish_dossier_on_loop(
+            session,
+            result=result,
+            cluster_meta=cluster_meta,
+            evidence_index=evidence_index,
+            fingerprint=fingerprint,
+            staged_assignment=staged_assignment,
+            expected_run_id=expected_run_id,
+            exclude_columns=exclude_columns,
+        )
+        assignment_summary = _cluster_assignment_summary(assignment)
         if detail == "summary":
             summary_feature_preview_limit = (
                 min(feature_preview_limit, 3)
@@ -399,7 +520,7 @@ async def generate_cluster_dossier(
             payload = build_summary_evidence_payload(
                 evidence_index,
                 cluster_meta,
-                _graph_metrics_payload(session.model),
+                _graph_metrics_payload(model),
                 max_clusters=max_clusters,
                 feature_preview_limit=summary_feature_preview_limit,
             )
@@ -442,15 +563,6 @@ async def generate_cluster_dossier(
                 separators=(",", ":") if len(payload["clusters"]) > 10 else None,
                 indent=None if len(payload["clusters"]) > 10 else 2,
             )
-
-        dossier = await asyncio.to_thread(
-            build_dossier,
-            session.model,
-            session.data,
-            result.labels,
-            detail=detail,
-            evidence_index=evidence_index,
-        )
         if response_format == "markdown":
             body = (
                 _two_lever_markdown_note(
@@ -511,6 +623,18 @@ async def generate_cluster_dossier(
         if response_format == "markdown":
             return _spectral_cut_error_to_markdown(e)
         return json.dumps(e.payload(detail=detail), indent=2)
+    except SessionConflictError as e:
+        logger.info("Dossier refused: %s", e)
+        return mcp_error(
+            "generate_cluster_dossier",
+            str(e),
+            error_code=e.error_code,
+            agent_action=(
+                "Nothing was persisted or published. The live run changed while "
+                "the dossier was computing; re-run generate_cluster_dossier "
+                "against the current run."
+            ),
+        )
     except Exception as e:
         logger.error(f"Error generating dossier: {e}")
         return mcp_error("generate_cluster_dossier", str(e))
@@ -704,8 +828,8 @@ async def compare_clusters(cluster_a: int, cluster_b: int, ctx: Context = None) 
         )
 
     try:
-        results = _compare_clusters(
-            session.data, session.clusters, cluster_a, cluster_b
+        results = await asyncio.to_thread(
+            _compare_clusters, session.data, session.clusters, cluster_a, cluster_b
         )
         if not results:
             return mcp_error(

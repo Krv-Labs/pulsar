@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any, Literal, TYPE_CHECKING
 
 import networkx as nx
@@ -11,6 +15,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from pulsar.runtime.utils import default_dir_mode, default_file_mode
 
 if TYPE_CHECKING:
     from pulsar.pipeline import ThemaRS
@@ -55,9 +61,27 @@ NODE_FIELD_TYPES = {
 NODE_RESERVED_FIELDS = set(NODE_FIELD_TYPES)
 
 
+def _atomic_write_file(path: Path, write_fn: Callable[[Path], None]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+    try:
+        write_fn(tmp_path)
+        os.chmod(tmp_path, default_file_mode())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _write_parquet(df: pd.DataFrame, schema: pa.Schema, path: Path) -> None:
     table = pa.Table.from_pandas(df, preserve_index=False).cast(schema)
-    pq.write_table(table, path)
+    _atomic_write_file(path, lambda tmp: pq.write_table(table, tmp))
 
 
 def _cast_known_fields(
@@ -353,6 +377,151 @@ def group_table(
     return df
 
 
+def _build_manifest_data(
+    model: ThemaRS,
+    *,
+    edges_threshold: float | None,
+    include_clean: bool,
+    edges_count: int,
+    cosmic_edges_count: int,
+    groups_count: int,
+    renamed_node_columns: dict[str, str],
+) -> dict[str, Any]:
+    from pulsar._version import get_version
+
+    version = get_version()
+    config_payload = json.dumps(
+        asdict(model.config), sort_keys=True, separators=(",", ":")
+    )
+    config_hash = hashlib.sha256(config_payload.encode("utf-8")).hexdigest()
+    return {
+        "pulsar_version": version,
+        "config_hash": config_hash,
+        "thresholds": {
+            "resolved_construction_threshold": float(
+                model.resolved_construction_threshold
+            ),
+            "edges_threshold": float(edges_threshold)
+            if edges_threshold is not None
+            else float(model.resolved_construction_threshold),
+        },
+        "phil_config": {
+            "enabled": include_clean,
+        },
+        "counts": {
+            "nodes": int(model.cosmic_rust.n),
+            "edges": int(edges_count),
+            "cosmic_edges": int(cosmic_edges_count),
+            "groups": int(groups_count),
+        },
+        "node_passthrough_column_renames": renamed_node_columns,
+    }
+
+
+def _promote_staged_bundle(
+    staging_dir: Path,
+    base_path: Path,
+) -> None:
+    if not base_path.exists():
+        os.replace(staging_dir, base_path)
+        return
+
+    backup_root = Path(
+        tempfile.mkdtemp(prefix=f".{base_path.name}_backup_", dir=base_path.parent)
+    )
+    backup_path = backup_root / base_path.name
+    try:
+        os.replace(base_path, backup_path)
+        try:
+            os.replace(staging_dir, base_path)
+        except BaseException:
+            if backup_path.exists() and not base_path.exists():
+                os.replace(backup_path, base_path)
+            raise
+    finally:
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+
+def _write_tabular_artifacts(
+    model: ThemaRS,
+    tabular_path: Path,
+    *,
+    n: int,
+    include_clean: bool,
+) -> tuple[dict[str, str], dict[str, str]]:
+    raw_df = model.data.copy()
+    if len(raw_df) != n:
+        raise RuntimeError(f"raw data has {len(raw_df)} rows but graph has {n} nodes")
+    extra_cols, renamed_node_columns = _node_passthrough_columns(list(raw_df.columns))
+    if source_node_id := renamed_node_columns.get("node_id"):
+        raw_df.rename(columns={"node_id": source_node_id}, inplace=True)
+    raw_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
+    _atomic_write_file(
+        tabular_path / "raw.parquet",
+        lambda tmp: raw_df.to_parquet(tmp, index=False),
+    )
+
+    if include_clean:
+        clean_df = clean_data(model).copy()
+        if len(clean_df) != n:
+            raise RuntimeError(
+                f"clean_data has {len(clean_df)} rows but graph has {n} nodes"
+            )
+        if "node_id" in clean_df.columns:
+            clean_renames = _node_passthrough_columns(list(clean_df.columns))[1]
+            clean_df.rename(columns={"node_id": clean_renames["node_id"]}, inplace=True)
+        clean_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
+        _atomic_write_file(
+            tabular_path / "clean.parquet",
+            lambda tmp: clean_df.to_parquet(tmp, index=False),
+        )
+    return extra_cols, renamed_node_columns
+
+
+def _write_graph_artifacts(
+    model: ThemaRS,
+    graph_path: Path,
+    *,
+    cluster_labels: pd.Series | np.ndarray,
+    cluster_names: dict[int, str] | None,
+    cluster_descriptions: dict[int, str] | None,
+    edges_threshold: float | None,
+    layout: Literal["projection", "spectral", "zeros"],
+    extra_cols: dict[str, str],
+) -> tuple[int, int, int]:
+    cosmic_df = cosmic_edges(model, threshold=0.0)
+    _write_parquet(cosmic_df, EDGE_SCHEMA, graph_path / "cosmic.parquet")
+
+    edges_df = snapshot_edges(model, threshold=edges_threshold)
+    _write_parquet(edges_df, EDGE_SCHEMA, graph_path / "edges.parquet")
+
+    nodes_df = node_table(
+        model,
+        cluster_labels=cluster_labels,
+        cluster_names=cluster_names,
+        edges_threshold=edges_threshold,
+        layout=layout,
+        extra_columns=extra_cols,
+    )
+    nodes_table = _cast_known_fields(
+        pa.Table.from_pandas(nodes_df, preserve_index=False),
+        NODE_FIELD_TYPES,
+    )
+    _atomic_write_file(
+        graph_path / "nodes.parquet",
+        lambda tmp: pq.write_table(nodes_table, tmp),
+    )
+
+    groups_df = group_table(
+        model,
+        cluster_labels=cluster_labels,
+        cluster_names=cluster_names,
+        cluster_descriptions=cluster_descriptions,
+    )
+    _write_parquet(groups_df, GROUP_SCHEMA, graph_path / "groups.parquet")
+    return len(edges_df), len(cosmic_df), len(groups_df)
+
+
 def export_dataset_bundle(
     model: ThemaRS,
     output_dir: Path | str,
@@ -380,115 +549,56 @@ def export_dataset_bundle(
                 groups.parquet
             export_manifest.json  (optional)
     """
-    base_path = Path(output_dir) / slug
-    tabular_path = base_path / "tabular"
-    graph_path = base_path / "graph"
-
-    tabular_path.mkdir(parents=True, exist_ok=True)
-    graph_path.mkdir(parents=True, exist_ok=True)
-
     if model.cosmic_rust is None:
         raise RuntimeError("Call fit() first")
     n = model.cosmic_rust.n
 
-    cluster_names = _normalize_keys(cluster_names)
-    cluster_descriptions = _normalize_keys(cluster_descriptions)
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    base_path = output_root / slug
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{slug}_staging_", dir=output_root))
 
-    # 1. Export tabular/raw.parquet
-    raw_df = model.data.copy()
-    if len(raw_df) != n:
-        raise RuntimeError(f"raw data has {len(raw_df)} rows but graph has {n} nodes")
-    extra_cols, renamed_node_columns = _node_passthrough_columns(list(raw_df.columns))
-    if source_node_id := renamed_node_columns.get("node_id"):
-        raw_df.rename(columns={"node_id": source_node_id}, inplace=True)
-    raw_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
-    raw_df.to_parquet(tabular_path / "raw.parquet", index=False)
+    try:
+        os.chmod(staging_dir, default_dir_mode())
+        tabular_path = staging_dir / "tabular"
+        graph_path = staging_dir / "graph"
+        tabular_path.mkdir(parents=True, exist_ok=True)
+        graph_path.mkdir(parents=True, exist_ok=True)
 
-    # 2. Export tabular/clean.parquet (optional)
-    clean_path = tabular_path / "clean.parquet"
-    if include_clean:
-        clean_df = clean_data(model).copy()
-        if len(clean_df) != n:
-            raise RuntimeError(
-                f"clean_data has {len(clean_df)} rows but graph has {n} nodes"
-            )
-        if "node_id" in clean_df.columns:
-            clean_renames = _node_passthrough_columns(list(clean_df.columns))[1]
-            clean_df.rename(columns={"node_id": clean_renames["node_id"]}, inplace=True)
-        clean_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
-        clean_df.to_parquet(clean_path, index=False)
-    else:
-        clean_path.unlink(missing_ok=True)
-
-    # 3. Export graph/cosmic.parquet
-    cosmic_df = cosmic_edges(model, threshold=0.0)
-    _write_parquet(cosmic_df, EDGE_SCHEMA, graph_path / "cosmic.parquet")
-
-    # 4. Export graph/edges.parquet
-    edges_df = snapshot_edges(model, threshold=edges_threshold)
-    _write_parquet(edges_df, EDGE_SCHEMA, graph_path / "edges.parquet")
-
-    # 5. Export graph/nodes.parquet
-    nodes_df = node_table(
-        model,
-        cluster_labels=cluster_labels,
-        cluster_names=cluster_names,
-        edges_threshold=edges_threshold,
-        layout=layout,
-        extra_columns=extra_cols,
-    )
-    nodes_table = _cast_known_fields(
-        pa.Table.from_pandas(nodes_df, preserve_index=False), NODE_FIELD_TYPES
-    )
-    pq.write_table(nodes_table, graph_path / "nodes.parquet")
-
-    # 6. Export graph/groups.parquet
-    groups_df = group_table(
-        model,
-        cluster_labels=cluster_labels,
-        cluster_names=cluster_names,
-        cluster_descriptions=cluster_descriptions,
-    )
-    _write_parquet(groups_df, GROUP_SCHEMA, graph_path / "groups.parquet")
-
-    # 7. Write export_manifest.json (optional)
-    manifest_data = {}
-    manifest_path = base_path / "export_manifest.json"
-    if write_manifest:
-        from pulsar._version import get_version
-
-        version = get_version()
-
-        config_payload = json.dumps(
-            asdict(model.config), sort_keys=True, separators=(",", ":")
+        extra_cols, renamed_node_columns = _write_tabular_artifacts(
+            model, tabular_path, n=n, include_clean=include_clean
         )
-        config_hash = hashlib.sha256(config_payload.encode("utf-8")).hexdigest()
+        edges_count, cosmic_edges_count, groups_count = _write_graph_artifacts(
+            model,
+            graph_path,
+            cluster_labels=cluster_labels,
+            cluster_names=_normalize_keys(cluster_names),
+            cluster_descriptions=_normalize_keys(cluster_descriptions),
+            edges_threshold=edges_threshold,
+            layout=layout,
+            extra_cols=extra_cols,
+        )
 
-        manifest_data = {
-            "pulsar_version": version,
-            "config_hash": config_hash,
-            "thresholds": {
-                "resolved_construction_threshold": float(
-                    model.resolved_construction_threshold
+        manifest_data: dict[str, Any] = {}
+        if write_manifest:
+            manifest_data = _build_manifest_data(
+                model,
+                edges_threshold=edges_threshold,
+                include_clean=include_clean,
+                edges_count=edges_count,
+                cosmic_edges_count=cosmic_edges_count,
+                groups_count=groups_count,
+                renamed_node_columns=renamed_node_columns,
+            )
+            _atomic_write_file(
+                staging_dir / "export_manifest.json",
+                lambda tmp: tmp.write_text(
+                    json.dumps(manifest_data, indent=2), encoding="utf-8"
                 ),
-                "edges_threshold": float(edges_threshold)
-                if edges_threshold is not None
-                else float(model.resolved_construction_threshold),
-            },
-            "phil_config": {
-                "enabled": include_clean,
-            },
-            "counts": {
-                "nodes": int(model.cosmic_rust.n),
-                "edges": int(len(edges_df)),
-                "cosmic_edges": int(len(cosmic_df)),
-                "groups": int(len(groups_df)),
-            },
-            "node_passthrough_column_renames": renamed_node_columns,
-        }
-        with open(manifest_path, "w") as f:
-            json.dump(manifest_data, f, indent=2)
-    else:
-        manifest_path.unlink(missing_ok=True)
+            )
 
-    return manifest_data
+        _promote_staged_bundle(staging_dir, base_path)
+        return manifest_data
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise

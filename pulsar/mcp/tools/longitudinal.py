@@ -15,6 +15,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import threading
 import time
 import uuid
 from typing import Any, Literal
@@ -40,12 +41,14 @@ from pulsar.mcp.longitudinal import (
     temporal_diagnosis,
     trajectory_diagnosis,
 )
-from pulsar.mcp.session import (
+from ..session import (
     LongitudinalArtifact,
+    OperationCancelledError,
     _get_session,
     _read_dataset_file,
     _resolve_dataset_path,
     _resolve_longitudinal,
+    run_session_worker,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,132 @@ def _require_trajectory(tool: str, artifact: LongitudinalArtifact) -> str | None
             },
         )
     return None
+
+
+def _check_cancelled(cancel_event: threading.Event | None, stage: str) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise OperationCancelledError(f"Longitudinal build cancelled during {stage}.")
+
+
+def _build_surface_summary(
+    trajectory: Any,
+    temporal: Any,
+) -> dict[str, Any]:
+    surface: dict[str, Any] = {}
+    if trajectory is not None:
+        cross = trajectory.cross_time()
+        total = int(trajectory.similarity.nnz // 2)
+        surface["trajectory"] = {
+            "n_observations": trajectory.n_observations,
+            "n_balls": int(len(trajectory.balls)),
+            "n_edges": total,
+            "cross_time_edges": int(cross.nnz // 2),
+            "cross_time_fraction": (
+                round((cross.nnz // 2) / total, 4) if total else 0.0
+            ),
+        }
+    if temporal is not None:
+        surface["temporal"] = {
+            "tensor_shape": list(temporal.shape),
+            "tensor_mb": round(temporal.tensor.nbytes / (1024 * 1024), 2),
+        }
+    return surface
+
+
+def _build_longitudinal_worker(
+    *,
+    dataset_id: str,
+    dataset_path: str,
+    current_yaml: str,
+    entity_column: str,
+    time_column: str,
+    feature_columns: list[str] | None,
+    representation: str,
+    on_missing: str,
+    similarity_threshold: float,
+    detail: str,
+    cancel_event: threading.Event | None = None,
+) -> tuple[LongitudinalArtifact, dict[str, Any]]:
+    """Build the panel/representations. Pure compute: returns the artifact and
+    response payload; the caller publishes on the event loop."""
+    _check_cancelled(cancel_event, "config load")
+    cfg = load_config(yaml.safe_load(current_yaml))
+
+    # Deliberately NOT _bind_session_data: a panel is n*T observation rows and
+    # rebinding would invalidate the static cluster and feature-evidence caches.
+    df = _read_dataset_file(dataset_path)
+    _check_cancelled(cancel_event, "dataset read")
+    df = prepare_panel_frame(
+        df,
+        cfg,
+        entity_column,
+        time_column,
+        feature_columns,
+    )
+    _check_cancelled(cancel_event, "panel preparation")
+    panel = pivot_panel(
+        df,
+        entity_column,
+        time_column,
+        feature_columns,
+        on_missing,
+    )
+    guard_representation(panel, representation)
+    cfg, config_notes = adapt_config_to_panel(cfg, panel)
+    costs = estimate_costs(panel, cfg)
+    _check_cancelled(cancel_event, "representation build")
+    trajectory, temporal = build_representations(
+        panel,
+        cfg,
+        representation,
+        similarity_threshold,
+        cancel_event=cancel_event,
+    )
+    _check_cancelled(cancel_event, "artifact publish")
+    longitudinal_id = f"lng_{uuid.uuid4().hex[:12]}"
+    artifact = LongitudinalArtifact(
+        longitudinal_id=longitudinal_id,
+        dataset_id=dataset_id or None,
+        representation=representation,
+        trajectory=trajectory,
+        temporal=temporal,
+        panel={
+            "entity_column": entity_column,
+            "time_column": time_column,
+            "feature_columns": panel.feature_columns,
+            "times": panel.times,
+            "report": panel.report,
+        },
+        config_yaml=current_yaml,
+        created_at=time.time(),
+    )
+
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "detail": detail,
+        "longitudinal_id": longitudinal_id,
+        "dataset_id": dataset_id or None,
+        "representation": representation,
+        "panel": {
+            "entity_column": entity_column,
+            "time_column": time_column,
+            "n_features": len(panel.feature_columns),
+            "feature_columns_preview": panel.feature_columns[:10],
+            **panel.report,
+        },
+        "build_cost": costs,
+        "config_adaptation": config_notes,
+        "graph_surface": _build_surface_summary(trajectory, temporal),
+        "next_tools": [
+            "diagnose_longitudinal_graph",
+            "get_trajectory_archetypes",
+            "get_cross_time_neighbors",
+        ],
+    }
+    if detail == "full":
+        payload["config_yaml"] = current_yaml
+        payload["times"] = panel.times
+    return artifact, payload
 
 
 async def build_longitudinal_graph(
@@ -172,7 +301,9 @@ async def build_longitudinal_graph(
             agent_action="Call ingest_dataset first and pass the returned dataset_id.",
         )
 
-    validation = validate_config_yaml(current_yaml, dataset_path=dataset_path)
+    validation = await asyncio.to_thread(
+        validate_config_yaml, current_yaml, dataset_path=dataset_path
+    )
     if not validation.ok or validation.normalized_yaml is None:
         return mcp_error(
             "build_longitudinal_graph",
@@ -191,105 +322,28 @@ async def build_longitudinal_graph(
             return
         await ctx.report_progress(progress=fraction, total=1.0, message=stage)
 
+    cancel_event = threading.Event()
     try:
-        cfg = load_config(yaml.safe_load(current_yaml))
-
-        await report("read dataset", 0.1)
-        # Deliberately NOT _bind_session_data: a panel is n*T observation rows and
-        # rebinding would invalidate the static cluster and feature-evidence caches.
-        df = await asyncio.to_thread(_read_dataset_file, dataset_path)
-        df = await asyncio.to_thread(
-            prepare_panel_frame,
-            df,
-            cfg,
-            entity_column,
-            time_column,
-            feature_columns,
-        )
-
-        await report("pivot panel", 0.25)
-        panel = await asyncio.to_thread(
-            pivot_panel,
-            df,
-            entity_column,
-            time_column,
-            feature_columns,
-            on_missing,
-        )
-        guard_representation(panel, representation)
-        cfg, config_notes = adapt_config_to_panel(cfg, panel)
-        costs = estimate_costs(panel, cfg)
-
-        await report(f"build {representation}", 0.4)
-        trajectory, temporal = await asyncio.to_thread(
-            build_representations, panel, cfg, representation, similarity_threshold
-        )
-
-        await report("summarize", 0.9)
-        longitudinal_id = f"lng_{uuid.uuid4().hex[:12]}"
-        artifact = LongitudinalArtifact(
-            longitudinal_id=longitudinal_id,
-            dataset_id=dataset_id or None,
+        await report(f"build {representation}", 0.1)
+        artifact, payload = await run_session_worker(
+            session,
+            _build_longitudinal_worker,
+            dataset_id=dataset_id,
+            dataset_path=dataset_path,
+            current_yaml=current_yaml,
+            entity_column=entity_column,
+            time_column=time_column,
+            feature_columns=feature_columns,
             representation=representation,
-            trajectory=trajectory,
-            temporal=temporal,
-            panel={
-                "entity_column": entity_column,
-                "time_column": time_column,
-                "feature_columns": panel.feature_columns,
-                "times": panel.times,
-                "report": panel.report,
-            },
-            config_yaml=current_yaml,
-            created_at=time.time(),
+            on_missing=on_missing,
+            similarity_threshold=similarity_threshold,
+            detail=detail,
+            cancel_event=cancel_event,
+            heavy=True,
+            mutates_session=True,
         )
-        session.longitudinal[longitudinal_id] = artifact
-
-        surface: dict[str, Any] = {}
-        if trajectory is not None:
-            cross = trajectory.cross_time()
-            total = int(trajectory.similarity.nnz // 2)
-            surface["trajectory"] = {
-                "n_observations": trajectory.n_observations,
-                "n_balls": int(len(trajectory.balls)),
-                "n_edges": total,
-                "cross_time_edges": int(cross.nnz // 2),
-                "cross_time_fraction": (
-                    round((cross.nnz // 2) / total, 4) if total else 0.0
-                ),
-            }
-        if temporal is not None:
-            surface["temporal"] = {
-                "tensor_shape": list(temporal.shape),
-                "tensor_mb": round(temporal.tensor.nbytes / (1024 * 1024), 2),
-            }
-
-        payload: dict[str, Any] = {
-            "status": "ok",
-            "detail": detail,
-            "longitudinal_id": longitudinal_id,
-            "dataset_id": dataset_id or None,
-            "representation": representation,
-            "panel": {
-                "entity_column": entity_column,
-                "time_column": time_column,
-                "n_features": len(panel.feature_columns),
-                "feature_columns_preview": panel.feature_columns[:10],
-                **panel.report,
-            },
-            "build_cost": costs,
-            "config_adaptation": config_notes,
-            "graph_surface": surface,
-            "next_tools": [
-                "diagnose_longitudinal_graph",
-                "get_trajectory_archetypes",
-                "get_cross_time_neighbors",
-            ],
-        }
-        if detail == "full":
-            payload["config_yaml"] = current_yaml
-            payload["times"] = panel.times
-
+        # Back on the loop: single synchronous publish.
+        session.publish_longitudinal(artifact)
         await report("complete", 1.0)
 
         if response_format == "json":

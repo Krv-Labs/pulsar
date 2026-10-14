@@ -34,15 +34,25 @@ async def get_workflow_guide(ctx: Context = None) -> str:
     return WORKFLOW_PROMPT
 
 
+_MODEL_CONTINUITY = (
+    "In-memory model state persists between calls only on stdio and legacy-session "
+    "HTTP. Stateless HTTP (no session id) isolates clients but does not preserve "
+    "the fitted model between calls; dataset_id / run_id handles are the durable "
+    "state."
+)
+
+
 async def get_runtime_context(ctx: Context = None) -> str:
     """MCP server runtime context (cwd, cache_dir, session_id, latest handles,
     path-visibility guidance). Call before file-based operations."""
     session = _get_session(ctx)
+    transport = getattr(ctx, "transport", None) or "stdio-single-client"
     payload = {
         "cwd": os.getcwd(),
         "cache_dir": str(registry.cache_dir),
         "temp_dir": os.getenv("TMPDIR", "/tmp"),
-        "transport_assumption": "stdio-single-client",
+        "transport_assumption": transport,
+        "model_continuity": _MODEL_CONTINUITY,
         "session_id": _session_key(ctx),
         "dataset_handle_persistence": "on-disk registry under cache_dir",
         "run_handle_persistence": "on-disk registry under cache_dir/runs",

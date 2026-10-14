@@ -29,6 +29,58 @@ from pulsar.mcp.session import (
 logger = logging.getLogger(__name__)
 
 
+def _recommend_preprocessing_worker(
+    normalized_path: str,
+    df: Any,
+    dataset_id: str,
+    detail: Literal["summary", "full"],
+    rationale_limit: int,
+) -> dict[str, Any]:
+    from pulsar.analysis.characterization import characterize_dataset as _char
+
+    result = _char(normalized_path, dataframe=df)
+    geo = dataclasses.asdict(result)
+
+    n_samples = geo.get("n_samples", 0)
+    column_profiles = geo.get("column_profiles", [])
+
+    column_profiles, dirty_numeric_detection = enrich_dirty_numeric_samples(
+        column_profiles, df
+    )
+    drop, impute, encode, rationale = _recommend_preprocessing_block(
+        column_profiles, n_samples
+    )
+
+    preprocessing_yaml = _preprocessing_block_to_yaml(drop, impute, encode)
+
+    # Estimate expansion: each encoded column adds ~n_unique dummy columns
+    expansion_estimate = 0
+    for raw_cp in column_profiles:
+        cp = (
+            raw_cp
+            if isinstance(raw_cp, dict)
+            else {"name": raw_cp.name, "n_unique": raw_cp.n_unique}
+        )
+        name = cp["name"]
+        if name in encode:
+            expansion_estimate += cp.get("n_unique", 2)
+
+    return build_preprocessing_recommendation_payload(
+        drop=drop,
+        impute=impute,
+        encode=encode,
+        rationale=rationale,
+        column_profiles=column_profiles,
+        preprocessing_yaml=preprocessing_yaml,
+        expansion_estimate=expansion_estimate,
+        dirty_numeric_detection=dirty_numeric_detection,
+        dataset_id=dataset_id,
+        n_samples=n_samples,
+        detail=detail,
+        rationale_limit=rationale_limit,
+    )
+
+
 async def recommend_preprocessing(
     dataset_id: str = "",
     detail: Literal["summary", "full"] = "summary",
@@ -52,53 +104,18 @@ async def recommend_preprocessing(
             agent_action="Pass dataset_id from ingest_dataset.",
         )
     try:
-        from pulsar.analysis.characterization import characterize_dataset as _char
-
         session = _get_session(ctx)
         df, normalized_path = await _load_session_dataframe(
             session,
             dataset_id=dataset_id,
         )
-        result = await asyncio.to_thread(_char, normalized_path, dataframe=df)
-        geo = dataclasses.asdict(result)
-
-        n_samples = geo.get("n_samples", 0)
-        column_profiles = geo.get("column_profiles", [])
-
-        column_profiles, dirty_numeric_detection = enrich_dirty_numeric_samples(
-            column_profiles, df
-        )
-        drop, impute, encode, rationale = _recommend_preprocessing_block(
-            column_profiles, n_samples
-        )
-
-        preprocessing_yaml = _preprocessing_block_to_yaml(drop, impute, encode)
-
-        # Estimate expansion: each encoded column adds ~n_unique dummy columns
-        expansion_estimate = 0
-        for raw_cp in column_profiles:
-            cp = (
-                raw_cp
-                if isinstance(raw_cp, dict)
-                else {"name": raw_cp.name, "n_unique": raw_cp.n_unique}
-            )
-            name = cp["name"]
-            if name in encode:
-                expansion_estimate += cp.get("n_unique", 2)
-
-        payload = build_preprocessing_recommendation_payload(
-            drop=drop,
-            impute=impute,
-            encode=encode,
-            rationale=rationale,
-            column_profiles=column_profiles,
-            preprocessing_yaml=preprocessing_yaml,
-            expansion_estimate=expansion_estimate,
-            dirty_numeric_detection=dirty_numeric_detection,
-            dataset_id=dataset_id,
-            n_samples=n_samples,
-            detail=detail,
-            rationale_limit=rationale_limit,
+        payload = await asyncio.to_thread(
+            _recommend_preprocessing_worker,
+            normalized_path,
+            df,
+            dataset_id,
+            detail,
+            rationale_limit,
         )
         if response_format == "markdown":
             return preprocessing_recommendation_to_markdown(payload)

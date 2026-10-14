@@ -173,13 +173,13 @@ impl PyStabilityResult {
 #[pyfunction]
 #[pyo3(name = "find_stable_thresholds", signature = (weighted_adj, num_bins=None))]
 pub fn py_find_stable_thresholds<'py>(
-    _py: Python<'py>,
+    py: Python<'py>,
     weighted_adj: PyReadonlyArray2<'py, f64>,
     num_bins: Option<usize>,
 ) -> PyResult<PyStabilityResult> {
     let arr = weighted_adj.as_array().to_owned();
     let bins = num_bins.unwrap_or(DEFAULT_NUM_BINS);
-    let result = find_stable_thresholds(&arr, bins)?;
+    let result = py.allow_threads(|| find_stable_thresholds(&arr, bins))?;
     Ok(PyStabilityResult { inner: result })
 }
 
@@ -198,12 +198,12 @@ pub fn py_find_stable_thresholds<'py>(
 #[pyfunction]
 #[pyo3(name = "find_stable_thresholds_sparse", signature = (n, edges, num_bins=None))]
 pub fn py_find_stable_thresholds_sparse(
-    _py: Python<'_>,
+    py: Python<'_>,
     n: usize,
     edges: Vec<(usize, usize, f64)>,
     num_bins: Option<usize>,
 ) -> PyResult<PyStabilityResult> {
     let bins = num_bins.unwrap_or(DEFAULT_NUM_BINS);
-    let result = find_stable_thresholds_from_edges(n, &edges, bins)?;
+    let result = py.allow_threads(|| find_stable_thresholds_from_edges(n, &edges, bins))?;
     Ok(PyStabilityResult { inner: result })
 }

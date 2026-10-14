@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 from pulsar._pulsar import BallMapper, ball_mapper_grid
 
@@ -166,3 +167,26 @@ def test_ball_mapper_grid_matches_individual_fits():
 
     observed = [(bm.eps, bm.nodes, bm.edges) for bm in grid]
     assert observed == expected
+
+
+# --- edge cases: empty inputs must raise ValueError, never PanicException ---
+
+
+def test_fit_zero_columns_raises():
+    with pytest.raises(ValueError, match="0 columns"):
+        BallMapper(eps=1.0).fit(np.zeros((3, 0)))
+
+
+def test_fit_zero_rows_raises():
+    with pytest.raises(ValueError, match="0 rows"):
+        BallMapper(eps=1.0).fit(np.zeros((0, 3)))
+
+
+def test_grid_zero_columns_raises():
+    with pytest.raises(ValueError, match="0 columns"):
+        ball_mapper_grid([make_grid_points(), np.zeros((3, 0))], [1.0])
+
+
+def test_grid_zero_rows_raises():
+    with pytest.raises(ValueError, match="0 rows"):
+        ball_mapper_grid([np.zeros((0, 3))], [1.0])

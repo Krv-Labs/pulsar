@@ -71,6 +71,26 @@ Reveal the dataset's topology; do not force convenient clusters.
    nodes, and `detail="full"` only when both raw graph arrays and config YAML are
    needed.
 
+## BACKGROUND TASK MODE (opt-in)
+
+Server operators enable it with `PULSAR_MCP_ENABLE_TASKS=1` (needs
+`fastmcp[tasks]`). Only `run_topological_sweep` is task-capable; every other tool
+stays synchronous. The result is identical to the synchronous path. A
+task-capable client polls transparently, and progress is still reported. The
+durable state is the session handles (`run_id`, `dataset_id`), not the task
+object: follow-up tools such as `diagnose_cosmic_graph` use them as usual.
+
+## TRANSPORT
+In-memory model state (the fitted model, cluster cache) is guaranteed to persist
+between calls only on stdio and on legacy-session HTTP (clients that receive an
+`mcp-session-id`). The 2026-07-28 protocol revision removed protocol sessions, so on
+Streamable HTTP there is no session id: each request is isolated from other
+clients but gets a fresh session,
+so a fitted model is NOT preserved between calls (for example,
+`run_topological_sweep` then `diagnose_cosmic_graph` may not see the sweep).
+`dataset_id` and `run_id` handles are the durable state (on-disk registry). Check
+`get_runtime_context` (`transport_assumption`, `model_continuity`) if unsure.
+
 ## LONGITUDINAL DATA (PANELS)
 If the dataset is long-format — one row per (entity, time) — the static sweep is the
 wrong tool: it treats every row as an independent point and loses the panel structure.
