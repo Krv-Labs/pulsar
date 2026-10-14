@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
+import contextvars
 from dataclasses import dataclass, field
 import gc
 import hashlib
@@ -345,8 +346,12 @@ async def run_session_worker(
             held_sem = True
         if cancel_event.is_set():
             raise OperationCancelledError("Operation cancelled before start.")
+        # Unlike asyncio.to_thread, run_in_executor does not copy contextvars.
+        # Without them FastMCP's request context is unset in the worker and
+        # ctx.report_progress silently no-ops.
+        worker_ctx = contextvars.copy_context()
         fut = loop.run_in_executor(
-            None, _run_worker_job, cancel_event, fn, args, kwargs
+            None, worker_ctx.run, _run_worker_job, cancel_event, fn, args, kwargs
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):

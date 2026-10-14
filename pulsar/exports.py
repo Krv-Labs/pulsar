@@ -418,6 +418,18 @@ def _build_manifest_data(
     }
 
 
+# Every file export_dataset_bundle may write, relative to the bundle root.
+_BUNDLE_FILES = (
+    "tabular/raw.parquet",
+    "tabular/clean.parquet",
+    "graph/nodes.parquet",
+    "graph/edges.parquet",
+    "graph/cosmic.parquet",
+    "graph/groups.parquet",
+    "export_manifest.json",
+)
+
+
 def _promote_staged_bundle(
     staging_dir: Path,
     base_path: Path,
@@ -426,20 +438,18 @@ def _promote_staged_bundle(
         os.replace(staging_dir, base_path)
         return
 
-    backup_root = Path(
-        tempfile.mkdtemp(prefix=f".{base_path.name}_backup_", dir=base_path.parent)
-    )
-    backup_path = backup_root / base_path.name
-    try:
-        os.replace(base_path, backup_path)
-        try:
-            os.replace(staging_dir, base_path)
-        except BaseException:
-            if backup_path.exists() and not base_path.exists():
-                os.replace(backup_path, base_path)
-            raise
-    finally:
-        shutil.rmtree(backup_root, ignore_errors=True)
+    # Replace only the files the bundle owns, each atomically, so anything
+    # else the user keeps under the slug directory survives a re-export.
+    # Optional files the new export did not write are removed.
+    for rel in _BUNDLE_FILES:
+        staged = staging_dir / rel
+        target = base_path / rel
+        if staged.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, target)
+        else:
+            target.unlink(missing_ok=True)
+    shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def _write_tabular_artifacts(
@@ -556,7 +566,12 @@ def export_dataset_bundle(
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     base_path = output_root / slug
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{slug}_staging_", dir=output_root))
+    # Stage beside the bundle so nested slugs like "a/b" work and the final
+    # os.replace stays on one filesystem.
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=f".{base_path.name}_staging_", dir=base_path.parent)
+    )
 
     try:
         os.chmod(staging_dir, default_dir_mode())
