@@ -43,7 +43,7 @@ from pulsar.mcp.payloads import (
     summary_evidence_payload_to_markdown,
 )
 from pulsar.mcp.registry import registry
-from pulsar.mcp.session import _get_session, run_session_worker
+from pulsar.mcp.session import SessionConflictError, _get_session, run_session_worker
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +236,7 @@ def _get_or_build_evidence_index(
     return evidence_index
 
 
-def _compute_and_publish_dossier_worker(
+def _compute_dossier_worker(
     session: Any,
     model: Any,
     data: pd.DataFrame,
@@ -252,12 +252,13 @@ def _compute_and_publish_dossier_worker(
     exclude_columns: list[str] | None,
     max_char_cap: int,
     detail: Literal["summary", "standard", "full"],
-) -> tuple[Any, dict[str, Any], Any, FeatureEvidenceIndex, Any]:
-    if (
-        expected_run_id is not None
-        and session.latest_run_id != expected_run_id
-    ):
-        raise RuntimeError(
+) -> tuple[Any, dict[str, Any], FeatureEvidenceIndex, str, Any]:
+    """Compute clusters/evidence/dossier. Never mutates ``session`` or persists.
+
+    The caller publishes on the event loop (``_publish_dossier_on_loop``).
+    """
+    if expected_run_id is not None and session.latest_run_id != expected_run_id:
+        raise SessionConflictError(
             "Session run changed before dossier computation started; "
             "refusing to publish stale cluster dossier."
         )
@@ -289,13 +290,32 @@ def _compute_and_publish_dossier_worker(
             evidence_index=evidence_index,
         )
     )
-    if (
-        expected_run_id is not None
-        and session.latest_run_id != expected_run_id
-    ):
-        raise RuntimeError(
-            "Session run changed while computing cluster dossier; "
-            "refusing to publish stale cluster dossier."
+    return result, cluster_meta, evidence_index, fingerprint, dossier
+
+
+def _publish_dossier_on_loop(
+    session: Any,
+    *,
+    result: Any,
+    cluster_meta: dict[str, Any],
+    evidence_index: FeatureEvidenceIndex,
+    fingerprint: str,
+    expected_run_id: str | None,
+    data_dataset_id: str | None,
+    resolved_interpretation_threshold: float,
+    threshold_source: str,
+    construction_threshold: float,
+    exclude_columns: list[str] | None,
+) -> Any:
+    """Persist the assignment and publish dossier state in one synchronous block.
+
+    The run check precedes ``save_cluster_assignment`` and no ``await`` separates
+    them from ``publish_dossier``, so a refused dossier persists nothing.
+    """
+    if session.latest_run_id != expected_run_id:
+        raise SessionConflictError(
+            "Active run changed while computing cluster dossier; "
+            "refusing to publish stale clusters."
         )
     assignment = registry.save_cluster_assignment(
         run_id=expected_run_id,
@@ -315,7 +335,7 @@ def _compute_and_publish_dossier_worker(
         feature_evidence_index=evidence_index,
         feature_evidence_fingerprint=fingerprint,
     )
-    return result, cluster_meta, assignment, evidence_index, dossier
+    return assignment
 
 
 def _graph_metrics_payload(model: Any) -> dict[str, Any]:
@@ -457,28 +477,45 @@ async def generate_cluster_dossier(
         # on shattered graphs. Small singletons/noise are omitted from profiling.
         max_char_cap = max(50, max_clusters * 2)
 
-        _result, cluster_meta, assignment, evidence_index, dossier = (
-            await run_session_worker(
-                session,
-                _compute_and_publish_dossier_worker,
-                session,
-                model,
-                data,
-                expected_run_id,
-                data_dataset_id,
-                cached_index,
-                cached_fingerprint,
-                method,
-                max_k,
-                resolved_interpretation_threshold,
-                threshold_source,
-                construction_threshold,
-                exclude_columns,
-                max_char_cap,
-                detail,
-                heavy=True,
-                mutates_session=True,
-            )
+        (
+            result,
+            cluster_meta,
+            evidence_index,
+            fingerprint,
+            dossier,
+        ) = await run_session_worker(
+            session,
+            _compute_dossier_worker,
+            session,
+            model,
+            data,
+            expected_run_id,
+            data_dataset_id,
+            cached_index,
+            cached_fingerprint,
+            method,
+            max_k,
+            resolved_interpretation_threshold,
+            threshold_source,
+            construction_threshold,
+            exclude_columns,
+            max_char_cap,
+            detail,
+            heavy=True,
+            mutates_session=True,
+        )
+        assignment = _publish_dossier_on_loop(
+            session,
+            result=result,
+            cluster_meta=cluster_meta,
+            evidence_index=evidence_index,
+            fingerprint=fingerprint,
+            expected_run_id=expected_run_id,
+            data_dataset_id=data_dataset_id,
+            resolved_interpretation_threshold=resolved_interpretation_threshold,
+            threshold_source=threshold_source,
+            construction_threshold=construction_threshold,
+            exclude_columns=exclude_columns,
         )
         assignment_summary = _cluster_assignment_summary(assignment)
         if detail == "summary":
@@ -593,6 +630,18 @@ async def generate_cluster_dossier(
         if response_format == "markdown":
             return _spectral_cut_error_to_markdown(e)
         return json.dumps(e.payload(detail=detail), indent=2)
+    except SessionConflictError as e:
+        logger.info("Dossier refused: %s", e)
+        return mcp_error(
+            "generate_cluster_dossier",
+            str(e),
+            error_code=e.error_code,
+            agent_action=(
+                "Nothing was persisted or published. The live run changed while "
+                "the dossier was computing; re-run generate_cluster_dossier "
+                "against the current run."
+            ),
+        )
     except Exception as e:
         logger.error(f"Error generating dossier: {e}")
         return mcp_error("generate_cluster_dossier", str(e))

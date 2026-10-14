@@ -23,7 +23,12 @@ from pulsar.mcp.diagnostics import (
 )
 from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.registry import registry
-from pulsar.mcp.session import GraphArtifact, _get_session, run_session_worker
+from pulsar.mcp.session import (
+    GraphArtifact,
+    SessionConflictError,
+    _get_session,
+    run_session_worker,
+)
 from pulsar.mcp.thresholds import (
     THRESHOLD_CANDIDATE_POLICIES,
     agent_threshold_options,
@@ -1053,7 +1058,6 @@ async def get_threshold_stability_curve(
 
 
 def _build_sparsifier_artifact_worker(
-    session: Any,
     model: Any,
     target_run_id: str,
     kind: str,
@@ -1102,7 +1106,7 @@ def _build_sparsifier_artifact_worker(
         graph_summary=graph_summary,
         metrics=metrics,
     )
-    session.publish_graph_artifact(artifact, expected_run_id=target_run_id)
+    # Pure compute: the caller publishes the artifact on the event loop.
     return artifact, elapsed, graph.number_of_edges()
 
 
@@ -1191,7 +1195,6 @@ async def create_graph_artifact(
     artifact, elapsed, artifact_edge_count = await run_session_worker(
         session,
         _build_sparsifier_artifact_worker,
-        session,
         model,
         target_run_id,
         kind,
@@ -1205,6 +1208,21 @@ async def create_graph_artifact(
         heavy=True,
         mutates_session=True,
     )
+    try:
+        # Back on the loop: single synchronous publish (run check + write).
+        session.publish_graph_artifact(artifact, expected_run_id=target_run_id)
+    except SessionConflictError as e:
+        return mcp_error(
+            "create_graph_artifact",
+            str(e),
+            error_code=e.error_code,
+            agent_action=(
+                "The artifact was not published. The live run changed while it "
+                "was building; call get_runtime_context and rebuild against the "
+                "current run."
+            ),
+            details={"requested_run_id": target_run_id},
+        )
     return json.dumps(
         {
             "status": "ok",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 from pathlib import Path
@@ -15,11 +16,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from pulsar.exports import export_dataset_bundle
+from pulsar.mcp import registry as registry_mod
 from pulsar.mcp import session as session_mod
 from pulsar.mcp.tools.clustering import generate_cluster_dossier
 from pulsar.mcp.tools.config import create_config
 from pulsar.mcp.tools.ingestion import ingest_dataset
 from pulsar.mcp.tools.meta import get_runtime_context
+from pulsar.mcp.tools.preprocessing import recommend_preprocessing
 from pulsar.mcp.tools.reporting import export_labeled_data
 from pulsar.mcp.tools.sweeping import get_sweep_history, run_topological_sweep
 from pulsar.pipeline import ThemaRS
@@ -97,7 +100,18 @@ def _make_cancellable_fit(
 
 
 @pytest.fixture(autouse=True)
-def _clean_sessions():
+def _clean_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cache_dir = tmp_path / "pulsar_mcp_cache"
+    monkeypatch.setattr(registry_mod, "_CACHE_DIR", cache_dir)
+    monkeypatch.setattr(registry_mod, "_DATASETS_PATH", cache_dir / "datasets.json")
+    monkeypatch.setattr(registry_mod, "_DATASET_FILES_DIR", cache_dir / "datasets")
+    monkeypatch.setattr(registry_mod, "_UPLOADS_DIR", cache_dir / "uploads")
+    monkeypatch.setattr(registry_mod, "_RUNS_DIR", cache_dir / "runs")
+    monkeypatch.setattr(
+        registry_mod, "_CLUSTER_ASSIGNMENTS_DIR", cache_dir / "cluster_assignments"
+    )
+    monkeypatch.setattr(registry_mod, "_LOCK_PATH", cache_dir / ".registry.lock")
+    registry_mod.MCPRegistry()
     session_mod._sessions.clear()
     yield
     session_mod._sessions.clear()
@@ -352,3 +366,225 @@ def test_rayon_thread_override_does_not_mutate_environ(
         assert dict(os.environ) == before
 
     assert dict(os.environ) == before
+
+
+def test_loop_stays_responsive_when_binding_dataset_during_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: binding a new dataset must not wait on the sweep's mutation lock."""
+
+    async def _run() -> None:
+        ctx = _make_ctx("loop-block")
+        path_a = _write_synthetic_csv(tmp_path / "a.csv", n_rows=100)
+        path_b = _write_synthetic_csv(tmp_path / "b.csv", n_rows=90)
+        dataset_a, config_yaml = await _ingest_and_configure(path_a, ctx)
+        dataset_b = json.loads(await ingest_dataset(str(path_b), ctx=ctx))["dataset_id"]
+
+        entered = threading.Event()
+        orig_fit = ThemaRS.fit
+
+        def _slow_fit(self: ThemaRS, *args, **kwargs):
+            entered.set()
+            time.sleep(1.0)
+            return orig_fit(self, *args, **kwargs)
+
+        monkeypatch.setattr(ThemaRS, "fit", _slow_fit)
+        sweep_task = asyncio.create_task(
+            run_topological_sweep(
+                config_yaml=config_yaml,
+                dataset_id=dataset_a,
+                response_format="json",
+                ctx=ctx,
+            )
+        )
+        await _wait_for_event(entered)
+        session = session_mod._get_session(ctx)
+        assert session._worker_mutation_lock.locked()
+
+        probe_task = asyncio.create_task(
+            recommend_preprocessing(
+                dataset_id=dataset_b, response_format="json", ctx=ctx
+            )
+        )
+        t0 = time.perf_counter()
+        await asyncio.sleep(0.05)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        assert elapsed_ms < 300.0, f"event loop stalled for {elapsed_ms:.0f} ms"
+        t0 = time.perf_counter()
+        await get_runtime_context(ctx=ctx)
+        assert (time.perf_counter() - t0) * 1000.0 < 300.0
+
+        # The light tool finished binding dataset B while the sweep was running.
+        await probe_task
+        assert session.data_dataset_id == dataset_b
+        assert not sweep_task.done()
+
+        assert json.loads(await sweep_task)["status"] == "ok"
+        assert session.data_dataset_id == dataset_a
+
+    asyncio.run(_run())
+
+
+def test_cancel_before_start_does_not_leak_active_ops() -> None:
+    """F4: a job cancelled while queued in the executor releases active_ops."""
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+        session = session_mod._PulsarSession()
+        ran: list[bool] = []
+
+        blocker = asyncio.create_task(asyncio.to_thread(time.sleep, 0.3))
+        await asyncio.sleep(0.02)
+        task = asyncio.create_task(
+            session_mod.run_session_worker(
+                session,
+                lambda: ran.append(True),
+                heavy=False,
+                mutates_session=False,
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert session.active_ops == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await blocker
+        await asyncio.sleep(0.05)
+        assert session.active_ops == 0
+        assert ran == [], "cancelled job must not execute after being dequeued"
+
+    asyncio.run(_run())
+
+
+def test_heavy_admission_queues_on_loop_not_executor_threads() -> None:
+    """F4: heavy requests waiting on admission do not pin executor threads."""
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=2))
+        session = session_mod._PulsarSession()
+        gate = threading.Event()
+        started = threading.Event()
+
+        def _hold() -> str:
+            started.set()
+            gate.wait(timeout=3.0)
+            return "held"
+
+        heavy = [
+            asyncio.create_task(
+                session_mod.run_session_worker(session, _hold, heavy=True)
+            )
+            for _ in range(4)
+        ]
+        await _wait_for_event(started)
+        await asyncio.sleep(0.05)
+        # Only one heavy job is admitted (default PULSAR_MCP_MAX_CONCURRENT_HEAVY=1);
+        # the free executor thread still serves a light job immediately.
+        assert session_mod._MAX_CONCURRENT_HEAVY == 1
+        light = await asyncio.wait_for(
+            session_mod.run_session_worker(session, lambda: "light", heavy=False),
+            timeout=1.0,
+        )
+        assert light == "light"
+        assert session.active_ops == 4
+
+        gate.set()
+        assert await asyncio.gather(*heavy) == ["held"] * 4
+        assert session.active_ops == 0
+
+    asyncio.run(_run())
+
+
+def test_sweep_refused_by_conflict_returns_envelope_and_persists_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5/F6: a stale sweep is refused with a structured envelope, no orphan run."""
+
+    async def _run() -> None:
+        ctx = _make_ctx("sweep-conflict")
+        csv_path = _write_synthetic_csv(tmp_path / "conflict.csv", n_rows=80)
+        dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
+        session = session_mod._get_session(ctx)
+
+        entered = threading.Event()
+        release = threading.Event()
+        orig_fit = ThemaRS.fit
+
+        def _gated_fit(self: ThemaRS, *args, **kwargs):
+            entered.set()
+            release.wait(timeout=5.0)
+            return orig_fit(self, *args, **kwargs)
+
+        monkeypatch.setattr(ThemaRS, "fit", _gated_fit)
+        task = asyncio.create_task(
+            run_topological_sweep(
+                config_yaml=config_yaml,
+                dataset_id=dataset_id,
+                response_format="json",
+                ctx=ctx,
+            )
+        )
+        await _wait_for_event(entered)
+        # Simulate another sweep publishing while this one computes.
+        session.sweep_revision += 1
+        release.set()
+        res = json.loads(await task)
+
+        assert res["status"] == "error"
+        assert res["tool"] == "run_topological_sweep"
+        assert res["error_code"] == "SESSION_REVISION_CONFLICT"
+        assert "Another sweep published" in res["reason"]
+        assert res["agent_action"]
+        assert session.latest_run_id is None
+        assert session.sweep_history == []
+        assert session.model is None
+        assert session.active_ops == 0
+        assert not session._worker_mutation_lock.locked()
+        runs_dir = registry_mod._RUNS_DIR
+        assert not runs_dir.exists() or list(runs_dir.glob("*.json")) == []
+
+    asyncio.run(_run())
+
+
+def test_unrelated_publish_does_not_refuse_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6 policy: dossier/artifact/longitudinal publishes bump revision, not the
+    sweep conflict token, so they never refuse a running sweep."""
+
+    async def _run() -> None:
+        ctx = _make_ctx("sweep-unrelated")
+        csv_path = _write_synthetic_csv(tmp_path / "unrelated.csv", n_rows=80)
+        dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
+        session = session_mod._get_session(ctx)
+
+        entered = threading.Event()
+        release = threading.Event()
+        orig_fit = ThemaRS.fit
+
+        def _gated_fit(self: ThemaRS, *args, **kwargs):
+            entered.set()
+            release.wait(timeout=5.0)
+            return orig_fit(self, *args, **kwargs)
+
+        monkeypatch.setattr(ThemaRS, "fit", _gated_fit)
+        task = asyncio.create_task(
+            run_topological_sweep(
+                config_yaml=config_yaml,
+                dataset_id=dataset_id,
+                response_format="json",
+                ctx=ctx,
+            )
+        )
+        await _wait_for_event(entered)
+        session.revision += 1  # what a dossier/artifact/longitudinal publish does
+        release.set()
+        res = json.loads(await task)
+        assert res["status"] == "ok"
+        assert session.latest_run_id == res["run_id"]
+        assert session.sweep_revision == 1
+        assert session.revision == 2
+
+    asyncio.run(_run())

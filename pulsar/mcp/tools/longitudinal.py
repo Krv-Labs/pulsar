@@ -125,7 +125,6 @@ def _build_surface_summary(
 
 
 def _build_longitudinal_worker(
-    session: Any,
     *,
     dataset_id: str,
     dataset_path: str,
@@ -138,7 +137,9 @@ def _build_longitudinal_worker(
     similarity_threshold: float,
     detail: str,
     cancel_event: threading.Event | None = None,
-) -> dict[str, Any]:
+) -> tuple[LongitudinalArtifact, dict[str, Any]]:
+    """Build the panel/representations. Pure compute: returns the artifact and
+    response payload; the caller publishes on the event loop."""
     _check_cancelled(cancel_event, "config load")
     cfg = load_config(yaml.safe_load(current_yaml))
 
@@ -190,7 +191,6 @@ def _build_longitudinal_worker(
         config_yaml=current_yaml,
         created_at=time.time(),
     )
-    session.publish_longitudinal(artifact)
 
     payload: dict[str, Any] = {
         "status": "ok",
@@ -217,7 +217,7 @@ def _build_longitudinal_worker(
     if detail == "full":
         payload["config_yaml"] = current_yaml
         payload["times"] = panel.times
-    return payload
+    return artifact, payload
 
 
 async def build_longitudinal_graph(
@@ -325,10 +325,9 @@ async def build_longitudinal_graph(
     cancel_event = threading.Event()
     try:
         await report(f"build {representation}", 0.1)
-        payload = await run_session_worker(
+        artifact, payload = await run_session_worker(
             session,
             _build_longitudinal_worker,
-            session,
             dataset_id=dataset_id,
             dataset_path=dataset_path,
             current_yaml=current_yaml,
@@ -343,14 +342,14 @@ async def build_longitudinal_graph(
             heavy=True,
             mutates_session=True,
         )
+        # Back on the loop: single synchronous publish.
+        session.publish_longitudinal(artifact)
         await report("complete", 1.0)
 
         if response_format == "json":
             return json.dumps(payload, indent=2, default=str)
         return _build_to_markdown(payload)
 
-    except OperationCancelledError:
-        raise
     except PanelError as exc:
         return _panel_error("build_longitudinal_graph", exc)
     except FileNotFoundError:

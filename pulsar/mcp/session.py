@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import ExitStack
 from dataclasses import dataclass, field
 import gc
 import hashlib
@@ -13,6 +12,7 @@ import os
 from pathlib import Path
 import threading
 from typing import Any, TypeVar
+import weakref
 
 import pandas as pd
 from fastmcp import Context
@@ -29,11 +29,40 @@ T = TypeVar("T")
 _MAX_CONCURRENT_HEAVY = max(
     1, int(os.environ.get("PULSAR_MCP_MAX_CONCURRENT_HEAVY", "1"))
 )
-_HEAVY_COMPUTE_SEMAPHORE = threading.BoundedSemaphore(_MAX_CONCURRENT_HEAVY)
+# Heavy-compute admission is an asyncio.Semaphore owned by the event loop, so a
+# queued request waits as a coroutine instead of pinning an executor thread.
+# asyncio primitives bind to a loop, hence one semaphore per running loop.
+_heavy_semaphores: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Semaphore
+] = weakref.WeakKeyDictionary()
+
+
+def _heavy_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _heavy_semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_HEAVY)
+        _heavy_semaphores[loop] = sem
+    return sem
 
 
 class OperationCancelledError(RuntimeError):
     """Raised when a cooperative cancellation checkpoint fires in a worker thread."""
+
+
+class SessionConflictError(RuntimeError):
+    """A loop-side publish was refused because the session moved on.
+
+    Carries a stable ``error_code`` and ``agent_action`` so tools can return the
+    standard MCP error envelope instead of a bare string.
+    """
+
+    error_code = "SESSION_REVISION_CONFLICT"
+    agent_action = (
+        "The session state this result was computed against changed while it ran. "
+        "Nothing was published or persisted. Check get_runtime_context for the "
+        "current run, then re-run the tool if its result is still wanted."
+    )
 
 
 @dataclass
@@ -101,23 +130,45 @@ class _PulsarSession:
     active_config_dataset_id: str | None = None
     graph_artifacts: dict[str, GraphArtifact] = field(default_factory=dict)
     longitudinal: dict[str, LongitudinalArtifact] = field(default_factory=dict)
+    # Bumped by every publish (audit counter). Do NOT use it as a conflict token:
+    # dossier / artifact / longitudinal publishes bump it too.
     revision: int = 0
+    # Bumped only by publish_sweep. This is the sweep conflict token: a sweep is
+    # refused only if another sweep published while it ran, never because an
+    # unrelated dossier/artifact/longitudinal publish landed.
+    sweep_revision: int = 0
+    # Mutated only on the event-loop thread (incremented/decremented by
+    # run_session_worker), never inside a worker thread.
     active_ops: int = 0
-    _worker_mutation_lock: threading.Lock = field(
-        default_factory=threading.Lock, repr=False, compare=False
+    # Serializes session-mutating workers (sweeps, dossiers, longitudinal builds).
+    # An asyncio.Lock acquired on the loop: the loop never blocks on it and no
+    # executor thread is pinned waiting for it.
+    _worker_mutation_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, repr=False, compare=False
     )
+
+    # All publish_* methods mutate session state and MUST be called on the event
+    # loop thread with no ``await`` between the call and its neighbouring reads;
+    # a single synchronous block is atomic w.r.t. other coroutines. Workers
+    # compute and return results; they never call these.
+
+    def check_sweep_current(self, expected_sweep_revision: int) -> None:
+        if self.sweep_revision != expected_sweep_revision:
+            raise SessionConflictError(
+                "Another sweep published while this sweep was running; refusing "
+                "to overwrite it with a stale sweep."
+            )
 
     def publish_sweep(
         self,
         *,
-        expected_revision: int,
+        expected_sweep_revision: int,
         config_yaml: str | None = None,
         config_dataset_id: str | None = None,
         model: ThemaRS,
         data: pd.DataFrame,
         dataset_id: str | None = None,
         data_path: str | None = None,
-        dataset_path: str | None = None,
         dataset_fingerprint: str | None = None,
         embeddings: list[Any] | None = None,
         projection_fingerprint: str | None = None,
@@ -125,10 +176,7 @@ class _PulsarSession:
         record: SweepRecord,
         run_id: str,
     ) -> None:
-        if self.revision != expected_revision:
-            raise RuntimeError(
-                "Session state changed during sweep; refusing to publish stale sweep revision."
-            )
+        self.check_sweep_current(expected_sweep_revision)
         if config_yaml is not None:
             self.active_config_yaml = config_yaml
             self.active_config_dataset_id = config_dataset_id
@@ -137,7 +185,7 @@ class _PulsarSession:
             self,
             data,
             dataset_id=dataset_id,
-            data_path=data_path if data_path is not None else dataset_path,
+            data_path=data_path,
         )
         self.embeddings = embeddings
         self.projection_fingerprint = projection_fingerprint
@@ -146,6 +194,7 @@ class _PulsarSession:
         )
         self.sweep_history.append(record)
         self.latest_run_id = run_id
+        self.sweep_revision += 1
         self.revision += 1
 
     def publish_dossier(
@@ -160,15 +209,13 @@ class _PulsarSession:
         feature_evidence_fingerprint: str | None = None,
     ) -> None:
         if self.latest_run_id != expected_run_id:
-            raise RuntimeError(
+            raise SessionConflictError(
                 "Active run changed while computing cluster dossier; refusing to publish stale clusters."
             )
         self.clusters = clusters
         self.clusters_run_id = expected_run_id
         self.report_exclude_columns = (
-            list(report_exclude_columns)
-            if report_exclude_columns is not None
-            else None
+            list(report_exclude_columns) if report_exclude_columns is not None else None
         )
         self.feature_evidence_cluster_meta = dict(feature_evidence_cluster_meta)
         if cluster_assignment_id is not None:
@@ -186,7 +233,7 @@ class _PulsarSession:
         expected_run_id: str | None,
     ) -> None:
         if self.latest_run_id != expected_run_id:
-            raise RuntimeError(
+            raise SessionConflictError(
                 "Active run changed while building graph artifact; refusing to publish stale artifact."
             )
         self.graph_artifacts[artifact.artifact_id] = artifact
@@ -199,9 +246,7 @@ class _PulsarSession:
     def calculate_memory_mb(self) -> float:
         """Estimate current session memory footprint in MB."""
         bytes_total = (
-            int(self.data.memory_usage(deep=True).sum())
-            if self.data is not None
-            else 0
+            int(self.data.memory_usage(deep=True).sum()) if self.data is not None else 0
         )
         bytes_total += _model_memory_bytes(self.model)
         bytes_total += _embeddings_memory_bytes(self.embeddings)
@@ -246,29 +291,16 @@ _sessions: OrderedDict[str, _PulsarSession] = OrderedDict()
 _MAX_SESSIONS = int(os.environ.get("PULSAR_MAX_SESSIONS", "3"))
 
 
-def _execute_in_session_worker(
-    session: _PulsarSession,
+def _run_worker_job(
+    cancel_event: threading.Event,
     fn: Callable[..., T],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
-    *,
-    heavy: bool,
-    mutates_session: bool,
-    cancel_event: threading.Event | None,
 ) -> T:
-    try:
-        with ExitStack() as stack:
-            if mutates_session:
-                stack.enter_context(session._worker_mutation_lock)
-            if heavy:
-                stack.enter_context(_HEAVY_COMPUTE_SEMAPHORE)
-            if cancel_event is not None and cancel_event.is_set():
-                raise OperationCancelledError(
-                    "Operation cancelled before start."
-                )
-            return fn(*args, **kwargs)
-    finally:
-        session.active_ops = max(0, session.active_ops - 1)
+    # A job cancelled while still queued in the executor must not start.
+    if cancel_event.is_set():
+        raise OperationCancelledError("Operation cancelled before start.")
+    return fn(*args, **kwargs)
 
 
 async def run_session_worker(
@@ -280,27 +312,81 @@ async def run_session_worker(
     cancel_event: threading.Event | None = None,
     **kwargs: Any,
 ) -> T:
-    """Run blocking work in a worker thread with session/admission guards.
+    """Run blocking ``fn`` in an executor thread behind loop-side admission.
 
-    Locking and semaphore acquisition happen inside the worker thread so the
-    asyncio event loop is never blocked by ``threading.Lock`` or semaphore waits.
+    The per-session mutation lock and the heavy-compute semaphore are asyncio
+    primitives acquired on the loop, so queued requests never occupy executor
+    threads and the loop never blocks on a threading lock. ``fn`` must be a
+    pure compute function: it returns results and must not mutate ``session``;
+    callers publish after the ``await`` in a single synchronous block.
+
+    ``active_ops``, the lock and the semaphore are released on the loop exactly
+    once, when the work is finished or was never submitted. If the awaiting task
+    is cancelled while the thread is still running, release is deferred until
+    the thread actually ends so admission still bounds real concurrency.
     """
+    loop = asyncio.get_running_loop()
+    cancel_event = cancel_event if cancel_event is not None else threading.Event()
+    heavy_sem = _heavy_semaphore() if heavy else None
+    held_lock = False
+    held_sem = False
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        if held_sem and heavy_sem is not None:
+            heavy_sem.release()
+        if held_lock:
+            session._worker_mutation_lock.release()
+        session.active_ops = max(0, session.active_ops - 1)
+
     session.active_ops += 1
     try:
-        return await asyncio.to_thread(
-            _execute_in_session_worker,
-            session,
-            fn,
-            args,
-            kwargs,
-            heavy=heavy,
-            mutates_session=mutates_session,
-            cancel_event=cancel_event,
+        if mutates_session:
+            await session._worker_mutation_lock.acquire()
+            held_lock = True
+        if heavy_sem is not None:
+            await heavy_sem.acquire()
+            held_sem = True
+        if cancel_event.is_set():
+            raise OperationCancelledError("Operation cancelled before start.")
+        fut = loop.run_in_executor(
+            None, _run_worker_job, cancel_event, fn, args, kwargs
         )
-    except asyncio.CancelledError:
-        if cancel_event is not None:
+    except BaseException as exc:
+        if isinstance(exc, asyncio.CancelledError):
             cancel_event.set()
+        release()
         raise
+
+    def _on_done(done: asyncio.Future[Any]) -> None:
+        if not done.cancelled():
+            done.exception()  # mark retrieved; the awaiter may be gone
+        release()
+
+    fut.add_done_callback(_on_done)
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        cancel_event.set()
+        raise
+
+
+def _is_http_context(ctx: Context) -> bool:
+    """True for SSE / Streamable HTTP, including background-task workers.
+
+    fastmcp does not restore ``ctx.transport`` inside a task worker, but it does
+    snapshot the submitting request's HTTP headers; a non-empty snapshot marks an
+    HTTP submitter.
+    """
+    from fastmcp.server.dependencies import _background_task_headers
+
+    if ctx.transport in ("sse", "streamable-http"):
+        return True
+    return bool(ctx.is_background_task and _background_task_headers.get())
 
 
 def _extract_context_session_id(ctx: Context) -> str:
@@ -317,11 +403,25 @@ def _extract_context_session_id(ctx: Context) -> str:
         if headers is not None
         else get_http_headers(include={"mcp-session-id"}).get("mcp-session-id")
     )
-    return header_sid if isinstance(header_sid, str) and header_sid else "default"
+    if isinstance(header_sid, str) and header_sid:
+        return header_sid
+    # Shared "default" state is only safe for a single-client transport
+    # (stdio, or in-memory where ctx.transport is None). On HTTP with no
+    # session id, isolate clients by fastmcp's per-request id instead of
+    # merging them into one session.
+    if _is_http_context(ctx):
+        request_sid = getattr(ctx, "session_id", None)
+        if isinstance(request_sid, str) and request_sid:
+            return request_sid
+    return "default"
 
 
 def _session_key(ctx: Context | None) -> str:
-    """Get the session key from context (session_id or 'default' for STDIO)."""
+    """Get the session key from context.
+
+    ``"default"`` is used only for stdio / in-memory transports. HTTP without a
+    session id falls back to the per-request ``ctx.session_id``.
+    """
     if ctx is None:
         return "default"
     if isinstance(ctx, Context):
@@ -472,6 +572,7 @@ async def _load_session_dataframe(
     if cached_df is not None:
         return cached_df, normalized_path
 
+    sweep_revision_before = session.sweep_revision
     df = await run_session_worker(
         session,
         _read_dataset_file,
@@ -479,7 +580,11 @@ async def _load_session_dataframe(
         heavy=False,
         mutates_session=False,
     )
-    with session._worker_mutation_lock:
+    # Bind on the loop thread (atomic w.r.t. other coroutines; no lock needed and
+    # the loop never waits on a worker). If a sweep published while we were
+    # reading, its data binding is newer than this read, so do not clobber it:
+    # return the frame to the caller without rebinding the session.
+    if session.sweep_revision == sweep_revision_before:
         _bind_session_data(
             session,
             df,

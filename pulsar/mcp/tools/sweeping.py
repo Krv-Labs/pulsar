@@ -31,6 +31,7 @@ from pulsar.mcp.payloads import (
 from pulsar.mcp.registry import registry
 from pulsar.mcp.session import (
     OperationCancelledError,
+    SessionConflictError,
     SweepRecord,
     _dataset_id_for_path,
     _get_session,
@@ -287,33 +288,43 @@ _POST_FIT_PROGRESS_STAGES = frozenset(
 )
 
 
+@dataclasses.dataclass
+class _SweepComputation:
+    """Pure result of a sweep worker; published later on the event loop."""
+
+    model: ThemaRS
+    current_metrics: dict[str, Any]
+    graph_summary: dict[str, Any]
+    threshold_curve_summary: dict[str, Any]
+    bound_dataset_id: str | None
+    bound_data_path: str | None
+    embeddings: list[Any] | None
+    projection_fingerprint: str | None
+    pca_fingerprint: str | None
+
+
 def _execute_sweep_worker(
     session: Any,
-    expected_revision: int,
-    current_yaml: str,
-    resolved_config_dataset_id: str | None,
+    expected_sweep_revision: int,
     model: ThemaRS,
     cfg: Any,
     dataset_id: str,
     session_dataset_id: str | None,
     precomputed: list[Any] | None,
-    save_config: bool,
+    cached_fingerprints: tuple[str | None, str | None],
     progress_callback: Callable[[str, float], None],
     cancel_event: threading.Event,
-) -> tuple[
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-    str | None,
-    Any,
-    str | None,
-]:
+) -> _SweepComputation:
+    """Compute a sweep. Never mutates ``session`` or the registry.
+
+    Publication (session state, registry run, saved config) happens on the loop
+    in ``run_topological_sweep`` so loop-side readers never see half-published
+    state and a refused sweep leaves nothing persisted.
+    """
     from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
 
-    if session.revision != expected_revision:
-        raise RuntimeError(
-            "Session state changed before sweep started; refusing to execute stale sweep."
-        )
+    # Early-out for sweeps that queued behind another sweep (read-only check).
+    session.check_sweep_current(expected_sweep_revision)
     model.fit(
         _precomputed_embeddings=precomputed,
         progress_callback=progress_callback,
@@ -329,9 +340,8 @@ def _execute_sweep_worker(
         new_fp = projection_fingerprint(cfg, len(model.data), model.data)
         new_pca_fp = new_fp
     else:
-        new_embeddings = session.embeddings
-        new_fp = session.projection_fingerprint
-        new_pca_fp = session.pca_fingerprint
+        new_embeddings = precomputed
+        new_fp, new_pca_fp = cached_fingerprints
 
     progress_callback("diagnostics", 0.92)
     current_metrics_obj = diagnose_model(model)
@@ -347,48 +357,71 @@ def _execute_sweep_worker(
     progress_callback("persist run", 0.98)
     if cancel_event.is_set():
         raise OperationCancelledError("Topological sweep cancelled before publication.")
-    if session.revision != expected_revision:
-        raise RuntimeError(
-            "Session state changed during sweep; refusing to publish stale sweep revision."
-        )
+    return _SweepComputation(
+        model=model,
+        current_metrics=current_metrics,
+        graph_summary=graph_summary,
+        threshold_curve_summary=threshold_curve_summary,
+        bound_dataset_id=bound_dataset_id,
+        bound_data_path=bound_data_path,
+        embeddings=new_embeddings,
+        projection_fingerprint=new_fp,
+        pca_fingerprint=new_pca_fp,
+    )
 
-    saved_path = _auto_save_config(cfg) if save_config else None
+
+def _publish_sweep_on_loop(
+    session: Any,
+    computation: _SweepComputation,
+    *,
+    expected_sweep_revision: int,
+    current_yaml: str,
+    resolved_config_dataset_id: str | None,
+    cfg: Any,
+    save_config: bool,
+) -> tuple[Any, str | None]:
+    """Persist and publish a finished sweep in one synchronous block.
+
+    Conflict policy: a sweep conflicts only with another *sweep* publish
+    (``session.sweep_revision``). Dossier, graph-artifact and longitudinal
+    publishes bump ``session.revision`` but do not invalidate a sweep, because a
+    sweep replaces model/data wholesale and depends on none of their state. The
+    check, ``registry.save_run`` and ``publish_sweep`` run with no ``await``
+    between them, so the run is persisted only if it is published (no orphans).
+    """
+    session.check_sweep_current(expected_sweep_revision)
+    metrics = computation.current_metrics
+    model = computation.model
+    run_record = registry.save_run(
+        dataset_id=computation.bound_dataset_id,
+        config_yaml=current_yaml,
+        metrics=metrics,
+        resolved_construction_threshold=model.resolved_construction_threshold,
+        graph_summary=computation.graph_summary,
+        threshold_stability_summary=computation.threshold_curve_summary,
+    )
     record = SweepRecord(
         timestamp=time.time(),
         config_yaml=current_yaml,
-        metrics=current_metrics,
-        dataset_id=bound_dataset_id,
-    )
-    run_record = registry.save_run(
-        dataset_id=bound_dataset_id,
-        config_yaml=current_yaml,
-        metrics=current_metrics,
-        resolved_construction_threshold=model.resolved_construction_threshold,
-        graph_summary=graph_summary,
-        threshold_stability_summary=threshold_curve_summary,
+        metrics=metrics,
+        dataset_id=computation.bound_dataset_id,
     )
     session.publish_sweep(
-        expected_revision=expected_revision,
+        expected_sweep_revision=expected_sweep_revision,
         config_yaml=current_yaml,
         config_dataset_id=resolved_config_dataset_id,
         model=model,
         data=model.data,
-        dataset_id=bound_dataset_id,
-        data_path=bound_data_path,
-        embeddings=new_embeddings,
-        projection_fingerprint=new_fp,
-        pca_fingerprint=new_pca_fp,
+        dataset_id=computation.bound_dataset_id,
+        data_path=computation.bound_data_path,
+        embeddings=computation.embeddings,
+        projection_fingerprint=computation.projection_fingerprint,
+        pca_fingerprint=computation.pca_fingerprint,
         record=record,
         run_id=run_record.run_id,
     )
-    return (
-        current_metrics,
-        graph_summary,
-        threshold_curve_summary,
-        saved_path,
-        run_record,
-        bound_dataset_id,
-    )
+    saved_path = _auto_save_config(cfg) if save_config else None
+    return run_record, saved_path
 
 
 async def run_topological_sweep(
@@ -404,6 +437,11 @@ async def run_topological_sweep(
 ) -> str:
     """Run the Pulsar topological sweep pipeline. Prefer `config_yaml` inline;
     falls back to active session config if neither is given.
+
+    Background task mode: with PULSAR_MCP_ENABLE_TASKS=1 (requires fastmcp[tasks])
+    this is the only task-capable tool; a task-capable client may run it in the
+    background, and the result and session handles (run_id, dataset_id) are
+    identical to a synchronous call.
 
     Args:
         save_config: Persist resolved config to disk for reproducibility.
@@ -453,7 +491,11 @@ async def run_topological_sweep(
         resolved_config_dataset_id = (
             resolved_dataset_id or session.active_config_dataset_id
         )
-        expected_revision = session.revision
+        expected_sweep_revision = session.sweep_revision
+        cached_fingerprints = (
+            session.projection_fingerprint,
+            session.pca_fingerprint,
+        )
         prev_record = session.sweep_history[-1] if session.sweep_history else None
         session_dataset_id = session.dataset_id
 
@@ -505,32 +547,36 @@ async def run_topological_sweep(
             except RuntimeError:
                 pass
 
-        (
-            current_metrics,
-            _graph_summary,
-            threshold_curve_summary,
-            saved_path,
-            run_record,
-            persisted_dataset_id,
-        ) = await run_session_worker(
+        computation = await run_session_worker(
             session,
             _execute_sweep_worker,
             session,
-            expected_revision,
-            current_yaml,
-            resolved_config_dataset_id,
+            expected_sweep_revision,
             model,
             cfg,
             dataset_id,
             session_dataset_id,
             precomputed,
-            save_config,
+            cached_fingerprints,
             progress_callback,
             cancel_event,
             heavy=True,
             mutates_session=True,
             cancel_event=cancel_event,
         )
+        # Back on the loop: persist + publish atomically (no await inside).
+        run_record, saved_path = _publish_sweep_on_loop(
+            session,
+            computation,
+            expected_sweep_revision=expected_sweep_revision,
+            current_yaml=current_yaml,
+            resolved_config_dataset_id=resolved_config_dataset_id,
+            cfg=cfg,
+            save_config=save_config,
+        )
+        current_metrics = computation.current_metrics
+        threshold_curve_summary = computation.threshold_curve_summary
+        persisted_dataset_id = computation.bound_dataset_id
         if progress_futures:
             await asyncio.gather(
                 *(asyncio.wrap_future(future) for future in progress_futures),
@@ -635,6 +681,20 @@ async def run_topological_sweep(
         )
     except LookupError:
         return unknown_handle_error("run_topological_sweep", "dataset_id", dataset_id)
+    except SessionConflictError as e:
+        logger.info("Sweep refused: %s", e)
+        return mcp_error(
+            "run_topological_sweep",
+            str(e),
+            error_code=e.error_code,
+            agent_action=(
+                "No run was persisted or published. Another sweep replaced the "
+                "session's live run while this one was computing; call "
+                "get_runtime_context to see the current run, then re-run the "
+                "sweep if you still want this config."
+            ),
+            details={"conflict_token": "sweep_revision"},
+        )
     except Exception as e:
         logger.error(f"Error running sweep: {e}")
         return mcp_error("run_topological_sweep", str(e))
