@@ -201,42 +201,26 @@ class PulsarConfig:
 # ---------------------------------------------------------------------------
 
 
-def load_config(path_or_dict: str | dict) -> PulsarConfig:
-    """Load a PulsarConfig from a YAML file path or a raw dict."""
-    if isinstance(path_or_dict, str):
-        with open(path_or_dict, encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
-    else:
-        raw = dict(path_or_dict)
-
-    # run section (optional)
-    run_section = raw.get("run", {})
-    run_name = run_section.get("name", "")
-    data_path = run_section.get("data") or raw.get("data", "")
-
-    # preprocessing
-    pre = raw.get("preprocessing", {})
+def _parse_preprocessing(
+    pre: dict,
+) -> tuple[list[str], dict[str, ImputeSpec], dict[str, EncodeSpec]]:
     drop_columns = pre.get("drop_columns", []) or []
-
-    impute_raw = pre.get("impute", {}) or {}
-    impute: dict[str, ImputeSpec] = {}
-    for col, spec in impute_raw.items():
-        impute[col] = ImputeSpec(
-            method=spec["method"],
-            seed=int(spec.get("seed", 42)),
+    impute = {
+        col: ImputeSpec(method=spec["method"], seed=int(spec.get("seed", 42)))
+        for col, spec in (pre.get("impute") or {}).items()
+    }
+    encode = {
+        col: EncodeSpec(
+            method=spec["method"], max_categories=spec.get("max_categories")
         )
+        for col, spec in (pre.get("encode") or {}).items()
+    }
+    return drop_columns, impute, encode
 
-    encode_raw = pre.get("encode", {}) or {}
-    encode: dict[str, EncodeSpec] = {}
-    for col, spec in encode_raw.items():
-        encode[col] = EncodeSpec(
-            method=spec["method"],
-            max_categories=spec.get("max_categories"),
-        )
 
-    # sweep section
-    sweep = raw.get("sweep", {})
-
+def _parse_sweep(
+    sweep: dict,
+) -> tuple[ProjectionSpec, PCASpec, BallMapperSpec]:
     projection_raw = sweep.get("projection")
     pca_raw = sweep.get("pca", {})
     if projection_raw is None:
@@ -261,33 +245,28 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         dimensions=list(projection.dimensions),
         seeds=list(projection.seeds),
     )
-
     bm_raw = sweep.get("ball_mapper", {})
     ball_mapper = BallMapperSpec(
         epsilons=[float(e) for e in _expand_param(bm_raw.get("epsilon", [0.5]))],
     )
+    return projection, pca, ball_mapper
 
-    # cosmic_graph section
-    cg_raw = raw.get("cosmic_graph", {})
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)  # type: ignore[arg-type]
+
+
+def _parse_cosmic_graph(cg_raw: dict) -> CosmicGraphSpec:
     _validate_cosmic_graph_keys(cg_raw)
     threshold_raw = cg_raw.get("construction_threshold", "auto")
-    construction_threshold = normalize_construction_threshold(threshold_raw)
-    cosmic_graph = CosmicGraphSpec(
-        construction_threshold=construction_threshold,
+    return CosmicGraphSpec(
+        construction_threshold=normalize_construction_threshold(threshold_raw),
         neighborhood=str(cg_raw.get("neighborhood", "node")),
         sparsify=bool(cg_raw.get("sparsify", False)),
         sparsify_epsilon=float(cg_raw.get("sparsify_epsilon", 1.0)),
         sparsify_seed=int(cg_raw.get("sparsify_seed", 42)),
-        sparsify_sketch_dim=(
-            None
-            if cg_raw.get("sparsify_sketch_dim") is None
-            else int(cg_raw.get("sparsify_sketch_dim"))
-        ),
-        sparsify_sample_count=(
-            None
-            if cg_raw.get("sparsify_sample_count") is None
-            else int(cg_raw.get("sparsify_sample_count"))
-        ),
+        sparsify_sketch_dim=_optional_int(cg_raw.get("sparsify_sketch_dim")),
+        sparsify_sample_count=_optional_int(cg_raw.get("sparsify_sample_count")),
         sparsify_pcg_tol=float(cg_raw.get("sparsify_pcg_tol", 1e-6)),
         sparsify_max_iter=int(cg_raw.get("sparsify_max_iter", 1000)),
         construction=_normalize_construction(cg_raw.get("construction", "minhash")),
@@ -295,9 +274,23 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         minhash_seed=int(cg_raw.get("minhash_seed", 42)),
     )
 
-    # output section
-    output = raw.get("output", {})
-    n_reps = int(output.get("n_reps", 4))
+
+def load_config(path_or_dict: str | dict) -> PulsarConfig:
+    """Load a PulsarConfig from a YAML file path or a raw dict."""
+    if isinstance(path_or_dict, str):
+        with open(path_or_dict, encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+    else:
+        raw = dict(path_or_dict)
+
+    run_section = raw.get("run", {})
+    run_name = run_section.get("name", "")
+    data_path = run_section.get("data") or raw.get("data", "")
+
+    drop_columns, impute, encode = _parse_preprocessing(raw.get("preprocessing", {}))
+    projection, pca, ball_mapper = _parse_sweep(raw.get("sweep", {}))
+    cosmic_graph = _parse_cosmic_graph(raw.get("cosmic_graph", {}))
+    n_reps = int(raw.get("output", {}).get("n_reps", 4))
 
     return PulsarConfig(
         data=data_path,
@@ -313,47 +306,43 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     )
 
 
+def _format_preprocessing_yaml(cfg: PulsarConfig) -> tuple[str, str, str]:
+    drop_line = str(cfg.drop_columns) if cfg.drop_columns else "[]"
+    impute_lines = [
+        f"\n    {col}: {{method: {spec.method}, seed: {spec.seed}}}"
+        for col, spec in cfg.impute.items()
+    ]
+    impute_block = ("\n  impute:" + "".join(impute_lines)) if impute_lines else ""
+
+    encode_lines = []
+    for col, spec in cfg.encode.items():
+        parts = f"method: {spec.method}"
+        if spec.max_categories is not None:
+            parts += f", max_categories: {spec.max_categories}"
+        encode_lines.append(f"\n    {col}: {{{parts}}}")
+    encode_block = ("\n  encode:" + "".join(encode_lines)) if encode_lines else ""
+    return drop_line, impute_block, encode_block
+
+
+def _yaml_nullable(value: object) -> str:
+    return "null" if value is None else str(value)
+
+
 def config_to_yaml(cfg: PulsarConfig) -> str:
     """Serialize a PulsarConfig to a reproducible YAML string.
 
     Inverse of ``load_config``; every field is written explicitly so the
     resulting YAML can recreate the exact same pipeline run.
     """
-    # Preprocessing: drop_columns + impute + encode
-    drop_line = str(cfg.drop_columns) if cfg.drop_columns else "[]"
-
-    impute_block = ""
-    if cfg.impute:
-        impute_block = "\n  impute:"
-        for col, spec in cfg.impute.items():
-            impute_block += f"\n    {col}: {{method: {spec.method}, seed: {spec.seed}}}"
-
-    encode_block = ""
-    if cfg.encode:
-        encode_block = "\n  encode:"
-        for col, spec in cfg.encode.items():
-            parts = f"method: {spec.method}"
-            if spec.max_categories is not None:
-                parts += f", max_categories: {spec.max_categories}"
-            encode_block += f"\n    {col}: {{{parts}}}"
-
-    # Construction threshold
+    drop_line, impute_block, encode_block = _format_preprocessing_yaml(cfg)
     construction_threshold = cfg.cosmic_graph.construction_threshold
     threshold_str = (
         f'"{construction_threshold}"'
         if construction_threshold == "auto"
         else str(construction_threshold)
     )
-    sparsify_sketch_dim = (
-        "null"
-        if cfg.cosmic_graph.sparsify_sketch_dim is None
-        else str(cfg.cosmic_graph.sparsify_sketch_dim)
-    )
-    sparsify_sample_count = (
-        "null"
-        if cfg.cosmic_graph.sparsify_sample_count is None
-        else str(cfg.cosmic_graph.sparsify_sample_count)
-    )
+    sparsify_sketch_dim = _yaml_nullable(cfg.cosmic_graph.sparsify_sketch_dim)
+    sparsify_sample_count = _yaml_nullable(cfg.cosmic_graph.sparsify_sample_count)
 
     return f"""run:
   name: {cfg.run_name or "experiment"}

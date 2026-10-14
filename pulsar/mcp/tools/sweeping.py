@@ -608,6 +608,214 @@ def _publish_sweep_on_loop(
     return run_record, computation.saved_path
 
 
+async def _resolve_sweep_yaml(
+    session: Any, config_yaml: str, config_path: str
+) -> str | None:
+    if config_yaml:
+        return config_yaml
+    if config_path:
+        return await asyncio.to_thread(_read_config_file, config_path)
+    return session.active_config_yaml or None
+
+
+def _prepare_sweep_model(
+    session: Any, raw_yaml: str, dataset_id: str
+) -> tuple[
+    tuple[str, str | None, ThemaRS, str, list[Any] | None, str] | None,
+    ToolResult | None,
+]:
+    dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
+    validation = validate_config_yaml(raw_yaml, dataset_path=dataset_path)
+    if not validation.ok or validation.normalized_yaml is None:
+        return None, mcp_error(
+            "run_topological_sweep",
+            "Config validation failed before execution.",
+            error_code=validation.error_code or "CONFIG_VALIDATION_FAILED",
+            agent_action=validation.agent_action,
+            details={
+                "resolved_dataset_path": validation.resolved_dataset_path,
+                "issues": [dataclasses.asdict(issue) for issue in validation.issues],
+            },
+        )
+    current_yaml = validation.normalized_yaml
+    resolved_dataset_id = dataset_id or _dataset_id_for_path(
+        session.active_config_dataset_id,
+        validation.resolved_dataset_path,
+    )
+    resolved_config_dataset_id = resolved_dataset_id or session.active_config_dataset_id
+    logger.info("Starting topological sweep from normalized YAML")
+    model = ThemaRS(yaml.safe_load(current_yaml))
+    cfg = model.config
+    projection_method = getattr(cfg.projection, "method", "jl")
+    precomputed, projection_cache_status = _projection_cache_status(session, cfg)
+    if precomputed is not None:
+        logger.info(
+            "Reusing cached %s projection embeddings (fingerprint match)",
+            projection_method,
+        )
+    return (
+        current_yaml,
+        resolved_config_dataset_id,
+        model,
+        projection_method,
+        precomputed,
+        projection_cache_status,
+    ), None
+
+
+def _make_sweep_progress_reporter(
+    ctx: Context | None,
+    loop: asyncio.AbstractEventLoop,
+    cancel_event: threading.Event,
+    progress_futures: list[Any],
+) -> tuple[Callable[[str, float], Any], Callable[[str, float], None]]:
+    async def report_progress(stage: str, fraction: float) -> None:
+        if ctx is None:
+            return
+        await ctx.report_progress(progress=fraction, total=1.0, message=stage)
+
+    def progress_callback(stage: str, fraction: float) -> None:
+        if cancel_event.is_set():
+            raise OperationCancelledError(
+                f"Topological sweep cancelled at stage '{stage}'."
+            )
+        if ctx is None:
+            return
+        scaled_fraction = (
+            float(fraction)
+            if stage in _POST_FIT_PROGRESS_STAGES
+            else min(float(fraction), 1.0) * 0.9
+        )
+        try:
+            progress_futures.append(
+                asyncio.run_coroutine_threadsafe(
+                    ctx.report_progress(
+                        progress=scaled_fraction,
+                        total=1.0,
+                        message=stage,
+                    ),
+                    loop,
+                )
+            )
+        except RuntimeError:
+            pass
+
+    return report_progress, progress_callback
+
+
+def _latest_sweep_record(session: Any) -> SweepRecord | None:
+    return session.sweep_history[-1] if session.sweep_history else None
+
+
+async def _drain_progress_futures(progress_futures: list[Any]) -> None:
+    if not progress_futures:
+        return
+    await asyncio.gather(
+        *(asyncio.wrap_future(future) for future in progress_futures),
+        return_exceptions=True,
+    )
+
+
+def _build_sweep_response(
+    *,
+    session: Any,
+    run_record: Any,
+    computation: _SweepComputation,
+    prev_record: SweepRecord | None,
+    current_yaml: str,
+    projection_method: str,
+    precomputed: list[Any] | None,
+    projection_cache_status: str,
+    save_config: bool,
+    saved_path: str | None,
+) -> dict[str, Any]:
+    current_metrics = computation.current_metrics
+    threshold_curve_summary = computation.threshold_curve_summary
+    persisted_dataset_id = computation.bound_dataset_id
+    model = computation.model
+    diff = _compute_sweep_diff(
+        prev_record,
+        current_yaml,
+        persisted_dataset_id,
+        current_metrics,
+    )
+    config_advisory = (
+        f"Config changes persisted to host at: {saved_path}"
+        if save_config and saved_path
+        else "Config changes are in-memory (session-only). Set save_config=True to persist to params.yaml."
+    )
+    graph_health, is_connected, _ = _graph_health_summary(current_metrics)
+    unthresholded_component_count = threshold_curve_summary.get(
+        "unthresholded_component_count"
+    )
+    full_affinity_connected = bool(
+        int(model.cosmic_rust.n) > 0
+        and unthresholded_component_count is not None
+        and int(unthresholded_component_count) <= 1
+    )
+    response: dict[str, Any] = {
+        "status": "ok",
+        "run_id": run_record.run_id,
+        "metrics": current_metrics,
+        "projection_method": projection_method,
+        "projection_cached": precomputed is not None,
+        "projection_cache_status": projection_cache_status,
+        "pca_cached": precomputed is not None,
+        "pca_cache_status": projection_cache_status,
+        "memory_usage_mb": session.calculate_memory_mb(),
+        "diff": diff,
+        "config_advisory": config_advisory,
+        "config_yaml_normalized": current_yaml,
+        "data_shape": list(model.data.shape),
+        "is_connected": is_connected,
+        "constructed_graph_connected": is_connected,
+        "full_affinity_connected": full_affinity_connected,
+        "singleton_fraction": current_metrics.get("singleton_fraction", 0.0),
+        "spectral_clustering_allowed": full_affinity_connected,
+        "graph_health": graph_health,
+        "analysis_status": "diagnostics_required",
+        "next_required_check": "diagnose_cosmic_graph",
+        "finalization_gate": _finalization_gate(
+            current_metrics,
+            sweep_count=len(session.sweep_history),
+            config_yaml=current_yaml,
+            threshold_curve_summary=threshold_curve_summary,
+        ),
+        "construction_threshold": float(model.resolved_construction_threshold),
+    }
+    stability_summary = _threshold_stability_summary(model, current_metrics)
+    if stability_summary is not None:
+        response["threshold_stability_summary"] = stability_summary
+    if saved_path:
+        response["saved_config_path"] = saved_path
+    if persisted_dataset_id:
+        response["dataset_id"] = persisted_dataset_id
+    return response
+
+
+def _render_sweep_result(
+    response: dict[str, Any],
+    *,
+    detail: str,
+    response_format: str,
+    component_limit: int,
+    include_config_yaml: bool,
+) -> ToolResult:
+    summary_payload = build_sweep_summary_payload(
+        response,
+        component_limit=component_limit,
+        include_config_yaml=include_config_yaml,
+    )
+    if detail == "full":
+        response["detail"] = "full"
+        structured = response
+    else:
+        structured = summary_payload
+    if response_format == "markdown":
+        return mcp_result(structured, text=sweep_payload_to_markdown(summary_payload))
+    return mcp_result(structured)
+
+
 @tool_meta(
     title="Run Topological Sweep",
     read_only=False,
@@ -682,98 +890,40 @@ async def run_topological_sweep(
         )
     try:
         session = _get_session(ctx)
-        if config_yaml:
-            current_yaml = config_yaml
-        elif config_path:
-            current_yaml = await asyncio.to_thread(_read_config_file, config_path)
-        elif session.active_config_yaml:
-            current_yaml = session.active_config_yaml
-        else:
+        raw_yaml = await _resolve_sweep_yaml(session, config_yaml, config_path)
+        if not raw_yaml:
             return mcp_error(
                 "run_topological_sweep",
                 "Provide either config_path or config_yaml, or establish an active config first.",
                 error_code="CONFIG_NOT_PROVIDED",
                 agent_action="Pass config_yaml, or call create_config(dataset_id) first to set an active config.",
             )
-        dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
-        validation = validate_config_yaml(current_yaml, dataset_path=dataset_path)
-        if not validation.ok or validation.normalized_yaml is None:
-            return mcp_error(
-                "run_topological_sweep",
-                "Config validation failed before execution.",
-                error_code=validation.error_code or "CONFIG_VALIDATION_FAILED",
-                agent_action=validation.agent_action,
-                details={
-                    "resolved_dataset_path": validation.resolved_dataset_path,
-                    "issues": [
-                        dataclasses.asdict(issue) for issue in validation.issues
-                    ],
-                },
-            )
-
-        current_yaml = validation.normalized_yaml
-        config_dict = yaml.safe_load(current_yaml)
-        resolved_dataset_id = dataset_id or _dataset_id_for_path(
-            session.active_config_dataset_id,
-            validation.resolved_dataset_path,
-        )
-        resolved_config_dataset_id = (
-            resolved_dataset_id or session.active_config_dataset_id
-        )
+        prepared, prep_err = _prepare_sweep_model(session, raw_yaml, dataset_id)
+        if prep_err is not None:
+            return prep_err
+        assert prepared is not None
+        (
+            current_yaml,
+            resolved_config_dataset_id,
+            model,
+            projection_method,
+            precomputed,
+            projection_cache_status,
+        ) = prepared
         cached_fingerprints = (
             session.projection_fingerprint,
             session.pca_fingerprint,
         )
-        prev_record = session.sweep_history[-1] if session.sweep_history else None
+        prev_record = _latest_sweep_record(session)
         session_dataset_id = session.dataset_id
-
-        logger.info("Starting topological sweep from normalized YAML")
-        model = ThemaRS(config_dict)
-
         cfg = model.config
 
-        projection_method = getattr(cfg.projection, "method", "jl")
-        precomputed, projection_cache_status = _projection_cache_status(session, cfg)
-        if precomputed is not None:
-            logger.info(
-                "Reusing cached %s projection embeddings (fingerprint match)",
-                projection_method,
-            )
-
         loop = asyncio.get_running_loop()
-        progress_futures = []
+        progress_futures: list[Any] = []
         cancel_event = threading.Event()
-
-        async def report_progress(stage: str, fraction: float) -> None:
-            if ctx is None:
-                return
-            await ctx.report_progress(progress=fraction, total=1.0, message=stage)
-
-        def progress_callback(stage: str, fraction: float) -> None:
-            if cancel_event.is_set():
-                raise OperationCancelledError(
-                    f"Topological sweep cancelled at stage '{stage}'."
-                )
-            if ctx is None:
-                return
-            scaled_fraction = (
-                float(fraction)
-                if stage in _POST_FIT_PROGRESS_STAGES
-                else min(float(fraction), 1.0) * 0.9
-            )
-            try:
-                progress_futures.append(
-                    asyncio.run_coroutine_threadsafe(
-                        ctx.report_progress(
-                            progress=scaled_fraction,
-                            total=1.0,
-                            message=stage,
-                        ),
-                        loop,
-                    )
-                )
-            except RuntimeError:
-                pass
+        report_progress, progress_callback = _make_sweep_progress_reporter(
+            ctx, loop, cancel_event, progress_futures
+        )
 
         computation = await run_session_worker(
             session,
@@ -793,101 +943,34 @@ async def run_topological_sweep(
             mutates_session=True,
             cancel_event=cancel_event,
         )
-        # Back on the loop: persist + publish atomically (no await inside).
         run_record, saved_path = _publish_sweep_on_loop(
             session,
             computation,
             current_yaml=current_yaml,
             resolved_config_dataset_id=resolved_config_dataset_id,
         )
-        current_metrics = computation.current_metrics
-        threshold_curve_summary = computation.threshold_curve_summary
-        persisted_dataset_id = computation.bound_dataset_id
-        if progress_futures:
-            await asyncio.gather(
-                *(asyncio.wrap_future(future) for future in progress_futures),
-                return_exceptions=True,
-            )
+        await _drain_progress_futures(progress_futures)
         await report_progress("format response", 0.99)
-
-        diff = _compute_sweep_diff(
-            prev_record,
-            current_yaml,
-            persisted_dataset_id,
-            current_metrics,
+        response = _build_sweep_response(
+            session=session,
+            run_record=run_record,
+            computation=computation,
+            prev_record=prev_record,
+            current_yaml=current_yaml,
+            projection_method=projection_method,
+            precomputed=precomputed,
+            projection_cache_status=projection_cache_status,
+            save_config=save_config,
+            saved_path=saved_path,
         )
-
-        # Build configuration advisory message
-        if save_config and saved_path:
-            config_advisory = f"Config changes persisted to host at: {saved_path}"
-        else:
-            config_advisory = "Config changes are in-memory (session-only). Set save_config=True to persist to params.yaml."
-
-        response: dict[str, Any] = {
-            "status": "ok",
-            "run_id": run_record.run_id,
-            "metrics": current_metrics,
-            "projection_method": projection_method,
-            "projection_cached": precomputed is not None,
-            "projection_cache_status": projection_cache_status,
-            "pca_cached": precomputed is not None,
-            "pca_cache_status": projection_cache_status,
-            "memory_usage_mb": session.calculate_memory_mb(),
-            "diff": diff,
-            "config_advisory": config_advisory,
-            "config_yaml_normalized": current_yaml,
-            "data_shape": list(model.data.shape),
-        }
-        graph_health, is_connected, _ = _graph_health_summary(current_metrics)
-        unthresholded_component_count = threshold_curve_summary.get(
-            "unthresholded_component_count"
-        )
-        full_affinity_connected = bool(
-            int(model.cosmic_rust.n) > 0
-            and unthresholded_component_count is not None
-            and int(unthresholded_component_count) <= 1
-        )
-        response["is_connected"] = is_connected
-        response["constructed_graph_connected"] = is_connected
-        response["full_affinity_connected"] = full_affinity_connected
-        response["singleton_fraction"] = current_metrics.get("singleton_fraction", 0.0)
-        response["spectral_clustering_allowed"] = full_affinity_connected
-        response["graph_health"] = graph_health
-        response["analysis_status"] = "diagnostics_required"
-        response["next_required_check"] = "diagnose_cosmic_graph"
-        response["finalization_gate"] = _finalization_gate(
-            current_metrics,
-            sweep_count=len(session.sweep_history),
-            config_yaml=current_yaml,
-            threshold_curve_summary=threshold_curve_summary,
-        )
-        response["construction_threshold"] = float(
-            model.resolved_construction_threshold
-        )
-        stability_summary = _threshold_stability_summary(model, current_metrics)
-        if stability_summary is not None:
-            response["threshold_stability_summary"] = stability_summary
-        if saved_path:
-            response["saved_config_path"] = saved_path
-        if persisted_dataset_id:
-            response["dataset_id"] = persisted_dataset_id
-
-        summary_payload = build_sweep_summary_payload(
+        await report_progress("complete", 1.0)
+        return _render_sweep_result(
             response,
+            detail=detail,
+            response_format=response_format,
             component_limit=component_limit,
             include_config_yaml=include_config_yaml,
         )
-        if detail == "full":
-            response["detail"] = "full"
-            structured = response
-        else:
-            structured = summary_payload
-        await report_progress("complete", 1.0)
-        if response_format == "markdown":
-            return mcp_result(
-                structured, text=sweep_payload_to_markdown(summary_payload)
-            )
-        return mcp_result(structured)
 
     except FileNotFoundError:
         return path_access_error(

@@ -391,6 +391,69 @@ async def repair_preprocessing_config(
         )
 
 
+async def _resolve_validation_dataframe(
+    session: Any, dataset_id: str
+) -> tuple[Any | None, ToolResult | None]:
+    if not dataset_id:
+        if session.data is not None:
+            return session.data, None
+        return None, mcp_error(
+            "validate_preprocessing_config",
+            "No dataset_id given and no data is loaded in this session.",
+            error_code="SESSION_DATA_MISSING",
+            agent_action=(
+                "Pass dataset_id (from ingest_dataset) to validate against that "
+                "dataset; required on stateless transports."
+            ),
+        )
+    try:
+        resolved = _resolve_dataset_path(dataset_id)
+    except LookupError:
+        return None, unknown_handle_error(
+            "validate_preprocessing_config", "dataset_id", dataset_id
+        )
+    if (
+        session.data is not None
+        and session.data_dataset_id == dataset_id
+        and session.data_path == _normalize_data_path(resolved)
+    ):
+        return session.data, None
+    try:
+        data = await asyncio.to_thread(_read_dataset_file, resolved)
+        return data, None
+    except FileNotFoundError:
+        return None, path_access_error("validate_preprocessing_config", resolved)
+
+
+def _build_validation_payload(data: Any, layout: Any) -> dict[str, Any]:
+    input_cols = set(data.columns)
+    output_names = layout.feature_names
+    dummy_count = sum(
+        1 for name in output_names if "_" in name and name not in input_cols
+    )
+    missingness_flag_count = sum(
+        1 for name in output_names if name.endswith("_was_missing")
+    )
+    high_cardinality_encoded = [
+        col for col, cats in layout.vocab.items() if len(cats) > 20
+    ]
+    col_preview = list(output_names[:8])
+    if len(output_names) > 8:
+        col_preview.append(f"... +{len(output_names) - 8} more")
+    return {
+        "status": "ok",
+        "valid": True,
+        "input_rows": len(data),
+        "output_rows": layout.n_rows,
+        "output_feature_count": len(output_names),
+        "dummy_expansion_count": dummy_count,
+        "missingness_flag_count": missingness_flag_count,
+        "high_cardinality_encoded_columns": high_cardinality_encoded,
+        "feature_names_preview": col_preview,
+        "nan_remaining": 0,
+    }
+
+
 @tool_meta(
     read_only=True,
     idempotent=True,
@@ -428,37 +491,9 @@ async def validate_preprocessing_config(
     schema check.
     """
     session = _get_session(ctx)
-
-    if dataset_id:
-        try:
-            resolved = _resolve_dataset_path(dataset_id)
-        except LookupError:
-            return unknown_handle_error(
-                "validate_preprocessing_config", "dataset_id", dataset_id
-            )
-        if (
-            session.data is not None
-            and session.data_dataset_id == dataset_id
-            and session.data_path == _normalize_data_path(resolved)
-        ):
-            data = session.data
-        else:
-            try:
-                data = await asyncio.to_thread(_read_dataset_file, resolved)
-            except FileNotFoundError:
-                return path_access_error("validate_preprocessing_config", resolved)
-    else:
-        data = session.data
-    if data is None:
-        return mcp_error(
-            "validate_preprocessing_config",
-            "No dataset_id given and no data is loaded in this session.",
-            error_code="SESSION_DATA_MISSING",
-            agent_action=(
-                "Pass dataset_id (from ingest_dataset) to validate against that "
-                "dataset; required on stateless transports."
-            ),
-        )
+    data, err = await _resolve_validation_dataframe(session, dataset_id)
+    if err is not None:
+        return err
 
     try:
         config_dict = yaml.safe_load(config_yaml)
@@ -471,39 +506,8 @@ async def validate_preprocessing_config(
             )
 
         cfg = load_config(config_dict)
-        df_out, layout = await asyncio.to_thread(preprocess_dataframe, data, cfg)
-
-        # Compute expansion diagnostics
-        input_cols = set(data.columns)
-        output_names = layout.feature_names
-        dummy_count = sum(
-            1 for name in output_names if "_" in name and name not in input_cols
-        )
-        missingness_flag_count = sum(
-            1 for name in output_names if name.endswith("_was_missing")
-        )
-        high_cardinality_encoded = [
-            col for col, cats in layout.vocab.items() if len(cats) > 20
-        ]
-
-        col_preview = list(output_names[:8])
-        if len(output_names) > 8:
-            col_preview.append(f"... +{len(output_names) - 8} more")
-
-        return mcp_result(
-            {
-                "status": "ok",
-                "valid": True,
-                "input_rows": len(data),
-                "output_rows": layout.n_rows,
-                "output_feature_count": len(output_names),
-                "dummy_expansion_count": dummy_count,
-                "missingness_flag_count": missingness_flag_count,
-                "high_cardinality_encoded_columns": high_cardinality_encoded,
-                "feature_names_preview": list(col_preview),
-                "nan_remaining": 0,
-            }
-        )
+        _, layout = await asyncio.to_thread(preprocess_dataframe, data, cfg)
+        return mcp_result(_build_validation_payload(data, layout))
 
     except yaml.YAMLError as e:
         return mcp_error(
