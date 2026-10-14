@@ -1,7 +1,6 @@
 """Focused checks for deterministic, dtype-preserving entity sampling."""
 
 import asyncio
-import json
 
 import pandas as pd
 import pytest
@@ -12,6 +11,7 @@ from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
     sample_longitudinal_entities,
 )
+from tests.mcp_helpers import payload_of
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +69,7 @@ def test_sampling_is_deterministic_preserves_histories_and_parquet_dtypes(tmp_pa
     )
     source_path = tmp_path / "source.parquet"
     source.to_parquet(source_path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(source_path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(source_path))))
 
     session = _get_session(None)
     session.data = pd.DataFrame({"sentinel": [1]})
@@ -79,7 +79,7 @@ def test_sampling_is_deterministic_preserves_histories_and_parquet_dtypes(tmp_pa
     static_state = (session.data, session.model, session.clusters, session.dataset_id)
 
     results = [
-        json.loads(
+        payload_of(
             asyncio.run(
                 sample_longitudinal_entities(
                     dataset["dataset_id"],
@@ -133,9 +133,9 @@ def test_csv_source_with_mixed_type_column_samples_as_csv(tmp_path):
         }
     ).to_csv(source_path, index=False)
     assert {type(v) for v in pd.read_csv(source_path)["lab"]} == {int, str}
-    dataset = json.loads(asyncio.run(ingest_dataset(str(source_path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(source_path))))
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             sample_longitudinal_entities(
                 dataset["dataset_id"], "patient_id", max_entities=5
@@ -154,9 +154,9 @@ def test_min_time_points_requires_existing_time_column(tmp_path):
     pd.DataFrame(
         {"patient_id": ["0001", "0001", "0001"], "feature": [1.0, 2.0, 3.0]}
     ).to_csv(source_path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(source_path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(source_path))))
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             sample_longitudinal_entities(
                 dataset["dataset_id"], "patient_id", min_time_points=2
@@ -166,7 +166,7 @@ def test_min_time_points_requires_existing_time_column(tmp_path):
 
     assert result["error_code"] == "INVALID_SAMPLE_SIZE"
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             sample_longitudinal_entities(
                 dataset["dataset_id"],

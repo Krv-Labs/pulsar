@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import json
 import os
-from pathlib import Path
 import statistics
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,6 +27,7 @@ from pulsar.mcp.tools.reporting import export_labeled_data
 from pulsar.mcp.tools.sweeping import get_sweep_history, run_topological_sweep
 from pulsar.pipeline import ThemaRS
 from pulsar.runtime.utils import rayon_thread_override
+from tests.mcp_helpers import payload_of
 
 
 async def _noop_progress(*_args, **_kwargs) -> None:
@@ -65,9 +65,9 @@ def _write_synthetic_csv(path: Path, n_rows: int = 120) -> Path:
 async def _ingest_and_configure(
     csv_path: Path, ctx: SimpleNamespace
 ) -> tuple[str, str]:
-    ingest_res = json.loads(await ingest_dataset(str(csv_path), ctx=ctx))
+    ingest_res = payload_of(await ingest_dataset(str(csv_path), ctx=ctx))
     dataset_id = ingest_res["dataset_id"]
-    cfg_res = json.loads(await create_config(dataset_id=dataset_id, ctx=ctx))
+    cfg_res = payload_of(await create_config(dataset_id=dataset_id, ctx=ctx))
     return dataset_id, cfg_res["config_yaml"]
 
 
@@ -153,11 +153,11 @@ def test_concurrent_ping_during_sweep(
                 get_sweep_history(response_format="json", ctx=ctx),
             )
             latencies_ms.append((time.perf_counter() - t0) * 1000.0)
-            assert json.loads(ctx_out)["session_id"] == "concurrency-ping"
-            assert json.loads(hist_out)["status"] == "ok"
+            assert payload_of(ctx_out)["session_id"] == "concurrency-ping"
+            assert payload_of(hist_out)["status"] == "ok"
             await asyncio.sleep(0.005)
 
-        sweep_res = json.loads(await sweep_task)
+        sweep_res = payload_of(await sweep_task)
         assert sweep_res["status"] == "ok"
         assert statistics.median(latencies_ms) < 50.0
 
@@ -172,7 +172,7 @@ def test_cancelled_sweep_preserves_session_revision(
         ctx = _make_ctx("cancel-revision")
         dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
 
-        first_res = json.loads(
+        first_res = payload_of(
             await run_topological_sweep(
                 config_yaml=config_yaml,
                 dataset_id=dataset_id,
@@ -319,7 +319,7 @@ def test_atomic_labeled_csv_fault_injection(
             response_format="json",
             ctx=ctx,
         )
-        dossier_res = json.loads(
+        dossier_res = payload_of(
             await generate_cluster_dossier(
                 method="components",
                 response_format="json",
@@ -341,7 +341,7 @@ def test_atomic_labeled_csv_fault_injection(
 
         monkeypatch.setattr(pd.DataFrame, "to_csv", _failing_to_csv)
 
-        res = json.loads(
+        res = payload_of(
             await export_labeled_data(
                 cluster_assignment_id=assignment_id,
                 cluster_names=cluster_names,
@@ -379,7 +379,7 @@ def test_loop_stays_responsive_when_binding_dataset_during_sweep(
         path_a = _write_synthetic_csv(tmp_path / "a.csv", n_rows=100)
         path_b = _write_synthetic_csv(tmp_path / "b.csv", n_rows=90)
         dataset_a, config_yaml = await _ingest_and_configure(path_a, ctx)
-        dataset_b = json.loads(await ingest_dataset(str(path_b), ctx=ctx))["dataset_id"]
+        dataset_b = payload_of(await ingest_dataset(str(path_b), ctx=ctx))["dataset_id"]
 
         entered = threading.Event()
         orig_fit = ThemaRS.fit
@@ -420,7 +420,7 @@ def test_loop_stays_responsive_when_binding_dataset_during_sweep(
         assert session.data_dataset_id == dataset_b
         assert not sweep_task.done()
 
-        assert json.loads(await sweep_task)["status"] == "ok"
+        assert payload_of(await sweep_task)["status"] == "ok"
         assert session.data_dataset_id == dataset_a
 
     asyncio.run(_run())
@@ -518,7 +518,7 @@ def test_concurrent_sweeps_serialize_last_writer_wins(tmp_path: Path) -> None:
                 for _ in range(2)
             )
         )
-        first, second = (json.loads(r) for r in raw)
+        first, second = (payload_of(r) for r in raw)
 
         assert first["status"] == "ok"
         assert second["status"] == "ok"
@@ -544,7 +544,7 @@ def test_dossier_refused_when_sweep_replaced_model_persists_nothing(
         ctx = _make_ctx("dossier-conflict")
         csv_path = _write_synthetic_csv(tmp_path / "dossier.csv", n_rows=80)
         dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
-        sweep = json.loads(
+        sweep = payload_of(
             await run_topological_sweep(
                 config_yaml=config_yaml,
                 dataset_id=dataset_id,
@@ -574,7 +574,7 @@ def test_dossier_refused_when_sweep_replaced_model_persists_nothing(
         # A newer sweep replaced the live run while the dossier computed.
         session.latest_run_id = "run_replaced_by_newer_sweep"
         release.set()
-        res = json.loads(await task)
+        res = payload_of(await task)
 
         assert res["status"] == "error"
         assert res["tool"] == "generate_cluster_dossier"
@@ -683,13 +683,13 @@ def test_staging_does_not_take_registry_process_lock() -> None:
 def test_runtime_context_reports_transport_and_model_continuity() -> None:
     async def _run() -> None:
         ctx = _make_ctx("transport-ctx")
-        stdio = json.loads(await get_runtime_context(ctx=ctx))
+        stdio = payload_of(await get_runtime_context(ctx=ctx))
         assert stdio["transport_assumption"] == "stdio-single-client"
         assert "stateless HTTP" in stdio["model_continuity"].replace(
             "Stateless", "stateless"
         )
         ctx.transport = "streamable-http"
-        http = json.loads(await get_runtime_context(ctx=ctx))
+        http = payload_of(await get_runtime_context(ctx=ctx))
         assert http["transport_assumption"] == "streamable-http"
 
     asyncio.run(_run())

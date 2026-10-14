@@ -7,14 +7,25 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
+
+import mcp.types as mt
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
+from fastmcp.server.middleware.timing import TimingMiddleware
+from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
+
+import pulsar
+from pulsar.mcp.toolmeta import tool_meta_of
 from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Client-Agnostic Server Subclass to manage non-compliant MCP clients
+# Argument sanitising for non-compliant MCP clients
 # ---------------------------------------------------------------------------
 _KNOWN_ORCHESTRATION_KEYS = frozenset({"wait_for_previous"})
 
@@ -36,35 +47,48 @@ def _sanitize_tool_arguments(
     return {k: v for k, v in arguments.items() if k in valid_keys}
 
 
-class AgnosticFastMCP(FastMCP):
-    """Custom FastMCP subclass that gracefully strips client orchestration parameters."""
+class ArgumentSanitizerMiddleware(Middleware):
+    """Strip client orchestration keys and unknown arguments before dispatch."""
 
-    async def call_tool(
+    async def on_call_tool(
         self,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-        *args,
-        **kwargs,
-    ):
-        if arguments:
-            tool = await self.get_tool(name, version=kwargs.get("version"))
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        message = context.message
+        if message.arguments and context.fastmcp_context is not None:
+            tool = await context.fastmcp_context.fastmcp.get_tool(message.name)
             if tool is not None:
-                arguments = _sanitize_tool_arguments(tool, name, arguments)
-        return await super().call_tool(name, arguments, *args, **kwargs)
+                message.arguments = _sanitize_tool_arguments(
+                    tool, message.name, message.arguments
+                )
+        return await call_next(context)
 
 
 # ---------------------------------------------------------------------------
-# Initialize Client-Agnostic FastMCP
+# FastMCP server
 # ---------------------------------------------------------------------------
-mcp = AgnosticFastMCP(
+mcp = FastMCP(
     "Pulsar",
     instructions=(
         "Manifold discovery and topological data analysis for tabular datasets. Call "
         "`get_workflow_guide` once for the end-to-end procedure and tool map.\n"
         "Shared params across tools: `detail` ('summary' default; 'full' for "
         "audit/debug) and `response_format` ('json' for structured payloads; "
-        "'markdown' where a readable rendering is supported)."
+        "'markdown' where a readable rendering is supported).\n"
+        "Results carry structured content; errors set the MCP error flag with a "
+        "JSON envelope (error_code, agent_action)."
     ),
+    version=pulsar.__version__,
+    website_url="https://github.com/Krv-Labs/pulsar",
+    cache_ttl=3600,
+    middleware=[
+        ArgumentSanitizerMiddleware(),
+        ResponseLimitingMiddleware(
+            max_size=int(os.environ.get("PULSAR_MCP_MAX_RESPONSE_BYTES", "400000"))
+        ),
+        TimingMiddleware(logger=logging.getLogger("pulsar.mcp")),
+    ],
 )
 
 # ---------------------------------------------------------------------------
@@ -102,7 +126,25 @@ def _ensure_tasks_extension(server: FastMCP) -> bool:
 def register_server_tools(server: FastMCP) -> None:
     tasks_available = _tasks_enabled() and _ensure_tasks_extension(server)
     for tool_fn in ALL_TOOLS_LIST:
-        server.tool(task=get_tool_task_config(tool_fn, tasks_available))(tool_fn)
+        kwargs: dict[str, Any] = {
+            "task": get_tool_task_config(tool_fn, tasks_available)
+        }
+        meta = tool_meta_of(tool_fn)
+        # Tools without meta are tolerated for now; a later phase makes this raise.
+        if meta is not None:
+            kwargs["annotations"] = ToolAnnotations(
+                title=meta.title,
+                read_only_hint=meta.read_only,
+                destructive_hint=meta.destructive,
+                idempotent_hint=meta.idempotent,
+                open_world_hint=False,
+            )
+            kwargs["output_schema"] = meta.output_schema
+            if meta.timeout is not None:
+                kwargs["timeout"] = meta.timeout
+            if meta.tags:
+                kwargs["tags"] = set(meta.tags)
+        server.tool(**kwargs)(tool_fn)
 
 
 register_server_tools(mcp)

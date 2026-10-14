@@ -1,5 +1,4 @@
 import asyncio
-import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -7,16 +6,20 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-from pulsar.mcp.session import _sessions, _get_session
+from pulsar.mcp.interpreter import (
+    FeatureEvidenceIndex,
+    build_feature_evidence_index,
+    signal_matrix_payload,
+)
+from pulsar.mcp.payloads import build_cluster_selection
+from pulsar.mcp.session import _get_session, _sessions
 from pulsar.mcp.tools.clustering import (
     generate_cluster_dossier,
     get_cluster_profile,
-    get_feature_signal,
     get_cluster_signal_matrix,
+    get_feature_signal,
 )
-from pulsar.mcp.interpreter import FeatureEvidenceIndex, build_feature_evidence_index
-from pulsar.mcp.interpreter import signal_matrix_payload
-from pulsar.mcp.payloads import build_cluster_selection
+from tests.mcp_helpers import payload_of, text_of
 
 
 def _make_disconnected_model(size_per_cluster: int = 3) -> SimpleNamespace:
@@ -147,23 +150,29 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
     session.data = _make_small_server_dataset()
     session.latest_run_id = "run_synthetic"
 
-    summary_text = asyncio.run(
-        generate_cluster_dossier(
-            method="auto", detail="summary", response_format="json"
+    summary_text = text_of(
+        asyncio.run(
+            generate_cluster_dossier(
+                method="auto", detail="summary", response_format="json"
+            )
         )
     )
-    summary = json.loads(summary_text)
-    full_text = asyncio.run(
-        generate_cluster_dossier(method="auto", detail="full", response_format="json")
+    summary = payload_of(summary_text)
+    full_text = text_of(
+        asyncio.run(
+            generate_cluster_dossier(
+                method="auto", detail="full", response_format="json"
+            )
+        )
     )
-    full = json.loads(full_text)
-    cluster_profile = json.loads(
+    full = payload_of(full_text)
+    cluster_profile = payload_of(
         asyncio.run(get_cluster_profile(0, response_format="json"))
     )
-    feature_payload = json.loads(
+    feature_payload = payload_of(
         asyncio.run(get_feature_signal(["f1", "segment=alpha"], response_format="json"))
     )
-    matrix_payload = json.loads(
+    matrix_payload = payload_of(
         asyncio.run(get_cluster_signal_matrix(return_markdown=False))
     )
 
@@ -236,7 +245,7 @@ def test_generate_cluster_dossier_supports_tiered_retrieval_without_payload_dupl
         assert "wasserstein_norm" not in sample_numeric
         assert "evidence_vector" not in sample_numeric
         assert "signal_tier" in sample_numeric
-    full_feature_payload = json.loads(
+    full_feature_payload = payload_of(
         asyncio.run(
             get_feature_signal(
                 ["f1", "segment=alpha"],
@@ -267,7 +276,7 @@ def test_generate_cluster_dossier_defaults_to_compact_markdown_summary():
     session.data = _make_small_server_dataset()
     session.latest_run_id = "run_markdown_default"
 
-    markdown = asyncio.run(generate_cluster_dossier(method="auto"))
+    markdown = text_of(asyncio.run(generate_cluster_dossier(method="auto")))
 
     assert "# Threshold Surface" in markdown
     assert "# Cluster Dossier Summary" in markdown
@@ -288,7 +297,7 @@ def test_cluster_signal_matrix_tool_defaults_to_markdown():
             method="auto", detail="summary", response_format="json"
         )
     )
-    markdown = asyncio.run(get_cluster_signal_matrix())
+    markdown = text_of(asyncio.run(get_cluster_signal_matrix()))
 
     assert "## Topological Signal Matrix" in markdown
     assert "### Numeric Feature Matrix" in markdown
@@ -308,8 +317,8 @@ def test_profile_and_feature_signal_tools_default_to_markdown():
         )
     )
 
-    profile_markdown = asyncio.run(get_cluster_profile(0))
-    feature_markdown = asyncio.run(get_feature_signal(["f1"]))
+    profile_markdown = text_of(asyncio.run(get_cluster_profile(0)))
+    feature_markdown = text_of(asyncio.run(get_feature_signal(["f1"])))
 
     assert "# Cluster Profile" in profile_markdown
     assert "### Next Tools" in profile_markdown
@@ -332,7 +341,7 @@ def test_signal_matrix_caps_wide_feature_columns():
             method="auto", detail="summary", response_format="json"
         )
     )
-    payload = json.loads(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
+    payload = payload_of(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
     matrix = payload["signal_matrix"]
 
     assert len(matrix["numeric_columns"]) <= 10
@@ -352,13 +361,13 @@ def test_get_cluster_profile_caps_wide_dataset_feature_output():
             method="auto", detail="summary", response_format="json"
         )
     )
-    default_capped = json.loads(
+    default_capped = payload_of(
         asyncio.run(get_cluster_profile(0, response_format="json"))
     )
-    capped = json.loads(
+    capped = payload_of(
         asyncio.run(get_cluster_profile(0, max_features=7, response_format="json"))
     )
-    uncapped = json.loads(
+    uncapped = payload_of(
         asyncio.run(get_cluster_profile(0, max_features=200, response_format="json"))
     )
 
@@ -474,7 +483,7 @@ def test_generate_cluster_dossier_summary_caps_feature_preview():
     session.data = data
     session.latest_run_id = "run_preview_cap"
 
-    summary = json.loads(
+    summary = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 method="auto",
@@ -500,7 +509,7 @@ def test_generate_cluster_dossier_surfaces_singleton_heavy_readiness():
     session.data = _make_singleton_tail_dataset()
     session.latest_run_id = "run_singleton_tail"
 
-    summary = json.loads(
+    summary = payload_of(
         asyncio.run(
             generate_cluster_dossier(method="components", response_format="json")
         )
@@ -707,15 +716,15 @@ def test_sibling_tools_share_partition_but_disclose_different_ranking():
     session.data = _make_small_server_dataset()
     session.latest_run_id = "run_synthetic"
 
-    dossier = json.loads(
+    dossier = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 method="auto", detail="summary", response_format="json"
             )
         )
     )
-    matrix = json.loads(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
-    features = json.loads(
+    matrix = payload_of(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
+    features = payload_of(
         asyncio.run(get_feature_signal(["f1"], response_format="json"))
     )
 
@@ -799,7 +808,7 @@ def test_dossier_summary_has_no_unbounded_arrays_on_shattered_graph():
     )
     session.latest_run_id = "run_shattered"
 
-    summary = json.loads(
+    summary = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 method="components", detail="summary", response_format="json"

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
+
 
 _SANDBOX_PATH_PREFIXES = (
     "/home/claude",
@@ -21,8 +24,8 @@ def mcp_error(
     error_code: str | None = None,
     agent_action: str | None = None,
     details: dict[str, Any] | None = None,
-) -> str:
-    """Return the canonical MCP error envelope for Pulsar tools."""
+) -> ToolResult:
+    """Return the canonical MCP error envelope as an ``is_error`` ToolResult."""
     error_obj = {
         "status": "error",
         "tool": tool,
@@ -32,7 +35,11 @@ def mcp_error(
         "details": details or {},
         "metrics": metrics or {},
     }
-    return json.dumps(error_obj, indent=2)
+    return ToolResult(
+        content=[TextContent(type="text", text=json.dumps(error_obj, indent=2))],
+        structured_content=error_obj,
+        is_error=True,
+    )
 
 
 def classify_path(path: str) -> dict[str, Any]:
@@ -58,7 +65,7 @@ def path_access_error(
         "Provide a host-visible absolute path, or call get_runtime_context first."
     ),
     sandbox_action: str | None = None,
-) -> str:
+) -> ToolResult:
     """Return a structured error for path visibility or existence failures."""
     path_context = classify_path(path)
     if path_context["looks_like_sandbox_path"]:
@@ -83,14 +90,20 @@ def path_access_error(
     )
 
 
-def unknown_handle_error(tool: str, handle_name: str, handle_value: str) -> str:
+def unknown_handle_error(tool: str, handle_name: str, handle_value: str) -> ToolResult:
     """Return a structured error for unknown dataset/run handles."""
+    if handle_name == "run_id":
+        action = (
+            "A model for this run_id is no longer in memory. Re-run "
+            "run_topological_sweep to rebuild it (or omit run_id to use the "
+            "session's latest run on a stdio session)."
+        )
+    else:
+        action = f"Create or retrieve a valid {handle_name} before retrying this tool."
     return mcp_error(
         tool,
         f"Unknown {handle_name} '{handle_value}'.",
         error_code=f"{handle_name.upper()}_UNKNOWN",
-        agent_action=(
-            f"Create or retrieve a valid {handle_name} before retrying this tool."
-        ),
+        agent_action=action,
         details={handle_name: handle_value},
     )

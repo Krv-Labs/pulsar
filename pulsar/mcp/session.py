@@ -104,6 +104,79 @@ class LongitudinalArtifact:
 
 
 @dataclass
+class ResolvedRun:
+    """Everything a tool needs to read one fitted run, live or cached."""
+
+    run_id: str
+    model: ThemaRS
+    data: pd.DataFrame | None
+    dataset_id: str | None
+    embeddings: list | None
+    projection_fingerprint: str | None
+    pca_fingerprint: str | None = None  # Legacy alias; kept consistent on put().
+
+
+def _model_cache_capacity() -> int:
+    try:
+        return max(1, int(os.environ.get("PULSAR_MCP_MODEL_CACHE_SIZE", "3")))
+    except ValueError:
+        return 3
+
+
+class ModelCache:
+    """Process-wide bounded LRU of fitted runs keyed by ``run_id``.
+
+    Only touched on the event-loop thread (``publish_sweep`` and tool-side
+    ``resolve_run`` both run there, never in workers), so it deliberately has no
+    threading lock. Session eviction does NOT evict entries: the cache is
+    process-wide so a ``run_id`` stays addressable on stateless transports.
+
+    Memory: a cached run pins its model and DataFrame (and embeddings) until it
+    is evicted, even after the owning session is gone. Capacity comes from
+    ``PULSAR_MCP_MODEL_CACHE_SIZE`` (default 3, minimum 1).
+    """
+
+    def __init__(self, capacity: int | None = None) -> None:
+        self.capacity = (
+            max(1, capacity) if capacity is not None else _model_cache_capacity()
+        )
+        self._entries: OrderedDict[str, ResolvedRun] = OrderedDict()
+
+    def put(self, resolved: ResolvedRun) -> None:
+        if resolved.pca_fingerprint is None:
+            resolved.pca_fingerprint = resolved.projection_fingerprint
+        self._entries[resolved.run_id] = resolved
+        self._entries.move_to_end(resolved.run_id)
+        while len(self._entries) > self.capacity:
+            self._entries.popitem(last=False)
+
+    def get(self, run_id: str) -> ResolvedRun | None:
+        entry = self._entries.get(run_id)
+        if entry is not None:
+            self._entries.move_to_end(run_id)
+        return entry
+
+    def evict(self, run_id: str) -> None:
+        self._entries.pop(run_id, None)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "size": len(self._entries),
+            "capacity": self.capacity,
+            "run_ids": list(self._entries),  # least to most recently used
+        }
+
+
+model_cache = ModelCache()
+
+
+@dataclass
 class _PulsarSession:
     """Session state for a single MCP client."""
 
@@ -189,6 +262,19 @@ class _PulsarSession:
         self.latest_run_id = run_id
         self.sweep_revision += 1
         self.revision += 1
+        # Same objects as the session's live state (no copy). The cache is
+        # process-wide and outlives session eviction; it pins model and data.
+        model_cache.put(
+            ResolvedRun(
+                run_id=run_id,
+                model=model,
+                data=data,
+                dataset_id=dataset_id,
+                embeddings=embeddings,
+                projection_fingerprint=self.projection_fingerprint,
+                pca_fingerprint=self.pca_fingerprint,
+            )
+        )
 
     def publish_dossier(
         self,
@@ -478,6 +564,38 @@ def _resolve_longitudinal(
     if artifact is None:
         raise LookupError(longitudinal_id)
     return artifact
+
+
+def resolve_run(session: _PulsarSession, run_id: str = "") -> ResolvedRun:
+    """Resolve a run handle, or raise LookupError for the error envelope.
+
+    Empty ``run_id`` returns the session's live state (``LookupError("")`` when
+    nothing has been fitted); otherwise the process-wide cache entry, else
+    ``LookupError(run_id)``.
+    """
+    if not run_id:
+        if session.model is None:
+            raise LookupError("")
+        return ResolvedRun(
+            run_id=session.latest_run_id or "",
+            model=session.model,
+            data=session.data,
+            dataset_id=session.dataset_id,
+            embeddings=session.embeddings,
+            projection_fingerprint=session.projection_fingerprint,
+            pca_fingerprint=session.pca_fingerprint,
+        )
+    entry = model_cache.get(run_id)
+    if entry is None:
+        raise LookupError(run_id)
+    return entry
+
+
+def is_latest(session: _PulsarSession, resolved: ResolvedRun) -> bool:
+    """True when ``resolved`` is the session's latest published run."""
+    return (
+        session.latest_run_id is not None and resolved.run_id == session.latest_run_id
+    )
 
 
 def _resolve_dataset_path(dataset_id: str) -> str:
