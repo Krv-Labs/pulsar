@@ -434,6 +434,10 @@ class _WorkerAdmission:
         while self._releasers:
             self._releasers.pop()()
 
+    def release_if_done(self, done: asyncio.Future[Any]) -> None:
+        if done.done():
+            self.release()
+
     def on_done(self, done: asyncio.Future[Any]) -> None:
         if not done.cancelled():
             done.exception()  # mark retrieved; the awaiter may be gone
@@ -491,6 +495,8 @@ async def run_session_worker(
     except asyncio.CancelledError:
         cancel_event.set()
         raise
+    finally:
+        admission.release_if_done(fut)
 
 
 def _is_http_context(ctx: Context) -> bool:
