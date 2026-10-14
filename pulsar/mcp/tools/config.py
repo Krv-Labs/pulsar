@@ -4,10 +4,12 @@ import asyncio
 import dataclasses
 import json
 import logging
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from fastmcp import Context
+from fastmcp.tools import ToolResult
+from pydantic import Field
 
 from pulsar.mcp.config_tools import (
     apply_overrides,
@@ -17,6 +19,8 @@ from pulsar.mcp.config_tools import (
     _build_sparsify_warning,
 )
 from pulsar.mcp.errors import mcp_error, unknown_handle_error
+from pulsar.mcp.results import mcp_result
+from pulsar.mcp.toolmeta import INT, NUM, STR, arr, enum, nullable, obj, tool_meta
 from pulsar.mcp.preprocessing import _calibrate_processed_space
 from pulsar.mcp.session import (
     _get_session,
@@ -26,12 +30,75 @@ from pulsar.mcp.session import (
 
 logger = logging.getLogger(__name__)
 
+_ANY: dict = {}  # unconstrained JSON value
+_OPEN = obj({}, additional=True)
 
-async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) -> str:
-    """Canonical Pulsar YAML for an ingested dataset. Epsilon and projection
-    dimensions are calibrated against the processed feature space (post
-    drop/impute/encode/scale), not raw columns. Dimensions are selected from the
-    data's cumulative-variance structure; the default projection method is JL."""
+_CREATE_SCHEMA = obj(
+    {
+        "status": STR,
+        "config_yaml": STR,
+        "calibration_space": enum(["processed", "raw"]),
+        "sweep_strategy": _OPEN,
+        "processed_feature_count": INT,
+        "raw_to_processed_expansion_ratio": NUM,
+        "knn_distance_percentiles": obj(
+            {k: NUM for k in ("p5", "p25", "p50", "p75", "p95")}, additional=True
+        ),
+        "calibration_note": STR,
+    },
+    [
+        "status",
+        "config_yaml",
+        "calibration_space",
+        "sweep_strategy",
+        "calibration_note",
+    ],
+)
+
+_REFINE_SCHEMA = obj(
+    {
+        "status": STR,
+        "applied_overrides": arr(STR),
+        "diff": arr(_OPEN),
+        "config_yaml": STR,
+        "warnings": arr(_OPEN),
+        "dataset_id": nullable(STR),
+    },
+    ["status", "applied_overrides", "diff", "config_yaml"],
+)
+
+_VALIDATE_SCHEMA = obj(
+    {
+        "status": STR,
+        "resolved_dataset_path": nullable(STR),
+        "issues": arr(_OPEN),
+        "warnings": arr(_OPEN),
+        "normalized_config_yaml": STR,
+    },
+    ["status", "resolved_dataset_path", "issues"],
+)
+
+
+@tool_meta(read_only=False, output_schema=_CREATE_SCHEMA)
+async def create_config(
+    dataset_id: Annotated[
+        str,
+        Field(description="Dataset handle returned by ingest_dataset."),
+    ],
+    intent: Annotated[
+        str,
+        Field(
+            description="Optional short run name (e.g. 'baseline') stored as run.name in the config. Defaults to 'initial_sweep'."
+        ),
+    ] = "",
+    ctx: Context = None,
+) -> ToolResult:
+    """Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset.
+
+    Epsilon and projection dimensions are calibrated in the processed feature
+    space (after drop/impute/encode/scale), not raw columns. The YAML becomes the
+    session's active config. It is a starting grid, not the answer; refine it
+    with refine_config after diagnosing a run."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id)
         from pulsar.analysis.characterization import characterize_dataset as _char
@@ -155,26 +222,45 @@ async def create_config(dataset_id: str, intent: str = "", ctx: Context = None) 
                 "dimensions are calibrated against raw numeric columns only."
             )
 
-        return json.dumps(response, indent=2)
+        return mcp_result(response)
     except LookupError:
         return unknown_handle_error("create_config", "dataset_id", dataset_id)
     except Exception as e:
-        return mcp_error("create_config", str(e))
+        return mcp_error(
+            "create_config",
+            str(e),
+            error_code="CONFIG_CREATION_FAILED",
+            agent_action="Check the dataset_id is valid and the data is readable, then retry.",
+        )
 
 
+@tool_meta(read_only=False, output_schema=_REFINE_SCHEMA)
 async def refine_config(
-    config_yaml: str = "",
-    overrides: dict[str, Any] | None = None,
-    response_format: Literal["json", "markdown", "yaml"] = "json",
+    config_yaml: Annotated[
+        str,
+        Field(
+            description="Full Pulsar config YAML to refine. Leave empty to refine the session's active config (set by create_config) and store the result back."
+        ),
+    ] = "",
+    overrides: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description="Nested dict of config values merged into the config, e.g. {'sweep': {'ball_mapper': {'epsilon': {'range': {'min': 0.2, 'max': 1.0, 'steps': 6}}}}}. To delete keys pass {'remove_keys': ['dotted.path']}."
+        ),
+    ] = None,
+    response_format: Annotated[
+        Literal["json", "markdown", "yaml"],
+        Field(
+            description="Text rendering only: 'json' (payload), 'markdown' (diff table plus YAML) or 'yaml' (bare normalized YAML). structured_content is identical in all three."
+        ),
+    ] = "json",
     ctx: Context = None,
-) -> str:
-    """Apply constrained overrides; returns normalized YAML. Omit
-    `config_yaml` (or pass "") to refine the session's active config in place.
+) -> ToolResult:
+    """Apply constrained overrides to a Pulsar config and return normalized YAML plus a diff.
 
-    Overrides merge into existing config. To DELETE a key (rather than null it),
-    pass `overrides={"remove_keys": ["preprocessing.encode.species"]}` — a list of
-    dotted paths. Deletion is idempotent and reported in `diff` with `removed: true`.
-    """
+    With no config_yaml it edits the session's active config in place. Deletion
+    via overrides={"remove_keys": [...]} is idempotent and shows as removed:true
+    in the diff. Use between sweeps to concentrate or shift the grid."""
     if overrides is None:
         overrides = {}
     if response_format not in {"json", "markdown", "yaml"}:
@@ -215,10 +301,10 @@ async def refine_config(
             session.active_config_yaml = result.config_yaml
             payload["dataset_id"] = session.active_config_dataset_id
         if response_format == "yaml":
-            return result.config_yaml
+            return mcp_result(payload, text=result.config_yaml)
         if response_format == "markdown":
-            return _refine_config_to_markdown(payload)
-        return json.dumps(payload, indent=2)
+            return mcp_result(payload, text=_refine_config_to_markdown(payload))
+        return mcp_result(payload)
     except ValueError as e:
         return mcp_error(
             "refine_config",
@@ -227,7 +313,12 @@ async def refine_config(
             agent_action="Use only valid override keys. See error message for valid key list.",
         )
     except Exception as e:
-        return mcp_error("refine_config", str(e))
+        return mcp_error(
+            "refine_config",
+            str(e),
+            error_code="CONFIG_REFINE_FAILED",
+            agent_action="Check config_yaml is valid YAML and overrides is a nested dict, then retry.",
+        )
 
 
 def _refine_config_to_markdown(payload: dict[str, Any]) -> str:
@@ -298,12 +389,25 @@ def _format_refine_value(value: Any, *, limit: int = 120) -> str:
     return f"`{text}`"
 
 
+@tool_meta(read_only=True, idempotent=True, output_schema=_VALIDATE_SCHEMA)
 async def validate_config(
-    config_yaml: str,
-    dataset_id: str = "",
+    config_yaml: Annotated[
+        str,
+        Field(description="Full Pulsar config as raw YAML text (no Markdown fences)."),
+    ],
+    dataset_id: Annotated[
+        str,
+        Field(
+            description="Optional dataset handle from ingest_dataset. When given, run.data is resolved against that dataset and it becomes the session's current dataset."
+        ),
+    ] = "",
     ctx: Context = None,
-) -> str:
-    """Validate full Pulsar config and normalize into canonical YAML."""
+) -> ToolResult:
+    """Validate a full Pulsar config and normalize it into canonical YAML.
+
+    Returns issues, warnings and normalized_config_yaml on success; a structured
+    error with an error_code and agent_action when the config is invalid. Use
+    before run_topological_sweep when you hand-edited the YAML."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
         report = await asyncio.to_thread(
@@ -311,8 +415,16 @@ async def validate_config(
         )
         if dataset_id:
             _get_session(ctx).dataset_id = dataset_id
-        return render_validation_report(report)
+        rendered = render_validation_report(report)
+        if isinstance(rendered, ToolResult):
+            return rendered
+        return mcp_result(json.loads(rendered))
     except LookupError:
         return unknown_handle_error("validate_config", "dataset_id", dataset_id)
     except Exception as e:
-        return mcp_error("validate_config", str(e))
+        return mcp_error(
+            "validate_config",
+            str(e),
+            error_code="CONFIG_VALIDATION_FAILED",
+            agent_action="Pass the config as raw YAML text and retry.",
+        )

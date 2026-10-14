@@ -172,7 +172,7 @@ sweep:
         )
     )
 
-    table = asyncio.run(get_sweep_history())
+    table = text_of(asyncio.run(get_sweep_history()))
     assert "| Run | Projection Dims | Epsilon Range |" in table
     assert "[2, 4]" in table
     assert "80.00%" in table
@@ -398,7 +398,7 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
     skeleton_full = payload_of(
         asyncio.run(get_topological_skeleton(run_a, detail="full"))
     )
-    comparison = asyncio.run(compare_sweeps(run_a, run_b))
+    comparison = text_of(asyncio.run(compare_sweeps(run_a, run_b)))
 
     assert skeleton["run_id"] == run_a
     assert skeleton["dataset_id"] == dataset["dataset_id"]
@@ -905,7 +905,7 @@ def test_append_dataset_chunk_rejects_invalid_base64():
 
 
 def test_get_workflow_guide_returns_phase_prompt():
-    guide = asyncio.run(get_workflow_guide())
+    guide = text_of(asyncio.run(get_workflow_guide()))
     assert "PHASE I" in guide
     assert "PHASE II" in guide
     assert "PHASE III" in guide

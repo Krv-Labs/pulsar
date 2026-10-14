@@ -3,16 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import dataclasses
-import json
 import logging
 import os
 import threading
 import time
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from fastmcp import Context
-from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
+from pydantic import Field
 
 from pulsar.config import config_to_yaml
 from pulsar.mcp.config_tools import validate_config_yaml
@@ -24,6 +24,8 @@ from pulsar.mcp.diagnostics import (
 )
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.history import summarize_history
+from pulsar.mcp.results import mcp_result
+from pulsar.mcp.toolmeta import BOOL, INT, NUM, STR, arr, nullable, obj, tool_meta
 from pulsar.mcp.payloads import (
     build_sweep_summary_payload,
     sweep_payload_to_markdown,
@@ -44,6 +46,104 @@ from pulsar.pipeline import ThemaRS
 from pulsar.runtime.fingerprint import projection_fingerprint
 
 logger = logging.getLogger(__name__)
+
+_ANY: dict = {}  # unconstrained JSON value
+_OPEN = obj({}, additional=True)
+
+
+def _tool_timeout_s() -> float:
+    try:
+        return float(os.environ.get("PULSAR_MCP_TOOL_TIMEOUT_S", "1800"))
+    except ValueError:
+        return 1800.0
+
+
+_HISTORY_SCHEMA = obj(
+    {
+        "status": STR,
+        "detail": STR,
+        "n_runs": INT,
+        "runs": arr(_OPEN),
+        "summary": _OPEN,
+    },
+    ["status", "detail", "n_runs"],
+)
+
+_RUN_SIDE = obj(
+    {
+        "run_id": STR,
+        "dataset_id": nullable(STR),
+        "projection_dimensions": arr(_ANY),
+        "epsilon": STR,
+        "threshold": _ANY,
+        "metrics": obj(
+            {
+                "n_nodes": _ANY,
+                "n_edges": _ANY,
+                "component_count": _ANY,
+                "giant_fraction": _ANY,
+                "weight_p95": _ANY,
+            },
+            additional=True,
+        ),
+    },
+    ["run_id", "dataset_id", "metrics"],
+)
+_COMPARE_SCHEMA = obj(
+    {"status": STR, "run_a": _RUN_SIDE, "run_b": _RUN_SIDE},
+    ["status", "run_a", "run_b"],
+)
+
+# One schema covers detail="summary" (compact packet) and detail="full" (raw
+# response); the keys of both are declared, only a subset is present per call.
+_SWEEP_SCHEMA = obj(
+    {
+        "status": STR,
+        "detail": STR,
+        "run_id": STR,
+        "dataset_id": nullable(STR),
+        "data_shape": arr(INT),
+        "construction_threshold": NUM,
+        "graph_health": _ANY,
+        "analysis_status": STR,
+        "next_required_check": STR,
+        "finalization_gate": _ANY,
+        "constructed_graph_connected": BOOL,
+        "full_affinity_connected": BOOL,
+        "spectral_clustering_allowed": BOOL,
+        "is_connected": BOOL,
+        "singleton_fraction": NUM,
+        "metrics": _OPEN,
+        "key_metrics": _OPEN,
+        "component_sizes_preview": arr(_ANY),
+        "component_sizes_omitted": INT,
+        "diff": arr(_ANY),
+        "diff_summary": _OPEN,
+        "threshold_stability_summary": nullable(_OPEN),
+        "projection_method": STR,
+        "projection_cached": BOOL,
+        "projection_cache_status": _ANY,
+        "pca_cached": BOOL,
+        "pca_cache_status": _ANY,
+        "memory_usage_mb": NUM,
+        "config_advisory": STR,
+        "config_yaml_included": BOOL,
+        "config_yaml_available_via": STR,
+        "config_yaml_normalized": STR,
+        "saved_config_path": STR,
+        "next_tools": arr(STR),
+    },
+    [
+        "status",
+        "detail",
+        "run_id",
+        "dataset_id",
+        "data_shape",
+        "construction_threshold",
+        "analysis_status",
+        "next_required_check",
+    ],
+)
 
 
 def _projection_dimensions_from_config(cfg: dict) -> list[Any]:
@@ -123,23 +223,72 @@ def _sweep_history_table(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def get_sweep_history(
-    detail: Literal["table", "summary", "full"] = "table",
-    response_format: Literal["markdown", "json"] = "markdown",
-    ctx: Context = None,
+def _history_markdown(
+    rows: list[dict[str, Any]], summary: dict[str, Any], detail: str
 ) -> str:
-    """Session sweep history. `table` returns the compact run table; `summary`
-    synthesizes patterns; `full` returns both rows and synthesis."""
+    if not rows:
+        return "No sweeps run yet in this session.\n\n" + _sweep_history_table(rows)
+    if detail == "table":
+        return _sweep_history_table(rows)
+    observations = summary.get("observations", [])
+    raw_rationale = summary.get("rationale", "")
+    rationale = (
+        raw_rationale
+        if isinstance(raw_rationale, list)
+        else [raw_rationale]
+        if raw_rationale
+        else []
+    )
+    lines = ["# Sweep History Summary", "", f"- Runs: {len(rows)}"]
+    if observations:
+        lines.extend(["", "## Observations"])
+        lines.extend(f"- {item}" for item in observations)
+    if rationale:
+        lines.extend(["", "## Rationale"])
+        lines.extend(f"- {item}" for item in rationale)
+    summary_md = "\n".join(lines).strip()
+    if detail == "summary":
+        return summary_md
+    return "\n\n".join(
+        ["# Sweep History", _sweep_history_table(rows), summary_md]
+    ).strip()
+
+
+@tool_meta(read_only=True, idempotent=True, output_schema=_HISTORY_SCHEMA)
+async def get_sweep_history(
+    detail: Annotated[
+        Literal["table", "summary", "full"],
+        Field(
+            description="'table' = compact per-run rows; 'summary' = synthesized patterns across runs; 'full' = both."
+        ),
+    ] = "table",
+    response_format: Annotated[
+        Literal["markdown", "json"],
+        Field(
+            description="Text rendering only: 'markdown' or 'json'. structured_content is identical in both."
+        ),
+    ] = "markdown",
+    ctx: Context = None,
+) -> ToolResult:
+    """List the sweeps run in this session with graph metrics per run.
+
+    Use after several run_topological_sweep calls to see how epsilon and
+    projection dimensions moved nodes, edges, components and giant fraction.
+    Session-scoped; use compare_sweeps for two persisted run_ids."""
     session = _get_session(ctx)
     if detail not in {"table", "summary", "full"}:
         return mcp_error(
             "get_sweep_history",
             "detail must be 'table', 'summary', or 'full'.",
+            error_code="INVALID_DETAIL",
+            agent_action="Use detail='table', 'summary', or 'full'.",
         )
     if response_format not in {"markdown", "json"}:
         return mcp_error(
             "get_sweep_history",
             "response_format must be 'markdown' or 'json'.",
+            error_code="UNKNOWN_RESPONSE_FORMAT",
+            agent_action="Use response_format='markdown' or 'json'.",
         )
 
     rows = _sweep_history_rows(list(session.sweep_history))
@@ -155,46 +304,47 @@ async def get_sweep_history(
         payload["summary"] = summary
 
     if response_format == "json":
-        return json.dumps(payload, indent=2)
-
-    if not rows:
-        return "No sweeps run yet in this session.\n\n" + _sweep_history_table(rows)
-    if detail == "table":
-        return _sweep_history_table(rows)
-    if detail == "summary":
-        observations = summary.get("observations", [])
-        raw_rationale = summary.get("rationale", "")
-        rationale = (
-            raw_rationale
-            if isinstance(raw_rationale, list)
-            else [raw_rationale]
-            if raw_rationale
-            else []
-        )
-        lines = ["# Sweep History Summary", "", f"- Runs: {len(rows)}"]
-        if observations:
-            lines.extend(["", "## Observations"])
-            lines.extend(f"- {item}" for item in observations)
-        if rationale:
-            lines.extend(["", "## Rationale"])
-            lines.extend(f"- {item}" for item in rationale)
-        return "\n".join(lines).strip()
-
-    return "\n\n".join(
-        [
-            "# Sweep History",
-            _sweep_history_table(rows),
-            await get_sweep_history(
-                detail="summary",
-                response_format="markdown",
-                ctx=ctx,
-            ),
-        ]
-    ).strip()
+        return mcp_result(payload)
+    return mcp_result(payload, text=_history_markdown(rows, summary, detail))
 
 
-async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
-    """Compare two persisted sweeps by config and graph metrics."""
+def _compare_side(record: Any, cfg: dict) -> dict[str, Any]:
+    metrics = record.metrics
+    return {
+        "run_id": record.run_id,
+        "dataset_id": record.dataset_id,
+        "projection_dimensions": _projection_dimensions_from_config(cfg),
+        "epsilon": _format_epsilon(cfg),
+        "threshold": cfg.get("cosmic_graph", {}).get("construction_threshold", "auto"),
+        "metrics": {
+            "n_nodes": metrics.get("n_nodes"),
+            "n_edges": metrics.get("n_edges"),
+            "component_count": metrics.get("component_count"),
+            "giant_fraction": metrics.get("giant_fraction", 0),
+            "weight_p95": metrics.get("weight_p95", 0),
+        },
+    }
+
+
+@tool_meta(read_only=True, idempotent=True, output_schema=_COMPARE_SCHEMA)
+async def compare_sweeps(
+    run_a: Annotated[
+        str,
+        Field(
+            description="First run_id, as returned by run_topological_sweep (persisted runs only)."
+        ),
+    ],
+    run_b: Annotated[
+        str,
+        Field(description="Second run_id to compare against run_a."),
+    ],
+    ctx: Context = None,
+) -> ToolResult:
+    """Compare two persisted sweeps side by side by config and graph metrics.
+
+    Returns each run's projection dimensions, epsilon, construction threshold,
+    nodes, edges, components, giant fraction and weight p95; the text view is a
+    markdown table. Measurement only: it does not rank the runs."""
     try:
         record_a = registry.get_run(run_a)
         record_b = registry.get_run(run_b)
@@ -205,8 +355,9 @@ async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
 
         cfg_a = yaml.safe_load(record_a.config_yaml)
         cfg_b = yaml.safe_load(record_b.config_yaml)
-        metrics_a = record_a.metrics
-        metrics_b = record_b.metrics
+        side_a = _compare_side(record_a, cfg_a)
+        side_b = _compare_side(record_b, cfg_b)
+        ma, mb = side_a["metrics"], side_b["metrics"]
 
         lines = [
             "### Sweep Comparison",
@@ -218,18 +369,26 @@ async def compare_sweeps(run_a: str, run_b: str, ctx: Context = None) -> str:
             "",
             "| Field | Run A | Run B |",
             "|---|---|---|",
-            f"| projection_dimensions | {_projection_dimensions_from_config(cfg_a)} | {_projection_dimensions_from_config(cfg_b)} |",
-            f"| epsilon | {_format_epsilon(cfg_a)} | {_format_epsilon(cfg_b)} |",
-            f"| threshold | {cfg_a.get('cosmic_graph', {}).get('construction_threshold', 'auto')} | {cfg_b.get('cosmic_graph', {}).get('construction_threshold', 'auto')} |",
-            f"| nodes | {metrics_a.get('n_nodes')} | {metrics_b.get('n_nodes')} |",
-            f"| edges | {metrics_a.get('n_edges')} | {metrics_b.get('n_edges')} |",
-            f"| components | {metrics_a.get('component_count')} | {metrics_b.get('component_count')} |",
-            f"| giant_fraction | {metrics_a.get('giant_fraction', 0):.2%} | {metrics_b.get('giant_fraction', 0):.2%} |",
-            f"| weight_p95 | {metrics_a.get('weight_p95', 0):.4f} | {metrics_b.get('weight_p95', 0):.4f} |",
+            f"| projection_dimensions | {side_a['projection_dimensions']} | {side_b['projection_dimensions']} |",
+            f"| epsilon | {side_a['epsilon']} | {side_b['epsilon']} |",
+            f"| threshold | {side_a['threshold']} | {side_b['threshold']} |",
+            f"| nodes | {ma['n_nodes']} | {mb['n_nodes']} |",
+            f"| edges | {ma['n_edges']} | {mb['n_edges']} |",
+            f"| components | {ma['component_count']} | {mb['component_count']} |",
+            f"| giant_fraction | {ma['giant_fraction']:.2%} | {mb['giant_fraction']:.2%} |",
+            f"| weight_p95 | {ma['weight_p95']:.4f} | {mb['weight_p95']:.4f} |",
         ]
-        return "\n".join(lines)
+        return mcp_result(
+            {"status": "ok", "run_a": side_a, "run_b": side_b},
+            text="\n".join(lines),
+        )
     except Exception as e:
-        return mcp_error("compare_sweeps", str(e))
+        return mcp_error(
+            "compare_sweeps",
+            str(e),
+            error_code="COMPARE_FAILED",
+            agent_action="Check both run_ids came from run_topological_sweep and retry.",
+        )
 
 
 def _compute_sweep_diff(
@@ -427,33 +586,78 @@ def _publish_sweep_on_loop(
     return run_record, saved_path
 
 
+@tool_meta(
+    read_only=False,
+    output_schema=_SWEEP_SCHEMA,
+    timeout=_tool_timeout_s(),
+)
 async def run_topological_sweep(
-    config_path: str = "",
-    config_yaml: str = "",
-    dataset_id: str = "",
-    save_config: bool = False,
-    detail: Literal["summary", "full"] = "summary",
-    response_format: Literal["markdown", "json"] = "markdown",
-    include_config_yaml: bool = False,
-    component_limit: int = 20,
+    config_path: Annotated[
+        str,
+        Field(
+            description="Host-visible absolute path to a *.yaml/*.yml config file. Used only when config_yaml is empty."
+        ),
+    ] = "",
+    config_yaml: Annotated[
+        str,
+        Field(
+            description="Full Pulsar config as raw YAML text. Preferred. If this and config_path are empty, the session's active config (from create_config/refine_config) is used."
+        ),
+    ] = "",
+    dataset_id: Annotated[
+        str,
+        Field(
+            description="Dataset handle from ingest_dataset; overrides run.data in the config. Empty uses the config's run.data."
+        ),
+    ] = "",
+    save_config: Annotated[
+        bool,
+        Field(
+            description="If true, also write the resolved config to <run name>_params.yaml next to the data for reproducibility."
+        ),
+    ] = False,
+    detail: Annotated[
+        Literal["summary", "full"],
+        Field(
+            description="'summary' = compact decision packet (key metrics, bounded component preview); 'full' = the complete raw response including all metrics."
+        ),
+    ] = "summary",
+    response_format: Annotated[
+        Literal["markdown", "json"],
+        Field(
+            description="Text rendering only: 'markdown' or 'json'. structured_content is identical in both."
+        ),
+    ] = "markdown",
+    include_config_yaml: Annotated[
+        bool,
+        Field(
+            description="Summary detail only: include the normalized config YAML in the payload."
+        ),
+    ] = False,
+    component_limit: Annotated[
+        int,
+        Field(
+            description="Summary detail only: how many component sizes to preview (largest first); the rest are counted as omitted. Must be >= 1."
+        ),
+    ] = 20,
     ctx: Context = None,
-) -> str:
-    """Run the Pulsar topological sweep pipeline. Prefer `config_yaml` inline;
-    falls back to active session config if neither is given.
+) -> ToolResult:
+    """Run the Pulsar topological sweep (project, ball-map grid, cosmic graph) and publish the run.
+
+    Returns run_id, key graph metrics, threshold and a finalization gate; follow
+    with diagnose_cosmic_graph. Prefer inline config_yaml; otherwise the active
+    session config is used.
 
     Background task mode: with PULSAR_MCP_ENABLE_TASKS=1 (requires fastmcp[tasks])
     this is the only task-capable tool; a task-capable client may run it in the
     background, and the result and session handles (run_id, dataset_id) are
-    identical to a synchronous call.
-
-    Args:
-        save_config: Persist resolved config to disk for reproducibility.
-        component_limit: Component sizes included in summary output.
-    """
+    identical to a synchronous call."""
     if component_limit < 1:
         return mcp_error(
             "run_topological_sweep",
             f"component_limit must be >= 1, got '{component_limit}'",
+            error_code="INVALID_COMPONENT_LIMIT",
+            agent_action="Pass component_limit >= 1.",
         )
     try:
         session = _get_session(ctx)
@@ -466,8 +670,11 @@ async def run_topological_sweep(
         elif session.active_config_yaml:
             current_yaml = session.active_config_yaml
         else:
-            raise ToolError(
-                "Provide either config_path or config_yaml, or establish an active config first."
+            return mcp_error(
+                "run_topological_sweep",
+                "Provide either config_path or config_yaml, or establish an active config first.",
+                error_code="CONFIG_NOT_PROVIDED",
+                agent_action="Pass config_yaml, or call create_config(dataset_id) first to set an active config.",
             )
         dataset_path = _resolve_dataset_path(dataset_id) if dataset_id else None
         validation = validate_config_yaml(current_yaml, dataset_path=dataset_path)
@@ -647,28 +854,22 @@ async def run_topological_sweep(
         if persisted_dataset_id:
             response["dataset_id"] = persisted_dataset_id
 
-        if detail == "full":
-            response["detail"] = "full"
-            if response_format == "markdown":
-                summary_payload = build_sweep_summary_payload(
-                    response,
-                    component_limit=component_limit,
-                    include_config_yaml=include_config_yaml,
-                )
-                await report_progress("complete", 1.0)
-                return sweep_payload_to_markdown(summary_payload)
-            await report_progress("complete", 1.0)
-            return json.dumps(response, indent=2)
-
         summary_payload = build_sweep_summary_payload(
             response,
             component_limit=component_limit,
             include_config_yaml=include_config_yaml,
         )
+        if detail == "full":
+            response["detail"] = "full"
+            structured = response
+        else:
+            structured = summary_payload
         await report_progress("complete", 1.0)
         if response_format == "markdown":
-            return sweep_payload_to_markdown(summary_payload)
-        return json.dumps(summary_payload, indent=2)
+            return mcp_result(
+                structured, text=sweep_payload_to_markdown(summary_payload)
+            )
+        return mcp_result(structured)
 
     except FileNotFoundError:
         return path_access_error(
@@ -684,4 +885,9 @@ async def run_topological_sweep(
         return unknown_handle_error("run_topological_sweep", "dataset_id", dataset_id)
     except Exception as e:
         logger.error(f"Error running sweep: {e}")
-        return mcp_error("run_topological_sweep", str(e))
+        return mcp_error(
+            "run_topological_sweep",
+            str(e),
+            error_code="SWEEP_FAILED",
+            agent_action="Inspect the reason, fix the config or dataset, and re-run; call validate_config first if unsure.",
+        )
