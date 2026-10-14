@@ -4,7 +4,6 @@ Tests for pulsar.mcp.diagnostics module.
 Tests graph quality metrics computation and diagnosis generation.
 """
 
-import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,13 +11,14 @@ import pandas as pd
 import pytest
 import yaml
 
-from pulsar.config import load_config, config_to_yaml
+from pulsar.config import config_to_yaml, load_config
 from pulsar.mcp.diagnostics import (
     GraphMetrics,
     _graph_advisories,
     diagnose_model,
 )
 from pulsar.pipeline import ThemaRS
+from tests.mcp_helpers import payload_of
 
 
 class _DenseForbiddenSparseModel:
@@ -579,7 +579,7 @@ def _two_block_spectral_session():
 
     import networkx as nx
 
-    from pulsar.mcp.session import _sessions, _get_session
+    from pulsar.mcp.session import _get_session, _sessions
 
     _sessions.clear()
     session = _get_session(None)
@@ -613,7 +613,7 @@ def test_cluster_profile_stamps_run_and_serves_when_consistent():
     asyncio, session = _two_block_spectral_session()
     session.latest_run_id = "run_first"
 
-    dossier = json.loads(
+    dossier = payload_of(
         asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
     )
     assert dossier["status"] == "ok"
@@ -621,7 +621,7 @@ def test_cluster_profile_stamps_run_and_serves_when_consistent():
     assert session.clusters_run_id == "run_first"
 
     cluster_id = dossier["clusters"][0]["cluster_id"]
-    profile = json.loads(
+    profile = payload_of(
         asyncio.run(get_cluster_profile(cluster_id=cluster_id, response_format="json"))
     )
     assert profile["status"] == "ok"
@@ -639,7 +639,7 @@ def test_cluster_profile_rejects_stale_cache_after_new_sweep():
     asyncio, session = _two_block_spectral_session()
     session.latest_run_id = "run_first"
 
-    dossier = json.loads(
+    dossier = payload_of(
         asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
     )
     assert dossier["status"] == "ok"
@@ -649,7 +649,7 @@ def test_cluster_profile_rejects_stale_cache_after_new_sweep():
     # replaced, but clusters/feature_evidence are NOT recomputed (stale cache).
     session.latest_run_id = "run_second"
 
-    profile = json.loads(
+    profile = payload_of(
         asyncio.run(get_cluster_profile(cluster_id=cluster_id, response_format="json"))
     )
 
@@ -674,7 +674,7 @@ def test_cluster_signal_matrix_rejects_stale_cache_after_new_sweep():
     asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
     session.latest_run_id = "run_second"
 
-    result = json.loads(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
+    result = payload_of(asyncio.run(get_cluster_signal_matrix(return_markdown=False)))
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_CACHE_STALE"
 
@@ -692,14 +692,14 @@ def test_generate_cluster_dossier_refreshes_stale_stamp():
     asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
 
     session.latest_run_id = "run_second"
-    dossier = json.loads(
+    dossier = payload_of(
         asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
     )
     assert dossier["status"] == "ok"
     assert session.clusters_run_id == "run_second"
 
     cluster_id = dossier["clusters"][0]["cluster_id"]
-    profile = json.loads(
+    profile = payload_of(
         asyncio.run(get_cluster_profile(cluster_id=cluster_id, response_format="json"))
     )
     assert profile["status"] == "ok"

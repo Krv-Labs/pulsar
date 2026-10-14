@@ -6,15 +6,28 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import sys
 from typing import Any
+
+import mcp.types as mt
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.server.middleware.timing import TimingMiddleware
+from fastmcp.tools import ToolResult
+from mcp.types import ToolAnnotations
+
+import pulsar
+from pulsar.mcp.errors import mcp_error
+from pulsar.mcp.toolmeta import tool_meta_of
 from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Client-Agnostic Server Subclass to manage non-compliant MCP clients
+# Argument sanitising for non-compliant MCP clients
 # ---------------------------------------------------------------------------
 _KNOWN_ORCHESTRATION_KEYS = frozenset({"wait_for_previous"})
 
@@ -36,35 +49,122 @@ def _sanitize_tool_arguments(
     return {k: v for k, v in arguments.items() if k in valid_keys}
 
 
-class AgnosticFastMCP(FastMCP):
-    """Custom FastMCP subclass that gracefully strips client orchestration parameters."""
+class ArgumentSanitizerMiddleware(Middleware):
+    """Strip client orchestration keys and unknown arguments before dispatch."""
 
-    async def call_tool(
+    async def on_call_tool(
         self,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-        *args,
-        **kwargs,
-    ):
-        if arguments:
-            tool = await self.get_tool(name, version=kwargs.get("version"))
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        message = context.message
+        if message.arguments and context.fastmcp_context is not None:
+            tool = await context.fastmcp_context.fastmcp.get_tool(message.name)
             if tool is not None:
-                arguments = _sanitize_tool_arguments(tool, name, arguments)
-        return await super().call_tool(name, arguments, *args, **kwargs)
+                message.arguments = _sanitize_tool_arguments(
+                    tool, message.name, message.arguments
+                )
+        return await call_next(context)
 
 
 # ---------------------------------------------------------------------------
-# Initialize Client-Agnostic FastMCP
+# Response budget backstop
 # ---------------------------------------------------------------------------
-mcp = AgnosticFastMCP(
+DEFAULT_MAX_RESPONSE_BYTES = 100_000  # ~25k tokens, Claude Code's tool-result cap
+
+
+def _max_response_bytes() -> int | None:
+    """Byte budget from the environment; ``<= 0`` disables the backstop."""
+    try:
+        value = int(os.environ.get("PULSAR_MCP_MAX_RESPONSE_BYTES", ""))
+    except ValueError:
+        return DEFAULT_MAX_RESPONSE_BYTES
+    return value if value > 0 else None
+
+
+def _result_size_bytes(result: ToolResult) -> int:
+    size = 0
+    for block in result.content or []:
+        text = getattr(block, "text", None)
+        size += len(text.encode("utf-8")) if text is not None else 0
+    if result.structured_content is not None:
+        size += len(json.dumps(result.structured_content, default=str).encode("utf-8"))
+    return size
+
+
+class ResponseBudgetMiddleware(Middleware):
+    """Replace oversized tool results with a parseable ``RESPONSE_TOO_LARGE`` error.
+
+    Unlike fastmcp's ResponseLimitingMiddleware this never truncates mid-JSON and
+    never touches ``on_list_tools``, so advertised output schemas stay intact.
+    The limit is read per call from ``PULSAR_MCP_MAX_RESPONSE_BYTES``.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        result = await call_next(context)
+        # Task acks / input-required results carry no measurable tool content.
+        if not isinstance(result, ToolResult) or type(result) is not ToolResult:
+            return result
+        size = _result_size_bytes(result)
+        limit = _max_response_bytes()
+        if limit is None or size <= limit:
+            return result
+        logger.warning(
+            "Tool %r response %d bytes exceeds limit %d; returning error envelope",
+            context.message.name,
+            size,
+            limit,
+        )
+        return mcp_error(
+            context.message.name,
+            f"Response is {size} bytes, over the {limit}-byte limit.",
+            error_code="RESPONSE_TOO_LARGE",
+            agent_action=(
+                "Request detail='summary', lower max_* / preview limits, or use "
+                "a narrower tool."
+            ),
+            details={"size_bytes": size, "limit_bytes": limit},
+        )
+
+
+def configure_logging() -> None:
+    """Send ``pulsar.mcp`` INFO logs (incl. timing) to stderr. Never stdout."""
+    log = logging.getLogger("pulsar.mcp")
+    if any(getattr(h, "_pulsar_stderr", False) for h in log.handlers):
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler._pulsar_stderr = True  # type: ignore[attr-defined]
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
+# ---------------------------------------------------------------------------
+# FastMCP server
+# ---------------------------------------------------------------------------
+mcp = FastMCP(
     "Pulsar",
     instructions=(
         "Manifold discovery and topological data analysis for tabular datasets. Call "
         "`get_workflow_guide` once for the end-to-end procedure and tool map.\n"
         "Shared params across tools: `detail` ('summary' default; 'full' for "
         "audit/debug) and `response_format` ('json' for structured payloads; "
-        "'markdown' where a readable rendering is supported)."
+        "'markdown' where a readable rendering is supported).\n"
+        "Results carry structured content; errors set the MCP error flag with a "
+        "JSON envelope (error_code, agent_action)."
     ),
+    version=pulsar.__version__,
+    website_url="https://github.com/Krv-Labs/pulsar",
+    cache_ttl=3600,
+    middleware=[
+        ArgumentSanitizerMiddleware(),
+        ResponseBudgetMiddleware(),
+        TimingMiddleware(logger=logging.getLogger("pulsar.mcp")),
+    ],
 )
 
 # ---------------------------------------------------------------------------
@@ -102,7 +202,29 @@ def _ensure_tasks_extension(server: FastMCP) -> bool:
 def register_server_tools(server: FastMCP) -> None:
     tasks_available = _tasks_enabled() and _ensure_tasks_extension(server)
     for tool_fn in ALL_TOOLS_LIST:
-        server.tool(task=get_tool_task_config(tool_fn, tasks_available))(tool_fn)
+        kwargs: dict[str, Any] = {
+            "task": get_tool_task_config(tool_fn, tasks_available)
+        }
+        meta = tool_meta_of(tool_fn)
+        if meta is None:
+            raise RuntimeError(
+                f"MCP tool {getattr(tool_fn, '__name__', tool_fn)!r} has no "
+                "@tool_meta; every tool must declare annotations and an "
+                "output schema."
+            )
+        kwargs["annotations"] = ToolAnnotations(
+            title=meta.title,
+            read_only_hint=meta.read_only,
+            destructive_hint=meta.destructive,
+            idempotent_hint=meta.idempotent,
+            open_world_hint=False,
+        )
+        kwargs["output_schema"] = meta.output_schema
+        if meta.timeout is not None:
+            kwargs["timeout"] = meta.timeout
+        if meta.tags:
+            kwargs["tags"] = set(meta.tags)
+        server.tool(**kwargs)(tool_fn)
 
 
 register_server_tools(mcp)
@@ -113,6 +235,7 @@ def main():
     # so a non-stdio transport can be selected by the environment.
     import fastmcp
 
+    configure_logging()
     transport = fastmcp.settings.transport
     if transport != "stdio":
         logger.warning(

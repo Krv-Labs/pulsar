@@ -1,39 +1,44 @@
 import asyncio
 import logging
-from pulsar.mcp.server import AgnosticFastMCP
+
+from fastmcp import Client, FastMCP
+
+from pulsar.mcp.server import ArgumentSanitizerMiddleware
 
 
-def test_agnostic_mcp_strips_orchestration_keys():
-    mcp_test = AgnosticFastMCP("TestServer")
+def _server() -> FastMCP:
+    srv = FastMCP("TestServer", middleware=[ArgumentSanitizerMiddleware()])
 
-    @mcp_test.tool()
+    @srv.tool()
     def my_tool(x: int) -> str:
         return f"value:{x}"
 
-    # Verify that call_tool successfully intercepts and strips wait_for_previous
-    res = asyncio.run(
-        mcp_test.call_tool("my_tool", {"x": 42, "wait_for_previous": True})
-    )
-    # In FastMCP, call_tool returns a CallToolResult whose content list contains TextContent
-    # Let's inspect the return type, but we can also check text representation.
+    return srv
+
+
+def test_sanitizer_strips_orchestration_keys():
+    asyncio.run(_test_sanitizer_strips_orchestration_keys())
+
+
+async def _test_sanitizer_strips_orchestration_keys():
+    async with Client(_server()) as client:
+        res = await client.call_tool("my_tool", {"x": 42, "wait_for_previous": True})
     assert "value:42" in str(res)
 
 
-def test_agnostic_mcp_logs_unrecognized_keys(caplog):
-    mcp_test = AgnosticFastMCP("TestServer")
+def test_sanitizer_logs_unrecognized_keys(caplog):
+    asyncio.run(_test_sanitizer_logs_unrecognized_keys(caplog))
 
-    @mcp_test.tool()
-    def my_tool(x: int) -> str:
-        return f"value:{x}"
 
-    with caplog.at_level(logging.WARNING):
-        res = asyncio.run(
-            mcp_test.call_tool("my_tool", {"x": 42, "const_threshold": "dummy"})
-        )
-
+async def _test_sanitizer_logs_unrecognized_keys(caplog):
+    async with Client(_server()) as client:
+        with caplog.at_level(logging.WARNING):
+            res = await client.call_tool(
+                "my_tool", {"x": 42, "const_threshold": "dummy"}
+            )
     assert "value:42" in str(res)
     assert any(
-        "Stripped unrecognized parameters from tool my_tool" in record.message
-        for record in caplog.records
+        "Stripped unrecognized parameters from tool my_tool" in r.message
+        and "const_threshold" in r.message
+        for r in caplog.records
     )
-    assert any("const_threshold" in record.message for record in caplog.records)

@@ -7,14 +7,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import fastmcp_tasks
-from fastmcp import Client, Context
+import pytest
+from fastmcp import Client, Context, FastMCP
 from fastmcp.server.dependencies import _background_task_headers
 from fastmcp.utilities.tasks import TaskConfig
-import pytest
 
+from tests.mcp_helpers import payload_of
 from pulsar.mcp import registry as registry_mod
 from pulsar.mcp import session as session_mod
-from pulsar.mcp.server import AgnosticFastMCP, register_server_tools
+from pulsar.mcp.server import register_server_tools
 from pulsar.mcp.tools import _sweep_task_config, _tasks_enabled
 
 
@@ -46,12 +47,14 @@ def _write_sample_csv(csv_path: Path, n_rows: int = 24) -> Path:
 
 
 def _extract_tool_json(result: Any) -> dict[str, Any]:
+    if hasattr(result, "content") and hasattr(result, "structured_content"):
+        return payload_of(result)
     blocks = result.content if hasattr(result, "content") else result
     return json.loads(blocks[0].text)
 
 
 async def _get_task_enabled_tools() -> tuple[set[str], str, str]:
-    server = AgnosticFastMCP("test-sweep-task")
+    server = FastMCP("test-sweep-task")
     register_server_tools(server)
     tools = await server.list_tools()
     enabled_names = {t.name for t in tools if t.task_config.mode != "forbidden"}
@@ -65,7 +68,7 @@ async def _get_task_enabled_tools() -> tuple[set[str], str, str]:
 async def _run_sweep_and_diagnose_workflow(
     csv_path: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    server = AgnosticFastMCP("test-continuity")
+    server = FastMCP("test-continuity")
     register_server_tools(server)
     async with Client(server) as client:
         ingest_res = await client.call_tool(
@@ -108,7 +111,7 @@ def test_sweep_task_enabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_session_key_background_task_context() -> None:
-    server = AgnosticFastMCP("test-bg-ctx")
+    server = FastMCP("test-bg-ctx")
     ctx = Context(fastmcp=server)
     assert session_mod._session_key(ctx) == "default"
     token = _background_task_headers.set({"mcp-session-id": "http-sess-42"})
@@ -143,7 +146,7 @@ def test_tasks_extension_registered_with_methods(
     from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
 
     monkeypatch.setenv("PULSAR_MCP_ENABLE_TASKS", "1")
-    server = AgnosticFastMCP("test-ext")
+    server = FastMCP("test-ext")
     register_server_tools(server)
     ext = server._extensions[TASKS_EXTENSION_ID]
     assert isinstance(ext, fastmcp_tasks.TasksExtension)
@@ -167,7 +170,7 @@ def test_tasks_not_advertised_when_fastmcp_tasks_missing(
 
     monkeypatch.setenv("PULSAR_MCP_ENABLE_TASKS", "1")
     monkeypatch.setattr(builtins, "__import__", _no_tasks)
-    server = AgnosticFastMCP("test-missing")
+    server = FastMCP("test-missing")
     with caplog.at_level("ERROR", logger="pulsar.mcp.server"):
         register_server_tools(server)
     assert TASKS_EXTENSION_ID not in server._extensions
@@ -177,7 +180,7 @@ def test_tasks_not_advertised_when_fastmcp_tasks_missing(
 
 
 async def _task_roundtrip(csv_path: Path) -> tuple[dict, dict, dict]:
-    server = AgnosticFastMCP("test-task-e2e")
+    server = FastMCP("test-task-e2e")
     register_server_tools(server)
     async with Client(server) as client:
         ingest = _extract_tool_json(
@@ -191,9 +194,7 @@ async def _task_roundtrip(csv_path: Path) -> tuple[dict, dict, dict]:
             {"dataset_id": dataset_id, "response_format": "json"},
         )
         task_result = await asyncio.wait_for(handle.result(), timeout=120)
-        ctx_res = await client.call_tool(
-            "get_runtime_context", {"response_format": "json"}
-        )
+        ctx_res = await client.call_tool("get_runtime_context", {})
     return (
         _extract_tool_json(task_result),
         _extract_tool_json(ctx_res),
@@ -260,7 +261,7 @@ def test_session_key_http_without_header_is_isolated_not_default() -> None:
 
 
 def test_session_key_in_memory_client_is_default() -> None:
-    server = AgnosticFastMCP("test-inmem-key")
+    server = FastMCP("test-inmem-key")
     seen: list[str] = []
 
     @server.tool
@@ -292,7 +293,7 @@ def test_sweep_progress_reaches_real_client_from_worker(tmp_path: Path) -> None:
         messages.append(message)
 
     async def _run() -> None:
-        server = AgnosticFastMCP("test-progress")
+        server = FastMCP("test-progress")
         register_server_tools(server)
         async with Client(server, progress_handler=_on_progress) as client:
             ingest_res = await client.call_tool(

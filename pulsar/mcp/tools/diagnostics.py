@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import logging
 import math
 import time
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 import uuid
 
 import numpy as np
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
+from pydantic import Field
 
 from pulsar.analysis import cosmic_to_networkx
 from pulsar.config import THRESHOLD_RANGE_MESSAGE
@@ -23,10 +24,14 @@ from pulsar.mcp.diagnostics import (
 )
 from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.registry import registry
+from pulsar.mcp.results import mcp_result
 from pulsar.mcp.session import (
     GraphArtifact,
+    ResolvedRun,
     SessionConflictError,
     _get_session,
+    is_latest,
+    resolve_run,
     run_session_worker,
 )
 from pulsar.mcp.thresholds import (
@@ -41,8 +46,57 @@ from pulsar.mcp.thresholds import (
     threshold_morphology_profile,
     useful_component_size_floor,
 )
+from pulsar.mcp.toolmeta import (
+    ANY,
+    BOOL,
+    INT,
+    NUM,
+    STR,
+    arr,
+    enum,
+    nullable,
+    obj,
+    tool_meta,
+)
 
 logger = logging.getLogger(__name__)
+
+OPEN_OBJ = obj({}, additional=True)
+
+
+def model_not_loaded_error(tool: str) -> ToolResult:
+    return mcp_error(
+        tool,
+        "No fitted model is loaded in this session.",
+        error_code="MODEL_NOT_LOADED",
+        agent_action=(
+            "Run run_topological_sweep first, or pass run_id of a cached run."
+        ),
+    )
+
+
+def resolve_run_or_error(
+    session: Any, tool: str, run_id: str
+) -> tuple[ResolvedRun | None, ToolResult | None]:
+    """Resolve ``run_id`` (empty = live) to a run, or return the error envelope."""
+    try:
+        return resolve_run(session, run_id), None
+    except LookupError:
+        if run_id:
+            return None, unknown_handle_error(tool, "run_id", run_id)
+        return None, model_not_loaded_error(tool)
+
+
+def stale_write_error(tool: str, noun: str) -> ToolResult:
+    return mcp_error(
+        tool,
+        f"Refusing to publish a {noun} for a run that is not the session's latest.",
+        error_code="SESSION_REVISION_CONFLICT",
+        agent_action=(
+            "Omit run_id or re-run the sweep; dossiers and artifacts can only be "
+            "published for the session's latest run."
+        ),
+    )
 
 
 def _validate_unit_threshold(value: float, *, name: str) -> float:
@@ -288,46 +342,192 @@ def _diagnosis_to_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def diagnose_cosmic_graph(
-    surface: Literal["constructed", "artifact"] = "constructed",
-    artifact_id: str = "",
-    detail: Literal["summary", "full"] = "summary",
-    response_format: Literal["json", "markdown"] = "json",
-    ctx: Context = None,
-) -> str:
-    """Current graph-state observables for the fitted cosmic graph.
+_DIAGNOSE_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "detail": enum(["summary", "full"]),
+        "source": enum(["live", "artifact"]),
+        "run_id": nullable(STR),
+        "graph_surface": obj(
+            {
+                "kind": STR,
+                "artifact_id": STR,
+                "construction_threshold": NUM,
+                "threshold_role": STR,
+                "preserves_current_fit": BOOL,
+            },
+            ["kind", "construction_threshold", "threshold_role"],
+            additional=True,
+        ),
+        "scale": obj(
+            {
+                "n_nodes": INT,
+                "n_edges": INT,
+                "density": NUM,
+                "avg_degree": NUM,
+                "nonzero_fraction_full_weighted": NUM,
+            },
+            ["n_nodes", "n_edges", "density", "avg_degree"],
+            additional=True,
+        ),
+        "component_morphology": obj(
+            {
+                "component_count": INT,
+                "top_component_sizes": arr(INT),
+                "top_component_sizes_omitted": INT,
+                "largest_component_fraction": NUM,
+                "second_largest_ratio": NUM,
+                "singleton_count": INT,
+                "singleton_fraction": NUM,
+                "nontrivial_component_floor": NUM,
+                "nontrivial_component_count": INT,
+                "nontrivial_mass_fraction": NUM,
+                "multi_component_coverage": NUM,
+                "tail_component_count": INT,
+                "tail_mass_fraction": NUM,
+                "component_size_entropy": NUM,
+                "top_two_balance": NUM,
+                "component_sizes": arr(INT),
+            },
+            ["component_count", "top_component_sizes", "largest_component_fraction"],
+            additional=True,
+        ),
+        "weight_distribution": obj(
+            {"p25": NUM, "p50": NUM, "p95": NUM, "sparkline": STR, "basis": STR},
+            ["p25", "p50", "p95"],
+            additional=True,
+        ),
+        "sweep_support": obj(
+            {
+                "n_ball_maps": INT,
+                "grid_adequacy_status": STR,
+                "grid_adequacy_note": STR,
+            },
+            ["n_ball_maps", "grid_adequacy_status"],
+            additional=True,
+        ),
+        "observed_patterns": arr(STR),
+        "risk_factors": arr(
+            obj({"code": STR, "severity": STR}, ["code"], additional=True)
+        ),
+        "minhash_profile": OPEN_OBJ,
+        "artifact_staleness": obj(
+            {
+                "stale": BOOL,
+                "artifact_run_id": nullable(STR),
+                "latest_run_id": nullable(STR),
+                "warning": nullable(STR),
+            },
+            ["stale"],
+            additional=True,
+        ),
+    },
+    [
+        "status",
+        "detail",
+        "source",
+        "graph_surface",
+        "scale",
+        "component_morphology",
+        "weight_distribution",
+        "sweep_support",
+        "observed_patterns",
+        "risk_factors",
+    ],
+)
 
-    Returns grouped measurements for the constructed graph or a graph artifact:
-    scale, component morphology, weight distribution, sweep support, observed
-    patterns, and risk factors. For MinHash-constructed graphs it also reports
-    ``minhash_profile`` — the realized weight accuracy (CI / signature memory) at the
-    depth used. The tool intentionally does not prescribe a next action; downstream
-    agents combine these measurements with user objectives.
+
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_DIAGNOSE_SCHEMA,
+    title="Diagnose Cosmic Graph",
+)
+async def diagnose_cosmic_graph(
+    surface: Annotated[
+        Literal["constructed", "artifact"],
+        Field(
+            description=(
+                "'constructed' (default): the fitted cosmic graph at its construction threshold. 'artifact': a create_graph_artifact graph; artifact_id is then required."
+            )
+        ),
+    ] = "constructed",
+    artifact_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Artifact handle from create_graph_artifact (e.g. 'graph_ab12cd34ef56'). "
+                "Only used, and then required, when surface='artifact'."
+            )
+        ),
+    ] = "",
+    detail: Annotated[
+        Literal["summary", "full"],
+        Field(
+            description=(
+                "'summary' (default) returns the top 10 component sizes. 'full' "
+                "additionally lists every component size (O(components) entries)."
+            )
+        ),
+    ] = "summary",
+    response_format: Annotated[
+        Literal["json", "markdown"],
+        Field(
+            description=(
+                "Text view: 'json' (default) or 'markdown'. structured_content is identical."
+            )
+        ),
+    ] = "json",
+    run_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Run to read, from run_topological_sweep. Omit for the latest run. "
+                "Ignored when surface='artifact' (artifacts carry their own run_id)."
+            )
+        ),
+    ] = "",
+    ctx: Context = None,
+) -> ToolResult:
+    """Graph-state observables for a fitted cosmic graph or graph artifact.
+
+    Returns scale, component morphology, weight distribution, sweep support,
+    observed patterns and risk factors (plus MinHash weight accuracy when used).
+    Measurement only, no recommended action. Use after run_topological_sweep;
+    use get_threshold_stability_curve to compare construction thresholds.
     """
+    tool = "diagnose_cosmic_graph"
     session = _get_session(ctx)
     if detail not in {"summary", "full"}:
         return mcp_error(
-            "diagnose_cosmic_graph",
+            tool,
             "detail must be 'summary' or 'full'.",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass detail='summary' or detail='full'.",
         )
     if response_format not in {"json", "markdown"}:
         return mcp_error(
-            "diagnose_cosmic_graph",
+            tool,
             "response_format must be 'json' or 'markdown'.",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass response_format='json' or 'markdown'.",
         )
-
-    if surface == "constructed" and session.model is None:
-        raise ToolError("No model found. Run run_topological_sweep() first.")
 
     try:
         if surface == "artifact":
             if not artifact_id:
-                raise ToolError("artifact_id is required when surface='artifact'.")
+                return mcp_error(
+                    tool,
+                    "artifact_id is required when surface='artifact'.",
+                    error_code="ARTIFACT_ID_REQUIRED",
+                    agent_action=(
+                        "Pass the artifact_id returned by create_graph_artifact, "
+                        "or use surface='constructed'."
+                    ),
+                )
             artifact = session.graph_artifacts.get(artifact_id)
             if artifact is None:
-                return unknown_handle_error(
-                    "diagnose_cosmic_graph", "artifact_id", artifact_id
-                )
+                return unknown_handle_error(tool, "artifact_id", artifact_id)
             staleness = _artifact_staleness(artifact, session.latest_run_id)
             payload = _diagnosis_payload(
                 dict(artifact.metrics),
@@ -346,13 +546,16 @@ async def diagnose_cosmic_graph(
                 artifact_staleness=staleness,
             )
         else:
-            result = await asyncio.to_thread(diagnose_model, session.model)
+            resolved, err = resolve_run_or_error(session, tool, run_id)
+            if err is not None:
+                return err
+            result = await asyncio.to_thread(diagnose_model, resolved.model)
             metrics = dataclasses.asdict(result)
             payload = _diagnosis_payload(
                 metrics,
                 detail=detail,
                 source="live",
-                run_id=session.latest_run_id,
+                run_id=resolved.run_id or None,
                 graph_surface={
                     "kind": "constructed_cosmic_graph",
                     "construction_threshold": float(
@@ -363,11 +566,16 @@ async def diagnose_cosmic_graph(
                 },
             )
         if response_format == "markdown":
-            return _diagnosis_to_markdown(payload)
-        return json.dumps(payload, indent=2)
+            return mcp_result(payload, text=_diagnosis_to_markdown(payload))
+        return mcp_result(payload)
     except Exception as e:
         logger.error(f"Error diagnosing graph: {e}")
-        return mcp_error("diagnose_cosmic_graph", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="DIAGNOSE_FAILED",
+            agent_action="Check get_runtime_context for the session state, then retry.",
+        )
 
 
 def _singleton_counts_from_edges(
@@ -976,32 +1184,126 @@ def _normalize_threshold_curve_payload(payload: dict[str, Any]) -> dict[str, Any
     return out
 
 
+_MORPH = OPEN_OBJ
+_CURVE_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "detail": enum(["summary", "full"]),
+        "source": enum(["live", "persisted"]),
+        "run_id": nullable(STR),
+        "resolved_construction_threshold": nullable(NUM),
+        "h0_longest_plateau_threshold": nullable(NUM),
+        "matches_current_threshold": BOOL,
+        "current_threshold_morphology": _MORPH,
+        "h0_longest_plateau_morphology": _MORPH,
+        "h0_plateau_readout": STR,
+        "threshold_guidance": STR,
+        "threshold_candidate_policy": STR,
+        "selection_strategy": ANY,
+        "threshold_candidates": arr(OPEN_OBJ),
+        "threshold_candidates_omitted": INT,
+        "threshold_profiles": arr(OPEN_OBJ),
+        "threshold_profiles_omitted": INT,
+        "unthresholded_component_count": nullable(INT),
+        "structural_breakpoints": arr(OPEN_OBJ),
+        "structural_breakpoints_omitted": INT,
+        "structural_breakpoints_filter": STR,
+        "structural_breakpoints_guidance": STR,
+        "plateaus_returned": INT,
+        "plateaus_omitted": INT,
+        "curve_point_count": INT,
+        "full_detail_available": STR,
+        "agent_threshold_options": OPEN_OBJ,
+        "plateaus": arr(OPEN_OBJ),
+        "curve_sample": arr(OPEN_OBJ),
+        "curve_sample_omitted": INT,
+        "curve_sample_guidance": STR,
+        "thresholds": arr(NUM),
+        "component_counts": arr(INT),
+        "singleton_counts": arr(INT),
+    },
+    ["status", "source"],
+    additional=True,  # persisted summaries from older runs may carry extra keys
+)
+
+
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_CURVE_SCHEMA,
+    title="Threshold Stability Curve",
+)
 async def get_threshold_stability_curve(
-    detail: Literal["summary", "full"] = "summary",
-    run_id: str = "",
-    source: Literal["persisted", "live"] = "persisted",
-    threshold_candidate_policy: Literal[
-        "balanced", "report_ready", "detail_seeking", "outlier_mining"
+    detail: Annotated[
+        Literal["summary", "full"],
+        Field(
+            description=(
+                "'summary' (default): bounded decision packet. 'full': adds plateaus, a curve sample and raw O(thresholds) arrays; recomputes live."
+            )
+        ),
+    ] = "summary",
+    run_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Run to read, from run_topological_sweep. Omit for the latest run. Live recomputation (source='live' or detail='full') needs the latest run, else RUN_NOT_LIVE."
+            )
+        ),
+    ] = "",
+    source: Annotated[
+        Literal["persisted", "live"],
+        Field(
+            description=(
+                "'persisted' (default): summary stored at sweep time (cheap, works for old runs). 'live': recompute from the in-memory model."
+            )
+        ),
+    ] = "persisted",
+    threshold_candidate_policy: Annotated[
+        Literal["balanced", "report_ready", "detail_seeking", "outlier_mining"],
+        Field(
+            description=(
+                "Lens for ranking candidates (not a score): 'balanced' (default), 'report_ready' (few large components), 'detail_seeking' (finer splits), 'outlier_mining' (singleton tails)."
+            )
+        ),
     ] = "balanced",
-    response_format: Literal["markdown", "json"] = "markdown",
+    response_format: Annotated[
+        Literal["markdown", "json"],
+        Field(
+            description=(
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
+            )
+        ),
+    ] = "markdown",
     ctx: Context = None,
-) -> str:
-    """Threshold morphology/lenses across the H0 component stability curve.
-    Summary mode returns bounded component-mass rows; `detail='full'` returns
-    raw arrays.
+) -> ToolResult:
+    """Threshold morphology and candidate lenses along the H0 component-stability curve.
+
+    Compares the fitted construction threshold with H0 plateaus and structural
+    breakpoints. Use to judge or choose a construction threshold before refine_config;
+    use diagnose_cosmic_graph for the graph already built.
     """
+    tool = "get_threshold_stability_curve"
     if threshold_candidate_policy not in THRESHOLD_CANDIDATE_POLICIES:
         return mcp_error(
-            "get_threshold_stability_curve",
+            tool,
             "threshold_candidate_policy must be one of "
             f"{sorted(THRESHOLD_CANDIDATE_POLICIES)}, got "
             f"'{threshold_candidate_policy}'",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass one of the listed threshold_candidate_policy values.",
         )
     if response_format not in {"markdown", "json"}:
         return mcp_error(
-            "get_threshold_stability_curve",
+            tool,
             "response_format must be 'markdown' or 'json'.",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass response_format='markdown' or 'json'.",
         )
+
+    def _render(payload: dict[str, Any]) -> ToolResult:
+        if response_format == "markdown":
+            return mcp_result(payload, text=_threshold_curve_to_markdown(payload))
+        return mcp_result(payload)
 
     try:
         session = _get_session(ctx)
@@ -1010,28 +1312,29 @@ async def get_threshold_stability_curve(
             if target_run_id:
                 record = registry.get_run(target_run_id)
                 if record is None:
-                    return unknown_handle_error(
-                        "get_threshold_stability_curve", "run_id", target_run_id
-                    )
+                    return unknown_handle_error(tool, "run_id", target_run_id)
                 if record.threshold_stability_summary is not None:
                     payload = _normalize_threshold_curve_payload(
                         dict(record.threshold_stability_summary)
                     )
                     payload["source"] = "persisted"
                     payload["run_id"] = target_run_id
-                    if response_format == "markdown":
-                        return _threshold_curve_to_markdown(payload)
-                    return json.dumps(payload, indent=2)
+                    return _render(payload)
 
-        if session.model is None:
-            raise ToolError("No model found. Run run_topological_sweep() first.")
-        if target_run_id and target_run_id != session.latest_run_id:
+        resolved, err = resolve_run_or_error(session, tool, run_id)
+        if err is not None:
+            return err
+        if run_id and not is_latest(session, resolved):
             return mcp_error(
-                "get_threshold_stability_curve",
+                tool,
                 "Live threshold-curve recomputation is only available for the current run.",
                 error_code="RUN_NOT_LIVE",
+                agent_action=(
+                    "Use source='persisted' with detail='summary' for this run, or "
+                    "omit run_id to recompute for the latest run."
+                ),
                 details={
-                    "requested_run_id": target_run_id,
+                    "requested_run_id": run_id,
                     "latest_run_id": session.latest_run_id,
                     "available_source": (
                         "persisted"
@@ -1042,19 +1345,21 @@ async def get_threshold_stability_curve(
             )
         payload = await asyncio.to_thread(
             _threshold_curve_payload,
-            session.model,
+            resolved.model,
             detail=detail,
             threshold_candidate_policy=threshold_candidate_policy,
         )
         payload = _normalize_threshold_curve_payload(payload)
-        if run_id:
-            payload["run_id"] = run_id
-        if response_format == "markdown":
-            return _threshold_curve_to_markdown(payload)
-        return json.dumps(payload, indent=2)
+        payload["run_id"] = resolved.run_id or None
+        return _render(payload)
     except Exception as e:
         logger.error(f"Error computing stability curve: {e}")
-        return mcp_error("get_threshold_stability_curve", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="THRESHOLD_CURVE_FAILED",
+            agent_action="Check get_runtime_context for the session state, then retry.",
+        )
 
 
 def _build_sparsifier_artifact_worker(
@@ -1110,53 +1415,155 @@ def _build_sparsifier_artifact_worker(
     return artifact, elapsed, graph.number_of_edges()
 
 
-async def create_graph_artifact(
-    kind: Literal["spectral_sparsifier"] = "spectral_sparsifier",
-    run_id: str = "",
-    epsilon: float = 1.0,
-    seed: int = 42,
-    sketch_dim: int | None = None,
-    sample_count: int | None = None,
-    pcg_tol: float = 1e-6,
-    max_iter: int = 1000,
-    estimate_only: bool = True,
-    ctx: Context = None,
-) -> str:
-    """Estimate or build a read-only graph artifact for the live fitted run.
-
-    Expensive by design: estimate_only defaults true, so agents must explicitly
-    opt in before paying for spectral sparsification.
-    """
-    session = _get_session(ctx)
-    if session.model is None:
-        raise ToolError("No model found. Run run_topological_sweep() first.")
-    target_run_id = run_id or session.latest_run_id
-    if not target_run_id:
-        raise ToolError("No run available. Run run_topological_sweep() first.")
-    if target_run_id != session.latest_run_id:
-        return mcp_error(
-            "create_graph_artifact",
-            "Artifacts can only be built from the current live run.",
-            error_code="RUN_NOT_LIVE",
-            agent_action="Rerun or select the latest run before building a graph artifact.",
-            details={
-                "requested_run_id": target_run_id,
-                "latest_run_id": session.latest_run_id,
+_ARTIFACT_PARAMS = obj(
+    {
+        "epsilon": NUM,
+        "seed": INT,
+        "sketch_dim": nullable(INT),
+        "sample_count": nullable(INT),
+        "pcg_tol": NUM,
+        "max_iter": INT,
+    },
+    additional=True,
+)
+_ARTIFACT_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "estimate_only": BOOL,
+        "kind": STR,
+        "run_id": STR,
+        "input": obj({"n_nodes": INT, "edge_count": INT}, additional=True),
+        "estimated_cost": obj(
+            {
+                "runtime_s": NUM,
+                "runtime_basis": STR,
+                "peak_mem_mb": NUM,
+                "edge_count": INT,
+                "sketch_dim": INT,
+                "sample_count": INT,
             },
-        )
+            additional=True,
+        ),
+        "params": _ARTIFACT_PARAMS,
+        "build_call": obj({"tool": STR, "args": OPEN_OBJ}, additional=True),
+        "artifact_id": STR,
+        "runtime_s": NUM,
+        "input_edge_count": INT,
+        "artifact_edge_count": INT,
+        "staleness": obj(
+            {
+                "stale": BOOL,
+                "artifact_run_id": nullable(STR),
+                "latest_run_id": nullable(STR),
+                "warning": nullable(STR),
+            },
+            additional=True,
+        ),
+    },
+    ["status", "estimate_only", "kind", "run_id", "params"],
+)
+
+
+@tool_meta(
+    read_only=False,
+    idempotent=False,
+    output_schema=_ARTIFACT_SCHEMA,
+    title="Graph Artifact",
+)
+async def create_graph_artifact(
+    kind: Annotated[
+        Literal["spectral_sparsifier"],
+        Field(
+            description=(
+                "Artifact type. 'spectral_sparsifier' builds an edge-sparsified "
+                "approximation of the weighted graph (the only supported kind)."
+            )
+        ),
+    ] = "spectral_sparsifier",
+    run_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Run to use, from run_topological_sweep. Omit for the latest run. Any cached run works with estimate_only=True (a pure read); building publishes into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT)."
+            )
+        ),
+    ] = "",
+    epsilon: Annotated[
+        float,
+        Field(
+            description=(
+                "Sparsifier accuracy in (0, inf). Smaller is more faithful and "
+                "costs roughly 1/epsilon^2 more time and edges. Default 1.0."
+            )
+        ),
+    ] = 1.0,
+    seed: Annotated[
+        int, Field(description="Random seed for the sparsifier sketch. Default 42.")
+    ] = 42,
+    sketch_dim: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Johnson-Lindenstrauss sketch rows. Omit to derive from epsilon; "
+                "set a small value only for quick tests."
+            )
+        ),
+    ] = None,
+    sample_count: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Number of edge samples drawn. Omit to derive from epsilon and node count."
+            )
+        ),
+    ] = None,
+    pcg_tol: Annotated[
+        float,
+        Field(description="Convergence tolerance of the preconditioned CG solves."),
+    ] = 1e-6,
+    max_iter: Annotated[
+        int, Field(description="Maximum CG iterations per solve.")
+    ] = 1000,
+    estimate_only: Annotated[
+        bool,
+        Field(
+            description=(
+                "True (default): return only a cost estimate (runtime, memory, edges). False: build and store the artifact (seconds to minutes)."
+            )
+        ),
+    ] = True,
+    ctx: Context = None,
+) -> ToolResult:
+    """Estimate or build a spectral-sparsifier graph artifact (estimates for any cached run; builds for the latest).
+
+    Expensive by design: estimate_only defaults true. A built artifact gets an
+    artifact_id usable with diagnose_cosmic_graph and get_topological_skeleton
+    (surface='artifact'). It never changes the fitted graph.
+    """
+    tool = "create_graph_artifact"
+    session = _get_session(ctx)
+    resolved, err = resolve_run_or_error(session, tool, run_id)
+    if err is not None:
+        return err
+    target_run_id = resolved.run_id
+    if not target_run_id:
+        return model_not_loaded_error(tool)
     if kind != "spectral_sparsifier":
         return mcp_error(
-            "create_graph_artifact",
+            tool,
             f"Unsupported graph artifact kind: {kind!r}",
             error_code="GRAPH_ARTIFACT_KIND_UNSUPPORTED",
             agent_action="Use kind='spectral_sparsifier'. structural_backbone is planned but not callable.",
         )
     if epsilon <= 0.0 or not np.isfinite(epsilon):
         return mcp_error(
-            "create_graph_artifact", "epsilon must be finite and positive."
+            tool,
+            "epsilon must be finite and positive.",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass a finite epsilon > 0 (default 1.0).",
         )
 
-    model = session.model
+    model = resolved.model
     n_nodes = int(model.cosmic_rust.n)
     edge_count = int(model.cosmic_rust.n_edges)
     estimate = _artifact_estimate(n_nodes, edge_count, epsilon)
@@ -1169,7 +1576,7 @@ async def create_graph_artifact(
         "max_iter": max_iter,
     }
     if estimate_only:
-        return json.dumps(
+        return mcp_result(
             {
                 "status": "ok",
                 "estimate_only": True,
@@ -1188,9 +1595,11 @@ async def create_graph_artifact(
                         "estimate_only": False,
                     },
                 },
-            },
-            indent=2,
+            }
         )
+
+    if run_id and not is_latest(session, resolved):
+        return stale_write_error(tool, "graph artifact")
 
     artifact, elapsed, artifact_edge_count = await run_session_worker(
         session,
@@ -1213,7 +1622,7 @@ async def create_graph_artifact(
         session.publish_graph_artifact(artifact, expected_run_id=target_run_id)
     except SessionConflictError as e:
         return mcp_error(
-            "create_graph_artifact",
+            tool,
             str(e),
             error_code=e.error_code,
             agent_action=(
@@ -1223,7 +1632,7 @@ async def create_graph_artifact(
             ),
             details={"requested_run_id": target_run_id},
         )
-    return json.dumps(
+    return mcp_result(
         {
             "status": "ok",
             "estimate_only": False,
@@ -1235,41 +1644,128 @@ async def create_graph_artifact(
             "artifact_edge_count": artifact_edge_count,
             "params": params,
             "staleness": _artifact_staleness(artifact, session.latest_run_id),
-        },
-        indent=2,
+        }
     )
 
 
-async def get_topological_skeleton(
-    run_id: str = "",
-    surface: Literal["constructed", "artifact"] = "constructed",
-    artifact_id: str = "",
-    detail: Literal["summary", "nodes", "edges", "full", "full_nodes"] = "summary",
-    max_edges: int = 100,
-    max_nodes: int = 100,
-    ctx: Context = None,
-) -> str:
-    """Graph connectivity structure for latest run or explicit `run_id`.
+_SKELETON_SCHEMA = obj(
+    {
+        "run_id": STR,
+        "dataset_id": nullable(STR),
+        "artifact_id": STR,
+        "artifact_kind": STR,
+        "config_yaml_omitted": BOOL,
+        "config_yaml": STR,
+        "resolved_construction_threshold": nullable(NUM),
+        "graph_surface": STR,
+        "artifact_staleness": obj(
+            {"stale": BOOL, "artifact_run_id": nullable(STR), "warning": nullable(STR)},
+            ["stale"],
+            additional=True,
+        ),
+        "graph": OPEN_OBJ,
+        "available_followup_tools": arr(STR),
+    },
+    [
+        "run_id",
+        "config_yaml_omitted",
+        "graph_surface",
+        "graph",
+        "available_followup_tools",
+    ],
+)
 
-    Detail modes are summary-first: `nodes` returns a compact topological summary,
-    `edges` returns capped raw edges, `full_nodes` returns capped raw nodes, and
-    `full` returns capped raw nodes, capped raw edges, and config YAML.
+
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_SKELETON_SCHEMA,
+    title="Topological Skeleton",
+)
+async def get_topological_skeleton(
+    run_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Run to read, from run_topological_sweep. Omit for the latest run. Reads the on-disk run record, so any stored run works on stateless transports."
+            )
+        ),
+    ] = "",
+    surface: Annotated[
+        Literal["constructed", "artifact"],
+        Field(
+            description=(
+                "'constructed' (default): the run's persisted cosmic graph. 'artifact': a graph from create_graph_artifact; artifact_id is then required."
+            )
+        ),
+    ] = "constructed",
+    artifact_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Artifact handle from create_graph_artifact. Required only when "
+                "surface='artifact'."
+            )
+        ),
+    ] = "",
+    detail: Annotated[
+        Literal["summary", "nodes", "edges", "full", "full_nodes"],
+        Field(
+            description=(
+                "'summary' (default): counts and components. 'nodes': per-node summary. 'edges': capped raw edges. 'full_nodes': capped raw nodes. 'full': nodes, edges and config YAML."
+            )
+        ),
+    ] = "summary",
+    max_edges: Annotated[
+        int,
+        Field(description="Cap on edges returned in 'edges'/'full' detail (>= 1)."),
+    ] = 100,
+    max_nodes: Annotated[
+        int,
+        Field(
+            description="Cap on nodes returned in 'nodes'/'full_nodes'/'full' detail (>= 1)."
+        ),
+    ] = 100,
+    ctx: Context = None,
+) -> ToolResult:
+    """Connectivity structure (components, nodes, edges) of a run's persisted graph.
+
+    Summary-first: raw nodes and edges are capped by max_nodes / max_edges. Reads
+    the stored run record, not the live model. Use diagnose_cosmic_graph for
+    risk-oriented measurements instead.
     """
+    tool = "get_topological_skeleton"
     try:
         if max_edges < 1:
-            raise ToolError(f"max_edges must be >= 1, got '{max_edges}'")
+            return mcp_error(
+                tool,
+                f"max_edges must be >= 1, got '{max_edges}'",
+                error_code="INVALID_ARGUMENT",
+                agent_action="Pass max_edges >= 1.",
+            )
         if max_nodes < 1:
-            raise ToolError(f"max_nodes must be >= 1, got '{max_nodes}'")
+            return mcp_error(
+                tool,
+                f"max_nodes must be >= 1, got '{max_nodes}'",
+                error_code="INVALID_ARGUMENT",
+                agent_action="Pass max_nodes >= 1.",
+            )
 
         session = _get_session(ctx)
         if surface == "artifact":
             if not artifact_id:
-                raise ToolError("artifact_id is required when surface='artifact'.")
+                return mcp_error(
+                    tool,
+                    "artifact_id is required when surface='artifact'.",
+                    error_code="ARTIFACT_ID_REQUIRED",
+                    agent_action=(
+                        "Pass the artifact_id returned by create_graph_artifact, "
+                        "or use surface='constructed'."
+                    ),
+                )
             artifact = session.graph_artifacts.get(artifact_id)
             if artifact is None:
-                return unknown_handle_error(
-                    "get_topological_skeleton", "artifact_id", artifact_id
-                )
+                return unknown_handle_error(tool, "artifact_id", artifact_id)
             payload = {
                 "run_id": artifact.run_id,
                 "artifact_id": artifact.artifact_id,
@@ -1291,16 +1787,14 @@ async def get_topological_skeleton(
                     "compare_sweeps",
                 ],
             }
-            return json.dumps(payload, indent=2)
+            return mcp_result(payload)
 
         target_run_id = run_id or session.latest_run_id
         if not target_run_id:
-            raise ToolError("No run available. Run run_topological_sweep() first.")
+            return model_not_loaded_error(tool)
         record = registry.get_run(target_run_id)
         if record is None:
-            return unknown_handle_error(
-                "get_topological_skeleton", "run_id", target_run_id
-            )
+            return unknown_handle_error(tool, "run_id", target_run_id)
         payload = {
             "run_id": record.run_id,
             "dataset_id": record.dataset_id,
@@ -1325,6 +1819,11 @@ async def get_topological_skeleton(
         }
         if detail == "full":
             payload["config_yaml"] = record.config_yaml
-        return json.dumps(payload, indent=2)
+        return mcp_result(payload)
     except Exception as e:
-        return mcp_error("get_topological_skeleton", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="SKELETON_FAILED",
+            agent_action="Check get_runtime_context for the session state, then retry.",
+        )

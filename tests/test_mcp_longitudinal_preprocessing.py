@@ -1,17 +1,17 @@
 """Longitudinal preprocessing follows configured numeric rules and preserves keys."""
 
 import asyncio
-import json
 
 import pandas as pd
 import pytest
 import yaml
 
 from pulsar.config import load_config
-from pulsar.mcp.longitudinal import PanelError, prepare_panel_frame, pivot_panel
+from pulsar.mcp.longitudinal import PanelError, pivot_panel, prepare_panel_frame
 from pulsar.mcp.session import _get_session, _sessions
 from pulsar.mcp.tools.ingestion import ingest_dataset
 from pulsar.mcp.tools.longitudinal import build_longitudinal_graph
+from tests.mcp_helpers import payload_of
 
 
 def _frame() -> pd.DataFrame:
@@ -64,8 +64,8 @@ def _build(
     _get_session(None)
     path = tmp_path / "panel.csv"
     _frame().to_csv(path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
-    return json.loads(
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
+    return payload_of(
         asyncio.run(
             build_longitudinal_graph(
                 dataset_id=dataset["dataset_id"],
@@ -150,9 +150,9 @@ def test_redaction_text_is_not_coerced_and_imputed(tmp_path):
     frame.to_csv(path, index=False)
     _sessions.clear()
     _get_session(None)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             build_longitudinal_graph(
                 dataset_id=dataset["dataset_id"],
@@ -186,9 +186,9 @@ def test_all_missing_feature_has_clear_structured_error(tmp_path):
     frame.to_csv(path, index=False)
     _sessions.clear()
     _get_session(None)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             build_longitudinal_graph(
                 dataset_id=dataset["dataset_id"],
