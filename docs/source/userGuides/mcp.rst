@@ -220,7 +220,7 @@ Core loop
    * - **compare_clusters**
      - Pairwise statistical tests (Welch's t-test, Kolmogorov-Smirnov, Cohen's d, effect sizes) between two cached clusters. Answers "Are these really different, or just noise?"
    * - **export_labeled_data**
-     - Return your original dataframe with labels from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. Ready for downstream analysis, visualization, or handoff to domain experts.
+     - Write a CSV of your original dataframe with labels (and the cluster names you supply) from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. The CSV is ready for downstream analysis, visualization, or handoff to domain experts.
 
 Preprocessing helpers
 ~~~~~~~~~~~~~~~~~~~~~
@@ -346,6 +346,10 @@ Every tool returns **two views of the same result**: a text view (markdown or JS
 
 Every tool also advertises MCP annotations (read-only, idempotent, destructive, and ``openWorldHint: false`` because the server only touches local files), an output schema, and a description for every parameter.
 
+Cluster state is tied to the latest sweep: any new ``run_topological_sweep`` discards the session's cluster labels and feature-evidence cache, so cluster tools and exports must follow a fresh ``generate_cluster_dossier``. ``run_id`` on cluster tools is a provenance check, not a way to recover old labels.
+
+Responses larger than ``PULSAR_MCP_MAX_RESPONSE_BYTES`` are turned into a ``RESPONSE_TOO_LARGE`` error envelope (see below) rather than truncated, so output schemas stay advertised and every payload stays parseable.
+
 Failures set the MCP **error flag** (``isError``) on the result and carry a JSON envelope in both views:
 
 .. list-table::
@@ -414,8 +418,8 @@ Server operators tune the MCP server through environment variables, set in the M
      - ``1800``
      - Per-call timeout in seconds on long tools (sweep, longitudinal build, dossier, characterize, HTML report, dataset bundle).
    * - ``PULSAR_MCP_MAX_RESPONSE_BYTES``
-     - ``400000``
-     - Backstop on a single response's size; larger responses are truncated by the server.
+     - ``100000``
+     - Backstop on a single response's size (about 25k tokens). A larger result is replaced, never truncated, by an ``is_error`` envelope with ``error_code: RESPONSE_TOO_LARGE`` (``details.size_bytes`` / ``details.limit_bytes``); retry with ``detail="summary"``, lower ``max_*`` / preview limits, or a narrower tool.
    * - ``PULSAR_MCP_MODEL_CACHE_SIZE``
      - ``3``
      - Number of fitted runs kept addressable by ``run_id`` (minimum 1).

@@ -83,7 +83,28 @@ def test_evict_and_clear(fresh_cache):
 
 def test_stats_shape(fresh_cache):
     fresh_cache.put(_run("a"))
-    assert fresh_cache.stats() == {"size": 1, "capacity": 3, "run_ids": ["a"]}
+    stats = fresh_cache.stats()
+    assert stats == {
+        "size": 1,
+        "capacity": 3,
+        "run_ids": ["a"],
+        "memory_bytes": 0,
+        "entries": [{"run_id": "a", "memory_bytes": 0}],
+        "model_bytes_estimated": False,
+    }
+
+
+def test_stats_memory_counts_frame_and_embeddings(fresh_cache):
+    import numpy as np
+
+    df = pd.DataFrame({"a": np.arange(100, dtype=float)})
+    emb = np.zeros((10, 4))
+    fresh_cache.put(ResolvedRun("m", FakeModel(), df, None, [emb], None))
+    stats = fresh_cache.stats()
+    expected = int(df.memory_usage(deep=True).sum()) + emb.nbytes
+    assert stats["memory_bytes"] == expected
+    assert stats["entries"] == [{"run_id": "m", "memory_bytes": expected}]
+    assert stats["model_bytes_estimated"] is False
 
 
 def test_publish_sweep_populates_cache_same_object(fresh_cache):

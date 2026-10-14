@@ -114,7 +114,11 @@ _BUNDLE_SCHEMA = obj(
     ["status", "output_dir", "slug", "bundle_path", "manifest"],
 )
 
-_RUN_ID_DESC = "Run from run_topological_sweep. Omit for the latest run; pass it on stateless transports or to address an older cached run."
+_RUN_ID_DESC = (
+    "Run from run_topological_sweep. Omit for the latest run. Must be the run the "
+    "session's cluster labels were built from (a newer sweep discards them), so "
+    "pass it mainly on stateless transports."
+)
 
 
 def _atomic_write_text_or_df(
@@ -264,7 +268,12 @@ def _write_labeled_csv_worker(
     return len(out_df)
 
 
-@tool_meta(read_only=False, idempotent=True, output_schema=_LABELED_SCHEMA)
+@tool_meta(
+    read_only=False,
+    idempotent=True,
+    output_schema=_LABELED_SCHEMA,
+    title="Export Labeled Data",
+)
 async def export_labeled_data(
     cluster_assignment_id: Annotated[
         str,
@@ -529,6 +538,7 @@ def _export_html_report_worker(
 
 
 @tool_meta(
+    title="Export HTML Report",
     read_only=False,
     idempotent=True,
     output_schema=_HTML_SCHEMA,
@@ -663,7 +673,9 @@ def _probe_columns_worker(df: Any, columns: list[str]) -> dict[str, Any]:
     return probe_columns_payload(profiles, columns, missing_columns)
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_PROBE_SCHEMA)
+@tool_meta(
+    read_only=True, idempotent=True, output_schema=_PROBE_SCHEMA, title="Probe Columns"
+)
 async def probe_columns(
     dataset_id: Annotated[
         str, Field(description="Dataset handle returned by ingest_dataset.")
@@ -766,6 +778,7 @@ def _normalize_cluster_metadata(
 
 
 @tool_meta(
+    title="Export Dataset Bundle",
     read_only=False,
     output_schema=_BUNDLE_SCHEMA,
     timeout=default_tool_timeout(),

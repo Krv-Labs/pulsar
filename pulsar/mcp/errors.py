@@ -94,9 +94,9 @@ def unknown_handle_error(tool: str, handle_name: str, handle_value: str) -> Tool
     """Return a structured error for unknown dataset/run handles."""
     if handle_name == "run_id":
         action = (
-            "A model for this run_id is no longer in memory. Re-run "
-            "run_topological_sweep to rebuild it (or omit run_id to use the "
-            "session's latest run on a stdio session)."
+            "Check the run_id against get_sweep_history. If the run exists but "
+            "its fitted model is no longer cached, re-run run_topological_sweep; "
+            "on a stdio session you can omit run_id to use the latest run."
         )
     else:
         action = f"Create or retrieve a valid {handle_name} before retrying this tool."

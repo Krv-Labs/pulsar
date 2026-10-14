@@ -257,7 +257,12 @@ def _history_markdown(
     ).strip()
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_HISTORY_SCHEMA)
+@tool_meta(
+    title="Sweep History",
+    read_only=True,
+    idempotent=True,
+    output_schema=_HISTORY_SCHEMA,
+)
 async def get_sweep_history(
     detail: Annotated[
         Literal["table", "summary", "full"],
@@ -329,7 +334,12 @@ def _compare_side(record: Any, cfg: dict) -> dict[str, Any]:
     }
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_COMPARE_SCHEMA)
+@tool_meta(
+    title="Compare Sweeps",
+    read_only=True,
+    idempotent=True,
+    output_schema=_COMPARE_SCHEMA,
+)
 async def compare_sweeps(
     run_a: Annotated[
         str,
@@ -590,6 +600,7 @@ def _publish_sweep_on_loop(
 
 
 @tool_meta(
+    title="Run Topological Sweep",
     read_only=False,
     output_schema=_SWEEP_SCHEMA,
     timeout=default_tool_timeout(),

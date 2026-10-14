@@ -13,7 +13,6 @@ import pandas as pd
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
-from mcp.types import TextContent
 from pydantic import Field
 
 from pulsar.config import THRESHOLD_RANGE_MESSAGE
@@ -152,37 +151,6 @@ def _validate_unit_threshold(value: float, *, name: str) -> float:
     if not np.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
         raise ToolError(f"{name}: {THRESHOLD_RANGE_MESSAGE}")
     return threshold
-
-
-def _spectral_cut_error_to_markdown(error: SpectralClusterCutError) -> str:
-    payload = error.payload(detail="summary")
-    details = payload["details"]
-    best_score = details.get("best_silhouette_score")
-    best = (
-        f"k={details.get('best_k')}, silhouette={best_score:.3f}"
-        if isinstance(best_score, (int, float))
-        else "none"
-    )
-    acceptance_floor = float(details.get("accepted_silhouette_min", 0.0))
-    return "\n".join(
-        [
-            "# No Stable Spectral Cut",
-            "",
-            "- Method: `spectral`",
-            "- Interpretation threshold: "
-            f"`{details.get('interpretation_edge_weight_threshold', 0.0):.4f}`",
-            f"- Affinity components: {details.get('affinity_component_count')}",
-            "- Giant component: "
-            f"{details.get('giant_component_size')} "
-            f"({float(details.get('giant_component_fraction', 0.0)):.1%})",
-            f"- Residual nodes: {details.get('residual_node_count')}",
-            f"- k evaluated: {details.get('k_min')}-{details.get('max_k')}",
-            f"- Best candidate: {best}",
-            f"- Acceptance floor: {acceptance_floor:.3f}",
-            "",
-            "Spectral search ran, but no evaluated cut exceeded the acceptance floor.",
-        ]
-    ).strip()
 
 
 def _feature_evidence_fingerprint(
@@ -473,7 +441,11 @@ def _require_cluster_state(
 _CLUSTER_RESULT = OPEN_OBJ
 _SELECTION = OPEN_OBJ
 _CLUSTERS_RUN_ID = nullable(STR)
-_RUN_ID_FOR_CLUSTERS = "Optional guard: run the session's cluster labels must come from (else CLUSTERS_STALE). Omit to use the current clusters."
+_RUN_ID_FOR_CLUSTERS = (
+    "Optional provenance check: the run_id (from run_topological_sweep) the "
+    "session's cluster labels must have been built from; returns CLUSTERS_STALE "
+    "otherwise. Omit to use the current labels unchecked."
+)
 
 _DOSSIER_SCHEMA = obj(
     {
@@ -508,6 +480,7 @@ _DOSSIER_SCHEMA = obj(
 
 
 @tool_meta(
+    title="Cluster Evidence Dossier",
     read_only=False,
     idempotent=False,
     output_schema=_DOSSIER_SCHEMA,
@@ -518,14 +491,17 @@ async def generate_cluster_dossier(
         Literal["auto", "spectral", "components"],
         Field(
             description=(
-                "'components': connected components after dropping edges <= the interpretation threshold. 'spectral': spectral cut of the weighted affinity (may return NO_STABLE_SPECTRAL_CUT). 'auto' (default): components if a positive threshold applies, else spectral."
+                "'components': connected components after dropping edges <= the interpretation threshold. 'spectral': spectral cut of the weighted affinity (may return NO_STABLE_SPECTRAL_CUT). 'auto' (default): 'components' when the resolved interpretation threshold (explicit, or the inherited construction threshold) is > 0; otherwise 'spectral'."
             )
         ),
     ] = "auto",
     max_k: Annotated[
         int,
         Field(
-            description="Upper bound on the number of clusters searched by spectral. Default 15."
+            description=(
+                "Largest k tried by the spectral search (2..max_k); ignored for "
+                "method='components'. Default 15."
+            )
         ),
     ] = 15,
     interpretation_edge_weight_threshold: Annotated[
@@ -615,6 +591,28 @@ async def generate_cluster_dossier(
             error_code="INVALID_ARGUMENT",
             agent_action="Pass feature_preview_limit >= 0.",
         )
+    if interpretation_edge_weight_threshold is not None:
+        try:
+            _validate_unit_threshold(
+                interpretation_edge_weight_threshold,
+                name="interpretation_edge_weight_threshold",
+            )
+        except ToolError as exc:
+            return mcp_error(
+                tool,
+                str(exc),
+                error_code="INVALID_ARGUMENT",
+                agent_action=(
+                    "Pass interpretation_edge_weight_threshold as a finite number "
+                    "in [0.0, 1.0], or omit it to inherit the construction "
+                    "threshold."
+                ),
+                details={
+                    "interpretation_edge_weight_threshold": (
+                        interpretation_edge_weight_threshold
+                    )
+                },
+            )
 
     try:
         model = resolved.model
@@ -781,9 +779,18 @@ async def generate_cluster_dossier(
     except SpectralClusterCutError as e:
         logger.info("No stable spectral cluster cut: %s", e.diagnostics)
         cut = e.payload(detail=detail)
-        error = mcp_error(
+        cut_details = cut["details"]
+        reason = (
+            f"{cut['reason']} Spectral search ran (k="
+            f"{cut_details.get('k_min')}-{cut_details.get('max_k')}) but no "
+            "evaluated cut exceeded the acceptance floor "
+            f"{cut_details.get('accepted_silhouette_min')}; best candidate "
+            f"k={cut_details.get('best_k')}, "
+            f"silhouette={cut_details.get('best_silhouette_score')}."
+        )
+        return mcp_error(
             tool,
-            cut["reason"],
+            reason,
             error_code=cut["error_code"],
             agent_action=(
                 "Try method='components' with an explicit "
@@ -793,15 +800,6 @@ async def generate_cluster_dossier(
             ),
             details=cut["details"],
         )
-        if response_format == "markdown":
-            return ToolResult(
-                content=[
-                    TextContent(type="text", text=_spectral_cut_error_to_markdown(e))
-                ],
-                structured_content=error.structured_content,
-                is_error=True,
-            )
-        return error
     except SessionConflictError as e:
         logger.info("Dossier refused: %s", e)
         return mcp_error(
@@ -841,7 +839,12 @@ _PROFILE_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_PROFILE_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_PROFILE_SCHEMA,
+    title="Cluster Profile",
+)
 async def get_cluster_profile(
     cluster_id: Annotated[
         int,
@@ -960,7 +963,12 @@ _SIGNAL_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_SIGNAL_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_SIGNAL_SCHEMA,
+    title="Feature Signal by Cluster",
+)
 async def get_feature_signal(
     feature_names: Annotated[
         list[str],
@@ -983,7 +991,7 @@ async def get_feature_signal(
         Literal["summary", "standard", "full"],
         Field(
             description=(
-                "'summary' (default): per-cluster headline per feature. 'standard'/'full': more per-cluster statistics; 'full' adds cluster-size telemetry."
+                "'summary' (default): core and supporting-tier features only, compact statistics. 'standard': also context-tier features; core/supporting rows carry every statistic. 'full': every feature with every statistic, plus full cluster sizes and surface_labels."
             )
         ),
     ] = "summary",
@@ -1099,7 +1107,12 @@ _MATRIX_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_MATRIX_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_MATRIX_SCHEMA,
+    title="Cluster Signal Matrix",
+)
 async def get_cluster_signal_matrix(
     cluster_ids: Annotated[
         list[int] | None,
@@ -1249,7 +1262,12 @@ _COMPARE_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_COMPARE_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_COMPARE_SCHEMA,
+    title="Compare Clusters",
+)
 async def compare_clusters(
     cluster_a: Annotated[
         int,

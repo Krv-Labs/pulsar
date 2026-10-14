@@ -236,12 +236,12 @@ construction only has to faithfully approximate the weighted graph.
   right choice for routine exploration.
 
 ## PHASE III: CONTRASTIVE INTERPRETATION
-7. Cluster: `generate_cluster_dossier`.
-8. Contrast: Perform comparative analysis. Identify the 'Pivot Feature' —
+10. Cluster: `generate_cluster_dossier`.
+11. Contrast: Perform comparative analysis. Identify the 'Pivot Feature' —
    the variable that most cleanly separates Cluster A from its topological
    neighbors. Do not name in isolation.
-9. Report: `export_html_report`. CRITICAL: YOU MUST pass synthesized,
-   highly informative `cluster_names` based on Step 8. Names must be
+12. Report: `export_html_report`. CRITICAL: YOU MUST pass synthesized,
+   highly informative `cluster_names` based on Step 11. Names must be
    descriptive (e.g., 'Male Gentoos w/ Large Flippers'). Passing
    `cluster_names` as a flat JSON object like
    `{"0": "Male Gentoos w/ Large Flippers"}` is the difference between a raw
@@ -256,10 +256,17 @@ construction only has to faithfully approximate the weighted graph.
 - The cosmic graph is evidence, not a score to maximize.
 
 ## PATH VISIBILITY (Claude Desktop)
-Claude Desktop sandboxes are isolated. DO NOT use chunked/base64 uploads
-for local files. Use the 'Cache-Bridge' pattern:
-1. Call `get_runtime_context` to find `cache_dir`.
-2. Use a shell command to `cp` your file into that `cache_dir`.
-3. Call `ingest_dataset(path)` on the new path.
-This is 100x faster and avoids protocol overhead.
+Claude Desktop sandboxes are isolated from the server host. DO NOT use
+chunked/base64 uploads, and do not use bash/cp as a bridge by default.
+1. Ask the user for a host-visible absolute path, or call `get_runtime_context`
+   to see `cwd` and `cache_dir`.
+2. Only when the user has confirmed the server host can see `cache_dir`, copy
+   the file there as the sandbox escape.
+3. Call `ingest_dataset(path)` and use the returned `dataset_id`.
+
+## SWEEP vs CLUSTER STATE
+Any new `run_topological_sweep` discards the session's cluster labels and
+feature-evidence cache. Cluster tools and exports must follow a fresh
+`generate_cluster_dossier`. `run_id` on cluster tools is a provenance check,
+not a way to recover old labels.
 """

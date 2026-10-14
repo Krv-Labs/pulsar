@@ -64,6 +64,79 @@ def test_every_tool_declares_contract_on_the_wire():
             assert (schema.get("description") or "").strip(), (tool.name, prop)
 
 
+def test_production_server_advertises_contract_on_the_wire():
+    """The real `mcp` instance (with its middleware) must keep output schemas."""
+
+    async def go():
+        async with Client(server_mod.mcp) as client:
+            return await client.list_tools()
+
+    tools = asyncio.run(go())
+    assert len(tools) == len(ALL_TOOLS_LIST)
+    for tool in tools:
+        assert tool.output_schema, tool.name
+        assert tool.annotations is not None, tool.name
+        assert tool.annotations.read_only_hint is not None, tool.name
+        for prop, schema in tool.input_schema.get("properties", {}).items():
+            assert (schema.get("description") or "").strip(), (tool.name, prop)
+
+
+def test_oversized_response_becomes_parseable_error_envelope(monkeypatch):
+    monkeypatch.setenv("PULSAR_MCP_MAX_RESPONSE_BYTES", "1000")
+
+    async def go():
+        async with Client(server_mod.mcp) as client:
+            return await client.call_tool(
+                "get_workflow_guide", {}, raise_on_error=False
+            )
+
+    result = asyncio.run(go())
+    assert result.is_error
+    envelope = json.loads(result.content[0].text)
+    assert envelope == result.structured_content
+    assert envelope["error_code"] == "RESPONSE_TOO_LARGE"
+    assert envelope["tool"] == "get_workflow_guide"
+    assert envelope["details"]["limit_bytes"] == 1000
+    assert envelope["details"]["size_bytes"] > 1000
+    assert envelope["agent_action"]
+
+
+def test_response_under_limit_passes_through(monkeypatch):
+    monkeypatch.delenv("PULSAR_MCP_MAX_RESPONSE_BYTES", raising=False)
+
+    async def go():
+        async with Client(server_mod.mcp) as client:
+            return await client.call_tool("get_workflow_guide", {})
+
+    result = asyncio.run(go())
+    assert not result.is_error
+    assert "guide" in result.structured_content
+
+
+def test_timing_lines_reach_stderr(capsys):
+    import logging
+
+    log = logging.getLogger("pulsar.mcp")
+    before = list(log.handlers)
+    level = log.level
+    server_mod.configure_logging()
+    server_mod.configure_logging()  # idempotent
+    assert len(log.handlers) == len(before) + 1
+
+    async def go():
+        async with Client(server_mod.mcp) as client:
+            await client.list_tools()
+
+    try:
+        asyncio.run(go())
+        captured = capsys.readouterr()
+        assert "completed in" in captured.err
+        assert "completed in" not in captured.out
+    finally:
+        log.handlers[:] = before
+        log.setLevel(level)
+
+
 def test_tools_list_is_deterministic():
     async def go():
         async with Client(_server()) as client:

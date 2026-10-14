@@ -78,7 +78,7 @@ _VALIDATE_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=False, output_schema=_CREATE_SCHEMA)
+@tool_meta(title="Create Config", read_only=False, output_schema=_CREATE_SCHEMA)
 async def create_config(
     dataset_id: Annotated[
         str,
@@ -232,7 +232,7 @@ async def create_config(
         )
 
 
-@tool_meta(read_only=False, output_schema=_REFINE_SCHEMA)
+@tool_meta(title="Refine Config", read_only=False, output_schema=_REFINE_SCHEMA)
 async def refine_config(
     config_yaml: Annotated[
         str,
@@ -387,7 +387,12 @@ def _format_refine_value(value: Any, *, limit: int = 120) -> str:
     return f"`{text}`"
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_VALIDATE_SCHEMA)
+@tool_meta(
+    title="Validate Config",
+    read_only=True,
+    idempotent=True,
+    output_schema=_VALIDATE_SCHEMA,
+)
 async def validate_config(
     config_yaml: Annotated[
         str,

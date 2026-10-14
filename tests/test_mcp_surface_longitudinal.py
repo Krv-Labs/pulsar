@@ -439,3 +439,41 @@ def test_query_argument_errors(tmp_path):
                 _assert_error(res, tool, code)
 
     asyncio.run(run())
+
+
+def test_build_with_malformed_yaml_returns_config_yaml_invalid(tmp_path):
+    async def run():
+        async with Client(_server()) as client:
+            dataset_id = await _sample(client, tmp_path)
+            res = await client.call_tool(
+                "build_longitudinal_graph",
+                {
+                    "dataset_id": dataset_id,
+                    "entity_column": "patient_id",
+                    "time_column": "hour",
+                    "config_yaml": "bad: [",
+                },
+                raise_on_error=False,
+            )
+            assert res.is_error is True
+            env = res.structured_content
+            assert env["error_code"] == "CONFIG_YAML_INVALID"
+            assert env["tool"] == "build_longitudinal_graph"
+            assert env["agent_action"]
+            assert json.loads(_text(res)) == env
+
+    asyncio.run(run())
+
+
+def test_build_and_archetype_descriptions_are_precise():
+    async def run():
+        async with Client(_server()) as client:
+            return {t.name: t for t in await client.list_tools()}
+
+    tools = asyncio.run(run())
+    props = tools["build_longitudinal_graph"].input_schema["properties"]
+    assert props["dataset_id"]["description"].startswith("Required.")
+    assert "never built" in props["similarity_threshold"]["description"]
+    assert "panel shape" in props["detail"]["description"]
+    arch = tools["get_trajectory_archetypes"].input_schema["properties"]["detail"]
+    assert "same bounded payload" in arch["description"]

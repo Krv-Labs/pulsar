@@ -409,8 +409,18 @@ def test_run_id_round_trip_reports_first_run(tmp_path: Path):
                 )
             )
             assert curve["run_id"] == second
-            # ...and an artifact estimate for the older run is refused (write path).
-            res = await _call(client, "create_graph_artifact", {"run_id": first})
+            # ...an artifact estimate is a pure read, so an older run works...
+            est = payload_of(
+                await _ok(client, "create_graph_artifact", {"run_id": first})
+            )
+            assert est["estimate_only"] is True and est["run_id"] == first
+            assert est["input"]["n_nodes"] == 24
+            # ...but building (a write) for the older run is refused.
+            res = await _call(
+                client,
+                "create_graph_artifact",
+                {"run_id": first, "estimate_only": False},
+            )
             assert res.is_error is True
             assert res.structured_content["error_code"] == "SESSION_REVISION_CONFLICT"
 
@@ -648,5 +658,84 @@ def test_error_paths_with_a_model(tmp_path: Path):
                 "compare_clusters",
                 "INVALID_ARGUMENT",
             )
+
+    _run(go())
+
+
+@pytest.mark.parametrize("bad", [1.5, -0.1])
+def test_dossier_out_of_range_interpretation_threshold_is_invalid_argument(
+    bad, tmp_path: Path
+):
+    async def go():
+        csv = _write_blobs_csv(tmp_path / "blobs.csv")
+        async with Client(_server()) as client:
+            await _sweep(client, csv)
+            res = await _call(
+                client,
+                "generate_cluster_dossier",
+                {"interpretation_edge_weight_threshold": bad},
+            )
+            env = _assert_envelope(res, "generate_cluster_dossier", "INVALID_ARGUMENT")
+            assert "0.0" in env["agent_action"] and "1.0" in env["agent_action"]
+            assert env["details"]["interpretation_edge_weight_threshold"] == bad
+
+    _run(go())
+
+
+def test_dossier_param_and_feature_signal_descriptions_are_precise():
+    async def go():
+        async with Client(_server()) as client:
+            return {t.name: t for t in await client.list_tools()}
+
+    tools = _run(go())
+    props = tools["generate_cluster_dossier"].input_schema["properties"]
+    assert "resolved interpretation threshold" in props["method"]["description"]
+    assert "2..max_k" in props["max_k"]["description"]
+    run_desc = tools["diagnose_cosmic_graph"].input_schema["properties"]["run_id"][
+        "description"
+    ]
+    assert run_desc.count("Omit for the latest run") == 1
+    detail = tools["get_feature_signal"].input_schema["properties"]["detail"]
+    assert "context-tier" in detail["description"]
+
+
+@pytest.mark.parametrize("fmt", ["markdown", "json"])
+def test_spectral_no_cut_error_text_is_the_json_envelope(
+    fmt, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import json
+
+    from pulsar.mcp.interpreter import SpectralClusterCutError
+    from pulsar.mcp.tools import clustering as clustering_mod
+
+    def boom(*args, **kwargs):
+        raise SpectralClusterCutError(
+            {
+                "k_min": 2,
+                "max_k": 4,
+                "best_k": 3,
+                "best_silhouette_score": 0.01,
+                "accepted_silhouette_min": 0.05,
+                "candidate_scores": [],
+            }
+        )
+
+    monkeypatch.setattr(clustering_mod, "resolve_clusters", boom)
+
+    async def go():
+        csv = _write_blobs_csv(tmp_path / "blobs.csv")
+        async with Client(_server()) as client:
+            await _sweep(client, csv)
+            res = await _call(
+                client,
+                "generate_cluster_dossier",
+                {"method": "spectral", "response_format": fmt},
+            )
+            env = _assert_envelope(
+                res, "generate_cluster_dossier", "NO_STABLE_SPECTRAL_CUT"
+            )
+            assert json.loads(res.content[0].text) == env
+            assert "k=2-4" in env["reason"]
+            assert env["details"]["best_k"] == 3
 
     _run(go())

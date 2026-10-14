@@ -13,7 +13,7 @@ from pydantic import Field
 
 from pulsar.config import load_config
 from pulsar.preprocessing import preprocess_dataframe
-from pulsar.mcp.errors import mcp_error, unknown_handle_error
+from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.results import mcp_result
 from pulsar.mcp.toolmeta import (
     BOOL,
@@ -35,6 +35,8 @@ from pulsar.mcp.preprocessing import (
 from pulsar.mcp.session import (
     _get_session,
     _load_session_dataframe,
+    _normalize_data_path,
+    _read_dataset_file,
     _resolve_dataset_path,
 )
 
@@ -227,17 +229,22 @@ def _recommend_preprocessing_worker(
     )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_RECOMMEND_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_RECOMMEND_SCHEMA,
+    title="Recommend Preprocessing",
+)
 async def recommend_preprocessing(
     dataset_id: Annotated[
         str,
         Field(
             description=(
-                "Dataset handle returned by ingest_dataset. Required despite the "
-                "empty default; an empty value returns MISSING_INPUT."
+                "Required. Dataset handle returned by ingest_dataset; an empty "
+                "value returns MISSING_INPUT."
             )
         ),
-    ] = "",
+    ],
     detail: Annotated[
         Literal["summary", "full"],
         Field(
@@ -316,7 +323,12 @@ async def recommend_preprocessing(
         )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_REPAIR_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_REPAIR_SCHEMA,
+    title="Repair Preprocessing Config",
+)
 async def repair_preprocessing_config(
     error_message: Annotated[
         str,
@@ -365,29 +377,7 @@ async def repair_preprocessing_config(
             profiles_by_name[pname] = cp
         repaired = repair_config(config_yaml, error_message, profiles_by_name)
         if isinstance(repaired, ToolResult):
-            reason = (repaired.structured_content or {}).get("reason", "")
-            if "valid YAML mapping" in reason:
-                code, action = (
-                    "CONFIG_YAML_INVALID",
-                    "Pass config_yaml as a YAML mapping with the usual top-level sections.",
-                )
-            elif "Unrecognized" in reason:
-                code, action = (
-                    "ERROR_PATTERN_UNRECOGNIZED",
-                    "Edit the preprocessing block by hand using the error text, "
-                    "then call validate_preprocessing_config.",
-                )
-            else:
-                code, action = (
-                    "NO_REPAIR_NEEDED",
-                    "Review the error message manually; the config needed no automatic change.",
-                )
-            return mcp_error(
-                "repair_preprocessing_config",
-                reason,
-                error_code=code,
-                agent_action=action,
-            )
+            return repaired
         return mcp_result(_parse_repair_markdown(repaired), text=repaired)
     except Exception as e:
         logger.error(f"Error in repair_preprocessing_config: {e}")
@@ -401,7 +391,12 @@ async def repair_preprocessing_config(
         )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_VALIDATE_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_VALIDATE_SCHEMA,
+    title="Validate Preprocessing Config",
+)
 async def validate_preprocessing_config(
     config_yaml: Annotated[
         str,
@@ -412,24 +407,56 @@ async def validate_preprocessing_config(
             )
         ),
     ],
+    dataset_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Dataset handle from ingest_dataset to validate against; read "
+                "without changing the session's bound data. Omit to use the data "
+                "the session already loaded (stdio only; stateless transports must "
+                "pass it)."
+            )
+        ),
+    ] = "",
     ctx: Context = None,
 ) -> ToolResult:
-    """Dry-run only the preprocessing of a config against the session's loaded data.
+    """Dry-run only the preprocessing of a config against a dataset.
 
-    Cheap (no sweep). Returns row/feature counts and expansion diagnostics, or a
-    CONFIG_INVALID error with a repair hint. Needs data loaded by
-    characterize_dataset or a sweep; validate_config does the full schema check.
+    Cheap (no sweep), read-only. Returns row/feature counts and expansion
+    diagnostics, or a CONFIG_INVALID error with a repair hint. Pass dataset_id, or
+    omit it to use the session's loaded data; validate_config does the full
+    schema check.
     """
     session = _get_session(ctx)
 
-    if session.data is None:
+    if dataset_id:
+        try:
+            resolved = _resolve_dataset_path(dataset_id)
+        except LookupError:
+            return unknown_handle_error(
+                "validate_preprocessing_config", "dataset_id", dataset_id
+            )
+        if (
+            session.data is not None
+            and session.data_dataset_id == dataset_id
+            and session.data_path == _normalize_data_path(resolved)
+        ):
+            data = session.data
+        else:
+            try:
+                data = await asyncio.to_thread(_read_dataset_file, resolved)
+            except FileNotFoundError:
+                return path_access_error("validate_preprocessing_config", resolved)
+    else:
+        data = session.data
+    if data is None:
         return mcp_error(
             "validate_preprocessing_config",
-            "No data in session. Run run_topological_sweep (even with a minimal config) or characterize_dataset first to load data into the session.",
+            "No dataset_id given and no data is loaded in this session.",
             error_code="SESSION_DATA_MISSING",
             agent_action=(
-                "Call characterize_dataset(dataset_id=...) to load data into the "
-                "session, then retry."
+                "Pass dataset_id (from ingest_dataset) to validate against that "
+                "dataset; required on stateless transports."
             ),
         )
 
@@ -444,12 +471,10 @@ async def validate_preprocessing_config(
             )
 
         cfg = load_config(config_dict)
-        df_out, layout = await asyncio.to_thread(
-            preprocess_dataframe, session.data, cfg
-        )
+        df_out, layout = await asyncio.to_thread(preprocess_dataframe, data, cfg)
 
         # Compute expansion diagnostics
-        input_cols = set(session.data.columns)
+        input_cols = set(data.columns)
         output_names = layout.feature_names
         dummy_count = sum(
             1 for name in output_names if "_" in name and name not in input_cols
@@ -469,7 +494,7 @@ async def validate_preprocessing_config(
             {
                 "status": "ok",
                 "valid": True,
-                "input_rows": len(session.data),
+                "input_rows": len(data),
                 "output_rows": layout.n_rows,
                 "output_feature_count": len(output_names),
                 "dummy_expansion_count": dummy_count,

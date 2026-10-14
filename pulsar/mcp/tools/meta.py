@@ -43,7 +43,12 @@ logger = logging.getLogger(__name__)
 _GUIDE_SCHEMA = obj({"guide": STR}, ["guide"])
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_GUIDE_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_GUIDE_SCHEMA,
+    title="Workflow guide",
+)
 async def get_workflow_guide(ctx: Context = None) -> ToolResult:
     """Return the recommended end-to-end Pulsar workflow as markdown.
 
@@ -82,7 +87,18 @@ _RUNTIME_SCHEMA = obj(
         "workflow_guide_available_via": STR,
         "path_guidance": arr(STR),
         "model_cache": obj(
-            {"size": INT, "capacity": INT, "run_ids": arr(STR)},
+            {
+                "size": INT,
+                "capacity": INT,
+                "run_ids": arr(STR),
+                "memory_bytes": INT,
+                "entries": arr(
+                    obj(
+                        {"run_id": STR, "memory_bytes": INT}, ["run_id", "memory_bytes"]
+                    )
+                ),
+                "model_bytes_estimated": BOOL,
+            },
             ["size", "capacity", "run_ids"],
         ),
     },
@@ -98,7 +114,12 @@ _RUNTIME_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_RUNTIME_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_RUNTIME_SCHEMA,
+    title="Runtime context",
+)
 async def get_runtime_context(ctx: Context = None) -> ToolResult:
     """Report the server's runtime context: paths, session handles, transport, model cache.
 
@@ -127,7 +148,7 @@ async def get_runtime_context(ctx: Context = None) -> ToolResult:
         "workflow_guide_available_via": "get_workflow_guide",
         "path_guidance": [
             "Use ingest_dataset(path) for host-visible absolute paths.",
-            "SANDBOX ISOLATION: If your file is in a sandbox (e.g. /home/claude), use the 'Cache-Bridge' pattern: Copy the file to the `cache_dir` shown above, then call `ingest_dataset(path)` on the destination.",
+            "SANDBOX ISOLATION: If your file is in a sandbox (e.g. /home/claude), do not use bash/cp as a bridge by default: ask the user for a host-visible absolute path. Only if the user confirms the server host can see `cache_dir` (shown above), copy the file there and call `ingest_dataset(path)` on the destination.",
             "config_path must be server-visible; config_yaml should be raw YAML (no Markdown).",
         ],
         "model_cache": session_mod.model_cache.stats(),
@@ -168,6 +189,7 @@ _CHARACTERIZE_SCHEMA = obj(
     read_only=True,
     idempotent=True,
     output_schema=_CHARACTERIZE_SCHEMA,
+    title="Characterize dataset",
     timeout=default_tool_timeout(),
 )
 async def characterize_dataset(
@@ -237,9 +259,10 @@ async def characterize_dataset(
                 "ingest_dataset first and pass dataset_id."
             ),
             sandbox_action=(
-                "Your file is isolated in a sandbox. DO NOT use base64 or chunked uploads. "
-                "Run a bash script to copy the file to the `cache_dir` (call `get_runtime_context` "
-                "to find it), use `ingest_dataset(path)` to get a dataset_id, and then "
+                "Your file is isolated in a sandbox. DO NOT use base64 or chunked uploads "
+                "or bash/cp as a bridge. Ask the user for a host-visible absolute path, "
+                "or call get_runtime_context; only if the user confirms the server host "
+                "can see `cache_dir`, copy the file there, ingest_dataset(path), and "
                 "retry this tool."
             ),
         )

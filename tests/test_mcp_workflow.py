@@ -1,4 +1,5 @@
 import asyncio
+import json
 import base64
 import importlib
 from types import SimpleNamespace
@@ -1684,9 +1685,11 @@ def test_generate_cluster_dossier_spectral_failure_is_diagnostic():
         )
     )
 
-    assert markdown.startswith("# No Stable Spectral Cut")
-    assert "Affinity components: 5" in markdown
-    assert "k evaluated: 2-4" in markdown
+    # Markdown mode returns the same JSON envelope as json mode (errors are uniform).
+    md_env = json.loads(markdown)
+    assert md_env["error_code"] == "NO_STABLE_SPECTRAL_CUT"
+    assert "k=2-4" in md_env["reason"]
+    assert md_env["details"]["affinity_component_count"] == 5
     assert "candidate_scores" not in markdown
     assert summary["error_code"] == "NO_STABLE_SPECTRAL_CUT"
     assert summary["details"]["affinity_component_count"] == 5

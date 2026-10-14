@@ -645,6 +645,7 @@ def _build_longitudinal_worker(
 
 
 @tool_meta(
+    title="Build Longitudinal Graph",
     read_only=False,
     idempotent=False,
     timeout=default_tool_timeout(),
@@ -655,7 +656,7 @@ async def build_longitudinal_graph(
         str,
         Field(
             description=(
-                "From ingest_dataset or sample_longitudinal_entities: long-format panel, one row per (entity, time step), numeric features."
+                "Required. From ingest_dataset or sample_longitudinal_entities: long-format panel, one row per (entity, time step), numeric features."
             )
         ),
     ] = "",
@@ -711,15 +712,20 @@ async def build_longitudinal_graph(
         float,
         Field(
             description=(
-                "Construction-time floor (>= 0) on trajectory CO_SIMILAR edge weights; "
-                "0 keeps all edges. Interpretation thresholds are set later."
+                "Construction-time floor (>= 0) on the weight of trajectory edges "
+                "(similarity between two (entity, time) observations); edges below "
+                "it are never built. 0 keeps all. Interpretation thresholds on later "
+                "tools filter on top of this."
             )
         ),
     ] = 0.0,
     detail: Annotated[
         Literal["summary", "full"],
         Field(
-            description="'full' also returns the normalized config_yaml and time labels."
+            description=(
+                "'summary' (default): panel shape, build cost and graph surface. "
+                "'full': also the normalized config_yaml and the list of time labels."
+            )
         ),
     ] = "summary",
     response_format: Annotated[
@@ -786,9 +792,20 @@ async def build_longitudinal_graph(
             agent_action="Call ingest_dataset first and pass the returned dataset_id.",
         )
 
-    validation = await asyncio.to_thread(
-        validate_config_yaml, current_yaml, dataset_path=dataset_path
-    )
+    try:
+        validation = await asyncio.to_thread(
+            validate_config_yaml, current_yaml, dataset_path=dataset_path
+        )
+    except (yaml.YAMLError, ValueError) as exc:
+        return mcp_error(
+            "build_longitudinal_graph",
+            f"config_yaml could not be parsed: {exc}",
+            error_code="CONFIG_YAML_INVALID",
+            agent_action=(
+                "Pass config_yaml as raw, well-formed YAML (a mapping), e.g. the "
+                "output of create_config, then retry."
+            ),
+        )
     if not validation.ok or validation.normalized_yaml is None:
         return mcp_error(
             "build_longitudinal_graph",
@@ -898,7 +915,12 @@ def _build_to_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_DIAGNOSE_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_DIAGNOSE_SCHEMA,
+    title="Diagnose Longitudinal Graph",
+)
 async def diagnose_longitudinal_graph(
     longitudinal_id: Annotated[str, Field(description=_LONGITUDINAL_ID_DESC)] = "",
     representation: Annotated[
@@ -1039,7 +1061,12 @@ def _diagnosis_to_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_ARCHETYPES_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_ARCHETYPES_SCHEMA,
+    title="Trajectory Archetypes",
+)
 async def get_trajectory_archetypes(
     longitudinal_id: Annotated[str, Field(description=_LONGITUDINAL_ID_DESC)] = "",
     threshold: Annotated[
@@ -1061,7 +1088,13 @@ async def get_trajectory_archetypes(
     ] = 5,
     detail: Annotated[
         Literal["summary", "full"],
-        Field(description="Echoed in the payload; archetype output is always bounded."),
+        Field(
+            description=(
+                "'summary' and 'full' return the same bounded payload (the value "
+                "is only echoed); widen with max_archetypes / "
+                "max_entities_per_archetype."
+            )
+        ),
     ] = "summary",
     response_format: Annotated[
         Literal["json", "markdown"], Field(description=_RESPONSE_FORMAT_DESC)
@@ -1155,7 +1188,12 @@ def _archetypes_to_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_CROSS_TIME_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_CROSS_TIME_SCHEMA,
+    title="Cross-Time Neighbors",
+)
 async def get_cross_time_neighbors(
     longitudinal_id: Annotated[str, Field(description=_LONGITUDINAL_ID_DESC)] = "",
     entity_id: Annotated[
@@ -1344,7 +1382,12 @@ def _neighbors_to_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_CLASSIFY_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_CLASSIFY_SCHEMA,
+    title="Classify Trajectories",
+)
 async def classify_trajectories(
     longitudinal_id: Annotated[str, Field(description=_LONGITUDINAL_ID_DESC)] = "",
     method: Annotated[

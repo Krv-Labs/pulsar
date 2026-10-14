@@ -165,11 +165,30 @@ class ModelCache:
     def __len__(self) -> int:
         return len(self._entries)
 
+    @staticmethod
+    def _entry_bytes(entry: ResolvedRun) -> int:
+        """Approximate bytes: DataFrame + embeddings only (model size unknown)."""
+        total = 0
+        if entry.data is not None:
+            try:
+                total += int(entry.data.memory_usage(deep=True).sum())
+            except Exception:  # noqa: BLE001 - estimate only
+                pass
+        for emb in entry.embeddings or []:
+            total += int(getattr(emb, "nbytes", 0) or 0)
+        return total
+
     def stats(self) -> dict[str, Any]:
+        per_entry = {rid: self._entry_bytes(e) for rid, e in self._entries.items()}
         return {
             "size": len(self._entries),
             "capacity": self.capacity,
             "run_ids": list(self._entries),  # least to most recently used
+            "memory_bytes": sum(per_entry.values()),
+            "entries": [
+                {"run_id": rid, "memory_bytes": b} for rid, b in per_entry.items()
+            ],
+            "model_bytes_estimated": False,  # fitted model size is not included
         }
 
 

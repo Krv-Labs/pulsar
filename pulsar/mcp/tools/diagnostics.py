@@ -62,7 +62,6 @@ from pulsar.mcp.toolmeta import (
 logger = logging.getLogger(__name__)
 
 OPEN_OBJ = obj({}, additional=True)
-RUN_ID_PARAM_READ = "Run to read, from run_topological_sweep. Omit for the latest run. Ignored when surface='artifact'."
 
 
 def model_not_loaded_error(tool: str) -> ToolResult:
@@ -438,7 +437,12 @@ _DIAGNOSE_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_DIAGNOSE_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_DIAGNOSE_SCHEMA,
+    title="Diagnose Cosmic Graph",
+)
 async def diagnose_cosmic_graph(
     surface: Annotated[
         Literal["constructed", "artifact"],
@@ -478,8 +482,8 @@ async def diagnose_cosmic_graph(
         str,
         Field(
             description=(
-                RUN_ID_PARAM_READ + " Ignored when surface='artifact' (artifacts "
-                "carry their own run_id)."
+                "Run to read, from run_topological_sweep. Omit for the latest run. "
+                "Ignored when surface='artifact' (artifacts carry their own run_id)."
             )
         ),
     ] = "",
@@ -1223,7 +1227,12 @@ _CURVE_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_CURVE_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_CURVE_SCHEMA,
+    title="Threshold Stability Curve",
+)
 async def get_threshold_stability_curve(
     detail: Annotated[
         Literal["summary", "full"],
@@ -1455,7 +1464,12 @@ _ARTIFACT_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=False, idempotent=False, output_schema=_ARTIFACT_SCHEMA)
+@tool_meta(
+    read_only=False,
+    idempotent=False,
+    output_schema=_ARTIFACT_SCHEMA,
+    title="Graph Artifact",
+)
 async def create_graph_artifact(
     kind: Annotated[
         Literal["spectral_sparsifier"],
@@ -1470,7 +1484,7 @@ async def create_graph_artifact(
         str,
         Field(
             description=(
-                "Run to build from, from run_topological_sweep. Omit for the latest run. Publishes into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT)."
+                "Run to use, from run_topological_sweep. Omit for the latest run. Any cached run works with estimate_only=True (a pure read); building publishes into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT)."
             )
         ),
     ] = "",
@@ -1531,8 +1545,6 @@ async def create_graph_artifact(
     resolved, err = resolve_run_or_error(session, tool, run_id)
     if err is not None:
         return err
-    if run_id and not is_latest(session, resolved):
-        return stale_write_error(tool, "graph artifact")
     target_run_id = resolved.run_id
     if not target_run_id:
         return model_not_loaded_error(tool)
@@ -1585,6 +1597,9 @@ async def create_graph_artifact(
                 },
             }
         )
+
+    if run_id and not is_latest(session, resolved):
+        return stale_write_error(tool, "graph artifact")
 
     artifact, elapsed, artifact_edge_count = await run_session_worker(
         session,
@@ -1661,7 +1676,12 @@ _SKELETON_SCHEMA = obj(
 )
 
 
-@tool_meta(read_only=True, idempotent=True, output_schema=_SKELETON_SCHEMA)
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_SKELETON_SCHEMA,
+    title="Topological Skeleton",
+)
 async def get_topological_skeleton(
     run_id: Annotated[
         str,

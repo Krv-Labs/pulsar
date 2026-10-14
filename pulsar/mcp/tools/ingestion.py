@@ -189,7 +189,9 @@ def _sample_longitudinal_entities_worker(
     }
 
 
-@tool_meta(read_only=False, output_schema=_DATASET_RECORD_SCHEMA)
+@tool_meta(
+    title="Ingest Dataset", read_only=False, output_schema=_DATASET_RECORD_SCHEMA
+)
 async def ingest_dataset(
     path: Annotated[
         str,
@@ -246,7 +248,9 @@ async def ingest_dataset(
         )
 
 
-@tool_meta(read_only=False, output_schema=_SAMPLE_SCHEMA)
+@tool_meta(
+    title="Sample Longitudinal Entities", read_only=False, output_schema=_SAMPLE_SCHEMA
+)
 async def sample_longitudinal_entities(
     dataset_id: Annotated[
         str,
@@ -338,7 +342,9 @@ async def sample_longitudinal_entities(
         )
 
 
-@tool_meta(read_only=False, output_schema=_UPLOAD_RECORD_SCHEMA)
+@tool_meta(
+    title="Begin Dataset Upload", read_only=False, output_schema=_UPLOAD_RECORD_SCHEMA
+)
 async def begin_dataset_upload(
     filename: Annotated[
         str, Field(description="File name to store the upload under, e.g. data.csv.")
@@ -368,7 +374,9 @@ async def begin_dataset_upload(
         )
 
 
-@tool_meta(read_only=False, output_schema=_UPLOAD_RECORD_SCHEMA)
+@tool_meta(
+    title="Append Dataset Chunk", read_only=False, output_schema=_UPLOAD_RECORD_SCHEMA
+)
 async def append_dataset_chunk(
     upload_id: Annotated[
         str, Field(description="Upload handle returned by begin_dataset_upload.")
@@ -428,7 +436,11 @@ async def append_dataset_chunk(
         )
 
 
-@tool_meta(read_only=False, output_schema=_DATASET_RECORD_SCHEMA)
+@tool_meta(
+    title="Finalize Dataset Upload",
+    read_only=False,
+    output_schema=_DATASET_RECORD_SCHEMA,
+)
 async def finalize_dataset_upload(
     upload_id: Annotated[
         str, Field(description="Upload handle returned by begin_dataset_upload.")

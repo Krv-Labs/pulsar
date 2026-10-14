@@ -6,19 +6,21 @@ Exposes "Thick Tools" for topological data analysis and interpretation.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import sys
 from typing import Any
 
 import mcp.types as mt
 from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
 from fastmcp.server.middleware.timing import TimingMiddleware
 from fastmcp.tools import ToolResult
 from mcp.types import ToolAnnotations
 
 import pulsar
+from pulsar.mcp.errors import mcp_error
 from pulsar.mcp.toolmeta import tool_meta_of
 from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
 
@@ -66,6 +68,80 @@ class ArgumentSanitizerMiddleware(Middleware):
 
 
 # ---------------------------------------------------------------------------
+# Response budget backstop
+# ---------------------------------------------------------------------------
+DEFAULT_MAX_RESPONSE_BYTES = 100_000  # ~25k tokens, Claude Code's tool-result cap
+
+
+def _max_response_bytes() -> int:
+    try:
+        return max(1, int(os.environ.get("PULSAR_MCP_MAX_RESPONSE_BYTES", "")))
+    except ValueError:
+        return DEFAULT_MAX_RESPONSE_BYTES
+
+
+def _result_size_bytes(result: ToolResult) -> int:
+    size = 0
+    for block in result.content or []:
+        text = getattr(block, "text", None)
+        size += len(text.encode("utf-8")) if text is not None else 0
+    if result.structured_content is not None:
+        size += len(json.dumps(result.structured_content, default=str).encode("utf-8"))
+    return size
+
+
+class ResponseBudgetMiddleware(Middleware):
+    """Replace oversized tool results with a parseable ``RESPONSE_TOO_LARGE`` error.
+
+    Unlike fastmcp's ResponseLimitingMiddleware this never truncates mid-JSON and
+    never touches ``on_list_tools``, so advertised output schemas stay intact.
+    The limit is read per call from ``PULSAR_MCP_MAX_RESPONSE_BYTES``.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        result = await call_next(context)
+        # Task acks / input-required results carry no measurable tool content.
+        if not isinstance(result, ToolResult) or type(result) is not ToolResult:
+            return result
+        size = _result_size_bytes(result)
+        limit = _max_response_bytes()
+        if size <= limit:
+            return result
+        logger.warning(
+            "Tool %r response %d bytes exceeds limit %d; returning error envelope",
+            context.message.name,
+            size,
+            limit,
+        )
+        return mcp_error(
+            context.message.name,
+            f"Response is {size} bytes, over the {limit}-byte limit.",
+            error_code="RESPONSE_TOO_LARGE",
+            agent_action=(
+                "Request detail='summary', lower max_* / preview limits, or use "
+                "a narrower tool."
+            ),
+            details={"size_bytes": size, "limit_bytes": limit},
+        )
+
+
+def configure_logging() -> None:
+    """Send ``pulsar.mcp`` INFO logs (incl. timing) to stderr. Never stdout."""
+    log = logging.getLogger("pulsar.mcp")
+    if any(getattr(h, "_pulsar_stderr", False) for h in log.handlers):
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler._pulsar_stderr = True  # type: ignore[attr-defined]
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
+# ---------------------------------------------------------------------------
 # FastMCP server
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
@@ -84,9 +160,7 @@ mcp = FastMCP(
     cache_ttl=3600,
     middleware=[
         ArgumentSanitizerMiddleware(),
-        ResponseLimitingMiddleware(
-            max_size=int(os.environ.get("PULSAR_MCP_MAX_RESPONSE_BYTES", "400000"))
-        ),
+        ResponseBudgetMiddleware(),
         TimingMiddleware(logger=logging.getLogger("pulsar.mcp")),
     ],
 )
@@ -159,6 +233,7 @@ def main():
     # so a non-stdio transport can be selected by the environment.
     import fastmcp
 
+    configure_logging()
     transport = fastmcp.settings.transport
     if transport != "stdio":
         logger.warning(

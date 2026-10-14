@@ -219,12 +219,13 @@ def test_error_paths_for_ingestion_and_preprocessing(tmp_path):
         csv = _write_csv(tmp_path / "e.csv")
         async with Client(_server()) as client:
             # validate before any data is loaded into the session
-            await _call(
+            res = await _call(
                 client,
                 "validate_preprocessing_config",
                 {"config_yaml": "run: {name: x}"},
                 error="SESSION_DATA_MISSING",
             )
+            assert "dataset_id" in res.structured_content["agent_action"]
             await _call(
                 client,
                 "ingest_dataset",
@@ -273,7 +274,7 @@ def test_error_paths_for_ingestion_and_preprocessing(tmp_path):
             await _call(
                 client,
                 "recommend_preprocessing",
-                {},
+                {"dataset_id": ""},
                 error="MISSING_INPUT",
             )
             await _call(
@@ -591,3 +592,125 @@ def test_schemas_are_declared_on_every_owned_function():
                 meta = tool_meta_of(fn)
                 assert meta is not None, name
                 assert meta.output_schema["type"] == "object", name
+
+
+def test_recommend_preprocessing_dataset_id_is_required_in_schema():
+    async def _run():
+        async with Client(_server()) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+        schema = tools["recommend_preprocessing"].input_schema
+        assert "dataset_id" in schema["required"]
+        assert "default" not in schema["properties"]["dataset_id"]
+        assert "Required" in schema["properties"]["dataset_id"]["description"]
+        validate = tools["validate_preprocessing_config"].input_schema
+        assert "dataset_id" in validate["properties"]
+        assert "dataset_id" not in validate.get("required", [])
+
+    asyncio.run(_run())
+
+
+def test_validate_preprocessing_config_by_dataset_id_is_stateless_and_read_only(
+    tmp_path,
+):
+    async def _run():
+        csv = _write_csv(tmp_path / "v.csv")
+        async with Client(_server()) as client:
+            dataset_id = (
+                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ).structured_content["dataset_id"]
+            cfg = (
+                await _call(client, "create_config", {"dataset_id": dataset_id})
+            ).structured_content["config_yaml"]
+            # Simulate a stateless transport / another frame bound last.
+            session_mod._sessions.clear()
+            res = await _call(
+                client,
+                "validate_preprocessing_config",
+                {"config_yaml": cfg, "dataset_id": dataset_id},
+            )
+            assert res.structured_content["valid"] is True
+            assert res.structured_content["input_rows"] == 24
+            # Read-only: the session was not rebound to this dataset.
+            for session in session_mod._sessions.values():
+                assert session.data is None
+            await _call(
+                client,
+                "validate_preprocessing_config",
+                {"config_yaml": cfg, "dataset_id": "ds_nope"},
+                error="DATASET_ID_UNKNOWN",
+            )
+
+    asyncio.run(_run())
+
+
+def test_validate_preprocessing_config_does_not_rebind_other_session_data(tmp_path):
+    async def _run():
+        a = _write_csv(tmp_path / "a.csv", n_rows=24)
+        b = _write_csv(tmp_path / "b.csv", n_rows=12)
+        async with Client(_server()) as client:
+            id_a = (
+                await _call(client, "ingest_dataset", {"path": str(a)})
+            ).structured_content["dataset_id"]
+            id_b = (
+                await _call(client, "ingest_dataset", {"path": str(b)})
+            ).structured_content["dataset_id"]
+            cfg = (
+                await _call(client, "create_config", {"dataset_id": id_a})
+            ).structured_content["config_yaml"]
+            await _call(client, "recommend_preprocessing", {"dataset_id": id_a})
+            bound = {k: v.data_dataset_id for k, v in session_mod._sessions.items()}
+            res = await _call(
+                client,
+                "validate_preprocessing_config",
+                {"config_yaml": cfg, "dataset_id": id_b},
+            )
+            assert res.structured_content["input_rows"] == 12
+            after = {k: v.data_dataset_id for k, v in session_mod._sessions.items()}
+            assert after == bound
+
+    asyncio.run(_run())
+
+
+def test_repair_errors_carry_codes_from_the_source(tmp_path):
+    async def _run():
+        csv = _write_csv(tmp_path / "r.csv")
+        async with Client(_server()) as client:
+            dataset_id = (
+                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ).structured_content["dataset_id"]
+            base = {"dataset_id": dataset_id}
+            res = await _call(
+                client,
+                "repair_preprocessing_config",
+                {**base, "error_message": "x", "config_yaml": "- a\n- b"},
+                error="CONFIG_YAML_INVALID",
+            )
+            assert "mapping" in res.structured_content["agent_action"]
+            res = await _call(
+                client,
+                "repair_preprocessing_config",
+                {**base, "error_message": "totally unknown", "config_yaml": "a: 1"},
+                error="ERROR_PATTERN_UNRECOGNIZED",
+            )
+            assert (
+                "validate_preprocessing_config"
+                in res.structured_content["agent_action"]
+            )
+
+    asyncio.run(_run())
+
+
+def test_repair_config_source_returns_coded_errors():
+    from pulsar.mcp.preprocessing import repair_config
+
+    for cfg, msg, code in [
+        (
+            "- a",
+            "NaN values remain after imputation: 'f1' (3 rows)",
+            "CONFIG_YAML_INVALID",
+        ),
+        ("a: 1", "nothing recognizable", "ERROR_PATTERN_UNRECOGNIZED"),
+    ]:
+        res = repair_config(cfg, msg, {})
+        assert res.structured_content["error_code"] == code
+        assert res.structured_content["agent_action"]
