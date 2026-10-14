@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import threading
 from typing import Any, Literal
 
 import numpy as np
@@ -43,7 +44,12 @@ from pulsar.mcp.payloads import (
     summary_evidence_payload_to_markdown,
 )
 from pulsar.mcp.registry import StagedWrite, registry
-from pulsar.mcp.session import SessionConflictError, _get_session, run_session_worker
+from pulsar.mcp.session import (
+    OperationCancelledError,
+    SessionConflictError,
+    _get_session,
+    run_session_worker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +233,7 @@ def _compute_dossier_worker(
     exclude_columns: list[str] | None,
     max_char_cap: int,
     detail: Literal["summary", "standard", "full"],
+    cancel_event: threading.Event | None = None,
 ) -> tuple[Any, dict[str, Any], FeatureEvidenceIndex, str, Any, StagedWrite]:
     """Compute clusters/evidence/dossier. Never mutates ``session``.
 
@@ -276,6 +283,11 @@ def _compute_dossier_worker(
         construction_threshold=construction_threshold,
         labels=result.labels.astype(int).tolist(),
     )
+    # A cancel that arrived during staging would otherwise orphan the temp
+    # file: the awaiting coroutine is gone, so nobody would discard it.
+    if cancel_event is not None and cancel_event.is_set():
+        registry.discard_staged(staged_assignment)
+        raise OperationCancelledError("Cluster dossier cancelled before publication.")
     return result, cluster_meta, evidence_index, fingerprint, dossier, staged_assignment
 
 
@@ -457,6 +469,7 @@ async def generate_cluster_dossier(
         # on shattered graphs. Small singletons/noise are omitted from profiling.
         max_char_cap = max(50, max_clusters * 2)
 
+        cancel_event = threading.Event()
         (
             result,
             cluster_meta,
@@ -482,8 +495,10 @@ async def generate_cluster_dossier(
             exclude_columns,
             max_char_cap,
             detail,
+            cancel_event,
             heavy=True,
             mutates_session=True,
+            cancel_event=cancel_event,
         )
         assignment = _publish_dossier_on_loop(
             session,

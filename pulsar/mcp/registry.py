@@ -19,6 +19,8 @@ _DATASET_FILES_DIR = _CACHE_DIR / "datasets"
 _UPLOADS_DIR = _CACHE_DIR / "uploads"
 _RUNS_DIR = _CACHE_DIR / "runs"
 _CLUSTER_ASSIGNMENTS_DIR = _CACHE_DIR / "cluster_assignments"
+# Orphaned ``.staged`` temp files older than this are swept at registry init.
+_STAGED_ORPHAN_MAX_AGE_S = 3600.0
 _LOCK_PATH = _CACHE_DIR / ".registry.lock"
 _PROCESS_LOCK = threading.RLock()
 _UTF8_BOM = b"\xef\xbb\xbf"
@@ -120,6 +122,28 @@ class MCPRegistry:
         _RUNS_DIR.mkdir(parents=True, exist_ok=True)
         _CLUSTER_ASSIGNMENTS_DIR.mkdir(parents=True, exist_ok=True)
         _LOCK_PATH.touch(exist_ok=True)
+        self.sweep_orphaned_staged()
+
+    @staticmethod
+    def sweep_orphaned_staged(max_age_s: float = _STAGED_ORPHAN_MAX_AGE_S) -> int:
+        """Remove ``.staged`` temp files nobody will commit; return the count.
+
+        A client cancel that lands between a worker staging a record and the
+        loop committing it can orphan the temp file. Such files are invisible
+        to lookups, so this is housekeeping, not correctness. Only files older
+        than ``max_age_s`` are removed so an in-flight stage is never touched.
+        """
+        now = time.time()
+        removed = 0
+        for directory in (_RUNS_DIR, _CLUSTER_ASSIGNMENTS_DIR):
+            for path in directory.glob(".*.staged"):
+                try:
+                    if now - path.stat().st_mtime > max_age_s:
+                        path.unlink(missing_ok=True)
+                        removed += 1
+                except OSError:
+                    continue
+        return removed
 
     @property
     def cache_dir(self) -> Path:

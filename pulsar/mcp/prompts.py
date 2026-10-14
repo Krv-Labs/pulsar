@@ -83,8 +83,9 @@ object: follow-up tools such as `diagnose_cosmic_graph` use them as usual.
 ## TRANSPORT
 In-memory model state (the fitted model, cluster cache) is guaranteed to persist
 between calls only on stdio and on legacy-session HTTP (clients that receive an
-`mcp-session-id`). On the 2026-07-28 stateless Streamable HTTP protocol there is no
-session id: each request is isolated from other clients but gets a fresh session,
+`mcp-session-id`). The 2026-07-28 protocol revision removed protocol sessions, so on
+Streamable HTTP there is no session id: each request is isolated from other
+clients but gets a fresh session,
 so a fitted model is NOT preserved between calls (for example,
 `run_topological_sweep` then `diagnose_cosmic_graph` may not see the sweep).
 `dataset_id` and `run_id` handles are the durable state (on-disk registry). Check

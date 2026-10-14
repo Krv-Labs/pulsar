@@ -693,3 +693,83 @@ def test_runtime_context_reports_transport_and_model_continuity() -> None:
         assert http["transport_assumption"] == "streamable-http"
 
     asyncio.run(_run())
+
+
+def test_dossier_cancelled_after_staging_leaves_no_staged_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel that lands while the worker is staging must not orphan the temp."""
+
+    async def _run() -> None:
+        ctx = _make_ctx("dossier-cancel-after-stage")
+        csv_path = _write_synthetic_csv(tmp_path / "dossier.csv", n_rows=80)
+        dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
+        await run_topological_sweep(
+            config_yaml=config_yaml,
+            dataset_id=dataset_id,
+            response_format="json",
+            ctx=ctx,
+        )
+        session = session_mod._get_session(ctx)
+
+        reg = registry_mod.registry
+        staged_done = threading.Event()
+        release = threading.Event()
+        orig_stage = reg.stage_cluster_assignment
+
+        def _gated_stage(*args, **kwargs):
+            staged = orig_stage(*args, **kwargs)
+            staged_done.set()
+            release.wait(timeout=5.0)
+            return staged
+
+        monkeypatch.setattr(reg, "stage_cluster_assignment", _gated_stage)
+        task = asyncio.create_task(
+            generate_cluster_dossier(
+                method="components", response_format="json", ctx=ctx
+            )
+        )
+        await _wait_for_event(staged_done)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+
+        deadline = time.monotonic() + 5.0
+        while session.active_ops != 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert session.active_ops == 0
+        assert not session._worker_mutation_lock.locked()
+        assert session.clusters is None
+        ca_dir = registry_mod._CLUSTER_ASSIGNMENTS_DIR
+        assert [p.name for p in ca_dir.iterdir()] == []
+
+    asyncio.run(_run())
+
+
+def test_registry_init_sweeps_only_old_staged_files() -> None:
+    runs_dir = registry_mod._RUNS_DIR
+    ca_dir = registry_mod._CLUSTER_ASSIGNMENTS_DIR
+    old_run = runs_dir / ".run_old.json.deadbeef.staged"
+    fresh_run = runs_dir / ".run_new.json.cafebabe.staged"
+    old_ca = ca_dir / ".ca_old.json.deadbeef.staged"
+    committed = runs_dir / "run_real.json"
+    for p in (old_run, fresh_run, old_ca, committed):
+        p.write_text("{}", encoding="utf-8")
+    stale = time.time() - 2 * registry_mod._STAGED_ORPHAN_MAX_AGE_S
+    os.utime(old_run, (stale, stale))
+    os.utime(old_ca, (stale, stale))
+
+    # Init sweeps on construction; a second explicit call finds nothing left.
+    reg = registry_mod.MCPRegistry()
+    assert not old_run.exists()
+    assert not old_ca.exists()
+    assert fresh_run.exists()
+    assert committed.exists()
+    assert reg.sweep_orphaned_staged() == 0
+
+    # The explicit call reports what it removed and leaves fresh files alone.
+    os.utime(fresh_run, (stale, stale))
+    assert reg.sweep_orphaned_staged() == 1
+    assert not fresh_run.exists()
+    assert committed.exists()
