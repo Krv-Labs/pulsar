@@ -20,6 +20,7 @@ from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.interpreter import build_dossier, build_feature_evidence_index
 from pulsar.mcp.report import dossier_to_html
 from pulsar.mcp.registry import registry
+from pulsar.runtime.utils import default_file_mode
 from pulsar.mcp.session import (
     _get_session,
     _load_session_dataframe,
@@ -46,6 +47,7 @@ def _atomic_write_text_or_df(
         tmp_path = Path(tmp_file.name)
     try:
         write_fn(tmp_path)
+        os.chmod(tmp_path, default_file_mode())
         os.replace(tmp_path, dest_path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -135,9 +137,7 @@ def _write_labeled_csv_worker(
     dest_path = Path(output_path)
     out_df = df.copy()
     out_df["topological_cluster_id"] = labels
-    out_df["topological_cluster_name"] = out_df["topological_cluster_id"].map(
-        names_map
-    )
+    out_df["topological_cluster_name"] = out_df["topological_cluster_id"].map(names_map)
     _atomic_write_text_or_df(
         dest_path,
         lambda tmp_path: out_df.to_csv(tmp_path, index=False),
@@ -276,10 +276,7 @@ def _export_html_report_worker(
     config_yaml: str | None,
     dataset_id: str,
 ) -> str:
-    if (
-        cached_evidence_index is not None
-        and cols_to_exclude == report_exclude_columns
-    ):
+    if cached_evidence_index is not None and cols_to_exclude == report_exclude_columns:
         evidence_index = cached_evidence_index
     else:
         evidence_index = build_feature_evidence_index(

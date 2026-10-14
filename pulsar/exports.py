@@ -16,6 +16,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from pulsar.runtime.utils import default_dir_mode, default_file_mode
+
 if TYPE_CHECKING:
     from pulsar.pipeline import ThemaRS
 
@@ -70,6 +72,7 @@ def _atomic_write_file(path: Path, write_fn: Callable[[Path], None]) -> None:
         tmp_path = Path(tmp_file.name)
     try:
         write_fn(tmp_path)
+        os.chmod(tmp_path, default_file_mode())
         os.replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -424,9 +427,7 @@ def _promote_staged_bundle(
         return
 
     backup_root = Path(
-        tempfile.mkdtemp(
-            prefix=f".{base_path.name}_backup_", dir=base_path.parent
-        )
+        tempfile.mkdtemp(prefix=f".{base_path.name}_backup_", dir=base_path.parent)
     )
     backup_path = backup_root / base_path.name
     try:
@@ -450,12 +451,8 @@ def _write_tabular_artifacts(
 ) -> tuple[dict[str, str], dict[str, str]]:
     raw_df = model.data.copy()
     if len(raw_df) != n:
-        raise RuntimeError(
-            f"raw data has {len(raw_df)} rows but graph has {n} nodes"
-        )
-    extra_cols, renamed_node_columns = _node_passthrough_columns(
-        list(raw_df.columns)
-    )
+        raise RuntimeError(f"raw data has {len(raw_df)} rows but graph has {n} nodes")
+    extra_cols, renamed_node_columns = _node_passthrough_columns(list(raw_df.columns))
     if source_node_id := renamed_node_columns.get("node_id"):
         raw_df.rename(columns={"node_id": source_node_id}, inplace=True)
     raw_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
@@ -472,9 +469,7 @@ def _write_tabular_artifacts(
             )
         if "node_id" in clean_df.columns:
             clean_renames = _node_passthrough_columns(list(clean_df.columns))[1]
-            clean_df.rename(
-                columns={"node_id": clean_renames["node_id"]}, inplace=True
-            )
+            clean_df.rename(columns={"node_id": clean_renames["node_id"]}, inplace=True)
         clean_df.insert(0, "node_id", np.arange(n, dtype=np.uint32))
         _atomic_write_file(
             tabular_path / "clean.parquet",
@@ -561,11 +556,10 @@ def export_dataset_bundle(
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     base_path = output_root / slug
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix=f".{slug}_staging_", dir=output_root)
-    )
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{slug}_staging_", dir=output_root))
 
     try:
+        os.chmod(staging_dir, default_dir_mode())
         tabular_path = staging_dir / "tabular"
         graph_path = staging_dir / "graph"
         tabular_path.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from contextlib import contextmanager
 
@@ -72,11 +73,35 @@ class ProgressTracker:
         self.update(stage, 1.0, label=label)
 
 
+def _read_process_umask() -> int:
+    # os.umask can only be read by setting it; do this once at import time so
+    # worker threads never race on the process-wide value.
+    current = os.umask(0)
+    os.umask(current)
+    return current
+
+
+_PROCESS_UMASK = _read_process_umask()
+
+
+def default_file_mode() -> int:
+    """Mode a plain ``open(path, "w")`` would produce: ``0o666 & ~umask``."""
+    return 0o666 & ~_PROCESS_UMASK
+
+
+def default_dir_mode() -> int:
+    """Mode a plain ``os.makedirs`` would produce: ``0o777 & ~umask``."""
+    return 0o777 & ~_PROCESS_UMASK
+
+
 @contextmanager
 def rayon_thread_override(workers: int | None):
-    """Thread-safe no-op context manager retained for backward compatibility.
+    """No-op context manager retained for API compatibility.
 
-    Rayon uses its process-wide thread pool without mutating global ``os.environ``.
+    Historically this set ``RAYON_NUM_THREADS``; since the GIL-release change
+    Rust uses the process-wide (global) rayon pool and ``workers`` has **no
+    effect**. A per-call pool would require Rust support. Callers that pass a
+    non-None value (see ``ThemaRS.fit_multi``) are warned separately.
     """
     yield
 
