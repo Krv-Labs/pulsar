@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
+from typing import Any
 
 
 _CACHE_DIR = Path(tempfile.gettempdir()) / "pulsar_mcp"
@@ -41,6 +42,21 @@ class DatasetRecord:
     mtime_ns: int
     ingested_at: float
     source: str = "path"
+
+
+@dataclass
+class StagedWrite:
+    """A fully serialized, fsynced record that is not yet visible.
+
+    ``stage_*`` does the expensive work (JSON serialization, write, fsync) in a
+    worker thread. ``commit_staged`` is one ``os.replace`` and is cheap enough for
+    the event loop. Until it commits, nothing is readable by id; ``discard_staged``
+    removes the temp file.
+    """
+
+    record: Any
+    final_path: Path
+    temp_path: Path
 
 
 @dataclass
@@ -210,7 +226,7 @@ class MCPRegistry:
             return False
         return stat.st_size == record.size_bytes and stat.st_mtime_ns == record.mtime_ns
 
-    def save_run(
+    def _build_run_record(
         self,
         *,
         dataset_id: str | None,
@@ -230,9 +246,35 @@ class MCPRegistry:
             created_at=time.time(),
             threshold_stability_summary=threshold_stability_summary,
         )
-        with self._locked_registry():
-            self._write_json(self._run_path(record.run_id), asdict(record))
         return record
+
+    def stage_run(
+        self,
+        *,
+        dataset_id: str | None,
+        config_yaml: str,
+        metrics: dict,
+        resolved_construction_threshold: float,
+        graph_summary: dict,
+        threshold_stability_summary: dict | None = None,
+    ) -> StagedWrite:
+        """Serialize and fsync a run record to a temp file (worker-thread safe).
+
+        Run files are uuid-named and never indexed, so no registry lock is needed.
+        """
+        record = self._build_run_record(
+            dataset_id=dataset_id,
+            config_yaml=config_yaml,
+            metrics=metrics,
+            resolved_construction_threshold=resolved_construction_threshold,
+            graph_summary=graph_summary,
+            threshold_stability_summary=threshold_stability_summary,
+        )
+        return self._stage_json(record, self._run_path(record.run_id))
+
+    def save_run(self, **kwargs: Any) -> RunRecord:
+        """Stage and commit in one step (synchronous callers and tests)."""
+        return self.commit_staged(self.stage_run(**kwargs))
 
     def get_run(self, run_id: str) -> RunRecord | None:
         path = self._run_path(run_id)
@@ -243,7 +285,7 @@ class MCPRegistry:
             raise ValueError(STALE_RUN_RECORD_MESSAGE)
         return RunRecord(**raw)
 
-    def save_cluster_assignment(
+    def stage_cluster_assignment(
         self,
         *,
         run_id: str | None,
@@ -253,7 +295,13 @@ class MCPRegistry:
         threshold_source: str,
         construction_threshold: float,
         labels: list[int],
-    ) -> ClusterAssignmentRecord:
+    ) -> StagedWrite:
+        """Serialize and fsync an assignment to a temp file (worker-thread safe).
+
+        Assignment files are uuid-named and never indexed, so no registry lock is
+        needed. The label vector is the O(rows) part, which is why this must not
+        run on the event loop.
+        """
         label_values = [int(label) for label in labels]
         record = ClusterAssignmentRecord(
             cluster_assignment_id=f"ca_{uuid.uuid4().hex[:12]}",
@@ -270,12 +318,50 @@ class MCPRegistry:
             labels=label_values,
             created_at=time.time(),
         )
-        with self._locked_registry():
-            self._write_json(
-                self._cluster_assignment_path(record.cluster_assignment_id),
-                asdict(record),
-            )
-        return record
+        return self._stage_json(
+            record, self._cluster_assignment_path(record.cluster_assignment_id)
+        )
+
+    def save_cluster_assignment(self, **kwargs: Any) -> ClusterAssignmentRecord:
+        """Stage and commit in one step (synchronous callers and tests)."""
+        return self.commit_staged(self.stage_cluster_assignment(**kwargs))
+
+    @staticmethod
+    def _stage_json(record: Any, final_path: Path) -> StagedWrite:
+        # Dot-prefixed, non-.json temp name: invisible to ``*.json`` globs and to
+        # get_run / get_cluster_assignment until committed.
+        temp_path = final_path.parent / f".{final_path.name}.{uuid.uuid4().hex}.staged"
+        serialized = json.dumps(asdict(record), indent=2, sort_keys=True)
+        try:
+            # 0o600 matches the NamedTemporaryFile mode _write_json produces.
+            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+        return StagedWrite(record=record, final_path=final_path, temp_path=temp_path)
+
+    @staticmethod
+    def commit_staged(staged: StagedWrite) -> Any:
+        """Make a staged record visible: a single atomic ``os.replace``.
+
+        Cheap and non-blocking in practice, so safe to call on the event loop.
+        On failure the temp file is removed and the error propagates.
+        """
+        try:
+            os.replace(staged.temp_path, staged.final_path)
+        except BaseException:
+            staged.temp_path.unlink(missing_ok=True)
+            raise
+        return staged.record
+
+    @staticmethod
+    def discard_staged(staged: StagedWrite) -> None:
+        """Drop a staged record that will not be published. Idempotent."""
+        staged.temp_path.unlink(missing_ok=True)
 
     def get_cluster_assignment(
         self, cluster_assignment_id: str

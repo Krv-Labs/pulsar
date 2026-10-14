@@ -42,7 +42,7 @@ from pulsar.mcp.payloads import (
     size_summary,
     summary_evidence_payload_to_markdown,
 )
-from pulsar.mcp.registry import registry
+from pulsar.mcp.registry import StagedWrite, registry
 from pulsar.mcp.session import SessionConflictError, _get_session, run_session_worker
 
 logger = logging.getLogger(__name__)
@@ -211,31 +211,6 @@ def _compute_evidence_index(
     return evidence_index, fingerprint
 
 
-def _get_or_build_evidence_index(
-    session: Any,
-    *,
-    cluster_result: Any,
-    exclude_columns: list[str] | None,
-    max_clusters_to_characterize: int | None = None,
-) -> FeatureEvidenceIndex:
-    evidence_index, fingerprint = _compute_evidence_index(
-        session.model,
-        session.data,
-        session.latest_run_id,
-        session.feature_evidence_index,
-        session.feature_evidence_fingerprint,
-        cluster_result=cluster_result,
-        exclude_columns=exclude_columns,
-        max_clusters_to_characterize=max_clusters_to_characterize,
-    )
-    session.feature_evidence_index = evidence_index
-    session.feature_evidence_fingerprint = fingerprint
-    # cluster_meta is owned by generate_cluster_dossier (built once per call and
-    # assigned to the session), so it is not (re)built here. Building it on the
-    # cache-miss path only would also leave it stale on a cache hit.
-    return evidence_index
-
-
 def _compute_dossier_worker(
     session: Any,
     model: Any,
@@ -252,10 +227,12 @@ def _compute_dossier_worker(
     exclude_columns: list[str] | None,
     max_char_cap: int,
     detail: Literal["summary", "standard", "full"],
-) -> tuple[Any, dict[str, Any], FeatureEvidenceIndex, str, Any]:
-    """Compute clusters/evidence/dossier. Never mutates ``session`` or persists.
+) -> tuple[Any, dict[str, Any], FeatureEvidenceIndex, str, Any, StagedWrite]:
+    """Compute clusters/evidence/dossier. Never mutates ``session``.
 
-    The caller publishes on the event loop (``_publish_dossier_on_loop``).
+    The cluster assignment is only *staged* (serialized + fsynced to a temp
+    file; O(rows)). The caller commits it and publishes on the event loop
+    (``_publish_dossier_on_loop``), or discards it if the publish is refused.
     """
     if expected_run_id is not None and session.latest_run_id != expected_run_id:
         raise SessionConflictError(
@@ -290,7 +267,16 @@ def _compute_dossier_worker(
             evidence_index=evidence_index,
         )
     )
-    return result, cluster_meta, evidence_index, fingerprint, dossier
+    staged_assignment = registry.stage_cluster_assignment(
+        run_id=expected_run_id,
+        dataset_id=data_dataset_id,
+        method=str(cluster_meta["method_used"]),
+        interpretation_edge_weight_threshold=resolved_interpretation_threshold,
+        threshold_source=threshold_source,
+        construction_threshold=construction_threshold,
+        labels=result.labels.astype(int).tolist(),
+    )
+    return result, cluster_meta, evidence_index, fingerprint, dossier, staged_assignment
 
 
 def _publish_dossier_on_loop(
@@ -300,32 +286,26 @@ def _publish_dossier_on_loop(
     cluster_meta: dict[str, Any],
     evidence_index: FeatureEvidenceIndex,
     fingerprint: str,
+    staged_assignment: StagedWrite,
     expected_run_id: str | None,
-    data_dataset_id: str | None,
-    resolved_interpretation_threshold: float,
-    threshold_source: str,
-    construction_threshold: float,
     exclude_columns: list[str] | None,
 ) -> Any:
-    """Persist the assignment and publish dossier state in one synchronous block.
+    """Commit the staged assignment and publish dossier state synchronously.
 
-    The run check precedes ``save_cluster_assignment`` and no ``await`` separates
-    them from ``publish_dossier``, so a refused dossier persists nothing.
+    The run check precedes the commit and no ``await`` separates them from
+    ``publish_dossier``. A refused dossier discards its staged file, so nothing
+    is persisted unless it is published.
     """
-    if session.latest_run_id != expected_run_id:
-        raise SessionConflictError(
-            "Active run changed while computing cluster dossier; "
-            "refusing to publish stale clusters."
-        )
-    assignment = registry.save_cluster_assignment(
-        run_id=expected_run_id,
-        dataset_id=data_dataset_id,
-        method=str(cluster_meta["method_used"]),
-        interpretation_edge_weight_threshold=resolved_interpretation_threshold,
-        threshold_source=threshold_source,
-        construction_threshold=construction_threshold,
-        labels=result.labels.astype(int).tolist(),
-    )
+    try:
+        if session.latest_run_id != expected_run_id:
+            raise SessionConflictError(
+                "Active run changed while computing cluster dossier; "
+                "refusing to publish stale clusters."
+            )
+        assignment = registry.commit_staged(staged_assignment)
+    except BaseException:
+        registry.discard_staged(staged_assignment)
+        raise
     session.publish_dossier(
         expected_run_id=expected_run_id,
         clusters=result.labels,
@@ -483,6 +463,7 @@ async def generate_cluster_dossier(
             evidence_index,
             fingerprint,
             dossier,
+            staged_assignment,
         ) = await run_session_worker(
             session,
             _compute_dossier_worker,
@@ -510,11 +491,8 @@ async def generate_cluster_dossier(
             cluster_meta=cluster_meta,
             evidence_index=evidence_index,
             fingerprint=fingerprint,
+            staged_assignment=staged_assignment,
             expected_run_id=expected_run_id,
-            data_dataset_id=data_dataset_id,
-            resolved_interpretation_threshold=resolved_interpretation_threshold,
-            threshold_source=threshold_source,
-            construction_threshold=construction_threshold,
             exclude_columns=exclude_columns,
         )
         assignment_summary = _cluster_assignment_summary(assignment)

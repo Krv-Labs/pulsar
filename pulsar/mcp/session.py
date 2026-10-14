@@ -133,9 +133,10 @@ class _PulsarSession:
     # Bumped by every publish (audit counter). Do NOT use it as a conflict token:
     # dossier / artifact / longitudinal publishes bump it too.
     revision: int = 0
-    # Bumped only by publish_sweep. This is the sweep conflict token: a sweep is
-    # refused only if another sweep published while it ran, never because an
-    # unrelated dossier/artifact/longitudinal publish landed.
+    # Bumped only by publish_sweep. Sweeps are serialized by the mutation lock and
+    # are last-writer-wins, so this is NOT a sweep conflict token. It exists so
+    # loop-side readers (``_load_session_dataframe``) can tell that a sweep
+    # rebound the session's data while they were reading.
     sweep_revision: int = 0
     # Mutated only on the event-loop thread (incremented/decremented by
     # run_session_worker), never inside a worker thread.
@@ -152,17 +153,9 @@ class _PulsarSession:
     # a single synchronous block is atomic w.r.t. other coroutines. Workers
     # compute and return results; they never call these.
 
-    def check_sweep_current(self, expected_sweep_revision: int) -> None:
-        if self.sweep_revision != expected_sweep_revision:
-            raise SessionConflictError(
-                "Another sweep published while this sweep was running; refusing "
-                "to overwrite it with a stale sweep."
-            )
-
     def publish_sweep(
         self,
         *,
-        expected_sweep_revision: int,
         config_yaml: str | None = None,
         config_dataset_id: str | None = None,
         model: ThemaRS,
@@ -176,7 +169,6 @@ class _PulsarSession:
         record: SweepRecord,
         run_id: str,
     ) -> None:
-        self.check_sweep_current(expected_sweep_revision)
         if config_yaml is not None:
             self.active_config_yaml = config_yaml
             self.active_config_dataset_id = config_dataset_id

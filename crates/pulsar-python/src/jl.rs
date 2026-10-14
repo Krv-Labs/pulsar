@@ -77,8 +77,10 @@ pub fn jl_grid<'py>(
     center: bool,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     validate_rows(data.as_array().nrows())?;
-    // Kept as an owned snapshot: borrowing numpy memory across allow_threads
-    // would let another Python thread mutate the buffer mid-computation.
+    // Owned snapshot by choice, not necessity: rust-numpy borrows stay valid
+    // across allow_threads, but copying matches the other bindings in this
+    // crate and shields the computation from unchecked Python-side writes to
+    // the buffer while the GIL is released. Cost: one O(n*d) copy.
     let arr = data.as_array().to_owned();
     let embeddings =
         py.allow_threads(|| pulsar_core::jl_grid(&arr.view(), &dimensions, &seeds, center))?;

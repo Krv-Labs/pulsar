@@ -80,6 +80,16 @@ task-capable client polls transparently, and progress is still reported. The
 durable state is the session handles (`run_id`, `dataset_id`), not the task
 object: follow-up tools such as `diagnose_cosmic_graph` use them as usual.
 
+## TRANSPORT
+In-memory model state (the fitted model, cluster cache) is guaranteed to persist
+between calls only on stdio and on legacy-session HTTP (clients that receive an
+`mcp-session-id`). On the 2026-07-28 stateless Streamable HTTP protocol there is no
+session id: each request is isolated from other clients but gets a fresh session,
+so a fitted model is NOT preserved between calls (for example,
+`run_topological_sweep` then `diagnose_cosmic_graph` may not see the sweep).
+`dataset_id` and `run_id` handles are the durable state (on-disk registry). Check
+`get_runtime_context` (`transport_assumption`, `model_continuity`) if unsure.
+
 ## LONGITUDINAL DATA (PANELS)
 If the dataset is long-format — one row per (entity, time) — the static sweep is the
 wrong tool: it treats every row as an independent point and loses the panel structure.

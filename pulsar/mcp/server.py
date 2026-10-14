@@ -109,6 +109,20 @@ register_server_tools(mcp)
 
 
 def main():
+    # mcp.run() with no argument uses fastmcp.settings.transport (FASTMCP_TRANSPORT),
+    # so a non-stdio transport can be selected by the environment.
+    import fastmcp
+
+    transport = fastmcp.settings.transport
+    if transport != "stdio":
+        logger.warning(
+            "Pulsar MCP is starting on transport %r. In-memory fitted-model "
+            "continuity between tool calls is guaranteed only on stdio and "
+            "legacy-session HTTP; stateless HTTP isolates clients but does not "
+            "preserve the fitted model between calls. Use dataset_id / run_id "
+            "handles as the durable state.",
+            transport,
+        )
     mcp.run()
 
 

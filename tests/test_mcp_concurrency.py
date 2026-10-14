@@ -18,6 +18,7 @@ import pytest
 from pulsar.exports import export_dataset_bundle
 from pulsar.mcp import registry as registry_mod
 from pulsar.mcp import session as session_mod
+from pulsar.mcp.tools import clustering as clustering_mod
 from pulsar.mcp.tools.clustering import generate_cluster_dossier
 from pulsar.mcp.tools.config import create_config
 from pulsar.mcp.tools.ingestion import ingest_dataset
@@ -497,94 +498,198 @@ def test_heavy_admission_queues_on_loop_not_executor_threads() -> None:
     asyncio.run(_run())
 
 
-def test_sweep_refused_by_conflict_returns_envelope_and_persists_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """F5/F6: a stale sweep is refused with a structured envelope, no orphan run."""
+def test_concurrent_sweeps_serialize_last_writer_wins(tmp_path: Path) -> None:
+    """Two sweeps on one session both succeed; the later publish is the live run."""
 
     async def _run() -> None:
-        ctx = _make_ctx("sweep-conflict")
-        csv_path = _write_synthetic_csv(tmp_path / "conflict.csv", n_rows=80)
+        ctx = _make_ctx("sweep-serial")
+        csv_path = _write_synthetic_csv(tmp_path / "serial.csv", n_rows=80)
         dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
         session = session_mod._get_session(ctx)
 
-        entered = threading.Event()
-        release = threading.Event()
-        orig_fit = ThemaRS.fit
-
-        def _gated_fit(self: ThemaRS, *args, **kwargs):
-            entered.set()
-            release.wait(timeout=5.0)
-            return orig_fit(self, *args, **kwargs)
-
-        monkeypatch.setattr(ThemaRS, "fit", _gated_fit)
-        task = asyncio.create_task(
-            run_topological_sweep(
-                config_yaml=config_yaml,
-                dataset_id=dataset_id,
-                response_format="json",
-                ctx=ctx,
+        raw = await asyncio.gather(
+            *(
+                run_topological_sweep(
+                    config_yaml=config_yaml,
+                    dataset_id=dataset_id,
+                    response_format="json",
+                    ctx=ctx,
+                )
+                for _ in range(2)
             )
         )
-        await _wait_for_event(entered)
-        # Simulate another sweep publishing while this one computes.
-        session.sweep_revision += 1
-        release.set()
-        res = json.loads(await task)
+        first, second = (json.loads(r) for r in raw)
 
-        assert res["status"] == "error"
-        assert res["tool"] == "run_topological_sweep"
-        assert res["error_code"] == "SESSION_REVISION_CONFLICT"
-        assert "Another sweep published" in res["reason"]
-        assert res["agent_action"]
-        assert session.latest_run_id is None
-        assert session.sweep_history == []
-        assert session.model is None
-        assert session.active_ops == 0
+        assert first["status"] == "ok"
+        assert second["status"] == "ok"
+        assert first["run_id"] != second["run_id"]
+        # The mutation lock is FIFO, so the second call publishes last.
+        assert session.latest_run_id == second["run_id"]
+        assert len(session.sweep_history) == 2
         assert not session._worker_mutation_lock.locked()
-        runs_dir = registry_mod._RUNS_DIR
-        assert not runs_dir.exists() or list(runs_dir.glob("*.json")) == []
+        assert session.active_ops == 0
+        run_files = {p.stem for p in registry_mod._RUNS_DIR.glob("*.json")}
+        assert run_files == {first["run_id"], second["run_id"]}
+        assert list(registry_mod._RUNS_DIR.glob(".*")) == []
 
     asyncio.run(_run())
 
 
-def test_unrelated_publish_does_not_refuse_sweep(
+def test_dossier_refused_when_sweep_replaced_model_persists_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F6 policy: dossier/artifact/longitudinal publishes bump revision, not the
-    sweep conflict token, so they never refuse a running sweep."""
+    """A dossier computed against a replaced run is refused; no file is left."""
 
     async def _run() -> None:
-        ctx = _make_ctx("sweep-unrelated")
-        csv_path = _write_synthetic_csv(tmp_path / "unrelated.csv", n_rows=80)
+        ctx = _make_ctx("dossier-conflict")
+        csv_path = _write_synthetic_csv(tmp_path / "dossier.csv", n_rows=80)
         dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
-        session = session_mod._get_session(ctx)
-
-        entered = threading.Event()
-        release = threading.Event()
-        orig_fit = ThemaRS.fit
-
-        def _gated_fit(self: ThemaRS, *args, **kwargs):
-            entered.set()
-            release.wait(timeout=5.0)
-            return orig_fit(self, *args, **kwargs)
-
-        monkeypatch.setattr(ThemaRS, "fit", _gated_fit)
-        task = asyncio.create_task(
-            run_topological_sweep(
+        sweep = json.loads(
+            await run_topological_sweep(
                 config_yaml=config_yaml,
                 dataset_id=dataset_id,
                 response_format="json",
                 ctx=ctx,
             )
         )
+        session = session_mod._get_session(ctx)
+        assert session.latest_run_id == sweep["run_id"]
+
+        entered = threading.Event()
+        release = threading.Event()
+        orig_resolve = clustering_mod.resolve_clusters
+
+        def _gated_resolve(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=5.0)
+            return orig_resolve(*args, **kwargs)
+
+        monkeypatch.setattr(clustering_mod, "resolve_clusters", _gated_resolve)
+        task = asyncio.create_task(
+            generate_cluster_dossier(
+                method="components", response_format="json", ctx=ctx
+            )
+        )
         await _wait_for_event(entered)
-        session.revision += 1  # what a dossier/artifact/longitudinal publish does
+        # A newer sweep replaced the live run while the dossier computed.
+        session.latest_run_id = "run_replaced_by_newer_sweep"
         release.set()
         res = json.loads(await task)
-        assert res["status"] == "ok"
-        assert session.latest_run_id == res["run_id"]
-        assert session.sweep_revision == 1
-        assert session.revision == 2
+
+        assert res["status"] == "error"
+        assert res["tool"] == "generate_cluster_dossier"
+        assert res["error_code"] == "SESSION_REVISION_CONFLICT"
+        assert "Active run changed" in res["reason"]
+        assert res["agent_action"]
+        assert session.clusters is None
+        assert session.cluster_assignment_id is None
+        assert session.active_ops == 0
+        assert not session._worker_mutation_lock.locked()
+        # No committed assignment and no staged temp file left behind.
+        ca_dir = registry_mod._CLUSTER_ASSIGNMENTS_DIR
+        assert [p.name for p in ca_dir.iterdir()] == []
+
+    asyncio.run(_run())
+
+
+def test_staged_run_and_assignment_visible_only_after_commit() -> None:
+    reg = registry_mod.registry
+    staged_ca = reg.stage_cluster_assignment(
+        run_id="run_x",
+        dataset_id=None,
+        method="components",
+        interpretation_edge_weight_threshold=0.0,
+        threshold_source="explicit",
+        construction_threshold=0.0,
+        labels=[0, 1, 1, 2],
+    )
+    staged_run = reg.stage_run(
+        dataset_id=None,
+        config_yaml="run: {}",
+        metrics={},
+        resolved_construction_threshold=0.0,
+        graph_summary={},
+    )
+    ca_id = staged_ca.record.cluster_assignment_id
+    run_id = staged_run.record.run_id
+
+    assert reg.get_cluster_assignment(ca_id) is None
+    assert reg.get_run(run_id) is None
+    assert list(registry_mod._CLUSTER_ASSIGNMENTS_DIR.glob("*.json")) == []
+    assert list(registry_mod._RUNS_DIR.glob("*.json")) == []
+    assert staged_ca.temp_path.exists() and staged_run.temp_path.exists()
+
+    reg.commit_staged(staged_ca)
+    reg.commit_staged(staged_run)
+    loaded = reg.get_cluster_assignment(ca_id)
+    assert loaded is not None and loaded.labels == [0, 1, 1, 2]
+    assert loaded.cluster_ids == [0, 1, 2]
+    assert reg.get_run(run_id) is not None
+    assert not staged_ca.temp_path.exists() and not staged_run.temp_path.exists()
+
+    discarded = reg.stage_cluster_assignment(
+        run_id=None,
+        dataset_id=None,
+        method="components",
+        interpretation_edge_weight_threshold=0.0,
+        threshold_source="explicit",
+        construction_threshold=0.0,
+        labels=[0],
+    )
+    reg.discard_staged(discarded)
+    reg.discard_staged(discarded)  # idempotent
+    assert not discarded.temp_path.exists()
+    assert reg.get_cluster_assignment(discarded.record.cluster_assignment_id) is None
+
+
+def test_staging_does_not_take_registry_process_lock() -> None:
+    """Staging must not wait on the registry lock a long upload/hash may hold."""
+    reg = registry_mod.registry
+    held = threading.Event()
+    done = threading.Event()
+
+    def _hold_lock() -> None:
+        with registry_mod._PROCESS_LOCK:
+            held.set()
+            done.wait(timeout=5.0)
+
+    holder = threading.Thread(target=_hold_lock)
+    holder.start()
+    try:
+        assert held.wait(timeout=2.0)
+        result: list[object] = []
+        stager = threading.Thread(
+            target=lambda: result.append(
+                reg.stage_cluster_assignment(
+                    run_id=None,
+                    dataset_id=None,
+                    method="components",
+                    interpretation_edge_weight_threshold=0.0,
+                    threshold_source="explicit",
+                    construction_threshold=0.0,
+                    labels=[0, 1],
+                )
+            )
+        )
+        stager.start()
+        stager.join(timeout=2.0)
+        assert not stager.is_alive(), "stage blocked on _PROCESS_LOCK"
+        reg.discard_staged(result[0])
+    finally:
+        done.set()
+        holder.join()
+
+
+def test_runtime_context_reports_transport_and_model_continuity() -> None:
+    async def _run() -> None:
+        ctx = _make_ctx("transport-ctx")
+        stdio = json.loads(await get_runtime_context(ctx=ctx))
+        assert stdio["transport_assumption"] == "stdio-single-client"
+        assert "stateless HTTP" in stdio["model_continuity"].replace(
+            "Stateless", "stateless"
+        )
+        ctx.transport = "streamable-http"
+        http = json.loads(await get_runtime_context(ctx=ctx))
+        assert http["transport_assumption"] == "streamable-http"
 
     asyncio.run(_run())

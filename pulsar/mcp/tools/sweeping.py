@@ -28,10 +28,9 @@ from pulsar.mcp.payloads import (
     build_sweep_summary_payload,
     sweep_payload_to_markdown,
 )
-from pulsar.mcp.registry import registry
+from pulsar.mcp.registry import StagedWrite, registry
 from pulsar.mcp.session import (
     OperationCancelledError,
-    SessionConflictError,
     SweepRecord,
     _dataset_id_for_path,
     _get_session,
@@ -292,6 +291,7 @@ _POST_FIT_PROGRESS_STAGES = frozenset(
 class _SweepComputation:
     """Pure result of a sweep worker; published later on the event loop."""
 
+    staged_run: StagedWrite
     model: ThemaRS
     current_metrics: dict[str, Any]
     graph_summary: dict[str, Any]
@@ -305,9 +305,9 @@ class _SweepComputation:
 
 def _execute_sweep_worker(
     session: Any,
-    expected_sweep_revision: int,
     model: ThemaRS,
     cfg: Any,
+    current_yaml: str,
     dataset_id: str,
     session_dataset_id: str | None,
     precomputed: list[Any] | None,
@@ -315,16 +315,15 @@ def _execute_sweep_worker(
     progress_callback: Callable[[str, float], None],
     cancel_event: threading.Event,
 ) -> _SweepComputation:
-    """Compute a sweep. Never mutates ``session`` or the registry.
+    """Compute a sweep. Never mutates ``session``; only stages a run file.
 
-    Publication (session state, registry run, saved config) happens on the loop
-    in ``run_topological_sweep`` so loop-side readers never see half-published
-    state and a refused sweep leaves nothing persisted.
+    Publication (session state, saved config, run-file commit) happens on the
+    loop in ``run_topological_sweep`` so loop-side readers never see
+    half-published state. The run record is only *staged* here (serialized and
+    fsynced to a temp file); it becomes visible when the loop commits it.
     """
     from pulsar.mcp.tools.diagnostics import _threshold_curve_payload
 
-    # Early-out for sweeps that queued behind another sweep (read-only check).
-    session.check_sweep_current(expected_sweep_revision)
     model.fit(
         _precomputed_embeddings=precomputed,
         progress_callback=progress_callback,
@@ -355,9 +354,19 @@ def _execute_sweep_worker(
     )
     progress_callback("build response", 0.97)
     progress_callback("persist run", 0.98)
+    staged_run = registry.stage_run(
+        dataset_id=bound_dataset_id,
+        config_yaml=current_yaml,
+        metrics=current_metrics,
+        resolved_construction_threshold=model.resolved_construction_threshold,
+        graph_summary=graph_summary,
+        threshold_stability_summary=threshold_curve_summary,
+    )
     if cancel_event.is_set():
+        registry.discard_staged(staged_run)
         raise OperationCancelledError("Topological sweep cancelled before publication.")
     return _SweepComputation(
+        staged_run=staged_run,
         model=model,
         current_metrics=current_metrics,
         graph_summary=graph_summary,
@@ -374,40 +383,34 @@ def _publish_sweep_on_loop(
     session: Any,
     computation: _SweepComputation,
     *,
-    expected_sweep_revision: int,
     current_yaml: str,
     resolved_config_dataset_id: str | None,
     cfg: Any,
     save_config: bool,
 ) -> tuple[Any, str | None]:
-    """Persist and publish a finished sweep in one synchronous block.
+    """Commit the staged run and publish a finished sweep, synchronously.
 
-    Conflict policy: a sweep conflicts only with another *sweep* publish
-    (``session.sweep_revision``). Dossier, graph-artifact and longitudinal
-    publishes bump ``session.revision`` but do not invalidate a sweep, because a
-    sweep replaces model/data wholesale and depends on none of their state. The
-    check, ``registry.save_run`` and ``publish_sweep`` run with no ``await``
-    between them, so the run is persisted only if it is published (no orphans).
+    Sweeps are serialized by the session mutation lock and each result is
+    self-contained (own config, fingerprint, run record), so there is no
+    sweep-vs-sweep conflict: the last sweep to finish wins. The commit
+    (``os.replace``) and ``publish_sweep`` have no ``await`` between them; if
+    anything fails before the commit the staged file is discarded, so a run is
+    visible only if it was published.
     """
-    session.check_sweep_current(expected_sweep_revision)
     metrics = computation.current_metrics
     model = computation.model
-    run_record = registry.save_run(
-        dataset_id=computation.bound_dataset_id,
-        config_yaml=current_yaml,
-        metrics=metrics,
-        resolved_construction_threshold=model.resolved_construction_threshold,
-        graph_summary=computation.graph_summary,
-        threshold_stability_summary=computation.threshold_curve_summary,
-    )
     record = SweepRecord(
         timestamp=time.time(),
         config_yaml=current_yaml,
         metrics=metrics,
         dataset_id=computation.bound_dataset_id,
     )
+    try:
+        run_record = registry.commit_staged(computation.staged_run)
+    except BaseException:
+        registry.discard_staged(computation.staged_run)
+        raise
     session.publish_sweep(
-        expected_sweep_revision=expected_sweep_revision,
         config_yaml=current_yaml,
         config_dataset_id=resolved_config_dataset_id,
         model=model,
@@ -491,7 +494,6 @@ async def run_topological_sweep(
         resolved_config_dataset_id = (
             resolved_dataset_id or session.active_config_dataset_id
         )
-        expected_sweep_revision = session.sweep_revision
         cached_fingerprints = (
             session.projection_fingerprint,
             session.pca_fingerprint,
@@ -551,9 +553,9 @@ async def run_topological_sweep(
             session,
             _execute_sweep_worker,
             session,
-            expected_sweep_revision,
             model,
             cfg,
+            current_yaml,
             dataset_id,
             session_dataset_id,
             precomputed,
@@ -568,7 +570,6 @@ async def run_topological_sweep(
         run_record, saved_path = _publish_sweep_on_loop(
             session,
             computation,
-            expected_sweep_revision=expected_sweep_revision,
             current_yaml=current_yaml,
             resolved_config_dataset_id=resolved_config_dataset_id,
             cfg=cfg,
@@ -681,20 +682,6 @@ async def run_topological_sweep(
         )
     except LookupError:
         return unknown_handle_error("run_topological_sweep", "dataset_id", dataset_id)
-    except SessionConflictError as e:
-        logger.info("Sweep refused: %s", e)
-        return mcp_error(
-            "run_topological_sweep",
-            str(e),
-            error_code=e.error_code,
-            agent_action=(
-                "No run was persisted or published. Another sweep replaced the "
-                "session's live run while this one was computing; call "
-                "get_runtime_context to see the current run, then re-run the "
-                "sweep if you still want this config."
-            ),
-            details={"conflict_token": "sweep_revision"},
-        )
     except Exception as e:
         logger.error(f"Error running sweep: {e}")
         return mcp_error("run_topological_sweep", str(e))
