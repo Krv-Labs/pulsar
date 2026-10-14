@@ -2,6 +2,22 @@ use numpy::PyReadonlyArray2;
 use pyo3::prelude::*;
 
 use pulsar_core::ballmapper as core;
+use pulsar_core::PulsarError;
+
+/// Reject empty point clouds before they reach core `assert!`s.
+fn validate_points(nrows: usize, ncols: usize) -> Result<(), PulsarError> {
+    if nrows == 0 {
+        return Err(PulsarError::InvalidParameter {
+            msg: "BallMapper input has 0 rows (points)".to_string(),
+        });
+    }
+    if ncols == 0 {
+        return Err(PulsarError::InvalidParameter {
+            msg: "BallMapper input has 0 columns (features)".to_string(),
+        });
+    }
+    Ok(())
+}
 
 /// A fitted Ball Mapper complex.
 ///
@@ -24,7 +40,9 @@ impl BallMapper {
 
     /// Fit the Ball Mapper to a point cloud.
     pub fn fit(&mut self, py: Python<'_>, points: PyReadonlyArray2<f64>) -> PyResult<()> {
-        let arr = points.as_array().as_standard_layout().into_owned();
+        let view = points.as_array();
+        validate_points(view.nrows(), view.ncols())?;
+        let arr = view.as_standard_layout().into_owned();
         py.allow_threads(|| self.core.fit(arr.view()));
         Ok(())
     }
@@ -66,10 +84,12 @@ pub fn ball_mapper_grid(
     embeddings: Vec<PyReadonlyArray2<f64>>,
     epsilons: Vec<f64>,
 ) -> PyResult<Vec<BallMapper>> {
-    let owned: Vec<_> = embeddings
-        .iter()
-        .map(|e| e.as_array().as_standard_layout().into_owned())
-        .collect();
+    let mut owned = Vec::with_capacity(embeddings.len());
+    for e in &embeddings {
+        let view = e.as_array();
+        validate_points(view.nrows(), view.ncols())?;
+        owned.push(view.as_standard_layout().into_owned());
+    }
     let results = py.allow_threads(|| core::ball_mapper_grid(&owned, &epsilons));
     Ok(results
         .into_iter()
