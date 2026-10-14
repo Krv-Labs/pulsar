@@ -869,6 +869,10 @@ def repair_config(
         return mcp_error(
             "repair_preprocessing_config",
             "config_yaml must be a valid YAML mapping.",
+            error_code="CONFIG_YAML_INVALID",
+            agent_action=(
+                "Pass config_yaml as a YAML mapping with the usual top-level sections."
+            ),
         )
 
     pre = config_dict.setdefault("preprocessing", {})
@@ -999,12 +1003,22 @@ def repair_config(
         return mcp_error(
             "repair_preprocessing_config",
             f"Unrecognized preprocessing error pattern. Raw error:\n{error_message}",
+            error_code="ERROR_PATTERN_UNRECOGNIZED",
+            agent_action=(
+                "Edit the preprocessing block by hand using the error text, "
+                "then call validate_preprocessing_config."
+            ),
         )
 
     if not changes:
         return mcp_error(
             "repair_preprocessing_config",
             "Error was classified but no changes were needed. Review the error message manually.",
+            error_code="NO_REPAIR_NEEDED",
+            agent_action=(
+                "Review the error message manually; the config needed no automatic "
+                "change."
+            ),
         )
 
     # Classify error for display

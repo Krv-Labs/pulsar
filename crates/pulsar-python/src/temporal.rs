@@ -39,7 +39,8 @@ pub fn accumulate_temporal_pseudo_laplacians<'py>(
         .map(|bms| bms.iter().map(|bm| &bm.core.nodes).collect())
         .collect();
 
-    let tensor = core::accumulate_temporal_pseudo_laplacians_inner(&nodes_per_time, n);
+    let tensor =
+        py.allow_threads(|| core::accumulate_temporal_pseudo_laplacians_inner(&nodes_per_time, n));
 
     Ok(tensor.into_pyarray_bound(py))
 }
@@ -75,6 +76,6 @@ pub fn py_normalize_temporal_laplacian<'py>(
     l: numpy::PyReadonlyArray3<'py, i64>,
 ) -> PyResult<Bound<'py, PyArray3<f64>>> {
     let arr = l.as_array().to_owned();
-    let w = core::normalize_temporal_laplacian(&arr);
+    let w = py.allow_threads(|| core::normalize_temporal_laplacian(&arr));
     Ok(w.into_pyarray_bound(py))
 }

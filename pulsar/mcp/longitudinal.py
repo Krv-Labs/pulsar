@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 import os
+import threading
 from typing import Any, Literal
 
 import numpy as np
@@ -31,6 +32,7 @@ from pulsar.config import PulsarConfig
 from pulsar.mcp.payloads import bounded_list, size_summary
 from pulsar.representations import CosmicTrajectory, TemporalCosmicGraph
 from pulsar._pulsar import impute_column
+from .session import OperationCancelledError
 
 PIVOT_POLICIES = ("drop_entity", "forward_fill", "allow_ragged")
 REPRESENTATIONS = ("trajectory", "temporal", "both")
@@ -739,11 +741,17 @@ def build_representations(
     config: PulsarConfig,
     representation: str,
     similarity_threshold: float,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[CosmicTrajectory | None, TemporalCosmicGraph | None]:
     """Blocking build of the requested representations. Call under to_thread."""
     trajectory = None
     temporal = None
     if representation in {"trajectory", "both"}:
+        if cancel_event is not None and cancel_event.is_set():
+            raise OperationCancelledError(
+                "Longitudinal build cancelled before trajectory representation."
+            )
         trajectory = CosmicTrajectory.from_snapshots(
             panel.snapshots,
             config,
@@ -752,7 +760,15 @@ def build_representations(
             similarity_threshold=similarity_threshold,
         )
     if representation in {"temporal", "both"}:
+        if cancel_event is not None and cancel_event.is_set():
+            raise OperationCancelledError(
+                "Longitudinal build cancelled before temporal representation."
+            )
         temporal = TemporalCosmicGraph.from_snapshots(panel.snapshots, config)
+    if cancel_event is not None and cancel_event.is_set():
+        raise OperationCancelledError(
+            "Longitudinal build cancelled after representation build."
+        )
     return trajectory, temporal
 
 

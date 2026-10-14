@@ -220,7 +220,7 @@ Core loop
    * - **compare_clusters**
      - Pairwise statistical tests (Welch's t-test, Kolmogorov-Smirnov, Cohen's d, effect sizes) between two cached clusters. Answers "Are these really different, or just noise?"
    * - **export_labeled_data**
-     - Return your original dataframe with labels from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. Ready for downstream analysis, visualization, or handoff to domain experts.
+     - Write a CSV of your original dataframe with labels (and the cluster names you supply) from a specific ``cluster_assignment_id`` emitted by ``generate_cluster_dossier``. The CSV is ready for downstream analysis, visualization, or handoff to domain experts.
 
 Preprocessing helpers
 ~~~~~~~~~~~~~~~~~~~~~
@@ -325,7 +325,7 @@ categorical encoding is not applied to them.
    * - **get_cross_time_neighbors**
      - Finds observations at other time steps resembling a given ``(entity, time)`` observation.
    * - **classify_trajectories**
-     - Classifies entity trajectories into cohorts via complexity (Shannon entropy), transition (Markov self-retention), sequence (structural path type), Levenshtein, or DTW distance.
+     - Classifies entity trajectories into cohorts via complexity (Shannon entropy), transition (Markov self-retention), sequence (structural path type), Levenshtein, or DTW distance. Returns a per-class summary and a 25-entity preview; pass ``detail="full"`` for every entity.
 
 Meta
 ~~~~
@@ -337,7 +337,107 @@ Meta
    * - Tool
      - What It Does
    * - **get_runtime_context**
-     - Server cwd, cache directory, session state, and path-visibility guidance — useful for sandboxed clients that need to know what the server can actually see on disk.
+     - Server cwd, cache directory, session state, which runs the in-memory model cache holds, and path-visibility guidance — useful for sandboxed clients that need to know what the server can actually see on disk.
+
+Result Shape and Errors
+-----------------------
+
+Every tool returns **two views of the same result**: a text view (markdown or JSON, per the tool's ``response_format``) for the model to read, and ``structured_content``, a JSON object validated against the tool's declared output schema. Clients that parse results programmatically should read the structured content; the text is identical in substance.
+
+Every tool also advertises MCP annotations (read-only, idempotent, destructive, and ``openWorldHint: false`` because the server only touches local files), an output schema, and a description for every parameter.
+
+Cluster state is tied to the latest sweep: any new ``run_topological_sweep`` discards the session's cluster labels and feature-evidence cache, so cluster tools and exports must follow a fresh ``generate_cluster_dossier``. ``run_id`` on cluster tools is a provenance check, not a way to recover old labels.
+
+Responses larger than ``PULSAR_MCP_MAX_RESPONSE_BYTES`` are turned into a ``RESPONSE_TOO_LARGE`` error envelope (see below) rather than truncated, so output schemas stay advertised and every payload stays parseable.
+
+Failures set the MCP **error flag** (``isError``) on the result and carry a JSON envelope in both views:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Field
+     - Meaning
+   * - ``status``
+     - Always ``"error"``.
+   * - ``tool``
+     - The tool that failed.
+   * - ``reason``
+     - Human-readable cause.
+   * - ``error_code``
+     - Stable machine-readable code, for example ``RUN_ID_UNKNOWN``, ``CLUSTERS_STALE``, ``SESSION_REVISION_CONFLICT``, ``MODEL_NOT_LOADED``, or ``INVALID_ARGUMENT``.
+   * - ``agent_action``
+     - A concrete next step. Act on it before retrying.
+   * - ``details`` / ``metrics``
+     - Handle, path, and measurement context relevant to the failure.
+
+Run Handles and the Model Cache
+-------------------------------
+
+``run_topological_sweep`` returns a ``run_id``. Tools that read the fitted model (diagnostics, threshold curve, cluster profiles, exports) accept an optional ``run_id``:
+
+- Omit it to use the session's latest run.
+- Pass it to read an **earlier run**, for example to compare a graph before and after a refinement.
+- Pass it on **stateless transports**, where "latest" cannot be remembered between requests.
+
+Fitted models are kept in a process-wide LRU cache holding the last ``PULSAR_MCP_MODEL_CACHE_SIZE`` runs (default 3). A run that has been evicted, or never existed, returns ``RUN_ID_UNKNOWN``; re-run the sweep. ``get_runtime_context`` lists the cached ``run_id`` values. A cached run holds its model and data in memory until it is evicted, so raise the cache size deliberately on large datasets.
+
+Tools that **publish** session state (``generate_cluster_dossier``, ``create_graph_artifact``) accept only the latest run and refuse an older one with ``SESSION_REVISION_CONFLICT``. Cluster labels remain session-scoped; cluster tools report ``clusters_run_id`` so you can see which run the labels describe. Longitudinal tools read session-only longitudinal artifacts (``longitudinal_id``), not the fitted model, and take no ``run_id``.
+
+Transport Continuity
+--------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Transport
+     - What persists between calls
+   * - **stdio** (default)
+     - One client, one session: cluster labels, the latest-run pointer, longitudinal artifacts, and fitted models all persist.
+   * - **Streamable HTTP with sessions** (legacy clients that receive an ``mcp-session-id``)
+     - The same as stdio, per session.
+   * - **Streamable HTTP, stateless** (protocol revision 2026-07-28)
+     - Each request gets a fresh session. Fitted models survive through the model cache, so pass ``run_id``. Cluster labels and longitudinal artifacts do not; rebuild them in the same chain of calls. ``dataset_id`` handles live in the on-disk registry and always work.
+
+Check ``get_runtime_context`` (``transport_assumption``, ``model_continuity``, ``model_cache``) if unsure. Model state is in memory only and is lost when the server restarts.
+
+Environment Variables
+---------------------
+
+Server operators tune the MCP server through environment variables, set in the MCP client's ``env`` block or the shell that launches ``pulsar-mcp``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 38 14 48
+
+   * - Variable
+     - Default
+     - Effect
+   * - ``PULSAR_MCP_TOOL_TIMEOUT_S``
+     - ``1800``
+     - Per-call timeout in seconds on long tools (sweep, longitudinal build, dossier, characterize, HTML report, dataset bundle).
+   * - ``PULSAR_MCP_MAX_RESPONSE_BYTES``
+     - ``100000``
+     - Backstop on a single response's size, measured as the text view plus the serialized structured content together (so roughly 2x the text an agent reads; about 25k tokens combined). ``0`` or a negative value disables it. A larger result is replaced, never truncated, by an ``is_error`` envelope with ``error_code: RESPONSE_TOO_LARGE`` (``details.size_bytes`` / ``details.limit_bytes``); retry with ``detail="summary"``, lower ``max_*`` / preview limits, or a narrower tool.
+   * - ``PULSAR_MCP_MODEL_CACHE_SIZE``
+     - ``3``
+     - Number of fitted runs kept addressable by ``run_id`` (minimum 1).
+   * - ``PULSAR_MCP_MAX_CONCURRENT_HEAVY``
+     - ``1``
+     - Concurrent heavy computations (sweeps, builds) admitted at once; others queue.
+   * - ``PULSAR_MAX_SESSIONS``
+     - ``3``
+     - Maximum live client sessions held in memory; the least recently used is evicted beyond this.
+   * - ``PULSAR_MCP_ENABLE_TASKS``
+     - off
+     - Set to ``1``, ``true``, or ``yes`` to let task-capable clients run ``run_topological_sweep`` in the background (requires ``fastmcp[tasks]``).
+   * - ``PULSAR_MCP_ENABLE_UPLOAD``
+     - off
+     - Set to ``1`` to expose the chunked upload tools (``begin_dataset_upload``, ``append_dataset_chunk``, ``finalize_dataset_upload``) for sandboxed clients that cannot share a path.
+   * - ``PULSAR_MCP_MAX_TENSOR_BYTES``
+     - ``2 GiB``
+     - Peak working-set ceiling for the dense ``temporal`` longitudinal representation.
 
 Example: Palmer Penguins
 ------------------------

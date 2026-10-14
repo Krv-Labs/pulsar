@@ -4,12 +4,16 @@ import asyncio
 import dataclasses
 import json
 import logging
-from typing import Any, Literal
+import math
+import threading
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import pandas as pd
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
+from pydantic import Field
 
 from pulsar.config import THRESHOLD_RANGE_MESSAGE
 from pulsar.mcp.diagnostics import diagnose_model
@@ -42,8 +46,33 @@ from pulsar.mcp.payloads import (
     size_summary,
     summary_evidence_payload_to_markdown,
 )
-from pulsar.mcp.registry import registry
-from pulsar.mcp.session import _get_session
+from pulsar.mcp.registry import StagedWrite, registry
+from pulsar.mcp.results import mcp_result
+from pulsar.mcp.session import (
+    OperationCancelledError,
+    SessionConflictError,
+    _get_session,
+    is_latest,
+    run_session_worker,
+)
+from pulsar.mcp.toolmeta import (
+    BOOL,
+    default_tool_timeout,
+    INT,
+    NUM,
+    STR,
+    arr,
+    enum,
+    nullable,
+    obj,
+    tool_meta,
+)
+from pulsar.mcp.tools.diagnostics import (
+    OPEN_OBJ,
+    model_not_loaded_error,
+    resolve_run_or_error,
+    stale_write_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,37 +153,6 @@ def _validate_unit_threshold(value: float, *, name: str) -> float:
     return threshold
 
 
-def _spectral_cut_error_to_markdown(error: SpectralClusterCutError) -> str:
-    payload = error.payload(detail="summary")
-    details = payload["details"]
-    best_score = details.get("best_silhouette_score")
-    best = (
-        f"k={details.get('best_k')}, silhouette={best_score:.3f}"
-        if isinstance(best_score, (int, float))
-        else "none"
-    )
-    acceptance_floor = float(details.get("accepted_silhouette_min", 0.0))
-    return "\n".join(
-        [
-            "# No Stable Spectral Cut",
-            "",
-            "- Method: `spectral`",
-            "- Interpretation threshold: "
-            f"`{details.get('interpretation_edge_weight_threshold', 0.0):.4f}`",
-            f"- Affinity components: {details.get('affinity_component_count')}",
-            "- Giant component: "
-            f"{details.get('giant_component_size')} "
-            f"({float(details.get('giant_component_fraction', 0.0)):.1%})",
-            f"- Residual nodes: {details.get('residual_node_count')}",
-            f"- k evaluated: {details.get('k_min')}-{details.get('max_k')}",
-            f"- Best candidate: {best}",
-            f"- Acceptance floor: {acceptance_floor:.3f}",
-            "",
-            "Spectral search ran, but no evaluated cut exceeded the acceptance floor.",
-        ]
-    ).strip()
-
-
 def _feature_evidence_fingerprint(
     *,
     run_id: str | None,
@@ -179,40 +177,157 @@ def _feature_evidence_fingerprint(
     ).hexdigest()
 
 
-def _get_or_build_evidence_index(
-    session: Any,
+def _compute_evidence_index(
+    model: Any,
+    data: pd.DataFrame,
+    latest_run_id: str | None,
+    cached_index: FeatureEvidenceIndex | None,
+    cached_fingerprint: str | None,
     *,
     cluster_result: Any,
     exclude_columns: list[str] | None,
     max_clusters_to_characterize: int | None = None,
-) -> FeatureEvidenceIndex:
+) -> tuple[FeatureEvidenceIndex, str]:
     fingerprint = _feature_evidence_fingerprint(
-        run_id=session.latest_run_id,
+        run_id=latest_run_id,
         labels=cluster_result.labels,
         method=cluster_result.method_used,
         interpretation_edge_weight_threshold=cluster_result.interpretation_edge_weight_threshold_applied,
         exclude_columns=exclude_columns,
         max_clusters_to_characterize=max_clusters_to_characterize,
     )
-    if (
-        session.feature_evidence_index is not None
-        and session.feature_evidence_fingerprint == fingerprint
-    ):
-        return session.feature_evidence_index
+    if cached_index is not None and cached_fingerprint == fingerprint:
+        return cached_index, fingerprint
 
     evidence_index = build_feature_evidence_index(
-        session.model,
-        session.data,
+        model,
+        data,
         cluster_result.labels,
         exclude_columns=exclude_columns,
         max_clusters_to_characterize=max_clusters_to_characterize,
     )
-    session.feature_evidence_index = evidence_index
-    session.feature_evidence_fingerprint = fingerprint
-    # cluster_meta is owned by generate_cluster_dossier (built once per call and
-    # assigned to the session), so it is not (re)built here. Building it on the
-    # cache-miss path only would also leave it stale on a cache hit.
-    return evidence_index
+    return evidence_index, fingerprint
+
+
+def _compute_dossier_worker(
+    session: Any,
+    model: Any,
+    data: pd.DataFrame,
+    expected_run_id: str | None,
+    data_dataset_id: str | None,
+    cached_index: FeatureEvidenceIndex | None,
+    cached_fingerprint: str | None,
+    method: str,
+    max_k: int,
+    resolved_interpretation_threshold: float,
+    threshold_source: str,
+    construction_threshold: float,
+    exclude_columns: list[str] | None,
+    max_char_cap: int,
+    detail: Literal["summary", "standard", "full"],
+    cancel_event: threading.Event | None = None,
+) -> tuple[Any, dict[str, Any], FeatureEvidenceIndex, str, Any, StagedWrite]:
+    """Compute clusters/evidence/dossier. Never mutates ``session``.
+
+    The cluster assignment is only *staged* (serialized + fsynced to a temp
+    file; O(rows)). The caller commits it and publishes on the event loop
+    (``_publish_dossier_on_loop``), or discards it if the publish is refused.
+    """
+    if expected_run_id is not None and session.latest_run_id != expected_run_id:
+        raise SessionConflictError(
+            "Session run changed before dossier computation started; "
+            "refusing to publish stale cluster dossier."
+        )
+    result = resolve_clusters(
+        model,
+        method=method,
+        max_k=max_k,
+        interpretation_edge_weight_threshold=resolved_interpretation_threshold,
+    )
+    cluster_meta = cluster_result_payload(result)
+    evidence_index, fingerprint = _compute_evidence_index(
+        model,
+        data,
+        expected_run_id,
+        cached_index,
+        cached_fingerprint,
+        cluster_result=result,
+        exclude_columns=exclude_columns,
+        max_clusters_to_characterize=max_char_cap,
+    )
+    dossier = (
+        None
+        if detail == "summary"
+        else build_dossier(
+            model,
+            data,
+            result.labels,
+            detail=detail,
+            evidence_index=evidence_index,
+        )
+    )
+    staged_assignment = registry.stage_cluster_assignment(
+        run_id=expected_run_id,
+        dataset_id=data_dataset_id,
+        method=str(cluster_meta["method_used"]),
+        interpretation_edge_weight_threshold=resolved_interpretation_threshold,
+        threshold_source=threshold_source,
+        construction_threshold=construction_threshold,
+        labels=result.labels.astype(int).tolist(),
+    )
+    # A cancel that arrived during staging would otherwise orphan the temp
+    # file: the awaiting coroutine is gone, so nobody would discard it.
+    if cancel_event is not None and cancel_event.is_set():
+        registry.discard_staged(staged_assignment)
+        raise OperationCancelledError("Cluster dossier cancelled before publication.")
+    return result, cluster_meta, evidence_index, fingerprint, dossier, staged_assignment
+
+
+def _publish_dossier_on_loop(
+    session: Any,
+    *,
+    result: Any,
+    cluster_meta: dict[str, Any],
+    evidence_index: FeatureEvidenceIndex,
+    fingerprint: str,
+    staged_assignment: StagedWrite,
+    expected_run_id: str | None,
+    expected_data: Any,
+    exclude_columns: list[str] | None,
+) -> Any:
+    """Commit the staged assignment and publish dossier state synchronously.
+
+    The run and data checks precede the commit and no ``await`` separates them
+    from ``publish_dossier``. A refused dossier discards its staged file, so
+    nothing is persisted unless it is published.
+    """
+    try:
+        if session.latest_run_id != expected_run_id:
+            raise SessionConflictError(
+                "Active run changed while computing cluster dossier; "
+                "refusing to publish stale clusters."
+            )
+        # A rebind replaces session.data without changing the run id, so the
+        # run check alone would publish labels computed on the old rows.
+        if session.data is not expected_data:
+            raise SessionConflictError(
+                "Session data was rebound while computing cluster dossier; "
+                "refusing to publish clusters computed on the previous dataset."
+            )
+        assignment = registry.commit_staged(staged_assignment)
+    except BaseException:
+        registry.discard_staged(staged_assignment)
+        raise
+    session.publish_dossier(
+        expected_run_id=expected_run_id,
+        clusters=result.labels,
+        report_exclude_columns=exclude_columns,
+        feature_evidence_cluster_meta=cluster_meta,
+        cluster_assignment_id=assignment.cluster_assignment_id,
+        feature_evidence_index=evidence_index,
+        feature_evidence_fingerprint=fingerprint,
+    )
+    return assignment
 
 
 def _graph_metrics_payload(model: Any) -> dict[str, Any]:
@@ -245,7 +360,7 @@ class StaleClusterCacheError(Exception):
         )
 
 
-def _stale_cluster_cache_error(tool: str, exc: StaleClusterCacheError) -> str:
+def _stale_cluster_cache_error(tool: str, exc: StaleClusterCacheError) -> ToolResult:
     return mcp_error(
         tool,
         str(exc),
@@ -261,65 +376,254 @@ def _stale_cluster_cache_error(tool: str, exc: StaleClusterCacheError) -> str:
     )
 
 
+def _clusters_not_built_error(tool: str) -> ToolResult:
+    return mcp_error(
+        tool,
+        "No cluster evidence found in this session.",
+        error_code="CLUSTERS_NOT_BUILT",
+        agent_action="Run generate_cluster_dossier first (detail='summary' is enough).",
+    )
+
+
+def _clusters_stale_for_run_error(
+    tool: str, session: Any, requested_run_id: str
+) -> ToolResult:
+    return mcp_error(
+        tool,
+        f"Cluster labels in this session were built for run "
+        f"'{session.clusters_run_id}', not the requested run '{requested_run_id}'.",
+        error_code="CLUSTERS_STALE",
+        agent_action=(
+            "Rebuild the dossier for that run: omit run_id here and call "
+            "generate_cluster_dossier on the session's latest run, or pass "
+            "run_id equal to clusters_run_id."
+        ),
+        details={
+            "requested_run_id": requested_run_id,
+            "clusters_run_id": session.clusters_run_id,
+            "latest_run_id": session.latest_run_id,
+        },
+    )
+
+
 def _require_cluster_state(
-    session: Any,
-) -> tuple[FeatureEvidenceIndex, dict[str, Any]]:
-    if session.model is None or session.data is None:
-        raise ToolError("No model found. Run run_topological_sweep() first.")
+    session: Any, tool: str, run_id: str = ""
+) -> tuple[tuple[FeatureEvidenceIndex, dict[str, Any]] | None, ToolResult | None]:
+    """Return ``((evidence_index, cluster_meta), None)`` or ``(None, error)``.
+
+    Cluster labels are session-scoped. With ``run_id`` given, they must have been
+    built for that run (else CLUSTERS_STALE). Without it, they must match the
+    session's latest run (else CLUSTER_CACHE_STALE).
+    """
+    if not run_id and session.model is None:
+        return None, model_not_loaded_error(tool)
     if session.clusters is None or session.feature_evidence_index is None:
-        raise ToolError(
-            "No cluster evidence found. Run generate_cluster_dossier() first."
-        )
-    # Run-state consistency: reject cluster caches stamped from a prior run.
-    # generate_cluster_dossier recomputes and refreshes the stamp, so this only
-    # fires when a sweep ran after the last dossier (latest_run_id advanced).
-    if session.clusters_run_id != session.latest_run_id:
-        raise StaleClusterCacheError(
-            cached_run_id=session.clusters_run_id,
-            current_run_id=session.latest_run_id,
+        return None, _clusters_not_built_error(tool)
+    if run_id:
+        if run_id != session.clusters_run_id:
+            return None, _clusters_stale_for_run_error(tool, session, run_id)
+    elif session.clusters_run_id != session.latest_run_id:
+        # generate_cluster_dossier recomputes and refreshes the stamp, so this only
+        # fires when a sweep ran after the last dossier (latest_run_id advanced).
+        return None, _stale_cluster_cache_error(
+            tool,
+            StaleClusterCacheError(
+                cached_run_id=session.clusters_run_id,
+                current_run_id=session.latest_run_id,
+            ),
         )
     return (
         session.feature_evidence_index,
         session.feature_evidence_cluster_meta or {},
-    )
+    ), None
 
 
+_CLUSTER_RESULT = OPEN_OBJ
+_SELECTION = OPEN_OBJ
+_CLUSTERS_RUN_ID = nullable(STR)
+_RUN_ID_FOR_CLUSTERS = (
+    "Optional provenance check: the run_id (from run_topological_sweep) the "
+    "session's cluster labels must have been built from; returns CLUSTERS_STALE "
+    "otherwise. Omit to use the current labels unchecked."
+)
+
+_DOSSIER_SCHEMA = obj(
+    {
+        "status": STR,
+        "run_id": STR,
+        "clusters_run_id": _CLUSTERS_RUN_ID,
+        "construction_threshold": NUM,
+        "interpretation_edge_weight_threshold": NUM,
+        "threshold_inherited": BOOL,
+        "threshold_source": STR,
+        "threshold_surface": OPEN_OBJ,
+        "cluster_assignment": OPEN_OBJ,
+        "cluster_assignment_id": STR,
+        "cluster_selection": _SELECTION,
+        "clusters": arr(OPEN_OBJ),
+        "recommended_next_tools": arr(STR),
+        "detail_hint": STR,
+        "surface_labels_ref": STR,
+        "surface_labels": OPEN_OBJ,
+    },
+    [
+        "status",
+        "clusters_run_id",
+        "interpretation_edge_weight_threshold",
+        "threshold_surface",
+        "cluster_assignment_id",
+        "clusters",
+        "recommended_next_tools",
+    ],
+    additional=True,  # summary/standard/full add differently shaped evidence blocks
+)
+
+
+@tool_meta(
+    title="Cluster Evidence Dossier",
+    read_only=False,
+    idempotent=False,
+    output_schema=_DOSSIER_SCHEMA,
+    timeout=default_tool_timeout(),
+)
 async def generate_cluster_dossier(
-    method: Literal["auto", "spectral", "components"] = "auto",
-    max_k: int = 15,
-    interpretation_edge_weight_threshold: float | None = None,
-    detail: Literal["summary", "standard", "full"] = "summary",
-    max_clusters: int = 8,
-    feature_preview_limit: int = 5,
-    response_format: Literal["markdown", "json"] = "markdown",
-    exclude_columns: list[str] | None = None,
+    method: Annotated[
+        Literal["auto", "spectral", "components"],
+        Field(
+            description=(
+                "'components': connected components after dropping edges <= the interpretation threshold. 'spectral': spectral cut of the weighted affinity (may return NO_STABLE_SPECTRAL_CUT). 'auto' (default): 'components' when the resolved interpretation threshold (explicit, or the inherited construction threshold) is > 0; otherwise 'spectral'."
+            )
+        ),
+    ] = "auto",
+    max_k: Annotated[
+        int,
+        Field(
+            description=(
+                "Largest k tried by the spectral search (2..max_k); ignored for "
+                "method='components'. Default 15."
+            )
+        ),
+    ] = 15,
+    interpretation_edge_weight_threshold: Annotated[
+        float | None,
+        Field(
+            description=(
+                "Edge-weight cutoff in [0, 1]; edges <= this are dropped before clustering. Omit to inherit the construction threshold (spectral: 0.0, the full affinity)."
+            )
+        ),
+    ] = None,
+    detail: Annotated[
+        Literal["summary", "standard", "full"],
+        Field(
+            description=(
+                "'summary' (default): cheap per-cluster headline evidence. 'standard': adds per-cluster feature evidence (heavy). 'full': lossless audit payload (heaviest)."
+            )
+        ),
+    ] = "summary",
+    max_clusters: Annotated[
+        int,
+        Field(
+            description=(
+                "Show at most this many clusters, largest first (>= 1); "
+                "clusters_omitted reports the rest. Default 8."
+            )
+        ),
+    ] = 8,
+    feature_preview_limit: Annotated[
+        int,
+        Field(description="Feature hints shown per cluster (>= 0). Default 5."),
+    ] = 5,
+    response_format: Annotated[
+        Literal["markdown", "json"],
+        Field(
+            description=(
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
+            )
+        ),
+    ] = "markdown",
+    exclude_columns: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Column names to hide from the report. Display only: it does not "
+                "change the fitted model or the clustering."
+            )
+        ),
+    ] = None,
+    run_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Run to cluster, from run_topological_sweep. Omit for the latest run. Publishes labels into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT)."
+            )
+        ),
+    ] = "",
     ctx: Context = None,
-) -> str:
-    """Statistical dossier of topological clusters. Use default `summary` for
-    routine loops; `standard`/`full` are heavy — only after narrowing focus.
+) -> ToolResult:
+    """Cluster the fitted graph and build a statistical evidence dossier.
 
-    Args:
-        interpretation_edge_weight_threshold: Drop edges with weight <= this
-            before clustering. Omit to inherit `resolved_construction_threshold`
-            (spectral default is 0.0 / full affinity).
-        max_clusters: Truncate to top-N by size; `clusters_omitted` reports drops.
-        feature_preview_limit: Feature hints per cluster in summary mode.
-        exclude_columns: Hide columns from report (does NOT affect modeling).
+    Publishes the cluster labels used by get_cluster_profile, get_feature_signal,
+    get_cluster_signal_matrix, compare_clusters and export_labeled_data, and
+    persists a cluster_assignment_id. Start with detail='summary'; escalate only
+    after narrowing focus.
     """
+    tool = "generate_cluster_dossier"
     session = _get_session(ctx)
 
-    if session.model is None or session.data is None:
-        raise ToolError("No model found. Run run_topological_sweep() first.")
+    resolved, err = resolve_run_or_error(session, tool, run_id)
+    if err is not None:
+        return err
+    if run_id and not is_latest(session, resolved):
+        return stale_write_error(tool, "cluster dossier")
+    if resolved.data is None:
+        return model_not_loaded_error(tool)
     if max_clusters < 1:
-        raise ToolError(f"max_clusters must be >= 1, got '{max_clusters}'")
-    if feature_preview_limit < 0:
-        raise ToolError(
-            f"feature_preview_limit must be >= 0, got '{feature_preview_limit}'"
+        return mcp_error(
+            tool,
+            f"max_clusters must be >= 1, got '{max_clusters}'",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass max_clusters >= 1.",
         )
+    if feature_preview_limit < 0:
+        return mcp_error(
+            tool,
+            f"feature_preview_limit must be >= 0, got '{feature_preview_limit}'",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass feature_preview_limit >= 0.",
+        )
+    if interpretation_edge_weight_threshold is not None:
+        try:
+            _validate_unit_threshold(
+                interpretation_edge_weight_threshold,
+                name="interpretation_edge_weight_threshold",
+            )
+        except ToolError as exc:
+            return mcp_error(
+                tool,
+                str(exc),
+                error_code="INVALID_ARGUMENT",
+                agent_action=(
+                    "Pass interpretation_edge_weight_threshold as a finite number "
+                    "in [0.0, 1.0], or omit it to inherit the construction "
+                    "threshold."
+                ),
+                details={
+                    "interpretation_edge_weight_threshold": (
+                        interpretation_edge_weight_threshold
+                    )
+                },
+            )
 
     try:
+        model = resolved.model
+        data = resolved.data
+        expected_run_id = session.latest_run_id
+        data_dataset_id = session.data_dataset_id
+        cached_index = session.feature_evidence_index
+        cached_fingerprint = session.feature_evidence_fingerprint
+
         construction_threshold = _validate_unit_threshold(
-            session.model.resolved_construction_threshold,
+            model.resolved_construction_threshold,
             name="resolved_construction_threshold",
         )
         threshold_inherited = interpretation_edge_weight_threshold is None
@@ -342,56 +646,61 @@ async def generate_cluster_dossier(
             threshold_inherited=threshold_inherited,
             threshold_source=threshold_source,
         )
-        result = await asyncio.to_thread(
-            resolve_clusters,
-            session.model,
-            method=method,
-            max_k=max_k,
-            interpretation_edge_weight_threshold=resolved_interpretation_threshold,
-        )
-        session.clusters = result.labels
-        # Stamp the cluster cache with the run it was computed from so reads can
-        # detect when a newer sweep has advanced session.latest_run_id without
-        # recomputing clusters. generate_cluster_dossier recomputes here, so the
-        # stamp is always refreshed to the active fitted model's run.
-        session.clusters_run_id = session.latest_run_id
-        session.report_exclude_columns = exclude_columns
-
-        # Single source of truth for cluster metadata: build the O(n) size table
-        # once, store it on the session, and reuse it for every downstream reader
-        # (compacted header, cluster_selection ID universe, sibling tools).
-        cluster_meta = cluster_result_payload(result)
-        session.feature_evidence_cluster_meta = cluster_meta
-        assignment = registry.save_cluster_assignment(
-            run_id=session.latest_run_id,
-            # Only the dataset the current data was actually loaded from backs a
-            # durable export. session.dataset_id can linger from a prior ingest
-            # while session.data came from a raw data_path, so falling back to it
-            # would record a dataset that does not match these labels. None here
-            # correctly routes export_labeled_data to its in-session fallback.
-            dataset_id=session.data_dataset_id,
-            method=str(cluster_meta["method_used"]),
-            interpretation_edge_weight_threshold=resolved_interpretation_threshold,
-            threshold_source=threshold_source,
-            construction_threshold=construction_threshold,
-            labels=result.labels.astype(int).tolist(),
-        )
-        session.cluster_assignment_id = assignment.cluster_assignment_id
-        assignment_summary = _cluster_assignment_summary(assignment)
 
         # Safety cap: only characterize top N clusters to prevent O(K*F) hang
         # on shattered graphs. Small singletons/noise are omitted from profiling.
         max_char_cap = max(50, max_clusters * 2)
 
-        evidence_index = await asyncio.to_thread(
-            _get_or_build_evidence_index,
+        cancel_event = threading.Event()
+        (
+            result,
+            cluster_meta,
+            evidence_index,
+            fingerprint,
+            dossier,
+            staged_assignment,
+        ) = await run_session_worker(
             session,
-            cluster_result=result,
-            exclude_columns=exclude_columns,
-            max_clusters_to_characterize=max_char_cap,
+            _compute_dossier_worker,
+            session,
+            model,
+            data,
+            expected_run_id,
+            data_dataset_id,
+            cached_index,
+            cached_fingerprint,
+            method,
+            max_k,
+            resolved_interpretation_threshold,
+            threshold_source,
+            construction_threshold,
+            exclude_columns,
+            max_char_cap,
+            detail,
+            cancel_event,
+            heavy=True,
+            mutates_session=True,
+            cancel_event=cancel_event,
         )
+        assignment = _publish_dossier_on_loop(
+            session,
+            result=result,
+            cluster_meta=cluster_meta,
+            evidence_index=evidence_index,
+            fingerprint=fingerprint,
+            staged_assignment=staged_assignment,
+            expected_run_id=expected_run_id,
+            expected_data=data,
+            exclude_columns=exclude_columns,
+        )
+        assignment_summary = _cluster_assignment_summary(assignment)
+        header_note = _two_lever_markdown_note(
+            construction_threshold, resolved_interpretation_threshold
+        ) + _cluster_assignment_markdown(assignment)
         if detail == "summary":
-            summary_feature_preview_limit = (
+            # JSON callers get a tighter per-cluster preview (<= 3); the markdown
+            # view honours feature_preview_limit. The payload shape is identical.
+            summary_preview_limit = (
                 min(feature_preview_limit, 3)
                 if response_format == "json"
                 else feature_preview_limit
@@ -399,19 +708,10 @@ async def generate_cluster_dossier(
             payload = build_summary_evidence_payload(
                 evidence_index,
                 cluster_meta,
-                _graph_metrics_payload(session.model),
+                _graph_metrics_payload(model),
                 max_clusters=max_clusters,
-                feature_preview_limit=summary_feature_preview_limit,
+                feature_preview_limit=summary_preview_limit,
             )
-            payload["construction_threshold"] = construction_threshold
-            payload["interpretation_edge_weight_threshold"] = (
-                resolved_interpretation_threshold
-            )
-            payload["threshold_inherited"] = threshold_inherited
-            payload["threshold_source"] = threshold_source
-            payload["threshold_surface"] = threshold_surface
-            payload["cluster_assignment"] = assignment_summary
-            payload["cluster_assignment_id"] = assignment.cluster_assignment_id
             payload["cluster_selection"] = build_cluster_selection(
                 cluster_meta,
                 [c["cluster_id"] for c in payload["clusters"]],
@@ -427,47 +727,40 @@ async def generate_cluster_dossier(
                 "Use get_cluster_profile/get_feature_signal for evidence; "
                 "detail='full' returns lossless arrays for audit."
             )
-            if response_format == "markdown":
-                body = (
-                    _two_lever_markdown_note(
-                        construction_threshold, resolved_interpretation_threshold
-                    )
-                    + _cluster_assignment_markdown(assignment)
-                    + cluster_selection_to_markdown(payload["cluster_selection"])
-                    + summary_evidence_payload_to_markdown(payload)
-                )
-                return _prepend_threshold_markdown(body, threshold_surface)
-            return json.dumps(
-                payload,
-                separators=(",", ":") if len(payload["clusters"]) > 10 else None,
-                indent=None if len(payload["clusters"]) > 10 else 2,
+            text = (
+                header_note
+                + cluster_selection_to_markdown(payload["cluster_selection"])
+                + summary_evidence_payload_to_markdown(payload)
             )
-
-        dossier = await asyncio.to_thread(
-            build_dossier,
-            session.model,
-            session.data,
-            result.labels,
-            detail=detail,
-            evidence_index=evidence_index,
-        )
-        if response_format == "markdown":
-            body = (
-                _two_lever_markdown_note(
-                    construction_threshold, resolved_interpretation_threshold
-                )
-                + _cluster_assignment_markdown(assignment)
-                + dossier_to_markdown(dossier)
+        else:
+            payload = build_evidence_payload(
+                dossier,
+                cluster_meta,
+                detail=detail,
+                max_clusters=max_clusters,
+                feature_preview_limit=feature_preview_limit,
             )
-            return _prepend_threshold_markdown(body, threshold_surface)
-
-        payload = build_evidence_payload(
-            dossier,
-            cluster_meta,
-            detail=detail,
-            max_clusters=max_clusters,
-            feature_preview_limit=feature_preview_limit,
-        )
+            if detail != "full":
+                payload["surface_labels_ref"] = "get_workflow_guide"
+            else:
+                payload["surface_labels"] = _SURFACE_LABELS
+            payload["cluster_selection"] = build_cluster_selection(
+                cluster_meta,
+                [c["cluster_id"] for c in payload["clusters"]],
+                ranked_by="size",
+            )
+            payload["recommended_next_tools"] = [
+                "get_feature_signal",
+                "compare_clusters",
+                "export_html_report",
+            ]
+            payload["detail_hint"] = (
+                "Use targeted evidence tools for routine loops; detail='full' is the "
+                "lossless audit payload."
+            )
+            text = header_note + dossier_to_markdown(dossier)
+        payload["run_id"] = resolved.run_id
+        payload["clusters_run_id"] = session.clusters_run_id
         payload["construction_threshold"] = construction_threshold
         payload["interpretation_edge_weight_threshold"] = (
             resolved_interpretation_threshold
@@ -477,61 +770,140 @@ async def generate_cluster_dossier(
         payload["threshold_surface"] = threshold_surface
         payload["cluster_assignment"] = assignment_summary
         payload["cluster_assignment_id"] = assignment.cluster_assignment_id
-        if detail != "full":
-            payload["surface_labels_ref"] = "get_workflow_guide"
-        else:
-            payload["surface_labels"] = _SURFACE_LABELS
-        payload["cluster_selection"] = build_cluster_selection(
-            cluster_meta,
-            [c["cluster_id"] for c in payload["clusters"]],
-            ranked_by="size",
-        )
-        payload["recommended_next_tools"] = (
-            [
-                "get_cluster_profile",
-                "get_feature_signal",
-                "get_cluster_signal_matrix",
-                "compare_clusters",
-            ]
-            if detail == "summary"
-            else ["get_feature_signal", "compare_clusters", "export_html_report"]
-        )
-        payload["detail_hint"] = (
-            "Use targeted evidence tools for routine loops; detail='full' is the "
-            "lossless audit payload."
-        )
-        return json.dumps(
-            payload,
-            separators=(",", ":") if len(dossier.clusters) > 10 else None,
-            indent=None if len(dossier.clusters) > 10 else 2,
-        )
+        if response_format == "markdown":
+            return mcp_result(
+                payload, text=_prepend_threshold_markdown(text, threshold_surface)
+            )
+        return mcp_result(payload)
 
     except SpectralClusterCutError as e:
         logger.info("No stable spectral cluster cut: %s", e.diagnostics)
-        if response_format == "markdown":
-            return _spectral_cut_error_to_markdown(e)
-        return json.dumps(e.payload(detail=detail), indent=2)
+        cut = e.payload(detail=detail)
+        cut_details = cut["details"]
+        reason = (
+            f"{cut['reason']} Spectral search ran (k="
+            f"{cut_details.get('k_min')}-{cut_details.get('max_k')}) but no "
+            "evaluated cut exceeded the acceptance floor "
+            f"{cut_details.get('accepted_silhouette_min')}; best candidate "
+            f"k={cut_details.get('best_k')}, "
+            f"silhouette={cut_details.get('best_silhouette_score')}."
+        )
+        return mcp_error(
+            tool,
+            reason,
+            error_code=cut["error_code"],
+            agent_action=(
+                "Try method='components' with an explicit "
+                "interpretation_edge_weight_threshold (see "
+                "get_threshold_stability_curve), or treat the graph as one "
+                "continuous structure."
+            ),
+            details=cut["details"],
+        )
+    except SessionConflictError as e:
+        logger.info("Dossier refused: %s", e)
+        return mcp_error(
+            tool,
+            str(e),
+            error_code=e.error_code,
+            agent_action=(
+                "Nothing was persisted or published. The live run changed while "
+                "the dossier was computing; re-run generate_cluster_dossier "
+                "against the current run."
+            ),
+        )
     except Exception as e:
         logger.error(f"Error generating dossier: {e}")
-        return mcp_error("generate_cluster_dossier", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="DOSSIER_FAILED",
+            agent_action=(
+                "Check the reason, adjust method / interpretation threshold, and retry."
+            ),
+        )
 
 
+_PROFILE_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "clusters_run_id": _CLUSTERS_RUN_ID,
+        "cluster_result": _CLUSTER_RESULT,
+        "detail": enum(["summary", "standard", "full"]),
+        "max_features": INT,
+        "cluster": OPEN_OBJ,
+        "surface_labels_ref": STR,
+        "surface_labels": OPEN_OBJ,
+    },
+    ["status", "clusters_run_id", "cluster_result", "detail", "cluster"],
+)
+
+
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_PROFILE_SCHEMA,
+    title="Cluster Profile",
+)
 async def get_cluster_profile(
-    cluster_id: int,
-    detail: Literal["summary", "standard", "full"] = "standard",
-    max_features: int = 16,
-    response_format: Literal["markdown", "json"] = "markdown",
+    cluster_id: Annotated[
+        int,
+        Field(
+            description=(
+                "Integer cluster ID as listed by generate_cluster_dossier "
+                "(cluster_selection.shown_ids). IDs are stable within one dossier."
+            )
+        ),
+    ],
+    detail: Annotated[
+        Literal["summary", "standard", "full"],
+        Field(
+            description=(
+                "'summary': headline features. 'standard' (default): ranked numeric and categorical evidence up to max_features. 'full': lossless evidence plus size telemetry."
+            )
+        ),
+    ] = "standard",
+    max_features: Annotated[
+        int,
+        Field(
+            description="Maximum feature rows returned for this cluster (>= 1). Default 16."
+        ),
+    ] = 16,
+    response_format: Annotated[
+        Literal["markdown", "json"],
+        Field(
+            description=(
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
+            )
+        ),
+    ] = "markdown",
+    run_id: Annotated[str, Field(description=_RUN_ID_FOR_CLUSTERS)] = "",
     ctx: Context = None,
-) -> str:
-    """Targeted evidence for one cluster from cached dossier state."""
+) -> ToolResult:
+    """Evidence for one cluster (feature shifts versus the rest) from the cached dossier.
+
+    Reads the session's cluster labels; no recomputation. Use after
+    generate_cluster_dossier to drill into one cluster; use get_feature_signal to
+    follow one feature across clusters.
+    """
+    tool = "get_cluster_profile"
     try:
         if max_features < 1:
-            raise ToolError(f"max_features must be >= 1, got '{max_features}'")
+            return mcp_error(
+                tool,
+                f"max_features must be >= 1, got '{max_features}'",
+                error_code="INVALID_ARGUMENT",
+                agent_action="Pass max_features >= 1.",
+            )
 
         session = _get_session(ctx)
-        evidence_index, cluster_meta = _require_cluster_state(session)
+        state, err = _require_cluster_state(session, tool, run_id)
+        if err is not None:
+            return err
+        evidence_index, cluster_meta = state
         payload = {
             "status": "ok",
+            "clusters_run_id": session.clusters_run_id,
             "cluster_result": compact_cluster_result_payload(
                 cluster_meta,
                 include_full_sizes=detail == "full",
@@ -557,43 +929,109 @@ async def get_cluster_profile(
                 "[0,1]-normalized weighted adjacency (sparsified only when enabled), "
                 "not the persisted graph @ construction_threshold._\n\n"
             )
-            return note + cluster_profile_payload_to_markdown(payload)
-        return json.dumps(payload, indent=2)
-    except StaleClusterCacheError as e:
-        return _stale_cluster_cache_error("get_cluster_profile", e)
+            return mcp_result(
+                payload, text=note + cluster_profile_payload_to_markdown(payload)
+            )
+        return mcp_result(payload)
     except KeyError:
         return mcp_error(
-            "get_cluster_profile",
+            tool,
             f"Unknown cluster_id '{cluster_id}'.",
             error_code="CLUSTER_ID_UNKNOWN",
             agent_action="Use generate_cluster_dossier first and inspect available cluster IDs.",
         )
     except Exception as e:
-        return mcp_error("get_cluster_profile", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="CLUSTER_PROFILE_FAILED",
+            agent_action="Re-run generate_cluster_dossier and retry with a listed cluster_id.",
+        )
 
 
+_SIGNAL_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "clusters_run_id": _CLUSTERS_RUN_ID,
+        "cluster_result": _CLUSTER_RESULT,
+        "cluster_selection": _SELECTION,
+        "signals": OPEN_OBJ,
+        "surface_labels_ref": STR,
+        "surface_labels": OPEN_OBJ,
+    },
+    ["status", "clusters_run_id", "cluster_result", "cluster_selection", "signals"],
+)
+
+
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_SIGNAL_SCHEMA,
+    title="Feature Signal by Cluster",
+)
 async def get_feature_signal(
-    feature_names: list[str],
-    cluster_ids: list[int] | None = None,
-    detail: Literal["summary", "standard", "full"] = "summary",
-    max_clusters: int = 8,
-    response_format: Literal["markdown", "json"] = "markdown",
+    feature_names: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Numeric column names, or 'column=value' pairs for categorical levels (e.g. 'segment=alpha')."
+            )
+        ),
+    ],
+    cluster_ids: Annotated[
+        list[int] | None,
+        Field(
+            description=(
+                "Restrict to these cluster IDs. Omit to use the top max_clusters "
+                "clusters ranked by signal."
+            )
+        ),
+    ] = None,
+    detail: Annotated[
+        Literal["summary", "standard", "full"],
+        Field(
+            description=(
+                "'summary' (default): core and supporting-tier features only, compact statistics. 'standard': also context-tier features; core/supporting rows carry every statistic. 'full': every feature with every statistic, plus full cluster sizes and surface_labels."
+            )
+        ),
+    ] = "summary",
+    max_clusters: Annotated[
+        int,
+        Field(
+            description="Show at most this many clusters, ranked by signal (>= 1). Default 8."
+        ),
+    ] = 8,
+    response_format: Annotated[
+        Literal["markdown", "json"],
+        Field(
+            description=(
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
+            )
+        ),
+    ] = "markdown",
+    run_id: Annotated[str, Field(description=_RUN_ID_FOR_CLUSTERS)] = "",
     ctx: Context = None,
-) -> str:
-    """Cross-cluster evidence for specific feature columns.
+) -> ToolResult:
+    """Cross-cluster evidence for specific features from the cached dossier.
 
-    Args:
-        feature_names: Numeric columns or `column=value` pairs for categoricals.
-        cluster_ids: Restrict to specific clusters; omit to use top `max_clusters` by signal.
+    Returns, per requested feature, how strongly each cluster departs from the
+    rest. Use to test a hypothesis about particular columns; use
+    get_cluster_signal_matrix for an all-features overview.
     """
+    tool = "get_feature_signal"
     if max_clusters < 1:
         return mcp_error(
-            "get_feature_signal",
+            tool,
             f"max_clusters must be >= 1, got '{max_clusters}'",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass max_clusters >= 1.",
         )
     try:
         session = _get_session(ctx)
-        evidence_index, cluster_meta = _require_cluster_state(session)
+        state, err = _require_cluster_state(session, tool, run_id)
+        if err is not None:
+            return err
+        evidence_index, cluster_meta = state
         signals = feature_signal_payload(
             evidence_index,
             feature_names,
@@ -603,6 +1041,7 @@ async def get_feature_signal(
         )
         payload = {
             "status": "ok",
+            "clusters_run_id": session.clusters_run_id,
             "cluster_result": compact_cluster_result_payload(
                 cluster_meta,
                 include_full_sizes=detail == "full",
@@ -619,39 +1058,126 @@ async def get_feature_signal(
         else:
             payload["surface_labels_ref"] = "get_workflow_guide"
         if response_format == "markdown":
-            return feature_signal_payload_to_markdown(payload["signals"])
-        return json.dumps(payload, indent=2)
-    except StaleClusterCacheError as e:
-        return _stale_cluster_cache_error("get_feature_signal", e)
+            return mcp_result(
+                payload, text=feature_signal_payload_to_markdown(payload["signals"])
+            )
+        return mcp_result(payload)
     except Exception as e:
-        return mcp_error("get_feature_signal", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="FEATURE_SIGNAL_FAILED",
+            agent_action=(
+                "Check feature_names against the dataset columns (use "
+                "probe_columns) and cluster_ids against the dossier, then retry."
+            ),
+        )
 
 
+_MATRIX_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "clusters_run_id": _CLUSTERS_RUN_ID,
+        "cluster_result": _CLUSTER_RESULT,
+        "surface_labels_ref": STR,
+        "cluster_selection": _SELECTION,
+        "signal_matrix": obj(
+            {
+                "numeric_columns": arr(STR),
+                "categorical_values": arr(OPEN_OBJ),
+                "clusters_returned": INT,
+                "clusters_omitted": INT,
+                "omitted_clusters": arr(OPEN_OBJ),
+                "numeric_features_omitted": INT,
+                "categorical_features_omitted": INT,
+                "numeric_rows": arr(OPEN_OBJ),
+                "categorical_rows": arr(OPEN_OBJ),
+            },
+            ["clusters_returned", "clusters_omitted"],
+            additional=True,
+        ),
+    },
+    [
+        "status",
+        "clusters_run_id",
+        "cluster_result",
+        "cluster_selection",
+        "signal_matrix",
+    ],
+)
+
+
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_MATRIX_SCHEMA,
+    title="Cluster Signal Matrix",
+)
 async def get_cluster_signal_matrix(
-    cluster_ids: list[int] | None = None,
-    include_context_tier: bool = False,
-    max_clusters: int = 8,
-    return_markdown: bool = True,
+    cluster_ids: Annotated[
+        list[int] | None,
+        Field(
+            description=(
+                "Restrict the matrix to these cluster IDs. Omit for all clusters, "
+                "truncated to max_clusters by signal."
+            )
+        ),
+    ] = None,
+    include_context_tier: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) shows only core and supporting signal tiers. True "
+                "also includes weaker 'context' tier rows."
+            )
+        ),
+    ] = False,
+    max_clusters: Annotated[
+        int,
+        Field(
+            description=(
+                "Show at most this many clusters, ranked by signal (>= 1). "
+                "Presentation-only truncation. Default 8."
+            )
+        ),
+    ] = 8,
+    return_markdown: Annotated[
+        bool,
+        Field(
+            description=(
+                "True (default): markdown matrix text (z-scores for numeric, prevalence percent for categorical). False: JSON text."
+            )
+        ),
+    ] = True,
+    run_id: Annotated[str, Field(description=_RUN_ID_FOR_CLUSTERS)] = "",
     ctx: Context = None,
-) -> str:
-    """Cross-cluster signal matrix. `max_clusters` is presentation-only
-    truncation (ranks by signal). `include_context_tier` adds context-tier rows
-    beyond core/supporting. `return_markdown=False` returns flattened JSON.
+) -> ToolResult:
+    """Cluster-by-feature signal matrix from the cached dossier.
+
+    Shows which features distinguish which clusters in one dense table, ranked by
+    signal. Use for a cross-cluster overview; use get_feature_signal for chosen
+    features and get_cluster_profile for one cluster.
     """
+    tool = "get_cluster_signal_matrix"
     if max_clusters < 1:
         return mcp_error(
-            "get_cluster_signal_matrix",
+            tool,
             f"max_clusters must be >= 1, got '{max_clusters}'",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass max_clusters >= 1.",
         )
     try:
         session = _get_session(ctx)
-        evidence_index, cluster_meta = _require_cluster_state(session)
+        state, err = _require_cluster_state(session, tool, run_id)
+        if err is not None:
+            return err
+        evidence_index, cluster_meta = state
         signal_matrix = signal_matrix_payload(
             evidence_index,
             cluster_ids=cluster_ids,
             include_context_tier=include_context_tier,
             max_clusters=max_clusters,
-            return_markdown=return_markdown,
+            return_markdown=False,
         )
         omitted_ids = {
             int(item["cluster_id"])
@@ -669,53 +1195,189 @@ async def get_cluster_signal_matrix(
         )
         payload = {
             "status": "ok",
+            "clusters_run_id": session.clusters_run_id,
             "cluster_result": compact_cluster_result_payload(cluster_meta),
             "surface_labels_ref": "get_workflow_guide",
             "cluster_selection": cluster_selection,
             "signal_matrix": signal_matrix,
         }
         if return_markdown:
-            return (
-                cluster_selection_to_markdown(cluster_selection)
-                + payload["signal_matrix"]["markdown_report"]
+            report = signal_matrix_payload(
+                evidence_index,
+                cluster_ids=cluster_ids,
+                include_context_tier=include_context_tier,
+                max_clusters=max_clusters,
+                return_markdown=True,
+            )["markdown_report"]
+            return mcp_result(
+                payload,
+                text=cluster_selection_to_markdown(cluster_selection) + report,
             )
-        return json.dumps(payload, indent=2)
-    except StaleClusterCacheError as e:
-        return _stale_cluster_cache_error("get_cluster_signal_matrix", e)
+        return mcp_result(payload)
     except Exception as e:
-        return mcp_error("get_cluster_signal_matrix", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="SIGNAL_MATRIX_FAILED",
+            agent_action="Re-run generate_cluster_dossier and retry with listed cluster_ids.",
+        )
 
 
-async def compare_clusters(cluster_a: int, cluster_b: int, ctx: Context = None) -> str:
-    """Pairwise statistical tests between two clusters."""
+def _finite_or_none(value: Any) -> float | None:
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+_COMPARE_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "clusters_run_id": _CLUSTERS_RUN_ID,
+        "cluster_a": INT,
+        "cluster_b": INT,
+        "features_compared": INT,
+        "features_omitted": INT,
+        "results": arr(
+            obj(
+                {
+                    "column": STR,
+                    "mean_a": nullable(NUM),
+                    "mean_b": nullable(NUM),
+                    "p_val_t": nullable(NUM),
+                    "p_val_ks": nullable(NUM),
+                    "cohens_d": nullable(NUM),
+                },
+                ["column"],
+            )
+        ),
+    },
+    [
+        "status",
+        "clusters_run_id",
+        "cluster_a",
+        "cluster_b",
+        "features_compared",
+        "features_omitted",
+        "results",
+    ],
+)
+
+
+@tool_meta(
+    read_only=True,
+    idempotent=True,
+    output_schema=_COMPARE_SCHEMA,
+    title="Compare Clusters",
+)
+async def compare_clusters(
+    cluster_a: Annotated[
+        int,
+        Field(description="First cluster ID, as listed by generate_cluster_dossier."),
+    ],
+    cluster_b: Annotated[
+        int,
+        Field(description="Second cluster ID, as listed by generate_cluster_dossier."),
+    ],
+    max_features: Annotated[
+        int,
+        Field(
+            description=(
+                "Return at most this many numeric features, ranked by |Cohen's d| "
+                "(>= 1); features_omitted reports the rest. Default 20."
+            )
+        ),
+    ] = 20,
+    run_id: Annotated[str, Field(description=_RUN_ID_FOR_CLUSTERS)] = "",
+    ctx: Context = None,
+) -> ToolResult:
+    """Pairwise statistical comparison of two clusters over numeric features.
+
+    Per feature: both means, Welch t-test and KS-test p-values, and Cohen's d,
+    ranked by effect size. Use after generate_cluster_dossier to contrast two
+    specific clusters; p-values are uncorrected for multiple comparisons.
+    """
+    tool = "compare_clusters"
     session = _get_session(ctx)
-
-    if session.data is None or session.clusters is None:
-        raise ToolError(
-            "No data or clusters found. Run generate_cluster_dossier() first."
+    if max_features < 1:
+        return mcp_error(
+            tool,
+            f"max_features must be >= 1, got '{max_features}'",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass max_features >= 1.",
         )
-    if session.clusters_run_id != session.latest_run_id:
-        return _stale_cluster_cache_error(
-            "compare_clusters",
-            StaleClusterCacheError(
-                cached_run_id=session.clusters_run_id,
-                current_run_id=session.latest_run_id,
-            ),
-        )
+    if not run_id and session.model is None:
+        return model_not_loaded_error(tool)
+    if session.clusters is None:
+        return _clusters_not_built_error(tool)
+    if run_id:
+        if run_id != session.clusters_run_id:
+            return _clusters_stale_for_run_error(tool, session, run_id)
+        resolved, err = resolve_run_or_error(session, tool, run_id)
+        if err is not None:
+            return err
+        data = resolved.data
+    else:
+        if session.clusters_run_id != session.latest_run_id:
+            return _stale_cluster_cache_error(
+                tool,
+                StaleClusterCacheError(
+                    cached_run_id=session.clusters_run_id,
+                    current_run_id=session.latest_run_id,
+                ),
+            )
+        data = session.data
+    if data is None:
+        return model_not_loaded_error(tool)
 
     try:
-        results = _compare_clusters(
-            session.data, session.clusters, cluster_a, cluster_b
+        results = await asyncio.to_thread(
+            _compare_clusters, data, session.clusters, cluster_a, cluster_b
         )
         if not results:
             return mcp_error(
-                "compare_clusters",
+                tool,
                 f"No results for comparison between clusters {cluster_a} and {cluster_b}.",
+                error_code="COMPARISON_EMPTY",
+                agent_action=(
+                    "Both clusters need at least 2 rows and numeric columns with "
+                    "at least 2 non-missing values; check IDs with "
+                    "generate_cluster_dossier."
+                ),
+                details={"cluster_a": cluster_a, "cluster_b": cluster_b},
             )
 
-        markdown = comparison_to_markdown(cluster_a, cluster_b, results)
-        return markdown
+        shown = results[:max_features]
+        rows = [
+            {
+                "column": str(r["column"]),
+                **{
+                    key: _finite_or_none(r[key])
+                    for key in ("mean_a", "mean_b", "p_val_t", "p_val_ks", "cohens_d")
+                },
+            }
+            for r in shown
+        ]
+        payload = {
+            "status": "ok",
+            "clusters_run_id": session.clusters_run_id,
+            "cluster_a": int(cluster_a),
+            "cluster_b": int(cluster_b),
+            "features_compared": len(results),
+            "features_omitted": len(results) - len(shown),
+            "results": rows,
+        }
+        text = comparison_to_markdown(cluster_a, cluster_b, shown)
+        if len(results) > len(shown):
+            text += (
+                f"\n\n_{len(results) - len(shown)} further features omitted; "
+                "raise max_features to see them._"
+            )
+        return mcp_result(payload, text=text)
 
     except Exception as e:
         logger.error(f"Error comparing clusters: {e}")
-        return mcp_error("compare_clusters", str(e))
+        return mcp_error(
+            tool,
+            str(e),
+            error_code="COMPARE_FAILED",
+            agent_action="Check cluster IDs with generate_cluster_dossier and retry.",
+        )

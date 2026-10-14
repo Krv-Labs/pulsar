@@ -1,7 +1,6 @@
 """Tests for the longitudinal MCP surface (panel pivot + both representations)."""
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -20,11 +19,12 @@ from pulsar.mcp.tools import ALL_TOOLS_LIST  # noqa: E402
 from pulsar.mcp.tools.ingestion import ingest_dataset  # noqa: E402
 from pulsar.mcp.tools.longitudinal import (  # noqa: E402
     build_longitudinal_graph,
+    classify_trajectories,
     diagnose_longitudinal_graph,
     get_cross_time_neighbors,
     get_trajectory_archetypes,
-    classify_trajectories,
 )
+from tests.mcp_helpers import payload_of
 
 
 def _long_frame(n_times=4, seed=0) -> pd.DataFrame:
@@ -76,7 +76,7 @@ def _build(tmp_path, **kwargs) -> dict:
     _sessions.clear()
     _get_session(None)
     path = kwargs.pop("path", None) or _write_long(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(path)))
     params = {
         "dataset_id": dataset["dataset_id"],
         "entity_column": "patient_id",
@@ -85,7 +85,7 @@ def _build(tmp_path, **kwargs) -> dict:
         "response_format": "json",
     }
     params.update(kwargs)
-    return json.loads(asyncio.run(build_longitudinal_graph(**params)))
+    return payload_of(asyncio.run(build_longitudinal_graph(**params)))
 
 
 class TestPivotPolicies:
@@ -278,7 +278,7 @@ class TestConfigAdaptation:
 class TestDiagnose:
     def test_trajectory_surface_is_measured(self, tmp_path):
         built = _build(tmp_path)
-        diagnosis = json.loads(
+        diagnosis = payload_of(
             asyncio.run(
                 diagnose_longitudinal_graph(
                     built["longitudinal_id"], response_format="json"
@@ -298,7 +298,7 @@ class TestDiagnose:
 
     def test_temporal_surface_compares_all_aggregations(self, tmp_path):
         built = _build(tmp_path, representation="temporal")
-        diagnosis = json.loads(
+        diagnosis = payload_of(
             asyncio.run(
                 diagnose_longitudinal_graph(
                     built["longitudinal_id"], response_format="json"
@@ -326,7 +326,7 @@ class TestDiagnose:
 
     def test_requesting_an_unbuilt_surface_is_structured(self, tmp_path):
         built = _build(tmp_path, representation="trajectory")
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 diagnose_longitudinal_graph(
                     built["longitudinal_id"], representation="temporal"
@@ -339,7 +339,7 @@ class TestDiagnose:
 class TestArchetypes:
     def test_archetypes_recover_the_planted_groups(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 get_trajectory_archetypes(
                     built["longitudinal_id"], threshold=0.25, response_format="json"
@@ -357,7 +357,7 @@ class TestArchetypes:
 
     def test_archetype_payload_is_bounded(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 get_trajectory_archetypes(
                     built["longitudinal_id"],
@@ -379,7 +379,7 @@ class TestArchetypes:
 
     def test_negative_member_limit_is_rejected(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 get_trajectory_archetypes(
                     built["longitudinal_id"],
@@ -397,7 +397,7 @@ class TestCrossTimeNeighbors:
         built = _build(tmp_path)
         # p25 migrates from blob A to blob B; by the last step it should resemble
         # the entities that sat in blob B (p10-p19) from the very beginning.
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"],
@@ -422,7 +422,7 @@ class TestCrossTimeNeighbors:
 
     def test_direction_filters_are_applied(self, tmp_path):
         built = _build(tmp_path)
-        forward = json.loads(
+        forward = payload_of(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"],
@@ -440,7 +440,7 @@ class TestCrossTimeNeighbors:
         frame["hour"] = frame["hour"].map({0: 1, 1: 2, 2: 3, 3: 4})
         built = _build(tmp_path, path=_write_long(tmp_path, frame))
 
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"],
@@ -460,7 +460,7 @@ class TestCrossTimeNeighbors:
         assert all("time_label" in neighbor for neighbor in response["neighbors"])
 
         neighbor = response["neighbors"][0]
-        replayed = json.loads(
+        replayed = payload_of(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"],
@@ -475,7 +475,7 @@ class TestCrossTimeNeighbors:
 
     def test_unresolvable_observation_is_structured(self, tmp_path):
         built = _build(tmp_path)
-        missing = json.loads(
+        missing = payload_of(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"], entity_id="nobody", t=0
@@ -484,7 +484,7 @@ class TestCrossTimeNeighbors:
         )
         assert missing["error_code"] == "OBSERVATION_NOT_FOUND"
 
-        unspecified = json.loads(
+        unspecified = payload_of(
             asyncio.run(get_cross_time_neighbors(built["longitudinal_id"]))
         )
         assert unspecified["error_code"] == "OBSERVATION_NOT_SPECIFIED"
@@ -492,7 +492,7 @@ class TestCrossTimeNeighbors:
     def test_unmatched_time_label_returns_bounded_preview(self, tmp_path):
         built = _build(tmp_path)
 
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 get_cross_time_neighbors(
                     built["longitudinal_id"], entity_id="p0", t=999
@@ -514,13 +514,13 @@ class TestHandles:
             get_trajectory_archetypes,
             get_cross_time_neighbors,
         ):
-            response = json.loads(asyncio.run(tool("lng_missing")))
+            response = payload_of(asyncio.run(tool("lng_missing")))
             assert response["error_code"] == "LONGITUDINAL_ID_UNKNOWN"
             assert response["agent_action"]
 
     def test_omitted_handle_falls_back_to_latest_panel(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(diagnose_longitudinal_graph(response_format="json"))
         )
         assert response["longitudinal_id"] == built["longitudinal_id"]
@@ -534,7 +534,7 @@ class TestHandles:
         session.clusters = pd.Series([0, 1, 0])
 
         path = _write_long(tmp_path)
-        dataset = json.loads(asyncio.run(ingest_dataset(path)))
+        dataset = payload_of(asyncio.run(ingest_dataset(path)))
         asyncio.run(
             build_longitudinal_graph(
                 dataset_id=dataset["dataset_id"],
@@ -551,7 +551,7 @@ class TestHandles:
 class TestClassifyTrajectories:
     def test_classify_complexity(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 classify_trajectories(
                     built["longitudinal_id"],
@@ -565,10 +565,33 @@ class TestClassifyTrajectories:
         assert response["method"] == "complexity"
         assert "Stable (0 entropy)" in response["classes_summary"]
         assert "Volatile / Refractory" in response["classes_summary"]
+        # Summary-first: bounded preview, full map only on detail="full".
+        assert response["detail"] == "summary"
+        assert "classification" not in response
+        assert len(response["classification_preview"]) == 25
+        assert response["entities_returned"] == 25
+        assert response["entities_omitted"] == 5
+
+    def test_classify_full_detail(self, tmp_path):
+        built = _build(tmp_path)
+        response = payload_of(
+            asyncio.run(
+                classify_trajectories(
+                    built["longitudinal_id"],
+                    method="complexity",
+                    threshold=0.25,
+                    detail="full",
+                    response_format="json",
+                )
+            )
+        )
+        assert len(response["classification"]) == 30
+        assert response["entities_returned"] == 30
+        assert response["entities_omitted"] == 0
 
     def test_classify_transition(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 classify_trajectories(
                     built["longitudinal_id"],
@@ -584,7 +607,7 @@ class TestClassifyTrajectories:
 
     def test_classify_sequence(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 classify_trajectories(
                     built["longitudinal_id"],
@@ -599,7 +622,7 @@ class TestClassifyTrajectories:
 
     def test_classify_levenshtein(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 classify_trajectories(
                     built["longitudinal_id"],
@@ -615,7 +638,7 @@ class TestClassifyTrajectories:
 
     def test_classify_dtw(self, tmp_path):
         built = _build(tmp_path)
-        response = json.loads(
+        response = payload_of(
             asyncio.run(
                 classify_trajectories(
                     built["longitudinal_id"],

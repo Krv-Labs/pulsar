@@ -25,7 +25,7 @@ pub fn accumulate_pseudo_laplacians<'py>(
         .map(|bm| bm.core.nodes.as_slice())
         .collect();
 
-    let galactic_l = core::accumulate_pseudo_laplacians(&all_nodes, n);
+    let galactic_l = py.allow_threads(|| core::accumulate_pseudo_laplacians(&all_nodes, n));
 
     Ok(galactic_l.into_pyarray_bound(py))
 }
@@ -68,8 +68,13 @@ impl SparsePseudoLaplacian {
     /// Fold another sparse Laplacian (same n) into this one: sum diagonals and
     /// merge off-diagonal counts. Used to accumulate across datasets in `fit_multi`
     /// without ever building an n×n matrix.
-    pub fn merge_in_place(&mut self, other: PyRef<SparsePseudoLaplacian>) -> PyResult<()> {
-        self.core.merge_in_place(&other.core)?;
+    pub fn merge_in_place(
+        &mut self,
+        py: Python<'_>,
+        other: PyRef<SparsePseudoLaplacian>,
+    ) -> PyResult<()> {
+        let other_core = &other.core;
+        py.allow_threads(|| self.core.merge_in_place(other_core))?;
         Ok(())
     }
 }
@@ -84,7 +89,7 @@ impl SparsePseudoLaplacian {
 /// duplicate co-membership pairs across the whole sweep.
 #[pyfunction]
 pub fn accumulate_pseudo_laplacians_sparse<'py>(
-    _py: Python<'py>,
+    py: Python<'py>,
     ball_maps: Vec<PyRef<'py, BallMapper>>,
     n: usize,
 ) -> PyResult<SparsePseudoLaplacian> {
@@ -93,7 +98,7 @@ pub fn accumulate_pseudo_laplacians_sparse<'py>(
         .map(|bm| bm.core.nodes.as_slice())
         .collect();
 
-    Ok(SparsePseudoLaplacian {
-        core: core::accumulate_pseudo_laplacians_sparse(&all_nodes, n),
-    })
+    let core = py.allow_threads(|| core::accumulate_pseudo_laplacians_sparse(&all_nodes, n));
+
+    Ok(SparsePseudoLaplacian { core })
 }

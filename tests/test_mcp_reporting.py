@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 import pandas as pd
 import pytest
@@ -9,10 +8,11 @@ from pulsar.mcp.registry import registry
 from pulsar.mcp.session import _get_session, _sessions
 from pulsar.mcp.tools.reporting import (
     _normalize_cluster_names,
+    export_dataset_bundle,
     export_html_report,
     export_labeled_data,
-    export_dataset_bundle,
 )
+from tests.mcp_helpers import payload_of
 
 
 def test_normalize_cluster_names_accepts_flat_string_mapping():
@@ -26,6 +26,7 @@ def test_normalize_cluster_names_accepts_flat_string_mapping():
 
 
 def test_normalize_cluster_names_rejects_non_integer_keys():
+    # TODO(mcp-surface): becomes mcp_error envelope
     with pytest.raises(ToolError, match="integer cluster IDs"):
         _normalize_cluster_names(
             {"cluster_0": "Moderate Desert"},
@@ -50,7 +51,7 @@ def test_export_labeled_data_uses_flat_cluster_name_mapping(tmp_path):
     )
     output_path = tmp_path / "labeled.csv"
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             export_labeled_data(
                 assignment.cluster_assignment_id,
@@ -74,7 +75,7 @@ def test_export_labeled_data_uses_flat_cluster_name_mapping(tmp_path):
 def test_export_labeled_data_requires_known_assignment_handle(tmp_path):
     _sessions.clear()
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             export_labeled_data(
                 "ca_missing",
@@ -102,7 +103,7 @@ def test_export_labeled_data_reports_undurable_assignment_data(tmp_path):
         labels=[0, 1, 0],
     )
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             export_labeled_data(
                 assignment.cluster_assignment_id,
@@ -133,7 +134,7 @@ def test_export_labeled_data_can_use_session_data_for_undurable_assignment(tmp_p
     )
     output_path = tmp_path / "labeled.csv"
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             export_labeled_data(
                 assignment.cluster_assignment_id,
@@ -171,7 +172,7 @@ def test_export_labeled_data_rejects_changed_dataset_file(tmp_path):
     # Edit the backing file after registration: now 4 rows, new size/mtime.
     pd.DataFrame({"fips": ["001", "002", "003", "004"]}).to_csv(input_path, index=False)
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             export_labeled_data(
                 assignment.cluster_assignment_id,
@@ -210,7 +211,7 @@ def test_export_labeled_data_does_not_rebind_session_data(tmp_path):
     session.clusters = pd.Series([0, 1])
     session.clusters_run_id = "run_other_active"
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             export_labeled_data(
                 assignment.cluster_assignment_id,
@@ -234,10 +235,10 @@ def test_export_html_report_missing_session_state_gives_recovery_action():
     session.latest_run_id = "run_previous"
     session.dataset_id = "ds_previous"
 
-    payload = json.loads(asyncio.run(export_html_report(ctx=None)))
+    payload = payload_of(asyncio.run(export_html_report(ctx=None)))
 
     assert payload["status"] == "error"
-    assert payload["error_code"] == "SESSION_STATE_MISSING"
+    assert payload["error_code"] == "MODEL_NOT_LOADED"
     assert payload["details"]["latest_run_id"] == "run_previous"
     assert payload["details"]["latest_dataset_id"] == "ds_previous"
     assert "get_runtime_context" in payload["agent_action"]
@@ -246,6 +247,7 @@ def test_export_html_report_missing_session_state_gives_recovery_action():
 
 def test_export_dataset_bundle_success_session_clusters(tmp_path):
     from unittest.mock import MagicMock
+
     import numpy as np
 
     _sessions.clear()
@@ -272,7 +274,7 @@ def test_export_dataset_bundle_success_session_clusters(tmp_path):
             ctx=None,
         )
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
 
     assert result["status"] == "ok"
     assert result["slug"] == slug
@@ -322,7 +324,7 @@ def test_export_dataset_bundle_success_cluster_assignment(tmp_path):
             ctx=None,
         )
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
 
     assert result["status"] == "ok"
     assert result["manifest"] == mock_manifest
@@ -332,9 +334,9 @@ def test_export_dataset_bundle_success_cluster_assignment(tmp_path):
 def test_export_dataset_bundle_missing_session_state():
     _sessions.clear()
     result_json = asyncio.run(export_dataset_bundle("out", "slug", ctx=None))
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
-    assert result["error_code"] == "SESSION_STATE_MISSING"
+    assert result["error_code"] == "MODEL_NOT_LOADED"
 
 
 def test_export_dataset_bundle_missing_clusters_or_stale():
@@ -347,7 +349,7 @@ def test_export_dataset_bundle_missing_clusters_or_stale():
 
     # Case 1: no clusters in session
     result_json = asyncio.run(export_dataset_bundle("out", "slug", ctx=None))
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTERS_MISSING"
 
@@ -356,7 +358,7 @@ def test_export_dataset_bundle_missing_clusters_or_stale():
     session.clusters_run_id = "run_old"
     session.latest_run_id = "run_new"
     result_json = asyncio.run(export_dataset_bundle("out", "slug", ctx=None))
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_CACHE_STALE"
 
@@ -375,7 +377,7 @@ def test_export_dataset_bundle_invalid_edges_threshold():
     result_json = asyncio.run(
         export_dataset_bundle("out", "slug", edges_threshold=-0.5, ctx=None)
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
     assert "edges_threshold" in result["reason"]
 
@@ -393,7 +395,7 @@ def test_export_dataset_bundle_invalid_cluster_assignment_id():
             "out", "slug", cluster_assignment_id="ca_missing", ctx=None
         )
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_ASSIGNMENT_ID_UNKNOWN"
 
@@ -425,7 +427,7 @@ def test_export_dataset_bundle_mismatched_row_count():
             ctx=None,
         )
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_ASSIGNMENT_ROW_MISMATCH"
 
@@ -457,7 +459,7 @@ def test_export_dataset_bundle_rejects_assignment_from_other_run():
             ctx=None,
         )
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
 
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH"
@@ -501,7 +503,7 @@ def test_export_dataset_bundle_rejects_assignment_from_other_dataset(tmp_path):
             ctx=None,
         )
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
 
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH"
@@ -543,7 +545,7 @@ def test_export_dataset_bundle_rejects_stale_assignment_dataset(tmp_path):
             ctx=None,
         )
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
 
     assert result["status"] == "error"
     assert result["error_code"] == "CLUSTER_ASSIGNMENT_DATASET_STALE"
@@ -565,7 +567,7 @@ def test_export_dataset_bundle_invalid_metadata():
     result_json = asyncio.run(
         export_dataset_bundle("out", "slug", cluster_names="invalid_type", ctx=None)
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
     assert "must be a flat object" in result["reason"]
 
@@ -573,6 +575,6 @@ def test_export_dataset_bundle_invalid_metadata():
     result_json = asyncio.run(
         export_dataset_bundle("out", "slug", cluster_names={"99": "Unknown"}, ctx=None)
     )
-    result = json.loads(result_json)
+    result = payload_of(result_json)
     assert result["status"] == "error"
     assert "contains unknown cluster ID" in result["reason"]

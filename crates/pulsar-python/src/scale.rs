@@ -47,7 +47,7 @@ impl StandardScaler {
         data: PyReadonlyArray2<'py, f64>,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let arr = data.as_array().to_owned();
-        let (scaled, scaler) = StandardScalerInner::fit_transform(&arr);
+        let (scaled, scaler) = py.allow_threads(|| StandardScalerInner::fit_transform(&arr));
         self.inner = Some(scaler);
         Ok(scaled.into_pyarray_bound(py))
     }
@@ -66,7 +66,7 @@ impl StandardScaler {
             pyo3::exceptions::PyValueError::new_err("call fit_transform before transform")
         })?;
         let arr = data.as_array().to_owned();
-        let out = inner.transform(&arr)?;
+        let out = py.allow_threads(|| inner.transform(&arr))?;
         Ok(out.into_pyarray_bound(py))
     }
 
@@ -86,7 +86,7 @@ impl StandardScaler {
             )
         })?;
         let arr = data.as_array().to_owned();
-        let out = inner.inverse_transform(&arr)?;
+        let out = py.allow_threads(|| inner.inverse_transform(&arr))?;
         Ok(out.into_pyarray_bound(py))
     }
 }

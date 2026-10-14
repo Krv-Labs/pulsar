@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
+from typing import Any
+
+from fastmcp.utilities.tasks import TaskConfig
 
 from pulsar.mcp.tools.ingestion import (
     ingest_dataset,
@@ -59,6 +63,32 @@ from pulsar.mcp.tools.meta import (
 # Chunked-upload trio is a sandboxed-client escape hatch; opt in via env.
 _ENABLE_UPLOAD = os.environ.get("PULSAR_MCP_ENABLE_UPLOAD") == "1"
 
+
+def _tasks_enabled() -> bool:
+    return os.environ.get("PULSAR_MCP_ENABLE_TASKS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _sweep_task_config(tasks_available: bool = True) -> bool | TaskConfig:
+    if tasks_available and _tasks_enabled():
+        return TaskConfig(mode="optional")
+    return False
+
+
+def get_tool_task_config(
+    tool_fn: Callable[..., Any], tasks_available: bool = True
+) -> bool | TaskConfig:
+    if (
+        tool_fn is run_topological_sweep
+        or getattr(tool_fn, "__name__", "") == "run_topological_sweep"
+    ):
+        return _sweep_task_config(tasks_available)
+    return False
+
+
 ALL_TOOLS_LIST = [
     # Ingestion
     ingest_dataset,
@@ -110,6 +140,9 @@ ALL_TOOLS_LIST = [
 
 __all__ = [
     "ALL_TOOLS_LIST",
+    "_tasks_enabled",
+    "_sweep_task_config",
+    "get_tool_task_config",
     "ingest_dataset",
     "sample_longitudinal_entities",
     "begin_dataset_upload",

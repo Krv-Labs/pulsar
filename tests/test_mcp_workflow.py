@@ -1,7 +1,7 @@
 import asyncio
+import json
 import base64
 import importlib
-import json
 from types import SimpleNamespace
 
 import networkx as nx
@@ -9,33 +9,24 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from pulsar.mcp.session import SweepRecord, _sessions, _get_session
-from pulsar.mcp.diagnostics import _finalization_gate
 from pulsar.mcp.config_tools import _initial_pca_grid
+from pulsar.mcp.diagnostics import _finalization_gate
 from pulsar.mcp.payloads import sweep_payload_to_markdown
-from pulsar.mcp.tools.ingestion import (
-    ingest_dataset,
-    begin_dataset_upload,
-    append_dataset_chunk,
-    finalize_dataset_upload,
+from pulsar.mcp.session import SweepRecord, _get_session, _sessions
+from pulsar.mcp.thresholds import (
+    agent_threshold_options,
+    component_mass_profile,
+    component_state_at_threshold,
+    prepare_threshold_graph,
+    structural_breakpoints,
+)
+from pulsar.mcp.tools.clustering import (
+    generate_cluster_dossier,
 )
 from pulsar.mcp.tools.config import (
     create_config,
-    validate_config,
     refine_config,
-)
-from pulsar.mcp.tools.meta import get_runtime_context
-from pulsar.mcp.tools.sweeping import (
-    get_sweep_history,
-    run_topological_sweep,
-    compare_sweeps,
-)
-from pulsar.mcp.thresholds import (
-    agent_threshold_options,
-    component_state_at_threshold,
-    component_mass_profile,
-    prepare_threshold_graph,
-    structural_breakpoints,
+    validate_config,
 )
 from pulsar.mcp.tools.diagnostics import (
     _summary_structural_breakpoints,
@@ -46,19 +37,29 @@ from pulsar.mcp.tools.diagnostics import (
     get_threshold_stability_curve,
     get_topological_skeleton,
 )
-from pulsar.mcp.tools.preprocessing import (
-    recommend_preprocessing,
+from pulsar.mcp.tools.ingestion import (
+    append_dataset_chunk,
+    begin_dataset_upload,
+    finalize_dataset_upload,
+    ingest_dataset,
 )
 from pulsar.mcp.tools.meta import (
     characterize_dataset,
+    get_runtime_context,
     get_workflow_guide,
+)
+from pulsar.mcp.tools.preprocessing import (
+    recommend_preprocessing,
 )
 from pulsar.mcp.tools.reporting import (
     probe_columns,
 )
-from pulsar.mcp.tools.clustering import (
-    generate_cluster_dossier,
+from pulsar.mcp.tools.sweeping import (
+    compare_sweeps,
+    get_sweep_history,
+    run_topological_sweep,
 )
+from tests.mcp_helpers import payload_of, text_of
 
 
 def _write_dataset(tmp_path, rows: int = 30, cols: int = 6) -> str:
@@ -94,7 +95,7 @@ def _dataset_csv_content(rows: int = 30, cols: int = 6) -> str:
 
 def _extract_config_yaml(create_config_response: str) -> str:
     """Extract config_yaml from create_config's JSON response."""
-    payload = json.loads(create_config_response)
+    payload = payload_of(create_config_response)
     return payload["config_yaml"]
 
 
@@ -172,12 +173,12 @@ sweep:
         )
     )
 
-    table = asyncio.run(get_sweep_history())
+    table = text_of(asyncio.run(get_sweep_history()))
     assert "| Run | Projection Dims | Epsilon Range |" in table
     assert "[2, 4]" in table
     assert "80.00%" in table
 
-    summary = json.loads(
+    summary = payload_of(
         asyncio.run(get_sweep_history(detail="summary", response_format="json"))
     )
     assert summary["detail"] == "summary"
@@ -185,7 +186,7 @@ sweep:
     assert "summary" in summary
     assert "runs" not in summary
 
-    full = json.loads(
+    full = payload_of(
         asyncio.run(get_sweep_history(detail="full", response_format="json"))
     )
     assert full["detail"] == "full"
@@ -206,7 +207,7 @@ sweep:
 """
 
     payload = asyncio.run(validate_config(bad_yaml))
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "error"
     assert report["error_code"] == "YAML_SCHEMA_MISMATCH"
@@ -222,7 +223,7 @@ def test_validate_config_rejects_fenced_yaml(tmp_path):
     payload = asyncio.run(
         validate_config(f"```yaml\nrun:\n  data: {csv_path}\noutput:\n  n_reps: 1\n```")
     )
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "error"
     assert report["error_code"] == "YAML_NOT_RAW"
@@ -237,7 +238,7 @@ cosmic_graph:
 """
 
     payload = asyncio.run(validate_config(legacy_yaml))
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "error"
     assert report["error_code"] == "YAML_SCHEMA_MISMATCH"
@@ -257,7 +258,7 @@ output:
 """
 
     payload = asyncio.run(validate_config(config_yaml))
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "ok"
     normalized = yaml.safe_load(report["normalized_config_yaml"])
@@ -275,7 +276,7 @@ output:
 """
 
     payload = asyncio.run(validate_config(config_yaml))
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "ok"
     normalized = yaml.safe_load(report["normalized_config_yaml"])
@@ -293,7 +294,7 @@ output:
 """
 
     payload = asyncio.run(validate_config(config_yaml))
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "error"
     assert report["error_code"] == "YAML_SCHEMA_MISMATCH"
@@ -305,12 +306,12 @@ output:
 def test_ingest_dataset_and_create_config_round_trip(tmp_path):
     csv_path = _write_dataset(tmp_path)
 
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
-    create_response = json.loads(
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
+    create_response = payload_of(
         asyncio.run(create_config(dataset["dataset_id"], "demo_sweep"))
     )
     config_yaml = create_response["config_yaml"]
-    report = json.loads(
+    report = payload_of(
         asyncio.run(validate_config(config_yaml, dataset["dataset_id"]))
     )
 
@@ -325,7 +326,7 @@ def test_ingest_dataset_and_create_config_round_trip(tmp_path):
 
 def test_ingest_dataset_classifies_sandbox_local_missing_path():
     payload = asyncio.run(ingest_dataset("/home/claude/missing.csv"))
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "error"
     assert report["error_code"] == "HOST_PATH_NOT_VISIBLE"
@@ -336,7 +337,7 @@ def test_ingest_dataset_classifies_sandbox_local_missing_path():
 
 def test_ingest_dataset_classifies_host_missing_path():
     payload = asyncio.run(ingest_dataset("/definitely/not/real.csv"))
-    report = json.loads(payload)
+    report = payload_of(payload)
 
     assert report["status"] == "error"
     assert report["error_code"] == "FILE_NOT_FOUND"
@@ -345,12 +346,12 @@ def test_ingest_dataset_classifies_host_missing_path():
 
 def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "run_compare"))
     )
 
-    refined_a = json.loads(
+    refined_a = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -358,7 +359,7 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
             )
         )
     )["config_yaml"]
-    refined_b = json.loads(
+    refined_b = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -367,7 +368,7 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
         )
     )["config_yaml"]
 
-    result_a = json.loads(
+    result_a = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined_a,
@@ -376,7 +377,7 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
             )
         )
     )
-    result_b = json.loads(
+    result_b = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined_b,
@@ -391,14 +392,14 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
     run_a = result_a["run_id"]
     run_b = result_b["run_id"]
 
-    skeleton = json.loads(asyncio.run(get_topological_skeleton(run_a)))
-    skeleton_edges = json.loads(
+    skeleton = payload_of(asyncio.run(get_topological_skeleton(run_a)))
+    skeleton_edges = payload_of(
         asyncio.run(get_topological_skeleton(run_a, detail="edges", max_edges=5))
     )
-    skeleton_full = json.loads(
+    skeleton_full = payload_of(
         asyncio.run(get_topological_skeleton(run_a, detail="full"))
     )
-    comparison = asyncio.run(compare_sweeps(run_a, run_b))
+    comparison = text_of(asyncio.run(compare_sweeps(run_a, run_b)))
 
     assert skeleton["run_id"] == run_a
     assert skeleton["dataset_id"] == dataset["dataset_id"]
@@ -425,12 +426,12 @@ def test_run_topological_sweep_with_dataset_id_persists_run_summary(tmp_path):
 
 def _chunked_upload(filename: str, content: bytes) -> dict:
     """Helper: drive the begin/append/finalize ingest path for a single-chunk upload."""
-    upload = json.loads(
+    upload = payload_of(
         asyncio.run(begin_dataset_upload(filename, media_type="text/csv"))
     )
     chunk = base64.b64encode(content).decode("ascii")
     asyncio.run(append_dataset_chunk(upload["upload_id"], chunk))
-    return json.loads(asyncio.run(finalize_dataset_upload(upload["upload_id"])))
+    return payload_of(asyncio.run(finalize_dataset_upload(upload["upload_id"])))
 
 
 def test_chunked_upload_single_chunk_round_trip():
@@ -439,7 +440,7 @@ def test_chunked_upload_single_chunk_round_trip():
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "chunked_single"))
     )
-    report = json.loads(
+    report = payload_of(
         asyncio.run(validate_config(config_yaml, dataset["dataset_id"]))
     )
 
@@ -453,7 +454,7 @@ def test_ingest_modes_produce_equivalent_downstream_configs(tmp_path):
     csv_path = _write_dataset(tmp_path)
     content = _dataset_csv_content().encode("utf-8")
 
-    by_path = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    by_path = payload_of(asyncio.run(ingest_dataset(csv_path)))
     by_upload = _chunked_upload("uploaded.csv", content)
 
     path_cfg = _extract_config_yaml(
@@ -472,11 +473,11 @@ def test_ingest_modes_produce_equivalent_downstream_configs(tmp_path):
 def test_create_config_supports_parquet_dataset_id(tmp_path):
     parquet_path = _write_parquet_dataset(tmp_path)
 
-    dataset = json.loads(asyncio.run(ingest_dataset(parquet_path)))
-    create_response = json.loads(
+    dataset = payload_of(asyncio.run(ingest_dataset(parquet_path)))
+    create_response = payload_of(
         asyncio.run(create_config(dataset["dataset_id"], "parquet_sweep"))
     )
-    report = json.loads(
+    report = payload_of(
         asyncio.run(
             validate_config(create_response["config_yaml"], dataset["dataset_id"])
         )
@@ -495,13 +496,13 @@ def test_probe_columns_reloads_for_requested_dataset_id(tmp_path):
     pd.DataFrame({"a_only": [1, 2], "shared": [3, 4]}).to_csv(path_a, index=False)
     pd.DataFrame({"b_only": [5, 6], "shared": [7, 8]}).to_csv(path_b, index=False)
 
-    dataset_a = json.loads(asyncio.run(ingest_dataset(str(path_a))))
-    dataset_b = json.loads(asyncio.run(ingest_dataset(str(path_b))))
+    dataset_a = payload_of(asyncio.run(ingest_dataset(str(path_a))))
+    dataset_b = payload_of(asyncio.run(ingest_dataset(str(path_b))))
 
     asyncio.run(
         characterize_dataset(dataset_id=dataset_a["dataset_id"], response_format="json")
     )
-    payload = json.loads(
+    payload = payload_of(
         asyncio.run(
             probe_columns(
                 dataset_b["dataset_id"],
@@ -524,7 +525,7 @@ def test_probe_columns_reloads_for_requested_dataset_id(tmp_path):
 
 
 def test_staged_dataset_upload_round_trip():
-    upload = json.loads(
+    upload = payload_of(
         asyncio.run(begin_dataset_upload("chunked.csv", media_type="text/csv"))
     )
     content = _dataset_csv_content()
@@ -532,14 +533,14 @@ def test_staged_dataset_upload_round_trip():
     chunk_a = base64.b64encode(content[:midpoint].encode("utf-8")).decode("ascii")
     chunk_b = base64.b64encode(content[midpoint:].encode("utf-8")).decode("ascii")
 
-    append_a = json.loads(
+    append_a = payload_of(
         asyncio.run(append_dataset_chunk(upload["upload_id"], chunk_a))
     )
-    append_b = json.loads(
+    append_b = payload_of(
         asyncio.run(append_dataset_chunk(upload["upload_id"], chunk_b))
     )
-    dataset = json.loads(asyncio.run(finalize_dataset_upload(upload["upload_id"])))
-    report = json.loads(
+    dataset = payload_of(asyncio.run(finalize_dataset_upload(upload["upload_id"])))
+    report = payload_of(
         asyncio.run(
             validate_config(
                 _extract_config_yaml(
@@ -557,17 +558,17 @@ def test_staged_dataset_upload_round_trip():
 
 
 def test_upload_lifecycle_misuse_returns_stable_codes():
-    upload = json.loads(
+    upload = payload_of(
         asyncio.run(begin_dataset_upload("misuse.csv", media_type="text/csv"))
     )
     chunk = base64.b64encode(b"f0,f1\n1,2\n").decode("ascii")
     asyncio.run(append_dataset_chunk(upload["upload_id"], chunk))
     asyncio.run(finalize_dataset_upload(upload["upload_id"]))
 
-    append_after = json.loads(
+    append_after = payload_of(
         asyncio.run(append_dataset_chunk(upload["upload_id"], chunk))
     )
-    finalize_again = json.loads(
+    finalize_again = payload_of(
         asyncio.run(finalize_dataset_upload(upload["upload_id"]))
     )
 
@@ -578,7 +579,7 @@ def test_upload_lifecycle_misuse_returns_stable_codes():
 def test_chunked_upload_handles_bom_and_windows_newlines():
     content = "\ufefff0,f1\r\n1.0,2.0\r\n3.0,4.0\r\n".encode("utf-8")
     dataset = _chunked_upload("windows.csv", content)
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             characterize_dataset(
                 dataset_id=dataset["dataset_id"], response_format="json"
@@ -593,9 +594,9 @@ def test_chunked_upload_handles_bom_and_windows_newlines():
 
 def test_characterize_dataset_returns_compact_wide_schema_summary(tmp_path):
     csv_path = _write_dataset(tmp_path, rows=40, cols=124)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             characterize_dataset(
                 dataset_id=dataset["dataset_id"], response_format="json"
@@ -627,9 +628,9 @@ def test_characterize_dataset_previews_interesting_columns(tmp_path):
     )
     path = tmp_path / "interesting.csv"
     df.to_csv(path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             characterize_dataset(
                 dataset_id=dataset["dataset_id"], response_format="json"
@@ -647,9 +648,11 @@ def test_characterize_dataset_previews_interesting_columns(tmp_path):
 
 def test_characterize_dataset_defaults_to_markdown(tmp_path):
     csv_path = _write_dataset(tmp_path, rows=10, cols=4)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
 
-    markdown = asyncio.run(characterize_dataset(dataset_id=dataset["dataset_id"]))
+    markdown = text_of(
+        asyncio.run(characterize_dataset(dataset_id=dataset["dataset_id"]))
+    )
 
     assert "# Dataset Characterization" in markdown
     assert "## Column Name Preview" in markdown
@@ -666,9 +669,9 @@ def test_probe_columns_reports_missing_and_truncates_long_values(tmp_path):
             "value": [1.0, 2.0, 3.0],
         }
     ).to_csv(path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    payload = json.loads(
+    payload = payload_of(
         asyncio.run(
             probe_columns(
                 dataset["dataset_id"],
@@ -677,7 +680,7 @@ def test_probe_columns_reports_missing_and_truncates_long_values(tmp_path):
             )
         )
     )
-    markdown = asyncio.run(probe_columns(dataset["dataset_id"], ["text"]))
+    markdown = text_of(asyncio.run(probe_columns(dataset["dataset_id"], ["text"])))
 
     assert payload["columns_requested"] == 2
     assert payload["columns_returned"] == 1
@@ -700,10 +703,12 @@ def test_recommend_preprocessing_defaults_to_markdown_and_samples_dirty_numeric(
             "dirty": ["1.0", "2.5", "bad", "4.2"],
         }
     ).to_csv(path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    markdown = asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
-    payload = json.loads(
+    markdown = text_of(
+        asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
+    )
+    payload = payload_of(
         asyncio.run(
             recommend_preprocessing(
                 dataset_id=dataset["dataset_id"],
@@ -734,9 +739,9 @@ def test_recommend_preprocessing_summary_caps_rationale_and_warns_expansion(tmp_
         data[f"cat_{idx}"] = [f"v_{idx}_{value % 25}" for value in range(rows)]
     path = tmp_path / "wide_preprocessing.csv"
     pd.DataFrame(data).to_csv(path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    payload = json.loads(
+    payload = payload_of(
         asyncio.run(
             recommend_preprocessing(
                 dataset_id=dataset["dataset_id"],
@@ -767,10 +772,12 @@ def test_recommend_preprocessing_surfaces_high_missingness_decisions(tmp_path):
             "outcome_score": [None] * 17 + [0.0, 1.0, 1.0],
         }
     ).to_csv(path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    markdown = asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
-    payload = json.loads(
+    markdown = text_of(
+        asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
+    )
+    payload = payload_of(
         asyncio.run(
             recommend_preprocessing(
                 dataset_id=dataset["dataset_id"],
@@ -813,10 +820,12 @@ def test_recommend_preprocessing_surfaces_numeric_coded_categories(tmp_path):
             "lab_value": [float(i) + 0.25 for i in range(rows)],
         }
     ).to_csv(path, index=False)
-    dataset = json.loads(asyncio.run(ingest_dataset(str(path))))
+    dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    markdown = asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
-    payload = json.loads(
+    markdown = text_of(
+        asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
+    )
+    payload = payload_of(
         asyncio.run(
             recommend_preprocessing(
                 dataset_id=dataset["dataset_id"],
@@ -852,7 +861,7 @@ def test_recommend_preprocessing_surfaces_numeric_coded_categories(tmp_path):
     assert "## Numeric-Coded Category Review" in markdown
     assert "not a required next step" in markdown
 
-    probe = json.loads(
+    probe = payload_of(
         asyncio.run(
             probe_columns(
                 dataset["dataset_id"],
@@ -871,9 +880,9 @@ def test_recommend_preprocessing_surfaces_numeric_coded_categories(tmp_path):
 
 
 def test_unknown_handles_return_stable_codes():
-    dataset_report = json.loads(asyncio.run(create_config("ds_missing")))
-    run_report = json.loads(asyncio.run(get_topological_skeleton("run_missing")))
-    upload_report = json.loads(asyncio.run(finalize_dataset_upload("upload_missing")))
+    dataset_report = payload_of(asyncio.run(create_config("ds_missing")))
+    run_report = payload_of(asyncio.run(get_topological_skeleton("run_missing")))
+    upload_report = payload_of(asyncio.run(finalize_dataset_upload("upload_missing")))
 
     assert dataset_report["error_code"] == "DATASET_ID_UNKNOWN"
     assert run_report["error_code"] == "RUN_ID_UNKNOWN"
@@ -881,10 +890,10 @@ def test_unknown_handles_return_stable_codes():
 
 
 def test_append_dataset_chunk_rejects_invalid_base64():
-    upload = json.loads(
+    upload = payload_of(
         asyncio.run(begin_dataset_upload("broken.csv", media_type="text/csv"))
     )
-    report = json.loads(
+    report = payload_of(
         asyncio.run(
             append_dataset_chunk(
                 upload["upload_id"],
@@ -897,7 +906,7 @@ def test_append_dataset_chunk_rejects_invalid_base64():
 
 
 def test_get_workflow_guide_returns_phase_prompt():
-    guide = asyncio.run(get_workflow_guide())
+    guide = text_of(asyncio.run(get_workflow_guide()))
     assert "PHASE I" in guide
     assert "PHASE II" in guide
     assert "PHASE III" in guide
@@ -911,7 +920,7 @@ def test_get_workflow_guide_returns_phase_prompt():
 
 
 def test_run_topological_sweep_missing_config_path_returns_structured_error():
-    report = json.loads(
+    report = payload_of(
         asyncio.run(run_topological_sweep(config_path="/home/claude/missing.yaml"))
     )
 
@@ -919,7 +928,7 @@ def test_run_topological_sweep_missing_config_path_returns_structured_error():
 
 
 def test_run_topological_sweep_missing_host_config_path_returns_config_code():
-    report = json.loads(
+    report = payload_of(
         asyncio.run(run_topological_sweep(config_path="/definitely/not/real.yaml"))
     )
 
@@ -952,9 +961,9 @@ def _write_mixed_dataset(tmp_path):
 def test_create_config_returns_processed_calibration(tmp_path):
     """create_config should calibrate in processed space and report it."""
     csv_path = _write_mixed_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
 
-    response = json.loads(
+    response = payload_of(
         asyncio.run(create_config(dataset["dataset_id"], "mixed_test"))
     )
 
@@ -977,8 +986,8 @@ def test_create_config_generates_wide_grid(tmp_path):
     import yaml
 
     csv_path = _write_mixed_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
-    response = json.loads(asyncio.run(create_config(dataset["dataset_id"])))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
+    response = payload_of(asyncio.run(create_config(dataset["dataset_id"])))
 
     cfg = yaml.safe_load(response["config_yaml"])
     projection = cfg["sweep"]["projection"]
@@ -1003,8 +1012,8 @@ def test_create_config_high_dimensional_baseline_uses_broad_tail_grid(tmp_path):
     import yaml
 
     csv_path = _write_dataset(tmp_path, rows=80, cols=24)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
-    response = json.loads(asyncio.run(create_config(dataset["dataset_id"])))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
+    response = payload_of(asyncio.run(create_config(dataset["dataset_id"])))
     cfg = yaml.safe_load(response["config_yaml"])
 
     projection = cfg["sweep"]["projection"]
@@ -1052,9 +1061,9 @@ def test_initial_pca_grid_respects_tiny_feature_ceiling():
 def test_create_config_numeric_only_still_works(tmp_path):
     """create_config on pure numeric data should still work (no expansion)."""
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
 
-    response = json.loads(
+    response = payload_of(
         asyncio.run(create_config(dataset["dataset_id"], "numeric_only"))
     )
 
@@ -1071,12 +1080,12 @@ def test_create_config_numeric_only_still_works(tmp_path):
 def test_refine_config_rejects_unknown_keys(tmp_path):
     """refine_config should error on unknown override keys."""
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -1094,12 +1103,12 @@ def test_refine_config_rejects_unknown_keys(tmp_path):
 def test_refine_config_accepts_dotted_paths(tmp_path):
     """refine_config should accept dotted YAML paths alongside flat shortcuts."""
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -1183,11 +1192,11 @@ def test_refine_config_remove_keys_drops_preprocessing_entry(tmp_path):
     """End-to-end: a key injected under preprocessing can be deleted via
     remove_keys, and the deletion is reported in the diff with removed=true."""
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
-    seeded = json.loads(
+    seeded = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml, {"preprocessing.impute.f0": {"method": "fill_mean"}}
@@ -1198,7 +1207,7 @@ def test_refine_config_remove_keys_drops_preprocessing_entry(tmp_path):
         yaml.safe_load(seeded).get("preprocessing", {}).get("impute", {}) or {}
     )
 
-    removed = json.loads(
+    removed = payload_of(
         asyncio.run(refine_config(seeded, {"remove_keys": ["preprocessing.impute.f0"]}))
     )
     assert removed["status"] == "ok"
@@ -1215,12 +1224,12 @@ def test_refine_config_remove_keys_drops_preprocessing_entry(tmp_path):
 def test_refine_config_rejects_unknown_dotted_root(tmp_path):
     """Dotted paths under unknown roots should error."""
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(refine_config(config_yaml, {"nonsense.path.here": True}))
     )
 
@@ -1231,12 +1240,12 @@ def test_refine_config_rejects_unknown_dotted_root(tmp_path):
 def test_refine_config_returns_diff(tmp_path):
     """refine_config should return a diff of what changed."""
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             refine_config(config_yaml, {"projection_dimensions": [2, 5], "n_reps": 2})
         )
@@ -1252,23 +1261,27 @@ def test_refine_config_returns_diff(tmp_path):
 
 def test_refine_config_supports_human_readable_outputs(tmp_path):
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
 
-    markdown = asyncio.run(
-        refine_config(
-            config_yaml,
-            {"projection_dimensions": [2], "n_reps": 2},
-            response_format="markdown",
+    markdown = text_of(
+        asyncio.run(
+            refine_config(
+                config_yaml,
+                {"projection_dimensions": [2], "n_reps": 2},
+                response_format="markdown",
+            )
         )
     )
-    raw_yaml = asyncio.run(
-        refine_config(
-            config_yaml,
-            {"projection_dimensions": [2], "n_reps": 2},
-            response_format="yaml",
+    raw_yaml = text_of(
+        asyncio.run(
+            refine_config(
+                config_yaml,
+                {"projection_dimensions": [2], "n_reps": 2},
+                response_format="yaml",
+            )
         )
     )
 
@@ -1292,11 +1305,11 @@ def test_run_topological_sweep_returns_json(tmp_path):
     """run_topological_sweep should return bounded structured JSON when requested."""
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -1311,7 +1324,7 @@ def test_run_topological_sweep_returns_json(tmp_path):
         )
     )["config_yaml"]
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined,
@@ -1352,7 +1365,7 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert result["pca_cached"] is result["projection_cached"]
     assert result["pca_cache_status"] == result["projection_cache_status"]
 
-    full = json.loads(
+    full = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined,
@@ -1368,10 +1381,12 @@ def test_run_topological_sweep_returns_json(tmp_path):
     assert "config_yaml_normalized" in full
 
     # Verify that response defaults to markdown format
-    markdown = asyncio.run(
-        run_topological_sweep(
-            config_yaml=refined,
-            dataset_id=dataset["dataset_id"],
+    markdown = text_of(
+        asyncio.run(
+            run_topological_sweep(
+                config_yaml=refined,
+                dataset_id=dataset["dataset_id"],
+            )
         )
     )
     assert "# Sweep Run Complete" in markdown
@@ -1395,11 +1410,11 @@ def test_run_topological_sweep_reserves_progress_for_finalization(tmp_path):
     _sessions.clear()
     ctx = RecordingContext()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"]))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -1414,7 +1429,7 @@ def test_run_topological_sweep_reserves_progress_for_finalization(tmp_path):
         )
     )["config_yaml"]
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined,
@@ -1438,11 +1453,11 @@ def test_run_topological_sweep_reserves_progress_for_finalization(tmp_path):
 def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
-    create_response = json.loads(
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
+    create_response = payload_of(
         asyncio.run(create_config(dataset["dataset_id"], "active_config"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 overrides={"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
@@ -1450,8 +1465,8 @@ def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
         )
     )
 
-    active_before = json.loads(asyncio.run(get_runtime_context()))
-    result = json.loads(asyncio.run(run_topological_sweep(response_format="json")))
+    active_before = payload_of(asyncio.run(get_runtime_context()))
+    result = payload_of(asyncio.run(run_topological_sweep(response_format="json")))
 
     assert create_response["status"] == "ok"
     assert refined["status"] == "ok"
@@ -1460,7 +1475,7 @@ def test_run_topological_sweep_can_use_active_config_without_args(tmp_path):
     assert result["dataset_id"] == dataset["dataset_id"]
     assert "config_yaml_normalized" not in result
 
-    with_config = json.loads(
+    with_config = payload_of(
         asyncio.run(
             run_topological_sweep(include_config_yaml=True, response_format="json")
         )
@@ -1472,11 +1487,11 @@ def test_refine_config_active_supports_nested_and_mixed_overrides(tmp_path):
     """refine_config (active mode) flattens nested, mixed, and flat overrides."""
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     asyncio.run(create_config(dataset["dataset_id"], "active_config"))
 
     # Pass a mixture of nested projection shorthand and flat keys (n_reps)
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 overrides={
@@ -1492,7 +1507,7 @@ def test_refine_config_active_supports_nested_and_mixed_overrides(tmp_path):
     assert "sweep.epsilon_values" in refined["applied_overrides"]
     assert "output.n_reps" in refined["applied_overrides"]
 
-    active_after = json.loads(asyncio.run(get_runtime_context()))
+    active_after = payload_of(asyncio.run(get_runtime_context()))
     assert "dimensions:" in active_after["active_config_yaml"]
     assert "epsilon:" in active_after["active_config_yaml"]
     assert "n_reps: 2" in active_after["active_config_yaml"]
@@ -1502,11 +1517,11 @@ def test_dossier_inherits_construction_threshold(tmp_path):
     """generate_cluster_dossier inherits construction_threshold when arg omitted."""
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "dossier_inherit"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -1524,7 +1539,7 @@ def test_dossier_inherits_construction_threshold(tmp_path):
         run_topological_sweep(config_yaml=refined, dataset_id=dataset["dataset_id"])
     )
 
-    inherited = json.loads(
+    inherited = payload_of(
         asyncio.run(generate_cluster_dossier(response_format="json"))
     )
     assert "construction_threshold" in inherited
@@ -1540,7 +1555,7 @@ def test_dossier_inherits_construction_threshold(tmp_path):
         == inherited["construction_threshold"]
     )
 
-    explicit = json.loads(
+    explicit = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 interpretation_edge_weight_threshold=0.5,
@@ -1556,11 +1571,11 @@ def test_dossier_inherits_construction_threshold(tmp_path):
 def test_dossier_rejects_invalid_interpretation_threshold(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "bad_threshold"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
@@ -1571,7 +1586,7 @@ def test_dossier_rejects_invalid_interpretation_threshold(tmp_path):
         run_topological_sweep(config_yaml=refined, dataset_id=dataset["dataset_id"])
     )
 
-    payload = json.loads(
+    payload = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 interpretation_edge_weight_threshold=-0.1,
@@ -1604,7 +1619,7 @@ def test_dossier_explicit_spectral_method_is_not_overridden():
         }
     )
 
-    payload = json.loads(
+    payload = payload_of(
         asyncio.run(generate_cluster_dossier(method="spectral", response_format="json"))
     )
 
@@ -1615,7 +1630,7 @@ def test_dossier_explicit_spectral_method_is_not_overridden():
     assert payload["threshold_source"] == "spectral_default_full_affinity"
     assert payload["threshold_surface"]["status"] == "full_affinity_spectral"
 
-    sparse_payload = json.loads(
+    sparse_payload = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 method="spectral",
@@ -1641,14 +1656,16 @@ def test_generate_cluster_dossier_spectral_failure_is_diagnostic():
     session.data = pd.DataFrame({"x": [0, 1, 2, 3, 4]})
     session.latest_run_id = "run_spectral_fail"
 
-    markdown = asyncio.run(
-        generate_cluster_dossier(
-            method="spectral",
-            max_k=4,
-            response_format="markdown",
+    markdown = text_of(
+        asyncio.run(
+            generate_cluster_dossier(
+                method="spectral",
+                max_k=4,
+                response_format="markdown",
+            )
         )
     )
-    summary = json.loads(
+    summary = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 method="spectral",
@@ -1657,7 +1674,7 @@ def test_generate_cluster_dossier_spectral_failure_is_diagnostic():
             )
         )
     )
-    full = json.loads(
+    full = payload_of(
         asyncio.run(
             generate_cluster_dossier(
                 method="spectral",
@@ -1668,9 +1685,11 @@ def test_generate_cluster_dossier_spectral_failure_is_diagnostic():
         )
     )
 
-    assert markdown.startswith("# No Stable Spectral Cut")
-    assert "Affinity components: 5" in markdown
-    assert "k evaluated: 2-4" in markdown
+    # Markdown mode returns the same JSON envelope as json mode (errors are uniform).
+    md_env = json.loads(markdown)
+    assert md_env["error_code"] == "NO_STABLE_SPECTRAL_CUT"
+    assert "k=2-4" in md_env["reason"]
+    assert md_env["details"]["affinity_component_count"] == 5
     assert "candidate_scores" not in markdown
     assert summary["error_code"] == "NO_STABLE_SPECTRAL_CUT"
     assert summary["details"]["affinity_component_count"] == 5
@@ -1684,12 +1703,12 @@ def test_sweep_response_contains_stability_summary(tmp_path):
     """run_topological_sweep with auto threshold emits threshold_stability_summary."""
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     # create_config defaults construction_threshold to "auto"
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "auto_threshold"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
@@ -1697,7 +1716,7 @@ def test_sweep_response_contains_stability_summary(tmp_path):
         )
     )["config_yaml"]
 
-    result = json.loads(
+    result = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined,
@@ -1735,11 +1754,11 @@ def test_sweep_response_contains_stability_summary(tmp_path):
 def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "threshold_curve"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
@@ -1750,11 +1769,11 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
         run_topological_sweep(config_yaml=refined, dataset_id=dataset["dataset_id"])
     )
 
-    markdown = asyncio.run(get_threshold_stability_curve())
-    summary = json.loads(
+    markdown = text_of(asyncio.run(get_threshold_stability_curve()))
+    summary = payload_of(
         asyncio.run(get_threshold_stability_curve(response_format="json"))
     )
-    full = json.loads(
+    full = payload_of(
         asyncio.run(
             get_threshold_stability_curve(detail="full", response_format="json")
         )
@@ -1847,11 +1866,11 @@ def test_threshold_stability_curve_defaults_to_sparse_summary(tmp_path):
 def test_diagnose_cosmic_graph_returns_structured_observables(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "diagnose_task"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -1867,7 +1886,7 @@ def test_diagnose_cosmic_graph_returns_structured_observables(tmp_path):
         )
     )
 
-    objective = json.loads(asyncio.run(diagnose_cosmic_graph()))
+    objective = payload_of(asyncio.run(diagnose_cosmic_graph()))
 
     assert objective["status"] == "ok"
     assert objective["source"] == "live"
@@ -1895,10 +1914,10 @@ def test_diagnose_cosmic_graph_returns_structured_observables(tmp_path):
     assert 0.0 <= morph["component_size_entropy"] <= 1.0
     assert 0.0 <= morph["top_two_balance"] <= 1.0
 
-    full = json.loads(asyncio.run(diagnose_cosmic_graph(detail="full")))
+    full = payload_of(asyncio.run(diagnose_cosmic_graph(detail="full")))
     assert "component_sizes" in full["component_morphology"]
 
-    markdown = asyncio.run(diagnose_cosmic_graph(response_format="markdown"))
+    markdown = text_of(asyncio.run(diagnose_cosmic_graph(response_format="markdown")))
     assert markdown.startswith("# Cosmic Graph Diagnosis")
     assert "Observed patterns:" in markdown
     assert "MinHash construction" in markdown
@@ -1934,11 +1953,11 @@ def test_component_morphology_counts_gap_separated_minority_in_large_graph():
 def test_graph_artifact_estimate_build_and_staleness(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path, rows=24)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "artifact"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml,
@@ -1946,7 +1965,7 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
             )
         )
     )["config_yaml"]
-    first = json.loads(
+    first = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined,
@@ -1956,13 +1975,13 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
         )
     )
 
-    estimate = json.loads(asyncio.run(create_graph_artifact()))
+    estimate = payload_of(asyncio.run(create_graph_artifact()))
     assert estimate["estimate_only"] is True
     assert estimate["build_call"]["args"]["estimate_only"] is False
     assert estimate["estimated_cost"]["runtime_s"] is not None
 
     # structural_backbone is a planned surface, not a callable artifact kind.
-    unsupported = json.loads(
+    unsupported = payload_of(
         asyncio.run(
             create_graph_artifact(kind="structural_backbone", run_id=first["run_id"])
         )
@@ -1970,7 +1989,7 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
     assert unsupported["status"] == "error"
     assert unsupported["error_code"] == "GRAPH_ARTIFACT_KIND_UNSUPPORTED"
 
-    built = json.loads(
+    built = payload_of(
         asyncio.run(
             create_graph_artifact(
                 run_id=first["run_id"],
@@ -1983,7 +2002,7 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
     assert built["status"] == "ok"
     assert built["artifact_id"].startswith("graph_")
 
-    artifact = json.loads(
+    artifact = payload_of(
         asyncio.run(
             get_topological_skeleton(
                 surface="artifact",
@@ -1992,7 +2011,7 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
         )
     )
     assert artifact["artifact_staleness"]["stale"] is False
-    artifact_diagnosis = json.loads(
+    artifact_diagnosis = payload_of(
         asyncio.run(
             diagnose_cosmic_graph(
                 surface="artifact",
@@ -2011,7 +2030,7 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
             response_format="json",
         )
     )
-    stale = json.loads(
+    stale = payload_of(
         asyncio.run(
             get_topological_skeleton(
                 surface="artifact",
@@ -2020,7 +2039,7 @@ def test_graph_artifact_estimate_build_and_staleness(tmp_path):
         )
     )
     assert stale["artifact_staleness"]["stale"] is True
-    old_curve = json.loads(
+    old_curve = payload_of(
         asyncio.run(
             get_threshold_stability_curve(
                 run_id=built["run_id"],
@@ -2448,11 +2467,11 @@ def test_sweep_markdown_renders_caution_gate_recommendation():
 def test_run_topological_sweep_reports_projection_cache_hit_on_repeat(tmp_path):
     _sessions.clear()
     csv_path = _write_dataset(tmp_path)
-    dataset = json.loads(asyncio.run(ingest_dataset(csv_path)))
+    dataset = payload_of(asyncio.run(ingest_dataset(csv_path)))
     config_yaml = _extract_config_yaml(
         asyncio.run(create_config(dataset["dataset_id"], "cache_hit"))
     )
-    refined = json.loads(
+    refined = payload_of(
         asyncio.run(
             refine_config(
                 config_yaml, {"pca_dims": [2], "epsilon_values": [0.5], "n_reps": 1}
@@ -2460,7 +2479,7 @@ def test_run_topological_sweep_reports_projection_cache_hit_on_repeat(tmp_path):
         )
     )["config_yaml"]
 
-    first = json.loads(
+    first = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined,
@@ -2469,7 +2488,7 @@ def test_run_topological_sweep_reports_projection_cache_hit_on_repeat(tmp_path):
             )
         )
     )
-    second = json.loads(
+    second = payload_of(
         asyncio.run(
             run_topological_sweep(
                 config_yaml=refined,

@@ -7,9 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
+### Added
+
+- **SOTA MCP tool contracts and structured results (`pulsar-mcp`):** Every MCP
+  tool now declares `@tool_meta` (`ToolAnnotations` for read-only, destructive,
+  and idempotent hints plus `output_schema` and wall-clock timeouts) and returns
+  a `ToolResult` with dual-channel output (`structured_content` alongside text
+  content). Failures emit structured `mcp_error` envelopes (`is_error=True`,
+  `error_code`, `agent_action`, `details`).
+- **Process-wide `ModelCache` for multi-run workflows:** Fitted runs are cached
+  in a bounded LRU (`PULSAR_MCP_MODEL_CACHE_SIZE`, default 3) keyed by `run_id`,
+  allowing read-only inspection and export tools (`diagnose_cosmic_graph`,
+  `get_threshold_stability_curve`, `get_topological_skeleton`,
+  `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix`,
+  `compare_clusters`, `create_graph_artifact`, `export_labeled_data`,
+  `export_html_report`, `export_dataset_bundle`) to target historical runs
+  without re-sweeping.
+- **Opt-in MCP background tasks (`PULSAR_MCP_ENABLE_TASKS=1`):** When enabled
+  and `fastmcp-tasks` (`thema-pulsar[mcp]`) is installed,
+  `run_topological_sweep` advertises `TaskConfig(mode="optional")` so
+  task-capable MCP clients can run sweeps asynchronously without client-side
+  RPC timeouts.
+- **Response budget and argument-sanitizer middlewares:** Added
+  `ResponseBudgetMiddleware` (`PULSAR_MCP_MAX_RESPONSE_BYTES`, default 100 KB)
+  to return structured `RESPONSE_TOO_LARGE` guidance instead of truncating JSON
+  mid-stream, `ArgumentSanitizerMiddleware` to strip orchestration keys before
+  tool dispatch, and `TimingMiddleware` logging to `stderr`.
+- **Configurable MCP worker pool and timeouts:** Added
+  `PULSAR_MCP_WORKERS` (default 4) for CPU-bound executor threads and
+  `PULSAR_MCP_TOOL_TIMEOUT` / `PULSAR_MCP_SWEEP_TIMEOUT` environment controls.
+
+### Changed
+
+- **Rust PyO3 bindings release the Python GIL across all compute-heavy calls:**
+  `ThemaRS::fit`, `calibrate`, `set_active_threshold`, `cluster`,
+  `cluster_hierarchy`, `find_knee_point`, `get_stability_curve`,
+  `get_persistence_diagram`, `get_component_tree`, graph export helpers,
+  `jl_grid`, `pca_grid`, `compute_cluster_saliency`, and longitudinal Rust
+  entrypoints now copy inputs while holding the GIL, run Rayon parallel compute
+  inside `py.allow_threads(...)`, and construct Python results afterward.
+- **Concurrent MCP session safety and atomic exports:** Isolated worker inputs
+  via `SweepInput` snapshots, added per-session `_worker_mutation_lock` for C++
+  / Rust `ThemaRS` mutation calls (`cluster`, `set_active_threshold`), guarded
+  session eviction with `active_ops` reference counting, and routed all dataset
+  and run registry writes plus bundle exports through atomic temp-file +
+  `os.replace` staging.
+- **Bounded MCP tool outputs (`detail="summary" | "full"`):** Consolidated the
+  default tool surface to 27 tools (with chunked-upload tools gated behind
+  `PULSAR_MCP_ENABLE_UPLOAD=1`) and added preview caps and omission counters to
+  keep default responses compact.
+
 ### Fixed
 
-- Include the repository license in source distributions so PyPI accepts the
+- Propagated FastMCP request `ContextVar` state into executor worker threads so
+  in-fit `ctx.report_progress` notifications reach connected MCP clients.
+- Prevented unheadered Streamable HTTP requests from colliding in the shared
+  `"default"` session bucket.
+- Preserved sibling files in existing output directories when re-exporting
+  dataset bundles via per-artifact staging (`*.staged`).
+- Included the repository license in source distributions so PyPI accepts the
   declared license metadata.
 
 ## [0.4.0] - 2026-10-08

@@ -5,6 +5,7 @@ ThemaRS — orchestrates the full Pulsar pipeline.
 from __future__ import annotations
 
 import gc
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Union
@@ -370,9 +371,10 @@ class ThemaRS:
             ballmap_batch_size: Optional cap on how many projection embeddings to process
                 per BallMapper batch. Smaller batches reduce peak RAM at the cost
                 of more Rust crossings. None processes all embeddings together.
-            rayon_workers: Optional cap for Rayon worker threads used inside Rust
-                ops (projection grid, BallMapper grid, Laplacian accumulation). Defaults
-                to the library setting when None.
+            rayon_workers: Accepted for API compatibility only and currently has
+                **no effect**: Rust ops use the process-wide (global) rayon pool.
+                Passing a non-None value emits a ``RuntimeWarning``. The value is
+                still validated (must be positive).
 
         Returns self for method chaining.
         """
@@ -382,6 +384,13 @@ class ThemaRS:
             raise ValueError("ballmap_batch_size must be positive when provided")
         if rayon_workers is not None and rayon_workers <= 0:
             raise ValueError("rayon_workers must be positive when provided")
+        if rayon_workers is not None:
+            warnings.warn(
+                "rayon_workers has no effect: Rust ops use the global rayon pool. "
+                "The argument is accepted for API compatibility only.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         N = len(datasets)
         cfg = self.config
