@@ -300,19 +300,27 @@ def _publish_dossier_on_loop(
     fingerprint: str,
     staged_assignment: StagedWrite,
     expected_run_id: str | None,
+    expected_data: Any,
     exclude_columns: list[str] | None,
 ) -> Any:
     """Commit the staged assignment and publish dossier state synchronously.
 
-    The run check precedes the commit and no ``await`` separates them from
-    ``publish_dossier``. A refused dossier discards its staged file, so nothing
-    is persisted unless it is published.
+    The run and data checks precede the commit and no ``await`` separates them
+    from ``publish_dossier``. A refused dossier discards its staged file, so
+    nothing is persisted unless it is published.
     """
     try:
         if session.latest_run_id != expected_run_id:
             raise SessionConflictError(
                 "Active run changed while computing cluster dossier; "
                 "refusing to publish stale clusters."
+            )
+        # A rebind replaces session.data without changing the run id, so the
+        # run check alone would publish labels computed on the old rows.
+        if session.data is not expected_data:
+            raise SessionConflictError(
+                "Session data was rebound while computing cluster dossier; "
+                "refusing to publish clusters computed on the previous dataset."
             )
         assignment = registry.commit_staged(staged_assignment)
     except BaseException:
@@ -508,6 +516,7 @@ async def generate_cluster_dossier(
             fingerprint=fingerprint,
             staged_assignment=staged_assignment,
             expected_run_id=expected_run_id,
+            expected_data=data,
             exclude_columns=exclude_columns,
         )
         assignment_summary = _cluster_assignment_summary(assignment)

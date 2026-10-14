@@ -773,3 +773,99 @@ def test_registry_init_sweeps_only_old_staged_files() -> None:
     assert reg.sweep_orphaned_staged() == 1
     assert not fresh_run.exists()
     assert committed.exists()
+
+
+def test_dossier_refused_when_data_rebound_during_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dataset rebind mid-dossier must not publish labels for the old rows."""
+
+    async def _run() -> None:
+        ctx = _make_ctx("dossier-rebind")
+        csv_path = _write_synthetic_csv(tmp_path / "rebind.csv", n_rows=80)
+        dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
+        await run_topological_sweep(
+            config_yaml=config_yaml,
+            dataset_id=dataset_id,
+            response_format="json",
+            ctx=ctx,
+        )
+        session = session_mod._get_session(ctx)
+        run_id_before = session.latest_run_id
+
+        entered = threading.Event()
+        release = threading.Event()
+        orig_resolve = clustering_mod.resolve_clusters
+
+        def _gated_resolve(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=5.0)
+            return orig_resolve(*args, **kwargs)
+
+        monkeypatch.setattr(clustering_mod, "resolve_clusters", _gated_resolve)
+        task = asyncio.create_task(
+            generate_cluster_dossier(
+                method="components", response_format="json", ctx=ctx
+            )
+        )
+        await _wait_for_event(entered)
+        # Another tool binds a different (smaller) dataset; the run id is unchanged.
+        session_mod._bind_session_data(session, session.data.iloc[:50].copy())
+        release.set()
+        res = json.loads(await task)
+
+        assert session.latest_run_id == run_id_before
+        assert res["status"] == "error"
+        assert res["error_code"] == "SESSION_REVISION_CONFLICT"
+        assert "rebound" in res["reason"]
+        assert session.clusters is None
+        assert len(session.data) == 50
+        assert session.active_ops == 0
+        ca_dir = registry_mod._CLUSTER_ASSIGNMENTS_DIR
+        assert [p.name for p in ca_dir.iterdir()] == []
+
+    asyncio.run(_run())
+
+
+def test_bundle_reexport_keeps_unrelated_files_and_supports_nested_slug(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> None:
+        csv_path = _write_synthetic_csv(tmp_path / "bundle_keep.csv", n_rows=80)
+        ctx = _make_ctx("bundle-keep")
+        dataset_id, config_yaml = await _ingest_and_configure(csv_path, ctx)
+        await run_topological_sweep(
+            config_yaml=config_yaml,
+            dataset_id=dataset_id,
+            response_format="json",
+            ctx=ctx,
+        )
+        model = session_mod._get_session(ctx).model
+        labels = np.zeros(len(model.data), dtype=int)
+        output_dir = tmp_path / "exports"
+
+        export_dataset_bundle(
+            model, output_dir, "team/run1", cluster_labels=labels, include_clean=True
+        )
+        bundle = output_dir / "team" / "run1"
+        notes = bundle / "NOTES.md"
+        notes.write_text("keep me", encoding="utf-8")
+        (bundle / "graph" / "figure.png").write_bytes(b"png")
+
+        export_dataset_bundle(
+            model,
+            output_dir,
+            "team/run1",
+            cluster_labels=np.ones(len(model.data), dtype=int),
+            include_clean=False,
+        )
+
+        assert notes.read_text(encoding="utf-8") == "keep me"
+        assert (bundle / "graph" / "figure.png").exists()
+        assert not (bundle / "tabular" / "clean.parquet").exists()
+        nodes = pq.read_table(bundle / "graph" / "nodes.parquet").to_pandas()
+        assert len(nodes) == 80
+        # No staging directories are left beside the bundle.
+        assert [p.name for p in (output_dir / "team").iterdir()] == ["run1"]
+
+    asyncio.run(_run())

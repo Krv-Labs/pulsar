@@ -274,3 +274,38 @@ def test_session_key_in_memory_client_is_default() -> None:
 
     asyncio.run(_run())
     assert seen == ["default"]
+
+
+def test_sweep_progress_reaches_real_client_from_worker(tmp_path: Path) -> None:
+    """In-fit progress from the worker thread must reach the client.
+
+    The worker runs via run_in_executor, which does not copy contextvars; if
+    the request context is lost, ctx.report_progress silently no-ops and only
+    the loop-side events ("format response", "complete") arrive.
+    """
+    csv_path = _write_sample_csv(tmp_path / "progress.csv")
+    messages: list[str | None] = []
+
+    async def _on_progress(
+        progress: float, total: float | None, message: str | None
+    ) -> None:
+        messages.append(message)
+
+    async def _run() -> None:
+        server = AgnosticFastMCP("test-progress")
+        register_server_tools(server)
+        async with Client(server, progress_handler=_on_progress) as client:
+            ingest_res = await client.call_tool(
+                "ingest_dataset", {"path": str(csv_path)}
+            )
+            dataset_id = _extract_tool_json(ingest_res)["dataset_id"]
+            await client.call_tool("create_config", {"dataset_id": dataset_id})
+            messages.clear()
+            await client.call_tool(
+                "run_topological_sweep",
+                {"dataset_id": dataset_id, "response_format": "json"},
+            )
+
+    asyncio.run(_run())
+    in_fit = [m for m in messages if m not in ("format response", "complete")]
+    assert in_fit, f"no in-fit progress reached the client: {messages}"
