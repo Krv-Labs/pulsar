@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import fastmcp_tasks
 from fastmcp import Client, Context
 from fastmcp.server.dependencies import _background_task_headers
 from fastmcp.utilities.tasks import TaskConfig
@@ -131,3 +133,144 @@ def test_client_session_continuity_across_sweep_and_diagnose(
     assert diag_payload["scale"]["n_nodes"] == 24
     assert diag_payload["run_id"] == sweep_payload["run_id"]
 
+
+# ---------------------------------------------------------------------------
+# F2: tasks must be real (extension serves tasks/* methods) or not advertised
+# ---------------------------------------------------------------------------
+def test_tasks_extension_registered_with_methods(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
+
+    monkeypatch.setenv("PULSAR_MCP_ENABLE_TASKS", "1")
+    server = AgnosticFastMCP("test-ext")
+    register_server_tools(server)
+    ext = server._extensions[TASKS_EXTENSION_ID]
+    assert isinstance(ext, fastmcp_tasks.TasksExtension)
+    assert len(ext.methods()) > 0
+
+
+def test_tasks_not_advertised_when_fastmcp_tasks_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import builtins
+
+    from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
+
+    real_import = builtins.__import__
+
+    def _no_tasks(name, *args, **kwargs):
+        if name == "fastmcp_tasks" or name.startswith("fastmcp_tasks."):
+            raise ImportError("simulated missing fastmcp-tasks")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setenv("PULSAR_MCP_ENABLE_TASKS", "1")
+    monkeypatch.setattr(builtins, "__import__", _no_tasks)
+    server = AgnosticFastMCP("test-missing")
+    with caplog.at_level("ERROR", logger="pulsar.mcp.server"):
+        register_server_tools(server)
+    assert TASKS_EXTENSION_ID not in server._extensions
+    assert "fastmcp[tasks]" in caplog.text
+    tools = asyncio.run(server.list_tools())
+    assert all(t.task_config.mode == "forbidden" for t in tools)
+
+
+async def _task_roundtrip(csv_path: Path) -> tuple[dict, dict, dict]:
+    server = AgnosticFastMCP("test-task-e2e")
+    register_server_tools(server)
+    async with Client(server) as client:
+        ingest = _extract_tool_json(
+            await client.call_tool("ingest_dataset", {"path": str(csv_path)})
+        )
+        dataset_id = ingest["dataset_id"]
+        await client.call_tool("create_config", {"dataset_id": dataset_id})
+        handle = await fastmcp_tasks.call_tool_task(
+            client,
+            "run_topological_sweep",
+            {"dataset_id": dataset_id, "response_format": "json"},
+        )
+        task_result = await asyncio.wait_for(handle.result(), timeout=120)
+        ctx_res = await client.call_tool(
+            "get_runtime_context", {"response_format": "json"}
+        )
+    return (
+        _extract_tool_json(task_result),
+        _extract_tool_json(ctx_res),
+        {"dataset_id": dataset_id},
+    )
+
+
+def test_sweep_runs_as_background_task_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PULSAR_MCP_ENABLE_TASKS", "1")
+    csv_path = _write_sample_csv(tmp_path / "sample.csv", n_rows=24)
+    sweep, runtime, ids = asyncio.run(_task_roundtrip(csv_path))
+    assert sweep.get("status") == "ok"
+    assert sweep["run_id"]
+    assert sweep["key_metrics"]["n_nodes"] == 24
+    assert runtime.get("latest_run_id") == sweep["run_id"]
+
+
+# ---------------------------------------------------------------------------
+# F3: "default" session only for stdio / in-memory transports
+# ---------------------------------------------------------------------------
+def _fake_ctx(
+    transport: str | None,
+    *,
+    header: str | None = None,
+    session_id: str = "per-request-uuid",
+) -> SimpleNamespace:
+    headers = {"mcp-session-id": header} if header else {}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(
+            session=None, request=SimpleNamespace(headers=headers)
+        ),
+        _session=None,
+        transport=transport,
+        session_id=session_id,
+        is_background_task=False,
+    )
+
+
+def test_session_key_stdio_is_default() -> None:
+    assert session_mod._extract_context_session_id(_fake_ctx("stdio")) == "default"
+
+
+def test_session_key_in_memory_is_default() -> None:
+    assert session_mod._extract_context_session_id(_fake_ctx(None)) == "default"
+
+
+def test_session_key_http_with_header_uses_header() -> None:
+    ctx = _fake_ctx("streamable-http", header="hdr-sess-1")
+    assert session_mod._extract_context_session_id(ctx) == "hdr-sess-1"
+
+
+def test_session_key_http_without_header_is_isolated_not_default() -> None:
+    a = session_mod._extract_context_session_id(
+        _fake_ctx("streamable-http", session_id="req-a")
+    )
+    b = session_mod._extract_context_session_id(
+        _fake_ctx("streamable-http", session_id="req-b")
+    )
+    assert (a, b) == ("req-a", "req-b")
+    assert "default" not in (a, b)
+
+
+def test_session_key_in_memory_client_is_default() -> None:
+    server = AgnosticFastMCP("test-inmem-key")
+    seen: list[str] = []
+
+    @server.tool
+    async def whoami(ctx: Context) -> str:
+        seen.append(session_mod._session_key(ctx))
+        return "ok"
+
+    async def _run() -> None:
+        async with Client(server) as client:
+            await client.call_tool("whoami", {})
+
+    asyncio.run(_run())
+    assert seen == ["default"]

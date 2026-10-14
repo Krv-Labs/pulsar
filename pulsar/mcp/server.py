@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 from fastmcp import FastMCP
-from fastmcp.server.extensions import ServerExtension
 from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
 
 logger = logging.getLogger(__name__)
@@ -78,31 +77,32 @@ from pulsar.mcp.tools import (  # noqa: E402
 )
 
 
-class _PulsarTasksExtension(ServerExtension):
-    """Fallback tasks extension declaration when fastmcp-tasks is not installed."""
+def _ensure_tasks_extension(server: FastMCP) -> bool:
+    """Register the real tasks extension; return False if it cannot be provided.
 
-    identifier = TASKS_EXTENSION_ID
-
-
-def _ensure_tasks_extension(server: FastMCP) -> None:
+    Never advertises a tasks capability it cannot serve: when ``fastmcp-tasks``
+    is missing, no extension is registered and every tool stays task-forbidden.
+    """
     if TASKS_EXTENSION_ID in server._extensions:
-        return
+        return True
     try:
-        from fastmcp_tasks import TasksExtension  # type: ignore[import-not-found]
-
-        server.add_extension(TasksExtension())
+        from fastmcp_tasks import TasksExtension
     except ImportError:
-        logger.warning(
-            "fastmcp-tasks is not installed; registering fallback tasks capability declaration."
+        logger.error(
+            "PULSAR_MCP_ENABLE_TASKS is set but fastmcp-tasks is not installed; "
+            "background tasks are DISABLED. Install it with "
+            "`pip install 'fastmcp[tasks]>=4.0.10,<5'` (or `pip install "
+            "'thema-pulsar[mcp]'`)."
         )
-        server.add_extension(_PulsarTasksExtension())
+        return False
+    server.add_extension(TasksExtension())
+    return True
 
 
 def register_server_tools(server: FastMCP) -> None:
-    if _tasks_enabled():
-        _ensure_tasks_extension(server)
+    tasks_available = _tasks_enabled() and _ensure_tasks_extension(server)
     for tool_fn in ALL_TOOLS_LIST:
-        server.tool(task=get_tool_task_config(tool_fn))(tool_fn)
+        server.tool(task=get_tool_task_config(tool_fn, tasks_available))(tool_fn)
 
 
 register_server_tools(mcp)

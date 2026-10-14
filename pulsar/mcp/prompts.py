@@ -71,6 +71,15 @@ Reveal the dataset's topology; do not force convenient clusters.
    nodes, and `detail="full"` only when both raw graph arrays and config YAML are
    needed.
 
+## BACKGROUND TASK MODE (opt-in)
+
+Server operators enable it with `PULSAR_MCP_ENABLE_TASKS=1` (needs
+`fastmcp[tasks]`). Only `run_topological_sweep` is task-capable; every other tool
+stays synchronous. The result is identical to the synchronous path. A
+task-capable client polls transparently, and progress is still reported. The
+durable state is the session handles (`run_id`, `dataset_id`), not the task
+object: follow-up tools such as `diagnose_cosmic_graph` use them as usual.
+
 ## LONGITUDINAL DATA (PANELS)
 If the dataset is long-format — one row per (entity, time) — the static sweep is the
 wrong tool: it treats every row as an independent point and loses the panel structure.

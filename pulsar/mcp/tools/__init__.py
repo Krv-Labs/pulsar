@@ -72,18 +72,20 @@ def _tasks_enabled() -> bool:
     }
 
 
-def _sweep_task_config() -> bool | TaskConfig:
-    if _tasks_enabled():
+def _sweep_task_config(tasks_available: bool = True) -> bool | TaskConfig:
+    if tasks_available and _tasks_enabled():
         return TaskConfig(mode="optional")
     return False
 
 
-def get_tool_task_config(tool_fn: Callable[..., Any]) -> bool | TaskConfig:
+def get_tool_task_config(
+    tool_fn: Callable[..., Any], tasks_available: bool = True
+) -> bool | TaskConfig:
     if (
         tool_fn is run_topological_sweep
         or getattr(tool_fn, "__name__", "") == "run_topological_sweep"
     ):
-        return _sweep_task_config()
+        return _sweep_task_config(tasks_available)
     return False
 
 
