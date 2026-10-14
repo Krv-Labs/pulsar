@@ -30,7 +30,6 @@ from pulsar.mcp.session import (
 
 logger = logging.getLogger(__name__)
 
-_ANY: dict = {}  # unconstrained JSON value
 _OPEN = obj({}, additional=True)
 
 _CREATE_SCHEMA = obj(
@@ -95,10 +94,9 @@ async def create_config(
 ) -> ToolResult:
     """Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset.
 
-    Epsilon and projection dimensions are calibrated in the processed feature
-    space (after drop/impute/encode/scale), not raw columns. The YAML becomes the
-    session's active config. It is a starting grid, not the answer; refine it
-    with refine_config after diagnosing a run."""
+    Epsilon and dimensions are calibrated in the processed feature space, not raw
+    columns. The YAML becomes the session's active config. A starting grid, not
+    the answer; refine with refine_config after diagnosing a run."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id)
         from pulsar.analysis.characterization import characterize_dataset as _char
@@ -245,13 +243,13 @@ async def refine_config(
     overrides: Annotated[
         dict[str, Any] | None,
         Field(
-            description="Nested dict of config values merged into the config, e.g. {'sweep': {'ball_mapper': {'epsilon': {'range': {'min': 0.2, 'max': 1.0, 'steps': 6}}}}}. To delete keys pass {'remove_keys': ['dotted.path']}."
+            description="Nested dict merged into the config, e.g. {'sweep': {'ball_mapper': {'epsilon': {'range': {'min': 0.2, 'max': 1.0, 'steps': 6}}}}}. Delete keys with {'remove_keys': ['dotted.path']}."
         ),
     ] = None,
     response_format: Annotated[
         Literal["json", "markdown", "yaml"],
         Field(
-            description="Text rendering only: 'json' (payload), 'markdown' (diff table plus YAML) or 'yaml' (bare normalized YAML). structured_content is identical in all three."
+            description="Text view: 'json', 'markdown' (diff plus YAML) or 'yaml' (bare YAML). structured_content is identical."
         ),
     ] = "json",
     ctx: Context = None,
@@ -398,7 +396,7 @@ async def validate_config(
     dataset_id: Annotated[
         str,
         Field(
-            description="Optional dataset handle from ingest_dataset. When given, run.data is resolved against that dataset and it becomes the session's current dataset."
+            description="Optional dataset handle from ingest_dataset; run.data is resolved against it and it becomes the session's current dataset."
         ),
     ] = "",
     ctx: Context = None,

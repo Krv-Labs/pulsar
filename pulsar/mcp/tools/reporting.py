@@ -23,6 +23,7 @@ from pulsar.mcp.report import dossier_to_html
 from pulsar.mcp.registry import registry
 from pulsar.mcp.results import mcp_result
 from pulsar.mcp.toolmeta import (
+    default_tool_timeout,
     INT,
     STR,
     arr,
@@ -42,15 +43,6 @@ from pulsar.mcp.session import (
 
 logger = logging.getLogger(__name__)
 
-
-def _tool_timeout_s() -> float:
-    try:
-        return float(os.environ.get("PULSAR_MCP_TOOL_TIMEOUT_S", "1800"))
-    except ValueError:
-        return 1800.0
-
-
-_TOOL_TIMEOUT_S = _tool_timeout_s()
 
 _OPEN = obj({}, additional=True)
 
@@ -122,11 +114,7 @@ _BUNDLE_SCHEMA = obj(
     ["status", "output_dir", "slug", "bundle_path", "manifest"],
 )
 
-_RUN_ID_DESC = (
-    "Run handle from run_topological_sweep; omit (empty) to use this session's "
-    "latest fitted model. Pass it on stateless transports or to address an "
-    "older run still held in the model cache."
-)
+_RUN_ID_DESC = "Run from run_topological_sweep. Omit for the latest run; pass it on stateless transports or to address an older cached run."
 
 
 def _atomic_write_text_or_df(
@@ -291,10 +279,7 @@ async def export_labeled_data(
         dict[str, str],
         Field(
             description=(
-                "Names for EVERY cluster: keys are integer cluster ids written as "
-                'strings, values are non-empty names, e.g. {"0": "Cohort A", '
-                '"1": "Baseline"}. Names are yours to choose; Pulsar does not infer '
-                "domain meaning."
+                'Names for EVERY cluster: integer cluster ids as string keys, non-empty values, e.g. {"0": "Cohort A"}. Pulsar does not infer domain meaning.'
             )
         ),
     ],
@@ -302,8 +287,7 @@ async def export_labeled_data(
         str,
         Field(
             description=(
-                "Absolute host-visible path of the CSV to write (the path is on "
-                "the machine running the MCP server; an existing file is replaced)."
+                "Absolute server-visible path of the CSV to write; an existing file is replaced."
             )
         ),
     ],
@@ -311,9 +295,7 @@ async def export_labeled_data(
         str,
         Field(
             description=(
-                "Optional run handle. When set, the labels must come from that run "
-                "(else CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH) and its in-memory "
-                "data is used. Omit to rely on the persisted dataset."
+                "Optional run handle: labels must come from that run (else CLUSTER_ASSIGNMENT_PROVENANCE_MISMATCH); its in-memory data is used."
             )
         ),
     ] = "",
@@ -550,17 +532,14 @@ def _export_html_report_worker(
     read_only=False,
     idempotent=True,
     output_schema=_HTML_SCHEMA,
-    timeout=_TOOL_TIMEOUT_S,
+    timeout=default_tool_timeout(),
 )
 async def export_html_report(
     dataset_id: Annotated[
         str,
         Field(
             description=(
-                "Optional dataset handle from ingest_dataset; the report is "
-                "written next to that dataset file as <name>_report.html. When "
-                "empty it is written to pulsar_report.html in the server's "
-                "working directory."
+                "Optional dataset handle; the report is written next to that file as <name>_report.html, else pulsar_report.html in the working directory."
             )
         ),
     ] = "",
@@ -577,9 +556,7 @@ async def export_html_report(
         dict[str, str] | None,
         Field(
             description=(
-                "Optional names for clusters: keys are integer cluster ids as "
-                'strings, e.g. {"0": "Cohort A", "1": "Baseline"}. Unnamed '
-                "clusters get auto-names and a warning is returned."
+                'Optional cluster names: integer cluster ids as string keys, e.g. {"0": "Cohort A"}. Unnamed clusters get auto-names plus a warning.'
             )
         ),
     ] = None,
@@ -704,8 +681,7 @@ async def probe_columns(
         Literal["markdown", "json"],
         Field(
             description=(
-                "Text rendering only: markdown (readable) or json. "
-                "structured_content is identical either way."
+                "Text view: 'markdown' or 'json'. structured_content is identical."
             )
         ),
     ] = "markdown",
@@ -792,7 +768,7 @@ def _normalize_cluster_metadata(
 @tool_meta(
     read_only=False,
     output_schema=_BUNDLE_SCHEMA,
-    timeout=_TOOL_TIMEOUT_S,
+    timeout=default_tool_timeout(),
 )
 async def export_dataset_bundle(
     output_dir: Annotated[
@@ -814,9 +790,7 @@ async def export_dataset_bundle(
         str | None,
         Field(
             description=(
-                "Optional saved cluster assignment handle from "
-                "generate_cluster_dossier. Omit to use the session's current "
-                "clusters (they must belong to the same run)."
+                "Optional cluster_assignment_id from generate_cluster_dossier. Omit to use the session's clusters (must be the same run)."
             )
         ),
     ] = None,
@@ -871,10 +845,9 @@ async def export_dataset_bundle(
 ) -> ToolResult:
     """Export the fitted graph, node/edge tables, clusters and data as a Parquet bundle.
 
-    Writes `{output_dir}/{slug}/` (tabular/raw, graph/nodes, edges, cosmic,
-    groups, optional clean data, manifest) and returns the paths and manifest.
-    Needs clusters for the same run (generate_cluster_dossier). For one labeled
-    CSV use export_labeled_data.
+    Writes `{output_dir}/{slug}/` (tables, graph, groups, manifest) and returns the
+    paths and manifest. Needs clusters for the same run (generate_cluster_dossier).
+    For one labeled CSV use export_labeled_data.
     """
     import numpy as np
     from pathlib import Path

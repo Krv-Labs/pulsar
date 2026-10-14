@@ -3,6 +3,7 @@ small JSON-Schema builders for declaring success payloads."""
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -55,6 +56,23 @@ def tool_meta_of(fn: Callable[..., Any]) -> PulsarToolMeta | None:
     return getattr(fn, _META_ATTR, None)
 
 
+DEFAULT_TOOL_TIMEOUT_S = 1800.0
+
+
+def default_tool_timeout() -> float:
+    """Per-tool timeout in seconds for long-running tools.
+
+    Read from ``PULSAR_MCP_TOOL_TIMEOUT_S`` (default 1800); an unparsable value
+    falls back to the default.
+    """
+    try:
+        return float(
+            os.environ.get("PULSAR_MCP_TOOL_TIMEOUT_S", DEFAULT_TOOL_TIMEOUT_S)
+        )
+    except ValueError:
+        return DEFAULT_TOOL_TIMEOUT_S
+
+
 # ---------------------------------------------------------------------------
 # Schema builders
 # ---------------------------------------------------------------------------
@@ -62,6 +80,8 @@ STR: dict[str, Any] = {"type": "string"}
 INT: dict[str, Any] = {"type": "integer"}
 NUM: dict[str, Any] = {"type": "number"}
 BOOL: dict[str, Any] = {"type": "boolean"}
+# Any JSON value (unconstrained): use for open slots whose type genuinely varies.
+ANY: dict[str, Any] = {}
 
 
 def obj(

@@ -15,6 +15,8 @@ from typing import Any
 
 import numpy as np
 import pytest
+
+from pulsar.mcp.toolmeta import default_tool_timeout
 from fastmcp import Client, FastMCP
 
 from pulsar.mcp import registry as registry_mod
@@ -163,11 +165,11 @@ def test_dossier_timeout_from_env(monkeypatch: pytest.MonkeyPatch):
     from pulsar.mcp.tools.clustering import generate_cluster_dossier
 
     meta = tool_meta_of(generate_cluster_dossier)
-    assert meta.timeout == diag_mod._tool_timeout_s()
+    assert meta.timeout == default_tool_timeout()
     monkeypatch.setenv("PULSAR_MCP_TOOL_TIMEOUT_S", "12.5")
-    assert diag_mod._tool_timeout_s() == 12.5
+    assert default_tool_timeout() == 12.5
     monkeypatch.setenv("PULSAR_MCP_TOOL_TIMEOUT_S", "garbage")
-    assert diag_mod._tool_timeout_s() == 1800.0
+    assert default_tool_timeout() == 1800.0
     for fn in (diag_mod.diagnose_cosmic_graph, diag_mod.get_topological_skeleton):
         assert tool_meta_of(fn).timeout is None
 

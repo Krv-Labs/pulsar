@@ -130,20 +130,24 @@ def register_server_tools(server: FastMCP) -> None:
             "task": get_tool_task_config(tool_fn, tasks_available)
         }
         meta = tool_meta_of(tool_fn)
-        # Tools without meta are tolerated for now; a later phase makes this raise.
-        if meta is not None:
-            kwargs["annotations"] = ToolAnnotations(
-                title=meta.title,
-                read_only_hint=meta.read_only,
-                destructive_hint=meta.destructive,
-                idempotent_hint=meta.idempotent,
-                open_world_hint=False,
+        if meta is None:
+            raise RuntimeError(
+                f"MCP tool {getattr(tool_fn, '__name__', tool_fn)!r} has no "
+                "@tool_meta; every tool must declare annotations and an "
+                "output schema."
             )
-            kwargs["output_schema"] = meta.output_schema
-            if meta.timeout is not None:
-                kwargs["timeout"] = meta.timeout
-            if meta.tags:
-                kwargs["tags"] = set(meta.tags)
+        kwargs["annotations"] = ToolAnnotations(
+            title=meta.title,
+            read_only_hint=meta.read_only,
+            destructive_hint=meta.destructive,
+            idempotent_hint=meta.idempotent,
+            open_world_hint=False,
+        )
+        kwargs["output_schema"] = meta.output_schema
+        if meta.timeout is not None:
+            kwargs["timeout"] = meta.timeout
+        if meta.tags:
+            kwargs["tags"] = set(meta.tags)
         server.tool(**kwargs)(tool_fn)
 
 

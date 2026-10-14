@@ -14,7 +14,17 @@ from pulsar.mcp.prompts import WORKFLOW_PROMPT
 from pulsar.mcp.registry import registry
 from pulsar.mcp import session as session_mod
 from pulsar.mcp.results import mcp_result
-from pulsar.mcp.toolmeta import BOOL, INT, STR, arr, nullable, obj, tool_meta
+from pulsar.mcp.toolmeta import (
+    ANY,
+    default_tool_timeout,
+    BOOL,
+    INT,
+    STR,
+    arr,
+    nullable,
+    obj,
+    tool_meta,
+)
 from pulsar.mcp.session import (
     _get_session,
     _session_key,
@@ -28,15 +38,6 @@ from pulsar.mcp.characterization import (
 )
 
 logger = logging.getLogger(__name__)
-
-_ANY: dict = {}  # unconstrained JSON value
-
-
-def _tool_timeout_s() -> float:
-    try:
-        return float(os.environ.get("PULSAR_MCP_TOOL_TIMEOUT_S", "1800"))
-    except ValueError:
-        return 1800.0
 
 
 _GUIDE_SCHEMA = obj({"guide": STR}, ["guide"])
@@ -101,9 +102,9 @@ _RUNTIME_SCHEMA = obj(
 async def get_runtime_context(ctx: Context = None) -> ToolResult:
     """Report the server's runtime context: paths, session handles, transport, model cache.
 
-    Returns cwd, cache_dir, session_id, latest dataset_id/run_id, active config,
-    transport, which runs are cached in memory (model_cache), and path guidance.
-    Call before file-based operations or when a handle seems stale."""
+    Returns cwd, cache_dir, session_id, latest handles, active config, transport,
+    cached runs (model_cache) and path guidance. Call before file operations or
+    when a handle seems stale."""
     session = _get_session(ctx)
     transport = getattr(ctx, "transport", None) or "stdio-single-client"
     payload = {
@@ -137,12 +138,12 @@ async def get_runtime_context(ctx: Context = None) -> ToolResult:
 _CHARACTERIZE_SCHEMA = obj(
     {
         "status": STR,
-        "n_samples": _ANY,
-        "n_features": _ANY,
-        "n_columns_total": _ANY,
-        "missingness_pct": _ANY,
-        "numeric_missingness_pct": _ANY,
-        "overall_missingness_pct": _ANY,
+        "n_samples": ANY,
+        "n_features": ANY,
+        "n_columns_total": ANY,
+        "missingness_pct": ANY,
+        "numeric_missingness_pct": ANY,
+        "overall_missingness_pct": ANY,
         "raw_numeric_geometry": obj({}, additional=True),
         "schema_summary": obj({}, additional=True),
         "column_name_preview": obj({}, additional=True),
@@ -167,7 +168,7 @@ _CHARACTERIZE_SCHEMA = obj(
     read_only=True,
     idempotent=True,
     output_schema=_CHARACTERIZE_SCHEMA,
-    timeout=_tool_timeout_s(),
+    timeout=default_tool_timeout(),
 )
 async def characterize_dataset(
     csv_path: Annotated[
@@ -185,7 +186,7 @@ async def characterize_dataset(
     response_format: Annotated[
         Literal["markdown", "json"],
         Field(
-            description="Text rendering only: 'markdown' (readable report) or 'json'. structured_content is identical in both."
+            description="Text view: 'markdown' or 'json'. structured_content is identical."
         ),
     ] = "markdown",
     ctx: Context = None,

@@ -266,9 +266,46 @@ def test_classify_variants(tmp_path, method, response_format):
             )
             payload = _ok(res)
             assert payload["method"] == method
-            assert payload["n_entities"] == len(payload["classification"])
+            assert payload["detail"] == "summary"
+            assert "classification" not in payload
+            n = payload["n_entities"]
+            assert payload["entities_returned"] == len(
+                payload["classification_preview"]
+            )
+            assert payload["entities_returned"] <= 25
+            assert payload["entities_returned"] + payload["entities_omitted"] == n
             if response_format == "markdown":
                 assert _text(res).startswith("# Trajectory Classification")
+
+    asyncio.run(run())
+
+
+def test_classify_full_detail_returns_all_entities(tmp_path):
+    async def run():
+        async with Client(_server()) as client:
+            await _build(client, await _sample(client, tmp_path))
+            summary = _ok(
+                await client.call_tool(
+                    "classify_trajectories", {"response_format": "json"}
+                )
+            )
+            full = _ok(
+                await client.call_tool(
+                    "classify_trajectories",
+                    {"detail": "full", "response_format": "json"},
+                )
+            )
+            assert full["detail"] == "full"
+            assert len(full["classification"]) == full["n_entities"]
+            assert full["entities_returned"] == full["n_entities"]
+            assert full["entities_omitted"] == 0
+            # Preview is the leading slice of the full map.
+            assert (
+                list(summary["classification_preview"])
+                == list(full["classification"])[
+                    : len(summary["classification_preview"])
+                ]
+            )
 
     asyncio.run(run())
 

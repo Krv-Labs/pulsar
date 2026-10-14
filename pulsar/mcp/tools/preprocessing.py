@@ -251,8 +251,7 @@ async def recommend_preprocessing(
         Literal["markdown", "json"],
         Field(
             description=(
-                "Text rendering only: markdown (readable) or json. "
-                "structured_content is identical either way."
+                "Text view: 'markdown' or 'json'. structured_content is identical."
             )
         ),
     ] = "markdown",
@@ -417,10 +416,9 @@ async def validate_preprocessing_config(
 ) -> ToolResult:
     """Dry-run only the preprocessing of a config against the session's loaded data.
 
-    Cheap (no projection, Ball Mapper or sweep). Returns row/feature counts and
-    expansion diagnostics, or a CONFIG_INVALID error with a repair hint. Needs
-    data loaded by characterize_dataset or a sweep; use validate_config for the
-    full schema check.
+    Cheap (no sweep). Returns row/feature counts and expansion diagnostics, or a
+    CONFIG_INVALID error with a repair hint. Needs data loaded by
+    characterize_dataset or a sweep; validate_config does the full schema check.
     """
     session = _get_session(ctx)
 

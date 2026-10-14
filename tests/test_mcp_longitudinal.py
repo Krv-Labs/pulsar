@@ -565,6 +565,29 @@ class TestClassifyTrajectories:
         assert response["method"] == "complexity"
         assert "Stable (0 entropy)" in response["classes_summary"]
         assert "Volatile / Refractory" in response["classes_summary"]
+        # Summary-first: bounded preview, full map only on detail="full".
+        assert response["detail"] == "summary"
+        assert "classification" not in response
+        assert len(response["classification_preview"]) == 25
+        assert response["entities_returned"] == 25
+        assert response["entities_omitted"] == 5
+
+    def test_classify_full_detail(self, tmp_path):
+        built = _build(tmp_path)
+        response = payload_of(
+            asyncio.run(
+                classify_trajectories(
+                    built["longitudinal_id"],
+                    method="complexity",
+                    threshold=0.25,
+                    detail="full",
+                    response_format="json",
+                )
+            )
+        )
+        assert len(response["classification"]) == 30
+        assert response["entities_returned"] == 30
+        assert response["entities_omitted"] == 0
 
     def test_classify_transition(self, tmp_path):
         built = _build(tmp_path)

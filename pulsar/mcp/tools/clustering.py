@@ -58,6 +58,7 @@ from pulsar.mcp.session import (
 )
 from pulsar.mcp.toolmeta import (
     BOOL,
+    default_tool_timeout,
     INT,
     NUM,
     STR,
@@ -69,7 +70,6 @@ from pulsar.mcp.toolmeta import (
 )
 from pulsar.mcp.tools.diagnostics import (
     OPEN_OBJ,
-    _tool_timeout_s,
     model_not_loaded_error,
     resolve_run_or_error,
     stale_write_error,
@@ -473,12 +473,7 @@ def _require_cluster_state(
 _CLUSTER_RESULT = OPEN_OBJ
 _SELECTION = OPEN_OBJ
 _CLUSTERS_RUN_ID = nullable(STR)
-_RUN_ID_FOR_CLUSTERS = (
-    "Optional guard: the run the cluster labels must have been built for. Cluster "
-    "labels are session-scoped (they come from the last generate_cluster_dossier); "
-    "if run_id differs from the dossier's run you get CLUSTERS_STALE. Omit to use "
-    "the session's current clusters."
-)
+_RUN_ID_FOR_CLUSTERS = "Optional guard: run the session's cluster labels must come from (else CLUSTERS_STALE). Omit to use the current clusters."
 
 _DOSSIER_SCHEMA = obj(
     {
@@ -516,19 +511,14 @@ _DOSSIER_SCHEMA = obj(
     read_only=False,
     idempotent=False,
     output_schema=_DOSSIER_SCHEMA,
-    timeout=_tool_timeout_s(),
+    timeout=default_tool_timeout(),
 )
 async def generate_cluster_dossier(
     method: Annotated[
         Literal["auto", "spectral", "components"],
         Field(
             description=(
-                "Clustering method. 'components' = connected components of the graph "
-                "after dropping edges at or below the interpretation threshold. "
-                "'spectral' = spectral cut of the weighted affinity (finds structure "
-                "inside a connected graph; may return NO_STABLE_SPECTRAL_CUT). "
-                "'auto' (default) uses components when a positive threshold applies, "
-                "else spectral."
+                "'components': connected components after dropping edges <= the interpretation threshold. 'spectral': spectral cut of the weighted affinity (may return NO_STABLE_SPECTRAL_CUT). 'auto' (default): components if a positive threshold applies, else spectral."
             )
         ),
     ] = "auto",
@@ -542,9 +532,7 @@ async def generate_cluster_dossier(
         float | None,
         Field(
             description=(
-                "Edge-weight cutoff in [0, 1]; edges with weight <= this are dropped "
-                "before clustering. Omit to inherit the run's construction threshold "
-                "(spectral defaults to 0.0, the full affinity)."
+                "Edge-weight cutoff in [0, 1]; edges <= this are dropped before clustering. Omit to inherit the construction threshold (spectral: 0.0, the full affinity)."
             )
         ),
     ] = None,
@@ -552,10 +540,7 @@ async def generate_cluster_dossier(
         Literal["summary", "standard", "full"],
         Field(
             description=(
-                "'summary' (default): compact per-cluster headline evidence, cheap, "
-                "for routine loops. 'standard': adds per-cluster feature evidence "
-                "(heavy). 'full': lossless audit payload (heaviest). Use the narrow "
-                "cluster tools before escalating."
+                "'summary' (default): cheap per-cluster headline evidence. 'standard': adds per-cluster feature evidence (heavy). 'full': lossless audit payload (heaviest)."
             )
         ),
     ] = "summary",
@@ -576,8 +561,7 @@ async def generate_cluster_dossier(
         Literal["markdown", "json"],
         Field(
             description=(
-                "Text rendering: 'markdown' (default) or 'json'. structured_content "
-                "carries the same payload either way."
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
             )
         ),
     ] = "markdown",
@@ -594,10 +578,7 @@ async def generate_cluster_dossier(
         str,
         Field(
             description=(
-                "Run to cluster, from run_topological_sweep. Omit for the latest run. "
-                "This publishes cluster labels into the session and persists an "
-                "assignment, so it must be the session's latest run; an older run_id "
-                "is refused with SESSION_REVISION_CONFLICT."
+                "Run to cluster, from run_topological_sweep. Omit for the latest run. Publishes labels into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT)."
             )
         ),
     ] = "",
@@ -875,9 +856,7 @@ async def get_cluster_profile(
         Literal["summary", "standard", "full"],
         Field(
             description=(
-                "'summary': headline features only. 'standard' (default): ranked "
-                "numeric and categorical evidence up to max_features. 'full': "
-                "lossless evidence plus full cluster-size telemetry."
+                "'summary': headline features. 'standard' (default): ranked numeric and categorical evidence up to max_features. 'full': lossless evidence plus size telemetry."
             )
         ),
     ] = "standard",
@@ -891,8 +870,7 @@ async def get_cluster_profile(
         Literal["markdown", "json"],
         Field(
             description=(
-                "Text rendering: 'markdown' (default) or 'json'. structured_content "
-                "carries the same payload either way."
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
             )
         ),
     ] = "markdown",
@@ -988,8 +966,7 @@ async def get_feature_signal(
         list[str],
         Field(
             description=(
-                "Features to follow across clusters: numeric column names, or "
-                "'column=value' pairs for categorical levels (e.g. 'segment=alpha')."
+                "Numeric column names, or 'column=value' pairs for categorical levels (e.g. 'segment=alpha')."
             )
         ),
     ],
@@ -1006,9 +983,7 @@ async def get_feature_signal(
         Literal["summary", "standard", "full"],
         Field(
             description=(
-                "'summary' (default): per-cluster signal headline for each feature. "
-                "'standard'/'full': progressively more per-cluster statistics; "
-                "'full' also returns full cluster-size telemetry."
+                "'summary' (default): per-cluster headline per feature. 'standard'/'full': more per-cluster statistics; 'full' adds cluster-size telemetry."
             )
         ),
     ] = "summary",
@@ -1022,8 +997,7 @@ async def get_feature_signal(
         Literal["markdown", "json"],
         Field(
             description=(
-                "Text rendering: 'markdown' (default) or 'json'. structured_content "
-                "carries the same payload either way."
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
             )
         ),
     ] = "markdown",
@@ -1158,9 +1132,7 @@ async def get_cluster_signal_matrix(
         bool,
         Field(
             description=(
-                "True (default): text is a compact markdown matrix (cells are "
-                "z-scores for numeric features, prevalence percent for categoricals). "
-                "False: text is JSON. structured_content is the same either way."
+                "True (default): markdown matrix text (z-scores for numeric, prevalence percent for categorical). False: JSON text."
             )
         ),
     ] = True,

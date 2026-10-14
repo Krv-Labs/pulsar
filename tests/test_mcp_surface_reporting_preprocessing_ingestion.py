@@ -14,6 +14,8 @@ from typing import Any
 
 import pandas as pd
 import pytest
+
+from pulsar.mcp.toolmeta import default_tool_timeout
 from fastmcp import Client, FastMCP
 
 from pulsar.mcp import registry as registry_mod
@@ -131,7 +133,7 @@ def test_every_owned_tool_declares_metadata_and_described_params():
                 assert schema.get("description"), (name, prop)
         for name in TIMEOUT_TOOLS:
             got = await server.get_tool(name)
-            assert got.timeout == reporting_mod._TOOL_TIMEOUT_S
+            assert got.timeout == default_tool_timeout()
         for name in set(EXPECTED_ANNOTATIONS) - TIMEOUT_TOOLS:
             assert (await server.get_tool(name)).timeout is None, name
         for name in (

@@ -4,7 +4,6 @@ import asyncio
 import dataclasses
 import logging
 import math
-import os
 import time
 from typing import Annotated, Any, Literal
 import uuid
@@ -48,6 +47,7 @@ from pulsar.mcp.thresholds import (
     useful_component_size_floor,
 )
 from pulsar.mcp.toolmeta import (
+    ANY,
     BOOL,
     INT,
     NUM,
@@ -61,21 +61,8 @@ from pulsar.mcp.toolmeta import (
 
 logger = logging.getLogger(__name__)
 
-# Free-form JSON value (any type) for open sub-objects in output schemas.
-ANY_SCHEMA: dict[str, Any] = {}
 OPEN_OBJ = obj({}, additional=True)
-RUN_ID_PARAM_READ = (
-    "Run to read, as returned in `run_id` by run_topological_sweep. Omit to use the "
-    "session's latest run. Older runs stay addressable only while their model is "
-    "cached in memory (default: the 3 most recent); otherwise RUN_ID_UNKNOWN is returned."
-)
-
-
-def _tool_timeout_s() -> float:
-    try:
-        return float(os.environ.get("PULSAR_MCP_TOOL_TIMEOUT_S", "1800"))
-    except ValueError:
-        return 1800.0
+RUN_ID_PARAM_READ = "Run to read, from run_topological_sweep. Omit for the latest run. Ignored when surface='artifact'."
 
 
 def model_not_loaded_error(tool: str) -> ToolResult:
@@ -457,9 +444,7 @@ async def diagnose_cosmic_graph(
         Literal["constructed", "artifact"],
         Field(
             description=(
-                "Which graph to measure. 'constructed' = the fitted cosmic graph at "
-                "its construction threshold (default). 'artifact' = a graph artifact "
-                "built by create_graph_artifact; then artifact_id is required."
+                "'constructed' (default): the fitted cosmic graph at its construction threshold. 'artifact': a create_graph_artifact graph; artifact_id is then required."
             )
         ),
     ] = "constructed",
@@ -485,8 +470,7 @@ async def diagnose_cosmic_graph(
         Literal["json", "markdown"],
         Field(
             description=(
-                "Text rendering: 'json' (default) or a compact 'markdown' report. "
-                "structured_content carries the same payload either way."
+                "Text view: 'json' (default) or 'markdown'. structured_content is identical."
             )
         ),
     ] = "json",
@@ -1211,7 +1195,7 @@ _CURVE_SCHEMA = obj(
         "h0_plateau_readout": STR,
         "threshold_guidance": STR,
         "threshold_candidate_policy": STR,
-        "selection_strategy": ANY_SCHEMA,
+        "selection_strategy": ANY,
         "threshold_candidates": arr(OPEN_OBJ),
         "threshold_candidates_omitted": INT,
         "threshold_profiles": arr(OPEN_OBJ),
@@ -1245,10 +1229,7 @@ async def get_threshold_stability_curve(
         Literal["summary", "full"],
         Field(
             description=(
-                "'summary' (default) returns a bounded decision packet: headline "
-                "thresholds, ~10 morphology rows, top 3 candidate lenses, filtered "
-                "breakpoints. 'full' adds plateaus, a curve sample and the raw "
-                "per-threshold arrays (O(thresholds)); it always recomputes live."
+                "'summary' (default): bounded decision packet. 'full': adds plateaus, a curve sample and raw O(thresholds) arrays; recomputes live."
             )
         ),
     ] = "summary",
@@ -1256,10 +1237,7 @@ async def get_threshold_stability_curve(
         str,
         Field(
             description=(
-                "Run to read, as returned by run_topological_sweep. Omit for the "
-                "session's latest run. Persisted summaries work for any stored run; "
-                "live recomputation (source='live' or detail='full') needs the "
-                "latest run, else RUN_NOT_LIVE."
+                "Run to read, from run_topological_sweep. Omit for the latest run. Live recomputation (source='live' or detail='full') needs the latest run, else RUN_NOT_LIVE."
             )
         ),
     ] = "",
@@ -1267,9 +1245,7 @@ async def get_threshold_stability_curve(
         Literal["persisted", "live"],
         Field(
             description=(
-                "'persisted' (default) reads the summary stored at sweep time when "
-                "available (cheap, works for old runs). 'live' recomputes from the "
-                "fitted model in memory."
+                "'persisted' (default): summary stored at sweep time (cheap, works for old runs). 'live': recompute from the in-memory model."
             )
         ),
     ] = "persisted",
@@ -1277,10 +1253,7 @@ async def get_threshold_stability_curve(
         Literal["balanced", "report_ready", "detail_seeking", "outlier_mining"],
         Field(
             description=(
-                "Interpretation lens for ranking candidate thresholds: 'balanced' "
-                "(default) mixes stability and structure; 'report_ready' favours few "
-                "large components; 'detail_seeking' favours finer splits; "
-                "'outlier_mining' favours singleton/tail structure. A lens, not a score."
+                "Lens for ranking candidates (not a score): 'balanced' (default), 'report_ready' (few large components), 'detail_seeking' (finer splits), 'outlier_mining' (singleton tails)."
             )
         ),
     ] = "balanced",
@@ -1288,8 +1261,7 @@ async def get_threshold_stability_curve(
         Literal["markdown", "json"],
         Field(
             description=(
-                "Text rendering: 'markdown' (default, tables) or 'json'. "
-                "structured_content carries the same payload either way."
+                "Text view: 'markdown' (default) or 'json'. structured_content is identical."
             )
         ),
     ] = "markdown",
@@ -1498,9 +1470,7 @@ async def create_graph_artifact(
         str,
         Field(
             description=(
-                "Run to build from, from run_topological_sweep. Omit for the latest "
-                "run. Publishes an artifact into the session, so it must be the "
-                "session's latest run; an older run_id returns SESSION_REVISION_CONFLICT."
+                "Run to build from, from run_topological_sweep. Omit for the latest run. Publishes into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT)."
             )
         ),
     ] = "",
@@ -1544,9 +1514,7 @@ async def create_graph_artifact(
         bool,
         Field(
             description=(
-                "True (default) returns only a cost estimate (runtime, memory, edge "
-                "count) and the call to build it. False actually builds and stores "
-                "the artifact, which can take seconds to minutes."
+                "True (default): return only a cost estimate (runtime, memory, edges). False: build and store the artifact (seconds to minutes)."
             )
         ),
     ] = True,
@@ -1699,9 +1667,7 @@ async def get_topological_skeleton(
         str,
         Field(
             description=(
-                "Run whose persisted graph summary to read, from run_topological_sweep. "
-                "Omit for the session's latest run. Reads the on-disk run record, so "
-                "it works for any stored run and on stateless transports."
+                "Run to read, from run_topological_sweep. Omit for the latest run. Reads the on-disk run record, so any stored run works on stateless transports."
             )
         ),
     ] = "",
@@ -1709,9 +1675,7 @@ async def get_topological_skeleton(
         Literal["constructed", "artifact"],
         Field(
             description=(
-                "'constructed' (default) = the persisted cosmic graph of the run at "
-                "its construction threshold. 'artifact' = a graph artifact from "
-                "create_graph_artifact; then artifact_id is required."
+                "'constructed' (default): the run's persisted cosmic graph. 'artifact': a graph from create_graph_artifact; artifact_id is then required."
             )
         ),
     ] = "constructed",
@@ -1728,10 +1692,7 @@ async def get_topological_skeleton(
         Literal["summary", "nodes", "edges", "full", "full_nodes"],
         Field(
             description=(
-                "'summary' (default): counts and component structure only. 'nodes': "
-                "compact per-node topology summary. 'edges': capped raw edge list. "
-                "'full_nodes': capped raw node list. 'full': capped nodes and edges "
-                "plus the run's config YAML."
+                "'summary' (default): counts and components. 'nodes': per-node summary. 'edges': capped raw edges. 'full_nodes': capped raw nodes. 'full': nodes, edges and config YAML."
             )
         ),
     ] = "summary",

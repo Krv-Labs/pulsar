@@ -195,9 +195,7 @@ async def ingest_dataset(
         str,
         Field(
             description=(
-                "Absolute path to a CSV or Parquet file that exists on the "
-                "machine running this MCP server (a host-visible path; paths "
-                "inside a sandbox or container the server cannot see will fail)."
+                "Absolute path to a CSV or Parquet file on the machine running this server (host-visible; sandbox-only paths fail)."
             )
         ),
     ],

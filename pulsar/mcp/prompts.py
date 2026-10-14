@@ -80,63 +80,54 @@ task-capable client polls transparently, and progress is still reported. The
 durable state is the session handles (`run_id`, `dataset_id`), not the task
 object: follow-up tools such as `diagnose_cosmic_graph` use them as usual.
 
+## RESULTS AND ERRORS
+Every result has a text view and structured content. Errors set the MCP error flag
+and carry `error_code` plus `agent_action`: act on `agent_action` before retrying
+(a blind retry rarely helps).
+
+## RUN HANDLES
+`run_topological_sweep` returns a `run_id`. Tools that read the fitted model accept
+`run_id` to address an earlier cached run, or to work on stateless transports.
+Omit it to use the session's latest run. Dossier and graph-artifact publishes only
+accept the latest run (`SESSION_REVISION_CONFLICT` otherwise). The in-memory cache
+holds only the last `PULSAR_MCP_MODEL_CACHE_SIZE` runs (default 3); an evicted or
+unknown `run_id` returns `RUN_ID_UNKNOWN`, so re-run the sweep. Cluster labels stay
+session-scoped; responses report `clusters_run_id` to show which run they describe.
+
 ## TRANSPORT
-In-memory model state (the fitted model, cluster cache) is guaranteed to persist
-between calls only on stdio and on legacy-session HTTP (clients that receive an
-`mcp-session-id`). The 2026-07-28 protocol revision removed protocol sessions, so on
-Streamable HTTP there is no session id: each request is isolated from other
-clients but gets a fresh session,
-so a fitted model is NOT preserved between calls (for example,
-`run_topological_sweep` then `diagnose_cosmic_graph` may not see the sweep).
-`dataset_id` and `run_id` handles are the durable state (on-disk registry). Check
-`get_runtime_context` (`transport_assumption`, `model_continuity`) if unsure.
+Session state (cluster labels, the latest-run pointer, longitudinal artifacts) is
+guaranteed to persist between calls only on stdio and on legacy-session HTTP
+(clients that receive an `mcp-session-id`). The 2026-07-28 protocol revision removed
+protocol sessions, so on Streamable HTTP each request gets a fresh session. Fitted
+models still survive there through the process-wide run cache: pass `run_id` (from
+the sweep response) to model-reading tools instead of relying on "latest". Cluster
+labels and longitudinal artifacts do not survive a fresh session, so regenerate
+them in the same call chain. `dataset_id` handles live in the on-disk registry; model
+state is in memory only and is lost on server restart. Check `get_runtime_context`
+(`transport_assumption`, `model_continuity`, `model_cache`) if unsure.
 
 ## LONGITUDINAL DATA (PANELS)
-If the dataset is long-format — one row per (entity, time) — the static sweep is the
-wrong tool: it treats every row as an independent point and loses the panel structure.
-Use `build_longitudinal_graph(dataset_id, entity_column, time_column, ...)` instead.
-It pivots the table into per-time snapshots and returns a `longitudinal_id`.
+Long-format data (one row per entity and time step) is the wrong input for the
+static sweep, which treats every row as an independent point.
 
-Pick the representation by the question you are asking:
-- `representation="trajectory"` (default) — nodes are **observations** `(entity, t)`,
-  so edges may join different time steps. Answers "which observations resemble each
-  other across time" and "how do entities move between cohorts". Stays sparse.
-- `representation="temporal"` — nodes are **entities**, edges live inside one time
-  slice, collapsed by tensor aggregations. Answers "which entities are stably similar
-  over the window". Allocates a dense (n, n, T) tensor, so it is guarded by the peak
-  working-set ceiling `PULSAR_MCP_MAX_TENSOR_BYTES`; the final tensor uses about one
-  third of that budget. Prefer trajectory at scale.
-- `representation="both"` — build each and contrast them.
+Longitudinal panels: ingest a long-format table (one row per entity and time step, discrete orderable time column, numeric features), optionally `sample_longitudinal_entities`, `create_config`, then `build_longitudinal_graph(dataset_id, entity_column, time_column, config_yaml)`. This returns `longitudinal_id`; omit it on later calls to use the most recent panel. Default `representation='trajectory'` (sparse, cross-time edges); 'temporal' builds a dense (n,n,T) tensor, so check `build_cost` first. Then `diagnose_longitudinal_graph` (measurements and the threshold ladder), `get_trajectory_archetypes` (identical cluster sequences), `get_cross_time_neighbors` (lookalikes at other times), `classify_trajectories` (rule- or distance-based classes). Thresholds on these tools are interpretation filters, not the construction threshold. Cluster counts move steeply with threshold, so read the ladder. These tools read session-only longitudinal artifacts, not the fitted cosmic model, and take no `run_id`.
 
-Then:
-1. `diagnose_longitudinal_graph` — measurement for whichever surfaces exist. For the
-   temporal surface it compares all six aggregations side by side with
-   `why`/`best_for`/`avoid_for`; choose the aggregation deliberately rather than
-   defaulting to `persistence`. Each is cut at its own q90 because their value ranges
-   are not comparable ([0,1] vs a variance vs a signed slope).
-2. `get_trajectory_archetypes` — entities grouped by the cluster sequence they trace
-   through time. This is trajectory classification.
-3. `get_cross_time_neighbors` — the cross-time lookalike query: who does this entity
-   at this time resemble at a *different* time? Pass `t` as an original time-column
-   label. Responses expose that value as `time_label` and separately expose `t` as
-   the trajectory's positional index.
-
-Longitudinal caveats:
-- `time_column` must already be discrete and orderable. Bin continuous timestamps
-  before ingest; Pulsar will not choose a bin width or an aggregator for you.
-- `on_missing` decides entities absent at some step: `drop_entity` (default, and
-  required for the temporal representation), `forward_fill`, or `allow_ragged`
-  (trajectory only).
-- `create_config` calibrates against the raw file, which counts the entity and time
-  columns. The build refits the projection grid and, when no epsilon lands in the
-  panel's k-NN domain, recalibrates epsilon — always disclosed under
-  `config_adaptation`. Read it; a silent single-ball cover is the failure mode it
-  prevents.
-- The threshold in these tools is an **interpretation** filter, not the construction
-  threshold. Cluster counts move steeply with it, so every response carries a
-  threshold ladder. Compare rows; do not treat one row as ground truth.
-- Longitudinal artifacts are session-local and do not feed the cluster dossier chain,
-  which assumes positional alignment against the static dataset.
+Details:
+- `representation="trajectory"` nodes are observations `(entity, t)`; `"temporal"`
+  nodes are entities (edges inside one time slice, collapsed by aggregation) and is
+  bounded by `PULSAR_MCP_MAX_TENSOR_BYTES`; `"both"` builds each. For temporal, the
+  diagnose tool compares six aggregations with `why`/`best_for`/`avoid_for`; choose
+  one deliberately.
+- `get_cross_time_neighbors` takes `t` as an original time-column label; responses
+  give it as `time_label` and the positional index as `t`.
+- `classify_trajectories` returns a class summary and a bounded entity preview;
+  pass `detail="full"` for every entity.
+- `time_column` must already be discrete: bin timestamps before ingest. `on_missing`
+  is `drop_entity` (default; required for temporal), `forward_fill`, or
+  `allow_ragged` (trajectory only).
+- The build refits the projection grid and may recalibrate epsilon to the panel's
+  k-NN domain; read `config_adaptation`.
+- Longitudinal artifacts do not feed the cluster dossier chain.
 
 ## GRID GEOMETRY & EXPERT AGENT AUTONOMY
 The default config returned by `create_config` is ONLY a baseline starting guess. As the expert in the room, you have full autonomy—and the duty—to actively override, widen, and shift these parameters based on diagnostic feedback.

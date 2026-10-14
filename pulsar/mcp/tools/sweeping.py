@@ -25,7 +25,18 @@ from pulsar.mcp.diagnostics import (
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.history import summarize_history
 from pulsar.mcp.results import mcp_result
-from pulsar.mcp.toolmeta import BOOL, INT, NUM, STR, arr, nullable, obj, tool_meta
+from pulsar.mcp.toolmeta import (
+    ANY,
+    default_tool_timeout,
+    BOOL,
+    INT,
+    NUM,
+    STR,
+    arr,
+    nullable,
+    obj,
+    tool_meta,
+)
 from pulsar.mcp.payloads import (
     build_sweep_summary_payload,
     sweep_payload_to_markdown,
@@ -47,15 +58,7 @@ from pulsar.runtime.fingerprint import projection_fingerprint
 
 logger = logging.getLogger(__name__)
 
-_ANY: dict = {}  # unconstrained JSON value
 _OPEN = obj({}, additional=True)
-
-
-def _tool_timeout_s() -> float:
-    try:
-        return float(os.environ.get("PULSAR_MCP_TOOL_TIMEOUT_S", "1800"))
-    except ValueError:
-        return 1800.0
 
 
 _HISTORY_SCHEMA = obj(
@@ -73,16 +76,16 @@ _RUN_SIDE = obj(
     {
         "run_id": STR,
         "dataset_id": nullable(STR),
-        "projection_dimensions": arr(_ANY),
+        "projection_dimensions": arr(ANY),
         "epsilon": STR,
-        "threshold": _ANY,
+        "threshold": ANY,
         "metrics": obj(
             {
-                "n_nodes": _ANY,
-                "n_edges": _ANY,
-                "component_count": _ANY,
-                "giant_fraction": _ANY,
-                "weight_p95": _ANY,
+                "n_nodes": ANY,
+                "n_edges": ANY,
+                "component_count": ANY,
+                "giant_fraction": ANY,
+                "weight_p95": ANY,
             },
             additional=True,
         ),
@@ -104,10 +107,10 @@ _SWEEP_SCHEMA = obj(
         "dataset_id": nullable(STR),
         "data_shape": arr(INT),
         "construction_threshold": NUM,
-        "graph_health": _ANY,
+        "graph_health": ANY,
         "analysis_status": STR,
         "next_required_check": STR,
-        "finalization_gate": _ANY,
+        "finalization_gate": ANY,
         "constructed_graph_connected": BOOL,
         "full_affinity_connected": BOOL,
         "spectral_clustering_allowed": BOOL,
@@ -115,16 +118,16 @@ _SWEEP_SCHEMA = obj(
         "singleton_fraction": NUM,
         "metrics": _OPEN,
         "key_metrics": _OPEN,
-        "component_sizes_preview": arr(_ANY),
+        "component_sizes_preview": arr(ANY),
         "component_sizes_omitted": INT,
-        "diff": arr(_ANY),
+        "diff": arr(ANY),
         "diff_summary": _OPEN,
         "threshold_stability_summary": nullable(_OPEN),
         "projection_method": STR,
         "projection_cached": BOOL,
-        "projection_cache_status": _ANY,
+        "projection_cache_status": ANY,
         "pca_cached": BOOL,
-        "pca_cache_status": _ANY,
+        "pca_cache_status": ANY,
         "memory_usage_mb": NUM,
         "config_advisory": STR,
         "config_yaml_included": BOOL,
@@ -589,7 +592,7 @@ def _publish_sweep_on_loop(
 @tool_meta(
     read_only=False,
     output_schema=_SWEEP_SCHEMA,
-    timeout=_tool_timeout_s(),
+    timeout=default_tool_timeout(),
 )
 async def run_topological_sweep(
     config_path: Annotated[
@@ -601,7 +604,7 @@ async def run_topological_sweep(
     config_yaml: Annotated[
         str,
         Field(
-            description="Full Pulsar config as raw YAML text. Preferred. If this and config_path are empty, the session's active config (from create_config/refine_config) is used."
+            description="Full Pulsar config as raw YAML (preferred). If this and config_path are empty, the session's active config is used."
         ),
     ] = "",
     dataset_id: Annotated[
@@ -648,10 +651,8 @@ async def run_topological_sweep(
     with diagnose_cosmic_graph. Prefer inline config_yaml; otherwise the active
     session config is used.
 
-    Background task mode: with PULSAR_MCP_ENABLE_TASKS=1 (requires fastmcp[tasks])
-    this is the only task-capable tool; a task-capable client may run it in the
-    background, and the result and session handles (run_id, dataset_id) are
-    identical to a synchronous call."""
+    The only task-capable tool when PULSAR_MCP_ENABLE_TASKS=1; results are
+    identical either way."""
     if component_limit < 1:
         return mcp_error(
             "run_topological_sweep",

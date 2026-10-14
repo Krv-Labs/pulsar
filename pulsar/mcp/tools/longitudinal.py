@@ -15,7 +15,6 @@ import asyncio
 import dataclasses
 import json
 import logging
-import os
 import threading
 import time
 import uuid
@@ -32,6 +31,8 @@ from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.payloads import bounded_list
 from pulsar.mcp.results import mcp_result
 from pulsar.mcp.toolmeta import (
+    ANY,
+    default_tool_timeout,
     INT,
     NUM,
     STR,
@@ -68,13 +69,6 @@ from ..session import (
 logger = logging.getLogger(__name__)
 
 
-def _tool_timeout_s() -> float:
-    try:
-        return float(os.environ.get("PULSAR_MCP_TOOL_TIMEOUT_S", "1800"))
-    except ValueError:
-        return 1800.0
-
-
 def _json_default(value: Any) -> Any:
     item = getattr(value, "item", None)
     if callable(item):  # numpy scalars
@@ -97,14 +91,14 @@ def _json_safe(payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Output schemas (success payloads only; error envelopes are not validated)
 # ---------------------------------------------------------------------------
-_ANY: dict[str, Any] = {}
 _BOUNDED = obj(
-    {"total": INT, "preview": arr(_ANY), "omitted": INT},
+    {"total": INT, "preview": arr(ANY), "omitted": INT},
     ["total", "preview"],
     additional=True,
 )
 _OPEN = obj({}, additional=True)
 _NEXT_TOOLS = arr(STR)
+CLASSIFICATION_PREVIEW_LIMIT = 25
 _THRESHOLD_SWEEP = obj(
     {
         "basis": STR,
@@ -205,7 +199,7 @@ _BUILD_SCHEMA = obj(
         ),
         "next_tools": _NEXT_TOOLS,
         "config_yaml": STR,
-        "times": arr(_ANY),
+        "times": arr(ANY),
     },
     [
         "status",
@@ -242,8 +236,8 @@ _TRAJECTORY_SURFACE = obj(
         "similarity_surface": obj(
             {
                 "surface": STR,
-                "construction": _ANY,
-                "similarity_threshold_applied": _ANY,
+                "construction": ANY,
+                "similarity_threshold_applied": ANY,
                 "n_edges": INT,
                 "cross_time_edges": INT,
                 "cross_time_fraction": NUM,
@@ -305,7 +299,7 @@ _TEMPORAL_SURFACE = obj(
         "aggregations": arr(_AGGREGATION),
         "next_tools": _NEXT_TOOLS,
         "detail": enum(["full"]),
-        "threshold": _ANY,
+        "threshold": ANY,
     },
     [
         "representation",
@@ -381,7 +375,7 @@ _NEIGHBOR = obj(
         "obs_id": INT,
         "entity_id": STR,
         "t": INT,
-        "time_label": _ANY,
+        "time_label": ANY,
         "delta_t": INT,
         "weight": NUM,
     },
@@ -396,7 +390,7 @@ _CROSS_TIME_SCHEMA = obj(
         "interpretation_threshold": NUM,
         "direction": enum(["any", "forward", "backward"]),
         "source": obj(
-            {"obs_id": INT, "entity_id": STR, "t": INT, "time_label": _ANY},
+            {"obs_id": INT, "entity_id": STR, "t": INT, "time_label": ANY},
             ["obs_id", "entity_id", "t"],
         ),
         "neighbors_returned": INT,
@@ -430,6 +424,11 @@ _CLASSIFY_SCHEMA = obj(
         "interpretation_threshold": NUM,
         "n_entities": INT,
         "classes_summary": obj({}, additional=True),
+        "detail": enum(["summary", "full"]),
+        "classification_preview": obj({}, additional=True),
+        "entities_returned": INT,
+        "entities_omitted": INT,
+        # Only present when detail="full" (O(entities)).
         "classification": obj({}, additional=True),
         "next_tools": _NEXT_TOOLS,
     },
@@ -441,18 +440,17 @@ _CLASSIFY_SCHEMA = obj(
         "interpretation_threshold",
         "n_entities",
         "classes_summary",
-        "classification",
+        "detail",
+        "classification_preview",
+        "entities_returned",
+        "entities_omitted",
         "next_tools",
     ],
 )
 
-_LONGITUDINAL_ID_DESC = (
-    "Handle returned by build_longitudinal_graph. Omit to use the most recent "
-    "panel built in this session."
-)
+_LONGITUDINAL_ID_DESC = "From build_longitudinal_graph. Omit for the most recent panel."
 _RESPONSE_FORMAT_DESC = (
-    "'json' returns the payload as the text view; 'markdown' returns a readable "
-    "table view. structured_content carries the same payload either way."
+    "Text view: 'json' or 'markdown' table. structured_content is identical."
 )
 
 
@@ -649,7 +647,7 @@ def _build_longitudinal_worker(
 @tool_meta(
     read_only=False,
     idempotent=False,
-    timeout=_tool_timeout_s(),
+    timeout=default_tool_timeout(),
     output_schema=_BUILD_SCHEMA,
 )
 async def build_longitudinal_graph(
@@ -657,9 +655,7 @@ async def build_longitudinal_graph(
         str,
         Field(
             description=(
-                "Handle from ingest_dataset (or sample_longitudinal_entities) for a "
-                "long-format panel: one row per (entity, time step), numeric feature "
-                "columns."
+                "From ingest_dataset or sample_longitudinal_entities: long-format panel, one row per (entity, time step), numeric features."
             )
         ),
     ] = "",
@@ -691,10 +687,7 @@ async def build_longitudinal_graph(
         Literal["trajectory", "temporal", "both"],
         Field(
             description=(
-                "'trajectory': sparse graph over (entity, time) observations whose "
-                "edges may join different time steps (default, scales best). "
-                "'temporal': dense (n, n, T) tensor of per-time entity graphs, "
-                "memory-guarded. 'both': build each."
+                "'trajectory' (default): sparse graph over (entity, time) observations; edges may cross time steps. 'temporal': dense (n, n, T) entity tensor, memory-guarded. 'both': build each."
             )
         ),
     ] = "trajectory",
@@ -702,9 +695,7 @@ async def build_longitudinal_graph(
         str,
         Field(
             description=(
-                "Pulsar params YAML (from create_config). Omit to reuse the session's "
-                "active config. Projection dimensions above the panel feature count "
-                "are dropped and disclosed in config_adaptation."
+                "Pulsar params YAML from create_config. Omit to reuse the session's active config. Excess projection dimensions are dropped (see config_adaptation)."
             )
         ),
     ] = "",
@@ -712,9 +703,7 @@ async def build_longitudinal_graph(
         Literal["drop_entity", "forward_fill", "allow_ragged"],
         Field(
             description=(
-                "Entities not observed at every time step: 'drop_entity' removes "
-                "them, 'forward_fill' carries the last value forward, "
-                "'allow_ragged' keeps them as-is (trajectory representation only)."
+                "Entities missing at some time step: 'drop_entity' removes them, 'forward_fill' carries values forward, 'allow_ragged' keeps them (trajectory only)."
             )
         ),
     ] = "drop_entity",
@@ -1362,11 +1351,7 @@ async def classify_trajectories(
         Literal["complexity", "transition", "sequence", "levenshtein", "dtw"],
         Field(
             description=(
-                "'complexity': Shannon entropy and transition count (Stable, "
-                "Gradual, Volatile). 'transition': Markov self-retention rate. "
-                "'sequence': path shape (Singleton, Monostate, Multistate). "
-                "'levenshtein' / 'dtw': complete-linkage clustering of pairwise "
-                "edit / time-warp distance into 4 cohorts (O(n^2) pairs)."
+                "'complexity': entropy and transition count. 'transition': Markov self-retention. 'sequence': path shape. 'levenshtein'/'dtw': complete-linkage clustering of pairwise distance into 4 cohorts (O(n^2))."
             )
         ),
     ] = "complexity",
@@ -1379,6 +1364,16 @@ async def classify_trajectories(
             )
         ),
     ] = 0.15,
+    detail: Annotated[
+        Literal["summary", "full"],
+        Field(
+            description=(
+                "'summary' (default) returns the per-class summary plus a "
+                f"{CLASSIFICATION_PREVIEW_LIMIT}-entity preview. 'full' adds the "
+                "complete per-entity `classification` map (O(entities))."
+            )
+        ),
+    ] = "summary",
     response_format: Annotated[
         Literal["json", "markdown"], Field(description=_RESPONSE_FORMAT_DESC)
     ] = "markdown",
@@ -1386,9 +1381,10 @@ async def classify_trajectories(
 ) -> ToolResult:
     """Classify each entity's cluster path through time into trajectory classes.
 
-    Returns a per-class summary plus per-entity class, length and sequence. Needs the
-    trajectory representation. Prefer get_trajectory_archetypes for grouping by exact
-    sequence; use this for rule- or distance-based classes.
+    Returns a per-class summary plus a bounded entity preview (all entities with
+    detail="full"). Needs the trajectory representation. Use
+    get_trajectory_archetypes to group by exact sequence; this tool gives rule- or
+    distance-based classes.
     """
     session = _get_session(ctx)
 
@@ -1401,6 +1397,8 @@ async def classify_trajectories(
             "classify_trajectories",
             "method must be 'complexity', 'transition', 'sequence', 'levenshtein', or 'dtw'.",
         )
+    if detail not in {"summary", "full"}:
+        return _invalid("classify_trajectories", "detail must be 'summary' or 'full'.")
     if threshold < 0.0:
         return _invalid("classify_trajectories", "threshold must be >= 0.")
 
@@ -1422,6 +1420,16 @@ async def classify_trajectories(
         )
         payload["status"] = "ok"
         payload["longitudinal_id"] = artifact.longitudinal_id
+        full = payload.pop("classification")
+        preview = dict(list(full.items())[:CLASSIFICATION_PREVIEW_LIMIT])
+        payload["detail"] = detail
+        payload["classification_preview"] = preview
+        payload["entities_returned"] = len(full) if detail == "full" else len(preview)
+        payload["entities_omitted"] = (
+            0 if detail == "full" else len(full) - len(preview)
+        )
+        if detail == "full":
+            payload["classification"] = full
         payload = _json_safe(payload)
         if response_format == "json":
             return mcp_result(payload)
@@ -1458,20 +1466,21 @@ def _classification_to_markdown(payload: dict[str, Any]) -> str:
 
     lines += [
         "",
-        "## Entity Classification Samples (Top 15)",
+        "## Entity Classification Samples (first 15)",
         "",
         "| Entity ID | Cohort Class | Visits | Sequence (Observed) |",
         "|---|---|---|---|",
     ]
-    samples = list(payload["classification"].items())[:15]
-    for p_id, info in samples:
+    for p_id, info in list(payload["classification_preview"].items())[:15]:
         lines.append(
             f"| {p_id} | {info['class']} | {info['length']} | {info['sequence']} |"
         )
 
-    if len(payload["classification"]) > 15:
+    shown = min(len(payload["classification_preview"]), 15)
+    if payload["n_entities"] > shown:
         lines.append(
-            f"| ... | and {len(payload['classification']) - 15} more entities | | |"
+            f"| ... | and {payload['n_entities'] - shown} more entities "
+            '(detail="full" returns all) | | |'
         )
 
     lines += ["", "## Next Tools"] + [f"- `{t}`" for t in payload["next_tools"]]
