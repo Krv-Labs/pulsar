@@ -4,19 +4,76 @@ import asyncio
 import base64
 import dataclasses
 import hashlib
-import json
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 import uuid
 
 from fastmcp import Context
+from fastmcp.tools import ToolResult
+from pydantic import Field
 
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
 from pulsar.mcp.registry import registry
+from pulsar.mcp.results import mcp_result
 from pulsar.mcp.session import _get_session, _read_dataset_file, _resolve_dataset_path
+from pulsar.mcp.toolmeta import (
+    INT,
+    NUM,
+    STR,
+    nullable,
+    obj,
+    tool_meta,
+)
 
 logger = logging.getLogger(__name__)
+
+_DATASET_RECORD_SCHEMA = obj(
+    {
+        "dataset_id": STR,
+        "path": STR,
+        "name": STR,
+        "size_bytes": INT,
+        "mtime_ns": INT,
+        "ingested_at": NUM,
+        "source": STR,
+    },
+    ["dataset_id", "path", "name", "size_bytes", "mtime_ns", "ingested_at", "source"],
+)
+_UPLOAD_RECORD_SCHEMA = obj(
+    {
+        "upload_id": STR,
+        "filename": STR,
+        "media_type": STR,
+        "created_at": NUM,
+        "bytes_received": INT,
+    },
+    ["upload_id", "filename", "media_type", "created_at", "bytes_received"],
+)
+_SAMPLE_SCHEMA = obj(
+    {
+        "dataset_id": STR,
+        "source_dataset_id": STR,
+        "entity_column": STR,
+        "max_entities": INT,
+        "min_observations": INT,
+        "time_column": nullable(STR),
+        "min_time_points": nullable(INT),
+        "eligible_entities": INT,
+        "sampled_entities": INT,
+        "sampled_rows": INT,
+    },
+    [
+        "dataset_id",
+        "source_dataset_id",
+        "entity_column",
+        "max_entities",
+        "min_observations",
+        "eligible_entities",
+        "sampled_entities",
+        "sampled_rows",
+    ],
+)
 
 
 def _select_longitudinal_entities(
@@ -61,7 +118,7 @@ def _sample_longitudinal_entities_worker(
     min_observations: int,
     time_column: str | None,
     min_time_points: int | None,
-) -> str:
+) -> dict[str, Any] | ToolResult:
     frame = _read_dataset_file(source_path)
     if entity_column not in frame.columns:
         return mcp_error(
@@ -118,30 +175,45 @@ def _sample_longitudinal_entities_worker(
         )
     finally:
         staging_path.unlink(missing_ok=True)
-    return json.dumps(
-        {
-            "dataset_id": record.dataset_id,
-            "source_dataset_id": dataset_id,
-            "entity_column": entity_column,
-            "max_entities": max_entities,
-            "min_observations": min_observations,
-            "time_column": time_column,
-            "min_time_points": min_time_points,
-            "eligible_entities": eligible_count,
-            "sampled_entities": len(selected),
-            "sampled_rows": int(len(sampled)),
-        },
-        indent=2,
-    )
+    return {
+        "dataset_id": record.dataset_id,
+        "source_dataset_id": dataset_id,
+        "entity_column": entity_column,
+        "max_entities": max_entities,
+        "min_observations": min_observations,
+        "time_column": time_column,
+        "min_time_points": min_time_points,
+        "eligible_entities": eligible_count,
+        "sampled_entities": len(selected),
+        "sampled_rows": int(len(sampled)),
+    }
 
 
-async def ingest_dataset(path: str, ctx: Context = None) -> str:
-    """Register a host-visible absolute dataset path; returns a `dataset_id`."""
+@tool_meta(read_only=False, output_schema=_DATASET_RECORD_SCHEMA)
+async def ingest_dataset(
+    path: Annotated[
+        str,
+        Field(
+            description=(
+                "Absolute path to a CSV or Parquet file that exists on the "
+                "machine running this MCP server (a host-visible path; paths "
+                "inside a sandbox or container the server cannot see will fail)."
+            )
+        ),
+    ],
+    ctx: Context = None,
+) -> ToolResult:
+    """Register a host-visible CSV/Parquet file and return its `dataset_id`.
+
+    Returns the dataset record (`dataset_id`, resolved path, size). Pass
+    `dataset_id` to characterize_dataset, create_config, probe_columns and
+    run_topological_sweep. Start here; no other tool reads raw paths.
+    """
     try:
         record = await asyncio.to_thread(registry.register_dataset, path)
         session = _get_session(ctx)
         session.dataset_id = record.dataset_id
-        return json.dumps(dataclasses.asdict(record), indent=2)
+        return mcp_result(dataclasses.asdict(record))
     except FileNotFoundError:
         return path_access_error(
             "ingest_dataset",
@@ -165,25 +237,64 @@ async def ingest_dataset(path: str, ctx: Context = None) -> str:
             details={"path_context": {"attempted_path": path}},
         )
     except Exception as e:
-        return mcp_error("ingest_dataset", str(e))
+        return mcp_error(
+            "ingest_dataset",
+            str(e),
+            error_code="INGEST_FAILED",
+            agent_action=(
+                "Check that the file is a readable CSV or Parquet file, then retry "
+                "ingest_dataset with a host-visible absolute path."
+            ),
+        )
 
 
+@tool_meta(read_only=False, output_schema=_SAMPLE_SCHEMA)
 async def sample_longitudinal_entities(
-    dataset_id: str,
-    entity_column: str,
-    max_entities: int = 2000,
-    min_observations: int = 3,
+    dataset_id: Annotated[
+        str,
+        Field(description="Source dataset handle returned by ingest_dataset."),
+    ],
+    entity_column: Annotated[
+        str,
+        Field(
+            description=(
+                "Column that identifies the repeated entity (e.g. a patient or "
+                "device id); all rows of a sampled entity are kept."
+            )
+        ),
+    ],
+    max_entities: Annotated[
+        int,
+        Field(description="Maximum number of entities to keep (>= 1)."),
+    ] = 2000,
+    min_observations: Annotated[
+        int,
+        Field(description="Minimum number of rows an entity needs to be eligible."),
+    ] = 3,
     ctx: Context = None,
-    time_column: str | None = None,
-    min_time_points: int | None = None,
-) -> str:
+    time_column: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional discrete time column; required when min_time_points is set."
+            )
+        ),
+    ] = None,
+    min_time_points: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Optional minimum number of distinct time_column values an entity "
+                "needs to be eligible."
+            )
+        ),
+    ] = None,
+) -> ToolResult:
     """Create a deterministic, row-preserving sample of longitudinal entities.
 
-    The source must already be ingested. The result is a new ``dataset_id`` that
-    can be passed to ``create_config`` and ``build_longitudinal_graph``; no rows
-    or identifier values are returned. ``min_observations`` counts rows; when
-    ``min_time_points`` is set, entities must also have enough distinct values
-    in ``time_column``.
+    Returns a NEW `dataset_id` (registered) plus eligible/sampled counts; no rows
+    or identifiers are returned. Use before build_longitudinal_graph on large
+    panels. The source must already be ingested.
     """
     if (
         max_entities < 1
@@ -206,7 +317,7 @@ async def sample_longitudinal_entities(
         )
 
     try:
-        return await asyncio.to_thread(
+        outcome = await asyncio.to_thread(
             _sample_longitudinal_entities_worker,
             dataset_id=dataset_id,
             source_path=source_path,
@@ -216,33 +327,73 @@ async def sample_longitudinal_entities(
             time_column=time_column,
             min_time_points=min_time_points,
         )
+        if isinstance(outcome, ToolResult):
+            return outcome
+        return mcp_result(outcome)
     except Exception as e:
         logger.exception("Could not sample longitudinal entities")
-        return mcp_error("sample_longitudinal_entities", str(e))
+        return mcp_error(
+            "sample_longitudinal_entities",
+            str(e),
+            error_code="SAMPLE_FAILED",
+            agent_action="Check the dataset file and column names, then retry.",
+        )
 
 
+@tool_meta(read_only=False, output_schema=_UPLOAD_RECORD_SCHEMA)
 async def begin_dataset_upload(
-    filename: str,
-    media_type: str = "text/csv",
+    filename: Annotated[
+        str, Field(description="File name to store the upload under, e.g. data.csv.")
+    ],
+    media_type: Annotated[
+        str, Field(description="MIME type of the file, e.g. text/csv.")
+    ] = "text/csv",
     ctx: Context = None,
-) -> str:
-    """Begin staged upload (sandboxed clients only). Then append chunks + finalize."""
+) -> ToolResult:
+    """Begin a staged chunked upload (only for clients that cannot share a host path).
+
+    Returns an `upload_id`; then call append_dataset_chunk repeatedly and
+    finalize_dataset_upload to get a `dataset_id`. Prefer ingest_dataset when the
+    file is visible to the server.
+    """
     try:
         record = await asyncio.to_thread(
             registry.begin_upload, filename, media_type=media_type
         )
-        return json.dumps(dataclasses.asdict(record), indent=2)
+        return mcp_result(dataclasses.asdict(record))
     except Exception as e:
-        return mcp_error("begin_dataset_upload", str(e))
+        return mcp_error(
+            "begin_dataset_upload",
+            str(e),
+            error_code="UPLOAD_BEGIN_FAILED",
+            agent_action="Retry with a plain file name and a valid media_type.",
+        )
 
 
+@tool_meta(read_only=False, output_schema=_UPLOAD_RECORD_SCHEMA)
 async def append_dataset_chunk(
-    upload_id: str,
-    chunk: str,
-    encoding: Literal["base64", "utf-8"] = "base64",
+    upload_id: Annotated[
+        str, Field(description="Upload handle returned by begin_dataset_upload.")
+    ],
+    chunk: Annotated[
+        str, Field(description="The next slice of the file, encoded per `encoding`.")
+    ],
+    encoding: Annotated[
+        Literal["base64", "utf-8"],
+        Field(
+            description=(
+                "How `chunk` is encoded: base64 (binary-safe, default) or utf-8 "
+                "(plain text)."
+            )
+        ),
+    ] = "base64",
     ctx: Context = None,
-) -> str:
-    """Append one chunk to a staged upload (base64 default for binary safety)."""
+) -> ToolResult:
+    """Append one chunk to a staged upload and return the updated byte count.
+
+    Call repeatedly in file order after begin_dataset_upload, then
+    finalize_dataset_upload.
+    """
     try:
         if encoding == "base64":
             try:
@@ -269,13 +420,27 @@ async def append_dataset_chunk(
         )
         if record is None:
             return unknown_handle_error("append_dataset_chunk", "upload_id", upload_id)
-        return json.dumps(dataclasses.asdict(record), indent=2)
+        return mcp_result(dataclasses.asdict(record))
     except Exception as e:
-        return mcp_error("append_dataset_chunk", str(e))
+        return mcp_error(
+            "append_dataset_chunk",
+            str(e),
+            error_code="UPLOAD_APPEND_FAILED",
+            agent_action="Retry the chunk, or restart with begin_dataset_upload.",
+        )
 
 
-async def finalize_dataset_upload(upload_id: str, ctx: Context = None) -> str:
-    """Finalize a staged upload; returns a `dataset_id`."""
+@tool_meta(read_only=False, output_schema=_DATASET_RECORD_SCHEMA)
+async def finalize_dataset_upload(
+    upload_id: Annotated[
+        str, Field(description="Upload handle returned by begin_dataset_upload.")
+    ],
+    ctx: Context = None,
+) -> ToolResult:
+    """Finalize a staged upload and register it; returns the dataset record.
+
+    The returned `dataset_id` works like one from ingest_dataset.
+    """
     try:
         record = await asyncio.to_thread(registry.finalize_upload, upload_id)
         if record is None:
@@ -284,6 +449,11 @@ async def finalize_dataset_upload(upload_id: str, ctx: Context = None) -> str:
             )
         session = _get_session(ctx)
         session.dataset_id = record.dataset_id
-        return json.dumps(dataclasses.asdict(record), indent=2)
+        return mcp_result(dataclasses.asdict(record))
     except Exception as e:
-        return mcp_error("finalize_dataset_upload", str(e))
+        return mcp_error(
+            "finalize_dataset_upload",
+            str(e),
+            error_code="UPLOAD_FINALIZE_FAILED",
+            agent_action="Check that all chunks were appended, then retry.",
+        )

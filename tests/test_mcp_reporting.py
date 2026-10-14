@@ -238,7 +238,7 @@ def test_export_html_report_missing_session_state_gives_recovery_action():
     payload = payload_of(asyncio.run(export_html_report(ctx=None)))
 
     assert payload["status"] == "error"
-    assert payload["error_code"] == "SESSION_STATE_MISSING"
+    assert payload["error_code"] == "MODEL_NOT_LOADED"
     assert payload["details"]["latest_run_id"] == "run_previous"
     assert payload["details"]["latest_dataset_id"] == "ds_previous"
     assert "get_runtime_context" in payload["agent_action"]
@@ -336,7 +336,7 @@ def test_export_dataset_bundle_missing_session_state():
     result_json = asyncio.run(export_dataset_bundle("out", "slug", ctx=None))
     result = payload_of(result_json)
     assert result["status"] == "error"
-    assert result["error_code"] == "SESSION_STATE_MISSING"
+    assert result["error_code"] == "MODEL_NOT_LOADED"
 
 
 def test_export_dataset_bundle_missing_clusters_or_stale():
