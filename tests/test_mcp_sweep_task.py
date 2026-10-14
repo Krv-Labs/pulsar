@@ -293,7 +293,7 @@ def test_sweep_progress_reaches_real_client_from_worker(tmp_path: Path) -> None:
         messages.append(message)
 
     async def _run() -> None:
-        server = AgnosticFastMCP("test-progress")
+        server = FastMCP("test-progress")
         register_server_tools(server)
         async with Client(server, progress_handler=_on_progress) as client:
             ingest_res = await client.call_tool(

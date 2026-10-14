@@ -812,7 +812,7 @@ def test_dossier_refused_when_data_rebound_during_compute(
         # Another tool binds a different (smaller) dataset; the run id is unchanged.
         session_mod._bind_session_data(session, session.data.iloc[:50].copy())
         release.set()
-        res = json.loads(await task)
+        res = payload_of(await task)
 
         assert session.latest_run_id == run_id_before
         assert res["status"] == "error"
