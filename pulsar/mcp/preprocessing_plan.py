@@ -24,6 +24,7 @@ import json
 import math
 import time
 from typing import Any, Literal
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,7 @@ QuestionTopic = Literal[
     "conditional_column",
     "date_columns",
     "duplicate_signal",
+    "mixed_values",
     "outcome_columns",
 ]
 
@@ -284,6 +286,7 @@ def draft_plan(
 
     entries: dict[str, PlanEntry] = {}
     date_cols: list[str] = []
+    mixed_value_cols: list[str] = []
     conditional_by_partner: dict[str, list[str]] = {}
     rule7b_cols: list[str] = []
 
@@ -395,8 +398,55 @@ def draft_plan(
             date_cols.append(col)
             continue
 
-        # Rule 5: numeric_text -> treated as numeric (fill_median triggers coercion), then rule 7
+        # Rule 5: numeric_text -> never silently coerce when n_non_numeric > 0
         if ev.kind == "numeric_text":
+            n_non_num = int(ev.n_non_numeric or 0)
+            if n_non_num > 0:
+                top_val = (
+                    ev.non_numeric_values[0][0]
+                    if ev.non_numeric_values
+                    else "non-numeric text"
+                )
+                row_word = "row" if n_non_num == 1 else "rows"
+                blank_word = "blank" if ev.n_missing == 1 else "blanks"
+                if ev.n_unique <= cat_threshold:
+                    impute_spec = (
+                        {"method": "fill_value", "value": "(blank)"}
+                        if ev.n_missing > 0
+                        else None
+                    )
+                    entries[col] = PlanEntry(
+                        column=col,
+                        role="feature",
+                        impute=impute_spec,
+                        indicator="none",
+                        encode="one_hot",
+                        decided_by="default",
+                        status="open",
+                        reason=(
+                            f"mostly numbers with {top_val!r} ({n_non_num:,} {row_word}; "
+                            f"{ev.n_missing:,} {blank_word}); kept as {ev.n_unique:,} categories"
+                        ),
+                    )
+                else:
+                    ind = f"group:{ev.missing_group}" if ev.missing_group else "own"
+                    entries[col] = PlanEntry(
+                        column=col,
+                        role="feature",
+                        impute={"method": "fill_median"},
+                        indicator=ind,
+                        encode=None,
+                        decided_by="default",
+                        status="open",
+                        reason=(
+                            f"mostly numbers with {top_val!r} ({n_non_num:,} {row_word}; "
+                            f"{ev.n_missing:,} {blank_word}); non-numeric text treated as blank "
+                            "with median fill and blank marker"
+                        ),
+                    )
+                mixed_value_cols.append(col)
+                continue
+
             md = ev.mask_dependency
             partner_ev = ev_by_col.get(md.partner) if md is not None else None
             if (
@@ -423,7 +473,11 @@ def draft_plan(
                 )
                 conditional_by_partner.setdefault(md.partner, []).append(col)
             else:
-                ind = f"group:{ev.missing_group}" if ev.missing_group else "own"
+                ind = (
+                    (f"group:{ev.missing_group}" if ev.missing_group else "own")
+                    if ev.n_missing > 0
+                    else "none"
+                )
                 blank_word = "blank" if ev.n_missing == 1 else "blanks"
                 entries[col] = PlanEntry(
                     column=col,
@@ -434,8 +488,8 @@ def draft_plan(
                     decided_by="default",
                     status="resolved",
                     reason=(
-                        f"numeric text with non-numeric strings ({ev.n_missing:,} {blank_word}); "
-                        "coerced to numbers with median fill and blank marker"
+                        f"numeric text ({ev.n_missing:,} {blank_word}); "
+                        "coerced to numbers with median fill"
                     ),
                 )
             continue
@@ -624,6 +678,119 @@ def draft_plan(
             default_option_id="ignore",
         )
         pending_questions.append((q_date, list(date_cols)))
+
+    # Question type 5: mixed_values (one shared question for all numeric_text columns with n_non_numeric > 0)
+    if mixed_value_cols:
+        c_top = max(
+            mixed_value_cols,
+            key=lambda c: int(ev_by_col[c].n_non_numeric or 0),
+        )
+        ev_top = ev_by_col[c_top]
+        top_val, top_cnt = (
+            ev_top.non_numeric_values[0]
+            if ev_top.non_numeric_values
+            else ("", int(ev_top.n_non_numeric or 0))
+        )
+        top_n = int(ev_top.n_non_numeric or 0)
+        row_word = "row" if top_n == 1 else "rows"
+        entry_word = "entry" if top_cnt == 1 else "entries"
+        verb_phrase = (
+            "becomes a blank and is estimated"
+            if top_cnt == 1
+            else "become blanks and are estimated"
+        )
+        cols_preview = _format_col_list(mixed_value_cols, limit=3)
+        if len(mixed_value_cols) == 1:
+            q_mixed_text = (
+                f"`{c_top}` mostly holds numbers but also the value {top_val!r} "
+                f"({top_n:,} {row_word}). Should those values count as their own "
+                "category, or as unreadable entries treated like blanks?"
+            )
+        else:
+            q_mixed_text = (
+                f"{cols_preview}: `{c_top}` mostly holds numbers but also the value "
+                f"{top_val!r} ({top_n:,} {row_word}). Should those values count as "
+                "their own category, or as unreadable entries treated like blanks?"
+            )
+        rows_aff = max(
+            int(ev_by_col[c].n_non_numeric or 0) + ev_by_col[c].n_missing
+            for c in mixed_value_cols
+        )
+        as_cat_edits = [
+            {
+                "column": c,
+                "role": "feature",
+                "impute_method": ("fill_value" if ev_by_col[c].n_missing > 0 else None),
+                **({"impute_value": "(blank)"} if ev_by_col[c].n_missing > 0 else {}),
+                "indicator": "none",
+                "encode": "one_hot",
+            }
+            for c in mixed_value_cols
+        ]
+        as_blank_edits = [
+            {
+                "column": c,
+                "role": "feature",
+                "impute_method": "fill_median",
+                "indicator": (
+                    f"group:{ev_by_col[c].missing_group}"
+                    if ev_by_col[c].missing_group is not None
+                    else "own"
+                ),
+                "encode": None,
+            }
+            for c in mixed_value_cols
+        ]
+        leave_out_edits = [
+            {
+                "column": c,
+                "role": "drop",
+                "impute_method": None,
+                "indicator": "none",
+                "encode": None,
+            }
+            for c in mixed_value_cols
+        ]
+        default_opt = (
+            "as_categories"
+            if all(ev_by_col[c].n_unique <= cat_threshold for c in mixed_value_cols)
+            else "as_blank"
+        )
+        q_mixed = PlanQuestion(
+            question_id="",
+            topic="mixed_values",
+            text=q_mixed_text,
+            applies_to=list(mixed_value_cols),
+            rows_affected=int(rows_aff),
+            options=[
+                QuestionOption(
+                    option_id="as_categories",
+                    label="Treat as categories",
+                    effect=(
+                        "Each distinct value (including non-numeric text) gets its "
+                        "own 0/1 category column; blanks become '(blank)'"
+                    ),
+                    edits=as_cat_edits,
+                ),
+                QuestionOption(
+                    option_id="as_blank",
+                    label="Treat non-numeric text as blank",
+                    effect=(
+                        f"{top_cnt:,} {top_val!r} {entry_word} {verb_phrase} with "
+                        "the median of observed numbers, plus a 0/1 blank marker"
+                    ),
+                    edits=as_blank_edits,
+                ),
+                QuestionOption(
+                    option_id="leave_out",
+                    label="Leave out",
+                    effect=f"Leaves {cols_preview} out of the map",
+                    edits=leave_out_edits,
+                ),
+            ],
+            default_option_id=default_opt,
+        )
+        pending_questions.append((q_mixed, list(mixed_value_cols)))
 
     # Question type 7a: conditional_column (one per boolean event partner)
     for partner, cols in conditional_by_partner.items():
@@ -1152,7 +1319,9 @@ def _plan_to_matrix(sample_df: pd.DataFrame, plan: PreprocessingPlan) -> np.ndar
             "preprocessing": pre_dict,
         }
     )
-    df_proc, _ = preprocess_dataframe(sample_df, cfg)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        df_proc, _ = preprocess_dataframe(sample_df, cfg)
     return df_proc.to_numpy(dtype=np.float64)
 
 
@@ -1307,7 +1476,11 @@ def _validate_indicator(
                 "known_groups": sorted(missing_groups.keys()),
             },
         )
-    if ev is not None and ev.n_missing == 0:
+    if (
+        ev is not None
+        and ev.n_missing == 0
+        and not (ev.kind == "numeric_text" and (ev.n_non_numeric or 0) > 0)
+    ):
         raise PlanEditError(
             "INVALID_ARGUMENT",
             f"Column {col!r} has no blanks; indicator must be 'none'.",
@@ -1361,6 +1534,24 @@ def _apply_single_edit(
                 {"column": col, "role": role_val, "valid_roles": sorted(VALID_ROLES)},
             )
         entry.role = role_val  # type: ignore[assignment]
+
+    if "encode" in edit:
+        enc = edit["encode"]
+        if enc is None or enc == "none" or enc == "":
+            entry.encode = None
+        else:
+            enc_str = str(enc)
+            if enc_str not in VALID_ENCODE_METHODS:
+                raise PlanEditError(
+                    "INVALID_ARGUMENT",
+                    f"Invalid encode method {enc_str!r} for column {col!r}.",
+                    {
+                        "column": col,
+                        "encode": enc_str,
+                        "valid_methods": sorted(VALID_ENCODE_METHODS),
+                    },
+                )
+            entry.encode = enc_str
 
     # Handle nested 'impute' dict or flat 'impute_method' / 'impute_value'
     has_impute_edit = False
@@ -1444,6 +1635,11 @@ def _apply_single_edit(
         and entry.impute is not None
         and ev is not None
         and ev.n_missing == 0
+        and not (
+            ev.kind == "numeric_text"
+            and (ev.n_non_numeric or 0) > 0
+            and entry.encode is None
+        )
     ):
         raise PlanEditError(
             "INVALID_ARGUMENT",
@@ -1453,6 +1649,14 @@ def _apply_single_edit(
 
     if entry.impute is not None:
         method_now = entry.impute.get("method")
+        is_text_mode = ev is not None and (
+            ev.kind in ("text", "datetime_like")
+            or (ev.kind == "numeric_text" and entry.encode is not None)
+        )
+        is_numeric_mode = ev is not None and (
+            ev.kind in ("numeric", "boolean")
+            or (ev.kind == "numeric_text" and entry.encode is None)
+        )
         if method_now == "fill_value":
             if "value" not in entry.impute or entry.impute["value"] is None:
                 raise PlanEditError(
@@ -1470,7 +1674,7 @@ def _apply_single_edit(
                     {"column": col, "impute_value": str(val_now)},
                 )
             if ev is not None:
-                if ev.kind in ("numeric", "boolean", "numeric_text"):
+                if is_numeric_mode:
                     if isinstance(val_now, str) or not isinstance(
                         val_now, (int, float, np.number)
                     ):
@@ -1479,7 +1683,7 @@ def _apply_single_edit(
                             f"Column {col!r} is {ev.kind}; impute_value for 'fill_value' must be numeric, got {val_now!r}.",
                             {"column": col, "kind": ev.kind, "impute_value": val_now},
                         )
-                elif ev.kind in ("text", "datetime_like"):
+                elif is_text_mode:
                     if isinstance(val_now, (int, float, np.number)) and not isinstance(
                         val_now, bool
                     ):
@@ -1491,7 +1695,7 @@ def _apply_single_edit(
                 {"column": col, "impute_method": method_now},
             )
         if ev is not None:
-            if ev.kind in ("text", "datetime_like") and method_now in (
+            if is_text_mode and method_now in (
                 "fill_median",
                 "fill_mean",
                 "sample_normal",
@@ -1501,7 +1705,7 @@ def _apply_single_edit(
                     f"Column {col!r} is {ev.kind}; numeric impute_method {method_now!r} cannot be used on text.",
                     {"column": col, "kind": ev.kind, "impute_method": method_now},
                 )
-            if ev.kind in ("numeric", "boolean", "numeric_text") and method_now in (
+            if is_numeric_mode and method_now in (
                 "fill_mode",
                 "sample_categorical",
             ):
@@ -1510,24 +1714,6 @@ def _apply_single_edit(
                     f"Column {col!r} is {ev.kind}; categorical impute_method {method_now!r} cannot be used on numbers.",
                     {"column": col, "kind": ev.kind, "impute_method": method_now},
                 )
-
-    if "encode" in edit:
-        enc = edit["encode"]
-        if enc is None or enc == "none" or enc == "":
-            entry.encode = None
-        else:
-            enc_str = str(enc)
-            if enc_str not in VALID_ENCODE_METHODS:
-                raise PlanEditError(
-                    "INVALID_ARGUMENT",
-                    f"Invalid encode method {enc_str!r} for column {col!r}.",
-                    {
-                        "column": col,
-                        "encode": enc_str,
-                        "valid_methods": sorted(VALID_ENCODE_METHODS),
-                    },
-                )
-            entry.encode = enc_str
 
     if "indicator" in edit and edit["indicator"] is not None:
         entry.indicator = _validate_indicator(
@@ -1609,6 +1795,7 @@ def apply_answers_and_edits(
                 f"Unknown option_id {oid!r} for question {qid!r}.",
                 {
                     "question_id": qid,
+                    "topic": q.topic,
                     "option_id": oid,
                     "valid_options": [o.option_id for o in q.options],
                 },

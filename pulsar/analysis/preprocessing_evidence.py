@@ -47,6 +47,8 @@ class ColumnEvidence:
     max_abs_z: float | None
     missing_group: str | None
     mask_dependency: MaskDependency | None
+    non_numeric_values: tuple[tuple[str, int], ...] | None = None
+    n_non_numeric: int | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +208,8 @@ def _profile_single_column(
                     "nonnegative": None,
                     "minority_fraction": None,
                     "max_abs_z": None,
+                    "non_numeric_values": None,
+                    "n_non_numeric": None,
                 },
                 None,
                 float_arr,
@@ -289,6 +293,8 @@ def _profile_single_column(
                 "nonnegative": nonnegative,
                 "minority_fraction": minority_fraction,
                 "max_abs_z": max_abs_z,
+                "non_numeric_values": None,
+                "n_non_numeric": None,
             },
             partial_mask,
             float_arr,
@@ -326,6 +332,31 @@ def _profile_single_column(
         )
     else:
         minority_fraction = None
+
+    non_numeric_values: tuple[tuple[str, int], ...] | None = None
+    n_non_numeric: int | None = None
+    if kind == "numeric_text":
+        full_obs = str_obs if str_obs is not None else series.dropna().astype(str)
+        stripped = full_obs.str.strip()
+        non_empty = stripped[stripped != ""]
+        if len(non_empty) == 0:
+            non_numeric_values = ()
+            n_non_numeric = 0
+        else:
+            cleaned = non_empty.str.replace(_THOUSANDS_COMMA_RE, "", regex=True)
+            parsed = pd.to_numeric(cleaned, errors="coerce")
+            bad = non_empty[parsed.isna()]
+            n_non_numeric = int(len(bad))
+            if n_non_numeric > 0:
+                vc = bad.value_counts()
+                sorted_items = sorted(
+                    ((str(k), int(v)) for k, v in vc.items()),
+                    key=lambda kv: (-kv[1], kv[0]),
+                )
+                non_numeric_values = tuple(sorted_items[:5])
+            else:
+                non_numeric_values = ()
+
     partial_mask = isna_arr if 0 < n_missing < n_rows else None
 
     return (
@@ -345,6 +376,8 @@ def _profile_single_column(
             "nonnegative": None,
             "minority_fraction": minority_fraction,
             "max_abs_z": None,
+            "non_numeric_values": non_numeric_values,
+            "n_non_numeric": n_non_numeric,
         },
         partial_mask,
         None,
@@ -781,6 +814,8 @@ def measure_preprocessing_evidence(
             max_abs_z=r["max_abs_z"],
             missing_group=col_to_group_id.get(r["name"]),
             mask_dependency=col_to_mask_dep.get(r["name"]),
+            non_numeric_values=r["non_numeric_values"],
+            n_non_numeric=r["n_non_numeric"],
         )
         for r in raw_profiles
     )

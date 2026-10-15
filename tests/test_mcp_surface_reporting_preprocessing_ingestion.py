@@ -399,7 +399,8 @@ def test_full_loop_variants_and_exports(tmp_path):
                     sc = res.structured_content
                     assert sc["detail"] == detail
                     assert ("entries" in sc) is (detail == "full")
-                    assert sc["preprocessing_yaml"]
+                    assert ("preprocessing_yaml" in sc) is (detail == "full")
+                    assert sc["preprocessing_yaml_chars"] > 0
                     text = res.content[0].text
                     assert text.startswith("#") is (fmt == "markdown")
                     last_plan_id = sc["plan_id"]
@@ -696,10 +697,24 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
             assert cfg_no_plan["preprocessing_plan"]["source"] == "baseline_defaults"
             assert cfg_no_plan["preprocessing_plan"]["plan_id"].startswith("pp_")
             assert cfg_no_plan["preprocessing_plan"]["open_questions"] > 0
-            assert any(
-                w["code"] == "PREPROCESSING_QUESTIONS_OPEN"
-                for w in cfg_no_plan["warnings"]
+            preview = cfg_no_plan["preprocessing_plan"]["open_questions_preview"]
+            assert 1 <= len(preview) <= 3
+            assert all(
+                {"question_id", "topic", "rows_affected", "stakes"} <= set(item)
+                and item["stakes"] is not None
+                for item in preview
             )
+            open_warn = next(
+                w
+                for w in cfg_no_plan["warnings"]
+                if w["code"] == "PREPROCESSING_QUESTIONS_OPEN"
+            )
+            assert cfg_no_plan["preprocessing_plan"]["plan_id"] in open_warn["message"]
+            assert "open_questions_preview=" in open_warn["message"]
+            assert (
+                "call draft_preprocessing_plan(dataset_id) for the full cards, "
+                "or edit_preprocessing_plan(plan_id, ...)"
+            ) in open_warn["message"]
 
             # 2. draft_preprocessing_plan (summary + full × json + markdown)
             for fmt in ("json", "markdown"):
@@ -800,6 +815,24 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
                     "answers": [{"question_id": q_id, "option_id": "bad_option_id"}],
                 },
                 error="INVALID_ARGUMENT",
+            )
+            # D5: answering outcome_columns with invalid option_id (e.g. 'none') gives targeted agent_action
+            outcome_q_id = f"q{draft_sc['counts']['open_questions']}"
+            outcome_err = await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "answers": [{"question_id": outcome_q_id, "option_id": "none"}],
+                },
+                error="INVALID_ARGUMENT",
+            )
+            assert (
+                outcome_err.structured_content["details"]["topic"] == "outcome_columns"
+            )
+            assert (
+                outcome_err.structured_content["agent_action"]
+                == "To mark outcome columns, call edit_preprocessing_plan with edits=[{column, role: 'target'}]."
             )
 
             # Invalid edit -> INVALID_ARGUMENT

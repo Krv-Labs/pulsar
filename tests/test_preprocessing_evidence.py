@@ -170,6 +170,10 @@ def test_traps_known_answers_columns_and_kinds():
     assert lab.kind == "numeric_text"
     assert lab.n_missing == 0
     assert lab.is_constant is False
+    assert lab.non_numeric_values == (("N/A", 16),)
+    assert lab.n_non_numeric == 16
+    assert pid.non_numeric_values is None
+    assert pid.n_non_numeric is None
 
     age = by_name["age"]
     assert age.kind == "numeric"
@@ -178,6 +182,8 @@ def test_traps_known_answers_columns_and_kinds():
     assert age.n_zero == 0
     assert age.integer_valued is True
     assert age.nonnegative is True
+    assert age.non_numeric_values is None
+    assert age.n_non_numeric is None
 
 
 def test_traps_known_answers_groups_dependencies_and_relations():
