@@ -49,6 +49,7 @@ QuestionTopic = Literal[
     "date_columns",
     "duplicate_signal",
     "mixed_values",
+    "mostly_blank",
     "outcome_columns",
 ]
 
@@ -495,6 +496,8 @@ def draft_plan(
                         "coerced to numbers with median fill"
                     ),
                 )
+                if ev.n_missing > 0:
+                    rule7b_cols.append(col)
             continue
 
         # Rule 6: text categorical
@@ -1084,6 +1087,142 @@ def draft_plan(
             default_option_id="unknown",
         )
         pending_questions.append((q_blank, list(cols)))
+
+    # Question type 7c: mostly_blank (more blank than filled, not already handled)
+    mostly_blank_raw: list[str] = []
+    for _gid, cols in grouped_7b.items():
+        if cols[0] in blank_group_cols:
+            continue
+        if ev_by_col[cols[0]].n_missing > n_rows - ev_by_col[cols[0]].n_missing:
+            mostly_blank_raw.extend(cols)
+    mostly_blank_cols = sorted(
+        mostly_blank_raw,
+        key=lambda c: (-ev_by_col[c].missing_fraction, c),
+    )
+    if mostly_blank_cols:
+        for c in mostly_blank_cols:
+            entries[c].role = "drop"
+            entries[c].impute = None
+            entries[c].indicator = "none"
+            entries[c].encode = None
+            entries[c].decided_by = "default"
+            entries[c].status = "open"
+        c0 = mostly_blank_cols[0]
+        pct0 = max(51, round(100.0 * ev_by_col[c0].missing_fraction))
+        if len(mostly_blank_cols) == 1:
+            q_mb_text = (
+                f"`{c0}` is blank for {pct0}% of rows, and the data doesn't show why. "
+                "Leave it out, keep only whether it has a value, or estimate the missing values?"
+            )
+            has_value_effect = (
+                f"Leaves `{c0}` out of the map and adds a 0/1 marker for whether "
+                "it has a value"
+            )
+        else:
+            others = mostly_blank_cols[1:]
+            if len(others) == 1:
+                other_clause = (
+                    f"and 1 other column, `{others[0]}`, is blank for more than "
+                    "half of rows"
+                )
+            elif len(others) == 2:
+                other_clause = (
+                    "and 2 other columns are blank for more than half of rows: "
+                    f"`{others[0]}` and `{others[1]}`"
+                )
+            else:
+                other_clause = (
+                    f"and {len(others)} other columns are blank for more than "
+                    f"half of rows, including `{others[0]}` and `{others[1]}`"
+                )
+            q_mb_text = (
+                f"`{c0}` is blank for {pct0}% of rows ({other_clause}), and the data "
+                "doesn't show why. Leave them out, keep only whether each has a value, "
+                "or estimate the missing values?"
+            )
+            mb_preview = _format_col_list(mostly_blank_cols, limit=3)
+            has_value_effect = (
+                f"Leaves {mb_preview} out of the map and adds 0/1 markers for "
+                "whether values are filled in"
+            )
+        mb_preview = _format_col_list(mostly_blank_cols, limit=3)
+        mb_rows_aff = max(ev_by_col[c].n_missing for c in mostly_blank_cols)
+        est_pct = max(
+            51,
+            round(
+                100.0
+                * sum(ev_by_col[c].missing_fraction for c in mostly_blank_cols)
+                / len(mostly_blank_cols)
+            ),
+        )
+        mb_leave_out_edits = [
+            {
+                "column": c,
+                "role": "drop",
+                "impute_method": None,
+                "indicator": "none",
+            }
+            for c in mostly_blank_cols
+        ]
+        mb_has_value_edits = [
+            {
+                "column": c,
+                "role": "drop",
+                "impute_method": None,
+                "indicator": (
+                    f"group:{ev_by_col[c].missing_group}"
+                    if ev_by_col[c].missing_group is not None
+                    else f"group:{c}"
+                ),
+            }
+            for c in mostly_blank_cols
+        ]
+        mb_estimate_edits = [
+            {
+                "column": c,
+                "role": "feature",
+                "impute_method": "fill_median",
+                "indicator": (
+                    f"group:{ev_by_col[c].missing_group}"
+                    if ev_by_col[c].missing_group is not None
+                    else "own"
+                ),
+            }
+            for c in mostly_blank_cols
+        ]
+        q_mb = PlanQuestion(
+            question_id="",
+            topic="mostly_blank",
+            text=q_mb_text,
+            applies_to=list(mostly_blank_cols),
+            rows_affected=int(mb_rows_aff),
+            options=[
+                QuestionOption(
+                    option_id="leave_out",
+                    label="Leave out",
+                    effect=f"Leaves {mb_preview} out of the map",
+                    edits=mb_leave_out_edits,
+                ),
+                QuestionOption(
+                    option_id="has_value",
+                    label="Keep only whether value is filled in",
+                    effect=has_value_effect,
+                    edits=mb_has_value_edits,
+                ),
+                QuestionOption(
+                    option_id="estimate_and_mark",
+                    label="Fill with median and mark blanks",
+                    effect=(
+                        "Keeps in the map with blanks filled by the median of "
+                        "observed rows and a 0/1 blank marker "
+                        f"(about {est_pct}% of these values would be estimates)"
+                    ),
+                    edits=mb_estimate_edits,
+                ),
+            ],
+            default_option_id="leave_out",
+        )
+        pending_questions.append((q_mb, list(mostly_blank_cols)))
 
     # Question type 9: duplicate_signal (ONE question for sum_of, ONE question for duplicate)
     sum_targets: list[str] = []
