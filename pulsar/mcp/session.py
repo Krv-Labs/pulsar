@@ -223,6 +223,7 @@ class _PulsarSession:
     active_config_dataset_id: str | None = None
     graph_artifacts: dict[str, GraphArtifact] = field(default_factory=dict)
     longitudinal: dict[str, LongitudinalArtifact] = field(default_factory=dict)
+    preprocessing_plans: dict[str, Any] = field(default_factory=dict)
     # Bumped by every publish (audit counter). Do NOT use it as a conflict token:
     # dossier / artifact / longitudinal publishes bump it too.
     revision: int = 0
@@ -349,6 +350,11 @@ class _PulsarSession:
         bytes_total += _model_memory_bytes(self.model)
         bytes_total += _embeddings_memory_bytes(self.embeddings)
         bytes_total += _longitudinal_memory_bytes(self.longitudinal)
+        bytes_total += sum(
+            (len(getattr(p, "entries", {})) + len(getattr(p, "questions", {}))) * 256
+            + 512
+            for p in self.preprocessing_plans.values()
+        )
         return round(float(bytes_total) / (1024 * 1024), 2)
 
 

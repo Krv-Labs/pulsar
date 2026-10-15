@@ -36,7 +36,7 @@ pub mod temporal;
 pub use ballmapper::{ball_mapper_grid, fit_inner, BallMapper};
 pub use cosmic::{connected_components, laplacian_diag, CosmicGraphInner, WeightedEdge};
 pub use error::PulsarError;
-pub use impute::impute_column_inplace;
+pub use impute::{fill_constant_inplace, impute_column_inplace};
 pub use jl::{jl_grid, JLProjectionInner};
 pub use minhash::{cosmic_edges_minhash, MinHashSignatures};
 pub use pca::{pca_grid, PCAInner};

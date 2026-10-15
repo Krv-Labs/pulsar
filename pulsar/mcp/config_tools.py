@@ -19,9 +19,9 @@ from pulsar.config import (
 from pulsar.mcp.errors import classify_path, mcp_error
 import numpy as np
 from pulsar.analysis.characterization import NumericProfile
-from pulsar.mcp.preprocessing import (
-    _recommend_preprocessing_block,
-    _preprocessing_block_to_yaml,
+from pulsar.mcp.preprocessing_plan import (
+    PreprocessingPlan,
+    plan_to_preprocessing_yaml,
 )
 
 
@@ -48,7 +48,12 @@ def _build_sparsify_warning() -> ValidationIssue:
 
 
 _ALLOWED_TOP_LEVEL = {"run", "preprocessing", "sweep", "cosmic_graph", "output"}
-_ALLOWED_PREPROCESSING = {"drop_columns", "impute", "encode"}
+_ALLOWED_PREPROCESSING = {
+    "drop_columns",
+    "impute",
+    "encode",
+    "missing_indicator_groups",
+}
 _ALLOWED_SWEEP = {"projection", "pca", "ball_mapper"}
 _ALLOWED_PCA = {"dimensions", "seed"}
 _ALLOWED_PROJECTION = {"method", "dimensions", "seed", "center"}
@@ -61,6 +66,7 @@ _SUPPORTED_IMPUTE_METHODS = {
     "fill_mean",
     "fill_median",
     "fill_mode",
+    "fill_value",
 }
 _SUPPORTED_ENCODE_METHODS = {"one_hot"}
 _IMPUTE_METHOD_ALIASES = {
@@ -222,6 +228,7 @@ _VALID_OVERRIDE_KEYS = frozenset(
         "drop_columns",
         "impute",
         "encode",
+        "missing_indicator_groups",
         "raw",
     }
 )
@@ -316,6 +323,7 @@ def apply_overrides(
         "preprocessing.drop_columns": "drop_columns",
         "preprocessing.impute": "impute",
         "preprocessing.encode": "encode",
+        "preprocessing.missing_indicator_groups": "missing_indicator_groups",
         "run.run_name": "run_name",
         "run.dataset_path": "dataset_path",
     }
@@ -377,6 +385,7 @@ def apply_overrides(
         "drop_columns": "preprocessing.drop_columns",
         "impute": "preprocessing.impute",
         "encode": "preprocessing.encode",
+        "missing_indicator_groups": "preprocessing.missing_indicator_groups",
         "run_name": "run.name",
         "dataset_path": "run.data",
     }
@@ -500,6 +509,16 @@ def apply_overrides(
             overrides["encode"]
         )
         _track("preprocessing.encode", old, overrides["encode"])
+    if "missing_indicator_groups" in overrides:
+        old = dict(raw.get("preprocessing", {}).get("missing_indicator_groups", {}))
+        raw.setdefault("preprocessing", {}).setdefault(
+            "missing_indicator_groups", {}
+        ).update(overrides["missing_indicator_groups"])
+        _track(
+            "preprocessing.missing_indicator_groups",
+            old,
+            overrides["missing_indicator_groups"],
+        )
     if "raw" in overrides:
         _deep_merge(raw, overrides["raw"])
         _track("raw", "(deep merge)", overrides["raw"])
@@ -629,6 +648,33 @@ def _validate_preprocessing(pre: Any, issues: list[ValidationIssue]) -> None:
 
     _validate_impute(pre.get("impute"), issues)
     _validate_encode(pre.get("encode"), issues)
+    _validate_missing_groups_section(pre.get("missing_indicator_groups"), issues)
+
+
+def _validate_missing_groups_section(
+    groups: Any, issues: list[ValidationIssue]
+) -> None:
+    if groups is None:
+        return
+    if not isinstance(groups, dict):
+        issues.append(
+            ValidationIssue(
+                path="preprocessing.missing_indicator_groups",
+                message="missing_indicator_groups must be a mapping",
+            )
+        )
+        return
+    for name, cols in groups.items():
+        path = f"preprocessing.missing_indicator_groups.{name}"
+        if not isinstance(cols, list) or not cols:
+            issues.append(
+                ValidationIssue(
+                    path=path,
+                    message="missing_indicator_groups entries must be non-empty lists of column names",
+                    expected="list[str]",
+                    received=cols,
+                )
+            )
 
 
 def _validate_impute(impute: Any, issues: list[ValidationIssue]) -> None:
@@ -649,7 +695,7 @@ def _validate_impute(impute: Any, issues: list[ValidationIssue]) -> None:
                 ValidationIssue(
                     path=path,
                     message="Impute entries must be mappings, not bare strings",
-                    expected="{method: fill_mean|fill_median|fill_mode|sample_normal|sample_categorical, seed?: int}",
+                    expected="{method: fill_median|fill_mode|fill_value|fill_mean|sample_normal|sample_categorical, value?: any, indicator?: bool, seed?: int}",
                     received=spec,
                     suggestion=f"Use {{{{method: {alias}}}}}",
                     example_fix=f"{col}: {{method: {alias}}}",
@@ -936,12 +982,14 @@ def _build_initial_config_yaml(
     data_path: str,
     run_name: str = "initial_sweep",
     processed_profile: NumericProfile | None = None,
+    plan: PreprocessingPlan | None = None,
+    preprocessing_dict: dict[str, Any] | None = None,
 ) -> str:
-    """Construct a canonical initial config from dataset geometry.
+    """Construct a canonical initial config from dataset geometry and a preprocessing plan.
 
     When *processed_profile* is provided, epsilon and projection dimensions are
     calibrated against the processed feature space (after preprocessing +
-    scaling).  Otherwise falls back to raw-space geometry. Dimensions are picked
+    scaling). Otherwise falls back to raw-space geometry. Dimensions are picked
     from the cumulative-variance structure; the emitted projection method is JL.
     """
     if processed_profile is not None:
@@ -969,10 +1017,14 @@ def _build_initial_config_yaml(
         eps_min = knn_mean * 0.8
         eps_max = knn_mean * 1.5
 
-    n_samples = geo.get("n_samples", 0)
-    column_profiles = geo.get("column_profiles", [])
-    drop, impute, encode, _ = _recommend_preprocessing_block(column_profiles, n_samples)
-    preprocessing_block = _preprocessing_block_to_yaml(drop, impute, encode)
+    if plan is not None:
+        preprocessing_block = plan_to_preprocessing_yaml(plan, include_header=True)
+    elif preprocessing_dict is not None:
+        preprocessing_block = yaml.safe_dump(
+            {"preprocessing": preprocessing_dict}, sort_keys=False
+        ).rstrip()
+    else:
+        preprocessing_block = "preprocessing:\n  drop_columns: []"
 
     return f"""run:
   name: {run_name}

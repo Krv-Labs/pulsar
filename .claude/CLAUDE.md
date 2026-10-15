@@ -46,13 +46,13 @@ The entry point is `ThemaRS("params.yaml").fit()` (in `pulsar/pipeline.py`). It 
 ### Advanced Orchestration
 
 - **`fit_multi(datasets: list[pd.DataFrame])`**: Fuses multiple representations (e.g., different embedding models) of the same points. All resulting ball maps are accumulated into a single "Galactic" Pseudo-Laplacian.
-- **Threshold Stability**: If `construction_threshold: "auto"`, Pulsar uses approximate H₀ persistent homology (`src/ph.rs`) to find stable plateaus in the component-vs-threshold curve.
+- **Threshold Stability**: If `construction_threshold: "auto"`, Pulsar uses approximate H₀ persistent homology (`crates/pulsar-core/src/ph.rs`) to find stable plateaus in the component-vs-threshold curve.
 - **Representative Selection**: `model.select_representatives(n_reps)` clusters the thousands of generated ball maps (using node/edge/epsilon features) to find a diverse subset of the most descriptive maps.
 
 ### Layer Separation
 
-**Rust (`src/`)** — all computation:
-- `impute.rs` — missing value imputation; supports `sample_normal`, `sample_categorical`, `fill_mean`, `fill_median`, `fill_mode`.
+**Rust (`crates/pulsar-core/src` + `crates/pulsar-python/src`)** — all computation (`pulsar-core` pure-Rust engine; `pulsar-python` PyO3/numpy bindings):
+- `impute.rs` — missing value imputation; supports `sample_normal`, `sample_categorical`, `fill_mean`, `fill_median`, `fill_mode`, `fill_value`.
 - `scale.rs` — `StandardScaler` (z-score).
 - `pca.rs` — Randomized PCA (Halko et al. 2011) using parallel SVD via `rayon`.
 - `ballmapper.rs` — Ball Mapper: greedy center selection + point membership.
@@ -60,8 +60,8 @@ The entry point is `ThemaRS("params.yaml").fit()` (in `pulsar/pipeline.py`). It 
 - `cosmic.rs` — `CosmicGraph`: normalized adjacency from accumulated Laplacian.
 - `ph.rs` — approximate H₀ persistent homology for automatic threshold selection.
 - `temporal.rs` — 3D pseudo-Laplacian accumulation `(n, n, T)` across time steps.
-- `error.rs` — shared `PulsarError` type via `thiserror`.
-- `lib.rs` — PyO3 module definition.
+- `error.rs` (`crates/pulsar-core/src/error.rs`) — shared `PulsarError` type via `thiserror`.
+- `lib.rs` — crate root (`crates/pulsar-core/src/lib.rs`) and `pulsar._pulsar` PyO3 module definition (`crates/pulsar-python/src/lib.rs`).
 
 **Python (`pulsar/`)** — orchestration and post-processing:
 - `pipeline.py` — `ThemaRS` class; drives grid sweeps and handles imputation flags (`_was_missing`).
@@ -79,6 +79,7 @@ preprocessing:
   drop_columns: [id]
   impute:
     age: {method: sample_normal, seed: 42}
+    prior_stays: {method: fill_value, value: 0, indicator: false}
 sweep:
   pca:
     dimensions: {values: [2, 3, 5]}
@@ -138,7 +139,7 @@ The MCP server is a general-purpose topology workbench, not an EHR-only or domai
 - **Compress into decision-shaped slices**: Good summaries preserve the useful shape of a large object from several angles. `get_threshold_stability_curve` is the model: it condenses a full H0 threshold curve into a headline comparison, an evenly spaced morphology sample, top candidate lenses with `why` / `best_for` / `avoid_for`, filtered structural breakpoints, omitted counts, and compatible next tools. Prefer these dense, labeled snippets over either raw arrays or vague prose summaries.
 - **Make outputs rich but bounded**: Include the context an agent needs to decide the next step: dataset shape, raw-vs-processed calibration, k-NN/epsilon domain, projected feature count, estimated ball maps, grid adequacy, threshold provenance, graph surface, component morphology, weight distribution, finalization gates, and recommended next tools. Prefer a compact decision packet over a raw dump.
 - **Preserve agent autonomy**: `create_config` returns a broad baseline, not the answer. `diagnose_cosmic_graph` is measurement, not a directive. Threshold policies are interpretation lenses, not scores to maximize. Avoid wording that encourages metric hill-climbing, single-run perfection, or automatic rejection of valid one-component / giant-plus-tail topologies.
-- **Use drill-down tools intentionally**: The normal loop is `get_workflow_guide` -> `characterize_dataset` -> `create_config` -> `run_topological_sweep` -> `diagnose_cosmic_graph` -> `generate_cluster_dossier(detail="summary")`, followed by narrow calls such as `probe_columns`, `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix`, `get_threshold_stability_curve`, or `get_topological_skeleton` only when the current question needs them.
+- **Use drill-down tools intentionally**: The normal loop is `get_workflow_guide` -> `characterize_dataset` -> `draft_preprocessing_plan` -> `create_config` -> `run_topological_sweep` -> `diagnose_cosmic_graph` -> `generate_cluster_dossier(detail="summary")`, followed by narrow calls such as `edit_preprocessing_plan`, `probe_columns`, `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix`, `get_threshold_stability_curve`, or `get_topological_skeleton` only when the current question needs them.
 - **Label graph surfaces precisely**: Always distinguish construction threshold vs. interpretation threshold, persisted constructed graph vs. full weighted affinity, live model vs. persisted run, and constructed graph vs. sparsified artifact. If a payload mixes these surfaces, include explicit labels and threshold fields near the top.
 - **Scale costs must be visible**: Any expensive or potentially large operation should expose enough cost context for the agent to choose deliberately: estimated ball maps, runtime/memory tier, preview limits, returned/omitted counts, and whether a graph artifact is an estimate or a built object. Heavy modes and exports should be opt-in.
 - **Errors should unblock agents**: MCP errors should use structured envelopes with an error code, the failed tool, relevant handle/path context, and a concrete `agent_action`. Do not return opaque stack traces or benign-looking defaults when a statistical test, config validation, stale handle, or sandbox path failed.

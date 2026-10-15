@@ -282,3 +282,29 @@ def test_longitudinal_loop(tmp_path: Path):
             await _ok(client, "classify_trajectories")
 
     asyncio.run(go())
+
+
+def test_workflow_prompt_tool_references_match_registered_tools():
+    import re
+
+    from pulsar.mcp.prompts import WORKFLOW_PROMPT
+
+    registered = {fn.__name__ for fn in ALL_TOOLS_LIST}
+    referenced = set(re.findall(r"`([a-z][a-z0-9_]+)\(", WORKFLOW_PROMPT))
+    assert referenced <= registered, (
+        f"Unknown tools in WORKFLOW_PROMPT: {referenced - registered}"
+    )
+    for expected in (
+        "draft_preprocessing_plan",
+        "edit_preprocessing_plan",
+        "create_config",
+        "validate_preprocessing_config",
+    ):
+        assert expected in registered
+    for parts in (
+        ["recommend", "preprocessing"],
+        ["repair", "preprocessing", "config"],
+    ):
+        removed = "_".join(parts)
+        assert removed not in registered
+        assert removed not in WORKFLOW_PROMPT
