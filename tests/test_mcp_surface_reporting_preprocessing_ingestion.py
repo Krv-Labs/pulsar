@@ -701,7 +701,22 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
                 for w in cfg_no_plan["warnings"]
             )
 
-            # 2. draft_preprocessing_plan + edit_preprocessing_plan revision and conflict checks
+            # 2. draft_preprocessing_plan (summary + full × json + markdown)
+            for fmt in ("json", "markdown"):
+                full_res = await _call(
+                    client,
+                    "draft_preprocessing_plan",
+                    {
+                        "dataset_id": ds_traps,
+                        "stakes": False,
+                        "detail": "full",
+                        "response_format": fmt,
+                    },
+                )
+                assert full_res.structured_content["detail"] == "full"
+                assert "entries" in full_res.structured_content
+                assert full_res.content[0].text.startswith("#") is (fmt == "markdown")
+
             draft_sc = (
                 await _call(
                     client,
@@ -716,6 +731,25 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
             plan_id = draft_sc["plan_id"]
             assert draft_sc["revision"] == 1
             assert draft_sc["counts"]["open_questions"] >= 4
+
+            # Unknown plan_id on edit -> PLAN_ID_UNKNOWN
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": "pp_unknown",
+                    "edits": [{"column": "bmi", "role": "drop"}],
+                },
+                error="PLAN_ID_UNKNOWN",
+            )
+
+            # Empty answers + empty edits -> INVALID_ARGUMENT
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {"plan_id": plan_id},
+                error="INVALID_ARGUMENT",
+            )
 
             # Answer a question at base_revision=1 -> revision 2
             q_id = draft_sc["questions"][0]["question_id"]
@@ -734,6 +768,7 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
                 )
             ).structured_content
             assert edit_sc["revision"] == 2
+            assert "confirmed_without_change" in edit_sc["counts"]
 
             # Stale base_revision=1 -> SESSION_REVISION_CONFLICT
             await _call(
@@ -747,13 +782,22 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
                 error="SESSION_REVISION_CONFLICT",
             )
 
-            # Invalid answer -> INVALID_ARGUMENT
+            # Invalid answer (unknown question_id and bad option_id) -> INVALID_ARGUMENT
             await _call(
                 client,
                 "edit_preprocessing_plan",
                 {
                     "plan_id": plan_id,
                     "answers": [{"question_id": "q_nope", "option_id": "none"}],
+                },
+                error="INVALID_ARGUMENT",
+            )
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "answers": [{"question_id": q_id, "option_id": "bad_option_id"}],
                 },
                 error="INVALID_ARGUMENT",
             )

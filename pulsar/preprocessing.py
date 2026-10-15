@@ -178,7 +178,29 @@ def preprocess_dataframe(
     drop = [c for c in cfg.drop_columns if c in data.columns]
     df = data.drop(columns=drop).copy()
 
-    # 2. Coerce configured numeric-impute columns
+    # 2. Coerce object-dtype boolean columns and configured numeric-impute columns
+    for col in df.columns:
+        if col in cfg.encode or is_numeric_dtype(df[col]):
+            continue
+        spec = cfg.impute.get(col)
+        if spec is not None and spec.method in {"fill_mode", "sample_categorical"}:
+            continue
+        if (
+            spec is not None
+            and spec.method == "fill_value"
+            and isinstance(spec.value, str)
+        ):
+            continue
+        obs = df[col].dropna()
+        if len(obs) > 0 and all(isinstance(v, (bool, np.bool_)) for v in obs):
+            isna_mask = df[col].isna().to_numpy(dtype=bool)
+            raw = df[col].to_numpy()
+            out = np.empty(len(df), dtype=np.float64)
+            out[isna_mask] = np.nan
+            if not isna_mask.all():
+                out[~isna_mask] = np.asarray(raw[~isna_mask], dtype=np.float64)
+            df[col] = out
+
     for col, spec in cfg.impute.items():
         if col not in df.columns:
             continue

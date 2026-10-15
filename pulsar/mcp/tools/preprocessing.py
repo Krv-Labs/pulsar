@@ -74,6 +74,30 @@ _COUNTS_SCHEMA = obj(
     ],
 )
 
+_EDIT_COUNTS_SCHEMA = obj(
+    {
+        "columns": INT,
+        "features": INT,
+        "dropped": INT,
+        "open_entries": INT,
+        "open_questions": INT,
+        "decided_by": obj(
+            {"default": INT, "agent": INT, "user": INT},
+            ["default", "agent", "user"],
+        ),
+        "confirmed_without_change": INT,
+    },
+    [
+        "columns",
+        "features",
+        "dropped",
+        "open_entries",
+        "open_questions",
+        "decided_by",
+        "confirmed_without_change",
+    ],
+)
+
 _PROCESSED_SPACE_SCHEMA = nullable(
     obj(
         {
@@ -235,8 +259,11 @@ _DRAFT_PLAN_SCHEMA = obj(
         "questions_omitted": INT,
         "evidence": _EVIDENCE_SCHEMA,
         "weak_hints": obj(
-            {"event_partner_columns": arr(STR)},
-            ["event_partner_columns"],
+            {
+                "event_partner_columns": arr(STR),
+                "event_partner_columns_omitted": INT,
+            },
+            ["event_partner_columns", "event_partner_columns_omitted"],
         ),
         "preprocessing_yaml": STR,
         "cost": _OPEN,
@@ -281,7 +308,7 @@ _EDIT_PLAN_SCHEMA = obj(
             )
         ),
         "changes_omitted": INT,
-        "counts": _COUNTS_SCHEMA,
+        "counts": _EDIT_COUNTS_SCHEMA,
         "processed_space": _PROCESSED_SPACE_SCHEMA,
         "marker_legend": arr(_MARKER_LEGEND_ITEM_SCHEMA),
         "marker_legend_omitted": INT,

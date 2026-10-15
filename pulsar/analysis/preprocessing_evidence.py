@@ -158,12 +158,27 @@ def _profile_single_column(
     is_num_dt = (
         pd.api.types.is_numeric_dtype(dtype) and not is_bool_dt and not is_complex_dt
     ) or is_td64
+    is_obj_bool = False
+    if not (is_bool_dt or is_num_dt or is_dt64 or is_complex_dt):
+        obs_vals = series.dropna()
+        if len(obs_vals) > 0 and all(isinstance(v, (bool, np.bool_)) for v in obs_vals):
+            is_obj_bool = True
+            is_bool_dt = True
 
     if is_bool_dt or is_num_dt:
         if is_td64:
             float_arr = series.dt.total_seconds().to_numpy(
                 dtype=np.float64, na_value=np.nan
             )
+        elif is_obj_bool:
+            isna_mask = series.isna().to_numpy(dtype=bool)
+            raw_obj = series.to_numpy()
+            float_arr = np.empty(n_rows, dtype=np.float64)
+            float_arr[isna_mask] = np.nan
+            if not isna_mask.all():
+                float_arr[~isna_mask] = np.asarray(
+                    raw_obj[~isna_mask], dtype=np.float64
+                )
         else:
             float_arr = series.to_numpy(dtype=np.float64, na_value=np.nan)
         isna_arr = np.isnan(float_arr)
