@@ -53,17 +53,24 @@ def impute_string_column(df: pd.DataFrame, col: str, spec: ImputeSpec) -> None:
     """Impute a string/object column in-place.
 
     The Rust ``impute_column`` only handles f64 arrays, so string/object
-    columns require a Python implementation.  Only ``fill_mode`` and
-    ``sample_categorical`` are meaningful for string data.
+    columns require a Python implementation.  Only ``fill_mode``,
+    ``sample_categorical``, and ``fill_value`` are meaningful for string data.
 
     Raises:
         ValueError: If ``spec.method`` is numeric-only
             (``fill_mean``, ``fill_median``, ``sample_normal``).
-        ValueError: If the column is entirely missing.
+        ValueError: If the column is entirely missing (except ``fill_value``).
     """
     missing_mask = df[col].isna()
     if not missing_mask.any():
         return
+
+    if spec.method == "fill_value":
+        if not isinstance(spec.value, str) and not is_numeric_dtype(df[col]):
+            df[col] = df[col].astype(object)
+        df.loc[missing_mask, col] = spec.value
+        return
+
     observed = df.loc[~missing_mask, col]
     if observed.empty:
         raise ValueError(
@@ -87,7 +94,7 @@ def impute_string_column(df: pd.DataFrame, col: str, spec: ImputeSpec) -> None:
     else:
         raise ValueError(
             f"Column '{col}' is string/object dtype; method '{spec.method}' requires "
-            f"numeric data. Use 'fill_mode' or 'sample_categorical' for string columns."
+            f"numeric data. Use 'fill_mode', 'sample_categorical', or 'fill_value' for string columns."
         )
 
 
@@ -105,8 +112,9 @@ def preprocess_dataframe(
 ) -> tuple[pd.DataFrame, PreprocessLayout]:
     """Preprocess a DataFrame according to ``cfg``.
 
-    Sequencing: drop → coerce → all-missing guard → impute flags →
-    impute → encode → NaN check → numeric check → layout check.
+    Sequencing: group indicators (pre-drop) → drop → coerce →
+    all-missing guard → impute flags → impute → encode → NaN check →
+    numeric check → layout check.
 
     Args:
         data: Raw input DataFrame (not mutated).
@@ -128,6 +136,16 @@ def preprocess_dataframe(
         TypeError: On non-numeric columns remaining after preprocessing.
     """
     n_rows_input = len(data)
+
+    # 0. Compute group missingness indicators from input BEFORE drop_columns
+    group_indicators: dict[str, pd.Series] = {}
+    for group_name, group_cols in cfg.missing_indicator_groups.items():
+        present_cols = [c for c in group_cols if c in data.columns]
+        if not present_cols:
+            continue
+        group_indicators[f"{group_name}_was_missing"] = (
+            data[present_cols].isna().any(axis=1).astype(np.float64)
+        )
 
     # 1. Drop unwanted columns
     drop = [c for c in cfg.drop_columns if c in data.columns]
@@ -161,6 +179,8 @@ def preprocess_dataframe(
     for col in list(cfg.impute) + list(cfg.encode):
         if col not in df.columns:
             continue
+        if col in cfg.impute and cfg.impute[col].method == "fill_value":
+            continue
         if df[col].isna().all():
             raise ValueError(
                 f"Column '{col}' is all-missing; cannot impute/encode "
@@ -168,8 +188,13 @@ def preprocess_dataframe(
             )
 
     # 4. Imputation indicator flags
-    for col in cfg.impute:
-        if col in df.columns:
+    for flag_col, flag_series in group_indicators.items():
+        df[flag_col] = flag_series
+    grouped_columns = {
+        c for cols in cfg.missing_indicator_groups.values() for c in cols
+    }
+    for col, spec in cfg.impute.items():
+        if col in df.columns and spec.indicator and col not in grouped_columns:
             df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
 
     # 5. Impute (Rust for numeric, Python for string)
@@ -178,7 +203,19 @@ def preprocess_dataframe(
             continue
         if is_numeric_dtype(df[col]):
             arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-            df[col] = impute_column(arr, spec.method, spec.seed)
+            if spec.method == "fill_value":
+                if isinstance(spec.value, (str, bool)) or not isinstance(
+                    spec.value, (int, float, np.number)
+                ):
+                    raise ValueError(
+                        f"fill_value for numeric column '{col}' must be numeric, "
+                        f"got {spec.value!r}."
+                    )
+                df[col] = impute_column(
+                    arr, "fill_value", spec.seed, value=float(spec.value)
+                )
+            else:
+                df[col] = impute_column(arr, spec.method, spec.seed)
         else:
             impute_string_column(df, col, spec)
 
