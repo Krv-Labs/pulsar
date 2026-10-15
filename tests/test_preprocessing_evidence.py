@@ -476,3 +476,138 @@ def test_timing_20000_by_300_under_20_seconds():
         r.kind == "sum_of" and r.target == "f_10" and r.sources == ("f_7", "f_8", "f_9")
         for r in ev.relations
     )
+
+
+def test_inf_handling_in_stats_and_relations():
+    """Item 1: ±inf values do not crash lstsq and are excluded from min/max/max_abs_z."""
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=50)
+    b = rng.normal(size=50)
+    t = a + b
+    t[0] = np.inf
+    df = pd.DataFrame({"a": a, "b": b, "t": t, "c": rng.normal(size=50)})
+    ev = measure_preprocessing_evidence(df)
+    cols = {c.name: c for c in ev.columns}
+    finite_t = t[1:]
+    assert cols["t"].observed_min == pytest.approx(float(finite_t.min()))
+    assert cols["t"].observed_max == pytest.approx(float(finite_t.max()))
+    assert cols["t"].max_abs_z is not None and np.isfinite(cols["t"].max_abs_z)
+    assert any(
+        r.kind == "sum_of" and r.target == "t" and r.sources == ("a", "b")
+        for r in ev.relations
+    )
+
+    # Also check ±inf in source column and all-inf column
+    a2 = a.copy()
+    a2[0] = -np.inf
+    df2 = pd.DataFrame(
+        {
+            "a": a2,
+            "b": b,
+            "t": a + b,
+            "all_inf": np.full(50, np.inf),
+        }
+    )
+    ev2 = measure_preprocessing_evidence(df2)
+    cols2 = {c.name: c for c in ev2.columns}
+    assert cols2["all_inf"].observed_min is None
+    assert cols2["all_inf"].observed_max is None
+    assert cols2["all_inf"].max_abs_z is None
+    assert any(
+        r.kind == "sum_of" and r.target == "t" and r.sources == ("a", "b")
+        for r in ev2.relations
+    )
+
+
+def test_duplicate_column_names_raises():
+    """Item 6: duplicate column labels raise ValueError listing them."""
+    df = pd.DataFrame([[1, 2], [3, 4]], columns=["a", "a"])
+    with pytest.raises(ValueError, match=r"duplicate column names.*'a'"):
+        measure_preprocessing_evidence(df)
+
+
+def test_str_colliding_column_names_raises():
+    """Item 7: distinct column labels that stringify identically raise ValueError."""
+    df = pd.DataFrame([[1, 2], [3, 4]], columns=[1, "1"])
+    with pytest.raises(ValueError, match=r"column names must be unique after str\(\)"):
+        measure_preprocessing_evidence(df)
+
+
+def test_kind_detection_thousands_commas_and_false_dates():
+    """Item 9: thousands commas -> numeric_text; short tokens/numbers -> text; real dates -> datetime_like."""
+    df = pd.DataFrame(
+        {
+            "commas": ["1,234", "2,345", "1,234", "2,345"],
+            "months_short": ["Jan", "Feb", "Mar", "Apr"],
+            "ordinals": ["1st", "2nd", "3rd", "4th"],
+            "months_long": ["May", "June", "May", "June"],
+            "rel_words": ["now", "today", "now", "today"],
+            "space_nums": ["3 4", "5 6", "3 4", "5 6"],
+            "prefixed_date": ["A-2009-01", "B-2009-02", "C-2009-03", "D-2009-04"],
+            "pt_ids": ["PT00001", "PT00002", "PT00003", "PT00004"],
+            "yyyy_mm": ["2009-04", "2009-05", "2009-06", "2009-07"],
+            "iso_dt": [
+                "2009-04-04 10:00",
+                "2009-04-05 11:00",
+                "2009-04-06 12:00",
+                "2009-04-07 13:00",
+            ],
+            "slash_dt": ["04/05/2009", "04/06/2009", "04/07/2009", "04/08/2009"],
+        }
+    )
+    ev = measure_preprocessing_evidence(df)
+    kinds = {c.name: c.kind for c in ev.columns}
+    assert kinds["commas"] == "numeric_text"
+    assert kinds["months_short"] == "text"
+    assert kinds["ordinals"] == "text"
+    assert kinds["months_long"] == "text"
+    assert kinds["rel_words"] == "text"
+    assert kinds["space_nums"] == "text"
+    assert kinds["prefixed_date"] == "text"
+    assert kinds["pt_ids"] == "text"
+    assert kinds["yyyy_mm"] == "datetime_like"
+    assert kinds["iso_dt"] == "datetime_like"
+    assert kinds["slash_dt"] == "datetime_like"
+
+
+def test_unhashable_list_column_and_timedelta64_column():
+    """Item 13: unhashable list values fall back to str (kind='text'); timedelta64 -> kind='numeric' via total_seconds."""
+    df = pd.DataFrame(
+        {
+            "lists": [[1, 2], [3], [1, 2], None],
+            "td": pd.to_timedelta([1, 2, None, 4], unit="D"),
+        }
+    )
+    ev = measure_preprocessing_evidence(df)
+    cols = {c.name: c for c in ev.columns}
+
+    assert cols["lists"].kind == "text"
+    assert cols["lists"].n_missing == 1
+    assert cols["lists"].n_unique == 2
+    assert cols["lists"].minority_fraction == pytest.approx(1.0 / 3.0)
+
+    assert cols["td"].kind == "numeric"
+    assert cols["td"].n_missing == 1
+    assert cols["td"].n_unique == 3
+    assert cols["td"].observed_min == pytest.approx(86400.0)
+    assert cols["td"].observed_max == pytest.approx(345600.0)
+    assert cols["td"].integer_valued is True
+    assert cols["td"].nonnegative is True
+
+
+def test_timing_5000_by_1500_with_5pct_nan_under_6_seconds():
+    """Item 10: 5,000 x 1,500 numeric DataFrame with 5% NaN completes in < 6s."""
+    rng = np.random.default_rng(0)
+    n_rows, n_cols = 5000, 1500
+    X = rng.normal(size=(n_rows, n_cols))
+    X[rng.random(X.shape) < 0.05] = np.nan
+    df = pd.DataFrame(X, columns=[f"c{i}" for i in range(n_cols)])
+
+    t0 = time.perf_counter()
+    ev = measure_preprocessing_evidence(df)
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 6.0, f"Expected < 6s, took {elapsed:.2f}s"
+    assert ev.n_rows == n_rows
+    assert ev.n_columns == n_cols
+    assert len(ev.relations) == 20

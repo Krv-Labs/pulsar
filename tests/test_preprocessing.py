@@ -526,3 +526,138 @@ class TestYamlRoundTrip:
             assert isinstance(other.impute["Code_Str"].value, str)
             assert other.impute["Bool_Str"].value == "true"
             assert isinstance(other.impute["Bool_Str"].value, str)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for review fixes (Items 2, 3, 4, 5, 11, 12, 13c)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewFixesRegression:
+    def test_item2_group_flag_name_collisions_raise(self):
+        # Config-time collision: group name equals an ungrouped impute column with indicator=True
+        with pytest.raises(ValueError, match="missing indicator name collision"):
+            _minimal_cfg(
+                impute={
+                    "a": ImputeSpec("fill_mean", indicator=True),
+                    "b": ImputeSpec("fill_mean"),
+                },
+                missing_indicator_groups={"a": ["b"]},
+            )
+
+        # Runtime collision with an existing input DataFrame column
+        df = pd.DataFrame({"a": [1.0, np.nan, 3.0], "g_was_missing": [5.0, 6.0, 7.0]})
+        cfg = _minimal_cfg(
+            impute={"a": ImputeSpec("fill_mean")},
+            missing_indicator_groups={"g": ["a"]},
+        )
+        with pytest.raises(ValueError, match="missing indicator name collision"):
+            preprocess_dataframe(df, cfg)
+
+    def test_item3_group_flags_computed_after_coercion_and_combined_with_dropped(self):
+        df = pd.DataFrame(
+            {
+                "a": ["1.0", "oops", "3.0", "4.0"],
+                "b": [1.0, 2.0, np.nan, 4.0],
+                "c": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
+        cfg = _minimal_cfg(
+            drop_columns=["b"],
+            impute={"a": ImputeSpec("fill_mean")},
+            missing_indicator_groups={"g": ["a", "b"]},
+        )
+        out_df, _ = preprocess_dataframe(df, cfg)
+        # Row 1 has "oops" coerced to NaN in kept 'a'; row 2 has NaN in dropped 'b'
+        assert out_df["g_was_missing"].tolist() == [0.0, 1.0, 1.0, 0.0]
+
+    def test_item4_numeric_fill_value_coerces_string_and_object_columns(self):
+        # pandas nullable string dtype with numeric strings
+        df_str = pd.DataFrame({"a": pd.Series(["1.0", None, "3.0"], dtype="string")})
+        cfg_str = _minimal_cfg(impute={"a": ImputeSpec("fill_value", value=0)})
+        out_str, _ = preprocess_dataframe(df_str, cfg_str)
+        assert out_str["a"].tolist() == [1.0, 0.0, 3.0]
+        assert out_str["a_was_missing"].tolist() == [0.0, 1.0, 0.0]
+
+        # object dtype with numeric strings
+        df_obj = pd.DataFrame({"a": pd.Series(["1.0", None, "3.0"], dtype=object)})
+        out_obj, _ = preprocess_dataframe(df_obj, cfg_str)
+        assert out_obj["a"].tolist() == [1.0, 0.0, 3.0]
+        assert out_obj["a_was_missing"].tolist() == [0.0, 1.0, 0.0]
+
+        # >50% unparseable values raises the same coercion error as numeric methods
+        df_bad = pd.DataFrame({"a": pd.Series(["foo", "bar", "1.0"], dtype=object)})
+        with pytest.raises(
+            ValueError,
+            match=r"Column 'a' is configured for numeric imputation \(fill_value\) but contains non-numeric values",
+        ):
+            preprocess_dataframe(df_bad, cfg_str)
+
+        # All-None object column with numeric fill_value becomes the constant
+        df_none = pd.DataFrame(
+            {
+                "a": pd.Series([None, None, None], dtype=object),
+                "x": [1.0, 2.0, 3.0],
+            }
+        )
+        cfg_none = _minimal_cfg(impute={"a": ImputeSpec("fill_value", value=-1)})
+        out_none, _ = preprocess_dataframe(df_none, cfg_none)
+        assert out_none["a"].tolist() == [-1.0, -1.0, -1.0]
+        assert out_none["a_was_missing"].tolist() == [1.0, 1.0, 1.0]
+
+    def test_item5_categorical_dtype_with_string_fill_value(self):
+        df = pd.DataFrame({"a": pd.Categorical(["x", None, "y"])})
+        cfg = _minimal_cfg(
+            impute={"a": ImputeSpec("fill_value", value="missing")},
+            encode={"a": EncodeSpec("one_hot")},
+        )
+        out_df, _ = preprocess_dataframe(df, cfg)
+        assert out_df["a_was_missing"].tolist() == [0.0, 1.0, 0.0]
+        assert out_df["a_missing"].tolist() == [0.0, 1.0, 0.0]
+        assert out_df["a_x"].tolist() == [1.0, 0.0, 0.0]
+        assert out_df["a_y"].tolist() == [0.0, 0.0, 1.0]
+
+    def test_item11_indicator_must_be_real_bool(self):
+        from pulsar.config import load_config
+
+        with pytest.raises(ValueError, match="indicator must be true or false"):
+            ImputeSpec("fill_mean", indicator="false")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="indicator must be true or false"):
+            load_config(
+                {
+                    "run": {"name": "r", "data": "d.csv"},
+                    "preprocessing": {
+                        "impute": {"a": {"method": "fill_mean", "indicator": "false"}}
+                    },
+                }
+            )
+
+    def test_item12_config_to_yaml_coerces_path_and_np_str(self):
+        import pathlib
+        import yaml
+        from pulsar.config import config_to_yaml, load_config
+
+        cfg = PulsarConfig(
+            data=pathlib.Path("/tmp/x.csv"),  # type: ignore[arg-type]
+            drop_columns=[np.str_("drop_a")],
+            impute={
+                np.str_("num_col"): ImputeSpec(
+                    "fill_value",
+                    value=np.int64(3),
+                    seed=np.int64(7),  # type: ignore[arg-type]
+                )
+            },
+            encode={np.str_("cat_col"): EncodeSpec("one_hot")},
+            missing_indicator_groups={np.str_("grp"): [np.str_("num_col")]},
+            run_name="",
+        )
+        yaml_str = config_to_yaml(cfg)
+        rt_cfg = load_config(yaml.safe_load(yaml_str))
+        assert rt_cfg == cfg
+        assert rt_cfg.data == "/tmp/x.csv"
+        assert rt_cfg.run_name == ""
+
+    def test_item13_fill_value_numeric_overflow_raises_value_error(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            ImputeSpec("fill_value", value=10**400)
