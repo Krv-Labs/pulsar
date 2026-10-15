@@ -133,7 +133,7 @@ pub fn impute_column_inplace(
             return Err(PulsarError::InvalidParameter {
                 msg: format!(
                     "unknown imputation method '{}'; expected one of: \
-                     sample_normal, sample_categorical, fill_mean, fill_median, fill_mode",
+                     sample_normal, sample_categorical, fill_mean, fill_median, fill_mode, fill_value",
                     other
                 ),
             });
@@ -142,3 +142,76 @@ pub fn impute_column_inplace(
 
     Ok(())
 }
+
+/// Fill missing values (`NaN`) in a single column of `f64` values **in place**
+/// with a finite constant `value`.
+///
+/// Works even if every entry in `values` is `NaN` (no observed values required).
+///
+/// # Errors
+/// - [`PulsarError::InvalidParameter`] — `value` is not finite (`NaN` or `±∞`).
+pub fn fill_constant_inplace(values: &mut [f64], value: f64) -> Result<(), PulsarError> {
+    if !value.is_finite() {
+        return Err(PulsarError::InvalidParameter {
+            msg: format!("fill_value requires a finite value, got {value}"),
+        });
+    }
+    for v in values.iter_mut() {
+        if v.is_nan() {
+            *v = value;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fill_constant_inplace_replaces_nans() {
+        let mut vals = [1.0, f64::NAN, 3.5, f64::NAN, -2.0];
+        fill_constant_inplace(&mut vals, 0.0).unwrap();
+        assert_eq!(vals, [1.0, 0.0, 3.5, 0.0, -2.0]);
+    }
+
+    #[test]
+    fn test_fill_constant_inplace_all_nan() {
+        let mut vals = [f64::NAN, f64::NAN, f64::NAN];
+        fill_constant_inplace(&mut vals, -1.0).unwrap();
+        assert_eq!(vals, [-1.0, -1.0, -1.0]);
+    }
+
+    #[test]
+    fn test_fill_constant_inplace_no_nans_and_empty() {
+        let mut vals = [1.0, 2.0, 3.0];
+        fill_constant_inplace(&mut vals, 99.0).unwrap();
+        assert_eq!(vals, [1.0, 2.0, 3.0]);
+
+        let mut empty: [f64; 0] = [];
+        fill_constant_inplace(&mut empty, 0.0).unwrap();
+    }
+
+    #[test]
+    fn test_fill_constant_inplace_rejects_non_finite() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut vals = [1.0, f64::NAN];
+            let err = fill_constant_inplace(&mut vals, bad).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("fill_value requires a finite value"),
+                "unexpected error message: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_method_error_lists_fill_value() {
+        let mut vals = [1.0, f64::NAN, 3.0];
+        let err = impute_column_inplace(&mut vals, "bogus", 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown imputation method 'bogus'"));
+        assert!(msg.contains("fill_value"));
+    }
+}
+

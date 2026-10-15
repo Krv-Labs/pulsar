@@ -236,3 +236,28 @@ def test_sample_categorical_deterministic(categorical_col):
     r1 = np.array(impute_column(categorical_col, "sample_categorical", seed=99))
     r2 = np.array(impute_column(categorical_col, "sample_categorical", seed=99))
     np.testing.assert_array_equal(r1, r2)
+
+
+# ---------------------------------------------------------------------------
+# fill_value
+# ---------------------------------------------------------------------------
+
+
+def py_fill_value(arr, val):
+    """Fill NaN with a constant finite float value."""
+    result = arr.copy()
+    result[np.isnan(result)] = val
+    return result
+
+
+def test_fill_value_matches_reference(col_with_nans):
+    expected = py_fill_value(col_with_nans, -1.5)
+    actual = np.array(impute_column(col_with_nans, "fill_value", value=-1.5))
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_fill_value_all_nan_matches_reference():
+    arr = np.array([np.nan, np.nan, np.nan, np.nan], dtype=np.float64)
+    expected = py_fill_value(arr, 0.0)
+    actual = np.array(impute_column(arr, "fill_value", value=0.0))
+    np.testing.assert_array_equal(actual, expected)
