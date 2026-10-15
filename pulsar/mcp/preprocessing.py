@@ -36,50 +36,45 @@ _HOW_TO_USE = (
     "For code_columns that are labels rather than amounts, pass edits=[{'column': '<col>', 'encode': 'one_hot'}] or role='drop'."
 )
 
+EVENT_FLAG_HINT_DESCRIPTION = (
+    "complete 0/1 or count columns whose value exactly explains "
+    "other columns' blanks (often events or exposures; only you "
+    "can say whether any is an outcome)"
+)
+
 
 def _build_target_proxy_warnings(
     target_proxies: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    warnings_out: list[dict[str, Any]] = []
-    seen_targets: list[str] = []
+    by_target: dict[str, list[str]] = {}
     for item in target_proxies:
         if item.get("share_with_target") == 1.0:
-            tgt = str(item.get("target"))
-            if tgt not in seen_targets:
-                seen_targets.append(tgt)
-    for tgt in seen_targets:
-        cols = [
-            str(item["column"])
-            for item in target_proxies
-            if item.get("target") == tgt and item.get("share_with_target") == 1.0
-        ]
-        warnings_out.append(
-            {
-                "code": "TARGET_PROXY_COLUMNS",
-                "target": tgt,
-                "columns": cols,
-                "message": (
-                    f"these columns are 1 only for rows where {tgt} is set; "
-                    "they would let the map encode the outcome"
-                ),
-            }
-        )
-    return warnings_out
+            by_target.setdefault(str(item.get("target")), []).append(
+                str(item["column"])
+            )
+    return [
+        {
+            "code": "TARGET_PROXY_COLUMNS",
+            "target": tgt,
+            "columns": cols,
+            "message": (
+                f"these columns are 1 only for rows where {tgt} is set; "
+                "they would let the map encode the outcome"
+            ),
+        }
+        for tgt, cols in by_target.items()
+    ]
 
 
 def _format_question_item(
     q: Any, *, col_preview_limit: int | None = 5
 ) -> dict[str, Any]:
-    applies = list(q.applies_to)
-    preview = (
-        applies if col_preview_limit is None else list(applies[:col_preview_limit])
-    )
     return {
         "question_id": q.question_id,
         "topic": q.topic,
         "text": q.text,
-        "applies_to_preview": preview,
-        "applies_to_count": len(applies),
+        "applies_to_preview": _cap_list(q.applies_to, col_preview_limit)[0],
+        "applies_to_count": len(q.applies_to),
         "rows_affected": int(q.rows_affected),
         "options": [
             {
@@ -94,11 +89,193 @@ def _format_question_item(
     }
 
 
-def _cap_list(items: list[Any], limit: int | None) -> tuple[list[Any], int]:
+def _cap_list(items: Any, limit: int | None) -> tuple[list[Any], int]:
     if limit is None:
         return list(items), 0
     capped = list(items[:limit])
-    return capped, max(0, len(items) - len(capped))
+    return capped, len(items) - len(capped)
+
+
+def _capped(
+    key: str,
+    items: list[Any],
+    cap: int | None,
+    *,
+    preview_key: str | None = None,
+    count_key: str | None = None,
+) -> dict[str, Any]:
+    out, omitted = _cap_list(items, cap)
+    result: dict[str, Any] = {preview_key or key: out}
+    if count_key is not None:
+        result[count_key] = len(items)
+    result[f"{key}_omitted"] = omitted
+    return result
+
+
+def _plan_header(plan: PreprocessingPlan) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "plan_id": plan.plan_id,
+        "dataset_id": plan.dataset_id,
+        "revision": int(plan.revision),
+        "plan_fingerprint": plan_fingerprint(plan),
+    }
+
+
+def _open_question_items(
+    plan: PreprocessingPlan, *, col_preview_limit: int | None = 5
+) -> list[dict[str, Any]]:
+    return [
+        _format_question_item(q, col_preview_limit=col_preview_limit)
+        for q in plan.questions.values()
+        if q.status == "open"
+    ]
+
+
+def _target_proxy_fields(plan: PreprocessingPlan, cap: int | None) -> dict[str, Any]:
+    proxies_all = [copy.deepcopy(p) for p in plan.target_proxies]
+    return _capped("target_proxies", proxies_all, cap)
+
+
+def _missing_group_item(mg: Any, col_cap: int | None) -> dict[str, Any]:
+    return {
+        "group_id": mg.group_id,
+        "columns_preview": _cap_list(mg.columns, col_cap)[0],
+        "columns_count": len(mg.columns),
+        "n_missing": int(mg.n_missing),
+        "zero_free_columns_preview": _cap_list(mg.zero_free_columns, col_cap)[0],
+    }
+
+
+def _most_missing_item(plan: PreprocessingPlan, col_ev: Any) -> dict[str, Any]:
+    entry = plan.entries[col_ev.name]
+    return {
+        "column": col_ev.name,
+        "missing_fraction": float(col_ev.missing_fraction),
+        "n_missing": int(col_ev.n_missing),
+        "missing_group": col_ev.missing_group,
+        "plan_role": entry.role,
+        "plan_impute_method": (
+            entry.impute.get("method") if isinstance(entry.impute, dict) else None
+        ),
+    }
+
+
+def _mask_dependency_items(ev: Any) -> list[dict[str, Any]]:
+    ev_by_col = {c.name: c for c in ev.columns}
+    return [
+        {
+            "column": md.column,
+            "partner": md.partner,
+            "relation": md.relation,
+            "n_missing": (
+                int(ev_by_col[md.column].n_missing) if md.column in ev_by_col else 0
+            ),
+            "n_other_partners": int(md.n_other_partners),
+        }
+        for md in ev.mask_dependencies
+    ]
+
+
+def _rare_binary_items(ev: Any) -> list[dict[str, Any]]:
+    return sorted(
+        [
+            {
+                "column": col_ev.name,
+                "minority_fraction": float(col_ev.minority_fraction),
+                "max_abs_z": float(col_ev.max_abs_z),
+            }
+            for col_ev in ev.columns
+            if col_ev.minority_fraction is not None and col_ev.max_abs_z is not None
+        ],
+        key=lambda item: (-item["max_abs_z"], item["column"]),
+    )
+
+
+def _integer_coded_items(ev: Any) -> list[dict[str, Any]]:
+    return [
+        {"column": col_ev.name, "n_unique": int(col_ev.n_unique)}
+        for col_ev in ev.columns
+        if col_ev.kind == "numeric"
+        and col_ev.integer_valued is True
+        and not col_ev.is_constant
+        and col_ev.n_unique > 2
+    ]
+
+
+def _most_missing_items(plan: PreprocessingPlan, ev: Any) -> list[dict[str, Any]]:
+    return sorted(
+        [
+            _most_missing_item(plan, col_ev)
+            for col_ev in ev.columns
+            if col_ev.n_missing > 0 and col_ev.name in plan.entries
+        ],
+        key=lambda item: (-item["missing_fraction"], item["column"]),
+    )
+
+
+def _draft_evidence(
+    plan: PreprocessingPlan, *, ev_cap: int | None, col_cap: int | None
+) -> dict[str, Any]:
+    ev = plan.evidence
+    mg_all = [_missing_group_item(mg, col_cap) for mg in ev.missing_groups]
+    rel_all = [
+        {
+            "kind": rel.kind,
+            "target": rel.target,
+            "sources": list(rel.sources),
+            "value": float(rel.value),
+            "rows_used": int(rel.rows_used),
+        }
+        for rel in ev.relations
+    ]
+    const_all = [col_ev.name for col_ev in ev.columns if col_ev.is_constant]
+    date_all = [col_ev.name for col_ev in ev.columns if col_ev.kind == "datetime_like"]
+    return {
+        **_capped("missing_groups", mg_all, ev_cap),
+        **_capped("mask_dependencies", _mask_dependency_items(ev), ev_cap),
+        **_capped("relations", rel_all, ev_cap),
+        **_capped("rare_binary_leverage", _rare_binary_items(ev), ev_cap),
+        **_capped(
+            "constant_columns",
+            const_all,
+            ev_cap,
+            preview_key="constant_columns_preview",
+            count_key="constant_columns_count",
+        ),
+        **_capped(
+            "datetime_columns",
+            date_all,
+            ev_cap,
+            preview_key="datetime_columns_preview",
+            count_key="datetime_columns_count",
+        ),
+        **_capped(
+            "integer_coded",
+            _integer_coded_items(ev),
+            ev_cap,
+            preview_key="integer_coded_preview",
+        ),
+        **_target_proxy_fields(plan, ev_cap),
+        **_capped("most_missing_columns", _most_missing_items(plan, ev), ev_cap),
+    }
+
+
+def _entries_full(plan: PreprocessingPlan) -> dict[str, dict[str, Any]]:
+    return {
+        col: {
+            "column": entry.column,
+            "role": entry.role,
+            "impute": copy.deepcopy(entry.impute),
+            "indicator": entry.indicator,
+            "encode": entry.encode,
+            "decided_by": entry.decided_by,
+            "status": entry.status,
+            "reason": entry.reason,
+            "question_id": entry.question_id,
+        }
+        for col, entry in plan.entries.items()
+    }
 
 
 def build_draft_plan_payload(
@@ -115,172 +292,30 @@ def build_draft_plan_payload(
     ev_cap = None if is_full else max(1, int(evidence_limit))
     col_cap = None if is_full else 5
 
-    open_questions = [
-        _format_question_item(q, col_preview_limit=col_cap)
-        for q in plan.questions.values()
-        if q.status == "open"
-    ]
-    questions_out, questions_omitted = _cap_list(open_questions, q_cap)
-
-    ev = plan.evidence
-    mg_all = [
-        {
-            "group_id": mg.group_id,
-            "columns_preview": (
-                list(mg.columns) if col_cap is None else list(mg.columns[:col_cap])
-            ),
-            "columns_count": len(mg.columns),
-            "n_missing": int(mg.n_missing),
-            "zero_free_columns_preview": (
-                list(mg.zero_free_columns)
-                if col_cap is None
-                else list(mg.zero_free_columns[:col_cap])
-            ),
-        }
-        for mg in ev.missing_groups
-    ]
-    mg_out, mg_omitted = _cap_list(mg_all, ev_cap)
-
-    ev_by_col = {c.name: c for c in ev.columns}
-    md_all = [
-        {
-            "column": md.column,
-            "partner": md.partner,
-            "relation": md.relation,
-            "n_missing": (
-                int(ev_by_col[md.column].n_missing) if md.column in ev_by_col else 0
-            ),
-            "n_other_partners": int(md.n_other_partners),
-        }
-        for md in ev.mask_dependencies
-    ]
-    md_out, md_omitted = _cap_list(md_all, ev_cap)
-
-    rel_all = [
-        {
-            "kind": rel.kind,
-            "target": rel.target,
-            "sources": list(rel.sources),
-            "value": float(rel.value),
-            "rows_used": int(rel.rows_used),
-        }
-        for rel in ev.relations
-    ]
-    rel_out, rel_omitted = _cap_list(rel_all, ev_cap)
-
-    rare_all = sorted(
-        [
-            {
-                "column": col_ev.name,
-                "minority_fraction": float(col_ev.minority_fraction),
-                "max_abs_z": float(col_ev.max_abs_z),
-            }
-            for col_ev in ev.columns
-            if col_ev.minority_fraction is not None and col_ev.max_abs_z is not None
-        ],
-        key=lambda item: (-item["max_abs_z"], item["column"]),
-    )
-    rare_out, rare_omitted = _cap_list(rare_all, ev_cap)
-
-    const_all = [col_ev.name for col_ev in ev.columns if col_ev.is_constant]
-    const_out, const_omitted = _cap_list(const_all, ev_cap)
-
-    date_all = [col_ev.name for col_ev in ev.columns if col_ev.kind == "datetime_like"]
-    date_out, date_omitted = _cap_list(date_all, ev_cap)
-
-    int_coded_all = [
-        {"column": col_ev.name, "n_unique": int(col_ev.n_unique)}
-        for col_ev in ev.columns
-        if col_ev.kind == "numeric"
-        and col_ev.integer_valued is True
-        and not col_ev.is_constant
-        and col_ev.n_unique > 2
-    ]
-    int_coded_out, int_coded_omitted = _cap_list(int_coded_all, ev_cap)
-
-    proxies_all = [copy.deepcopy(p) for p in plan.target_proxies]
-    proxies_out, proxies_omitted = _cap_list(proxies_all, ev_cap)
-
-    most_missing_all = sorted(
-        [
-            {
-                "column": col_ev.name,
-                "missing_fraction": float(col_ev.missing_fraction),
-                "n_missing": int(col_ev.n_missing),
-                "missing_group": col_ev.missing_group,
-                "plan_role": plan.entries[col_ev.name].role,
-                "plan_impute_method": (
-                    plan.entries[col_ev.name].impute.get("method")
-                    if isinstance(plan.entries[col_ev.name].impute, dict)
-                    else None
-                ),
-            }
-            for col_ev in ev.columns
-            if col_ev.n_missing > 0 and col_ev.name in plan.entries
-        ],
-        key=lambda item: (-item["missing_fraction"], item["column"]),
-    )
-    most_missing_out, most_missing_omitted = _cap_list(most_missing_all, ev_cap)
-
+    open_questions = _open_question_items(plan, col_preview_limit=col_cap)
     legend_all = build_marker_legend(
         plan, preview_limit=5 if col_cap is not None else 10_000
     )
-    legend_out, legend_omitted = _cap_list(legend_all, ev_cap)
 
-    seen_partners: list[str] = []
-    for md in ev.mask_dependencies:
-        if md.partner not in seen_partners:
-            seen_partners.append(md.partner)
-    partners_out, partners_omitted = _cap_list(seen_partners, ev_cap)
+    seen_partners = list(
+        dict.fromkeys(md.partner for md in plan.evidence.mask_dependencies)
+    )
 
+    yaml_str = plan_to_preprocessing_yaml(plan, include_header=True)
     payload: dict[str, Any] = {
-        "status": "ok",
-        "plan_id": plan.plan_id,
-        "dataset_id": plan.dataset_id,
-        "revision": int(plan.revision),
-        "plan_fingerprint": plan_fingerprint(plan),
+        **_plan_header(plan),
         "detail": detail,
         "counts": summarize_plan_counts(plan),
         "processed_space": copy.deepcopy(processed_space),
-        "marker_legend": legend_out,
-        "marker_legend_omitted": legend_omitted,
-        "questions": questions_out,
-        "questions_omitted": questions_omitted,
-        "evidence": {
-            "missing_groups": mg_out,
-            "missing_groups_omitted": mg_omitted,
-            "mask_dependencies": md_out,
-            "mask_dependencies_omitted": md_omitted,
-            "relations": rel_out,
-            "relations_omitted": rel_omitted,
-            "rare_binary_leverage": rare_out,
-            "rare_binary_leverage_omitted": rare_omitted,
-            "constant_columns_preview": const_out,
-            "constant_columns_count": len(const_all),
-            "constant_columns_omitted": const_omitted,
-            "datetime_columns_preview": date_out,
-            "datetime_columns_count": len(date_all),
-            "datetime_columns_omitted": date_omitted,
-            "integer_coded_preview": int_coded_out,
-            "integer_coded_omitted": int_coded_omitted,
-            "target_proxies": proxies_out,
-            "target_proxies_omitted": proxies_omitted,
-            "most_missing_columns": most_missing_out,
-            "most_missing_columns_omitted": most_missing_omitted,
-        },
+        **_capped("marker_legend", legend_all, ev_cap),
+        **_capped("questions", open_questions, q_cap),
+        "evidence": _draft_evidence(plan, ev_cap=ev_cap, col_cap=col_cap),
         "warnings": _build_target_proxy_warnings(plan.target_proxies),
         "weak_hints": {
-            "event_flag_columns": partners_out,
-            "event_flag_columns_omitted": partners_omitted,
-            "description": (
-                "complete 0/1 or count columns whose value exactly explains "
-                "other columns' blanks (often events or exposures; only you "
-                "can say whether any is an outcome)"
-            ),
+            **_capped("event_flag_columns", seen_partners, ev_cap),
+            "description": EVENT_FLAG_HINT_DESCRIPTION,
         },
-        "preprocessing_yaml_chars": len(
-            yaml_str := plan_to_preprocessing_yaml(plan, include_header=True)
-        ),
+        "preprocessing_yaml_chars": len(yaml_str),
         "cost": copy.deepcopy(plan.cost),
         "how_to_use": _HOW_TO_USE,
         "next_tools": ["edit_preprocessing_plan", "create_config", "probe_columns"],
@@ -288,22 +323,59 @@ def build_draft_plan_payload(
 
     if is_full:
         payload["preprocessing_yaml"] = yaml_str
-        payload["entries"] = {
-            col: {
-                "column": entry.column,
-                "role": entry.role,
-                "impute": copy.deepcopy(entry.impute),
-                "indicator": entry.indicator,
-                "encode": entry.encode,
-                "decided_by": entry.decided_by,
-                "status": entry.status,
-                "reason": entry.reason,
-                "question_id": entry.question_id,
-            }
-            for col, entry in plan.entries.items()
-        }
+        payload["entries"] = _entries_full(plan)
 
     return payload
+
+
+def _warning_lines(payload: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for w in payload.get("warnings", []):
+        cols_str = ", ".join(f"`{c}`" for c in w.get("columns", []))
+        lines.append(
+            f"- Warning `{w.get('code')}` (`{w.get('target')}`): {w.get('message')} ({cols_str})"
+        )
+    return lines
+
+
+def _format_question_lines(q: dict[str, Any]) -> list[str]:
+    stakes = q.get("stakes")
+    if isinstance(stakes, dict) and stakes.get("neighbors_kept") is not None:
+        stakes_str = (
+            f"neighbors_kept={stakes['neighbors_kept']:.2f}, "
+            f"feature_delta={stakes.get('feature_count_delta', 0):+d}"
+        )
+    else:
+        stakes_str = "stakes=n/a"
+    lines = [
+        f"### `{q['question_id']}` [{q['topic']}] "
+        f"({q['rows_affected']} rows; {stakes_str})",
+        q["text"],
+    ]
+    for opt in q.get("options", []):
+        default_tag = (
+            " *(default)*" if opt["option_id"] == q.get("default_option_id") else ""
+        )
+        lines.append(
+            f"- `{opt['option_id']}` — **{opt['label']}**{default_tag}: {opt['effect']}"
+        )
+    lines.append("")
+    return lines
+
+
+def _open_questions_markdown(payload: dict[str, Any]) -> list[str]:
+    questions = payload.get("questions", [])
+    lines = ["", "## Open Questions", ""]
+    if not questions:
+        lines.append("- None. All entries are resolved.")
+        return lines
+    for q in questions:
+        lines.extend(_format_question_lines(q))
+    if payload.get("questions_omitted", 0):
+        lines.append(
+            f"*... +{payload['questions_omitted']} additional open question(s) omitted.*"
+        )
+    return lines
 
 
 def draft_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
@@ -330,64 +402,20 @@ def draft_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
     else:
         lines.append("- Processed space: dry-run unavailable")
 
-    for w in payload.get("warnings", []):
-        cols_str = ", ".join(f"`{c}`" for c in w.get("columns", []))
-        lines.append(
-            f"- Warning `{w.get('code')}` (`{w.get('target')}`): {w.get('message')} ({cols_str})"
-        )
-
-    questions = payload.get("questions", [])
-    lines.extend(["", "## Open Questions", ""])
-    if questions:
-        for q in questions:
-            stakes = q.get("stakes")
-            if isinstance(stakes, dict) and stakes.get("neighbors_kept") is not None:
-                stakes_str = (
-                    f"neighbors_kept={stakes['neighbors_kept']:.2f}, "
-                    f"feature_delta={stakes.get('feature_count_delta', 0):+d}"
-                )
-            else:
-                stakes_str = "stakes=n/a"
-            lines.append(
-                f"### `{q['question_id']}` [{q['topic']}] "
-                f"({q['rows_affected']} rows; {stakes_str})"
-            )
-            lines.append(q["text"])
-            for opt in q.get("options", []):
-                default_tag = (
-                    " *(default)*"
-                    if opt["option_id"] == q.get("default_option_id")
-                    else ""
-                )
-                lines.append(
-                    f"- `{opt['option_id']}` — **{opt['label']}**{default_tag}: {opt['effect']}"
-                )
-            lines.append("")
-        if payload.get("questions_omitted", 0):
-            lines.append(
-                f"*... +{payload['questions_omitted']} additional open question(s) omitted.*"
-            )
-    else:
-        lines.append("- None. All entries are resolved.")
+    lines.extend(_warning_lines(payload))
+    lines.extend(_open_questions_markdown(payload))
 
     ev = payload.get("evidence", {})
     lines.extend(["", "## Evidence Headline", ""])
-    lines.append(
-        f"- Shared missing groups: {len(ev.get('missing_groups', []))} "
-        f"(+{ev.get('missing_groups_omitted', 0)} omitted)"
-    )
-    lines.append(
-        f"- Conditional mask dependencies: {len(ev.get('mask_dependencies', []))} "
-        f"(+{ev.get('mask_dependencies_omitted', 0)} omitted)"
-    )
-    lines.append(
-        f"- Exact relations (duplicate/sum_of): {len(ev.get('relations', []))} "
-        f"(+{ev.get('relations_omitted', 0)} omitted)"
-    )
-    lines.append(
-        f"- Most-missing columns: {len(ev.get('most_missing_columns', []))} "
-        f"(+{ev.get('most_missing_columns_omitted', 0)} omitted)"
-    )
+    for label, key in (
+        ("Shared missing groups", "missing_groups"),
+        ("Conditional mask dependencies", "mask_dependencies"),
+        ("Exact relations (duplicate/sum_of)", "relations"),
+        ("Most-missing columns", "most_missing_columns"),
+    ):
+        lines.append(
+            f"- {label}: {len(ev.get(key, []))} (+{ev.get(f'{key}_omitted', 0)} omitted)"
+        )
     lines.append(f"- Constant columns dropped: {ev.get('constant_columns_count', 0)}")
     weak_hints = payload.get("weak_hints", {})
     hints = weak_hints.get("event_flag_columns", [])
@@ -436,9 +464,6 @@ def build_edit_plan_payload(
         for ch in changes
         if ch.get("field") in ("role", "impute", "indicator", "encode")
     ]
-    changes_out, changes_omitted = _cap_list(
-        effective_changes, max(1, int(change_limit))
-    )
 
     summary_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     for ch in effective_changes:
@@ -450,28 +475,20 @@ def build_edit_plan_payload(
             json.dumps(was_val, sort_keys=True, default=str),
             json.dumps(now_val, sort_keys=True, default=str),
         )
-        if key not in summary_groups:
-            summary_groups[key] = {
+        grp = summary_groups.setdefault(
+            key,
+            {
                 "field": fld,
                 "was": copy.deepcopy(was_val),
                 "now": copy.deepcopy(now_val),
-                "count": 1,
-            }
-        else:
-            summary_groups[key]["count"] += 1
+                "count": 0,
+            },
+        )
+        grp["count"] += 1
     summary_all = list(summary_groups.values())
-    summary_out, summary_omitted = _cap_list(summary_all, max(1, int(change_limit)))
 
-    open_questions = [
-        _format_question_item(q, col_preview_limit=5)
-        for q in plan.questions.values()
-        if q.status == "open"
-    ]
-    open_out, open_omitted = _cap_list(open_questions, max(1, int(question_limit)))
+    open_questions = _open_question_items(plan, col_preview_limit=5)
     legend_all = build_marker_legend(plan, preview_limit=5)
-    legend_out, legend_omitted = _cap_list(legend_all, 12)
-    proxies_all = [copy.deepcopy(p) for p in plan.target_proxies]
-    proxies_out, proxies_omitted = _cap_list(proxies_all, max(1, int(evidence_limit)))
 
     effective_changed_cols = {ch["column"] for ch in effective_changes}
     provenance_changed_cols = {
@@ -482,6 +499,8 @@ def build_edit_plan_payload(
         provenance_changed_cols - effective_changed_cols
     )
 
+    change_cap = max(1, int(change_limit))
+    ev_cap = max(1, int(evidence_limit))
     yaml_str = plan_to_preprocessing_yaml(plan, include_header=True)
     next_tools = (
         ["edit_preprocessing_plan", "create_config"]
@@ -489,30 +508,24 @@ def build_edit_plan_payload(
         else ["create_config", "validate_preprocessing_config"]
     )
     return {
-        "status": "ok",
-        "plan_id": plan.plan_id,
-        "dataset_id": plan.dataset_id,
-        "revision": int(plan.revision),
-        "plan_fingerprint": plan_fingerprint(plan),
-        "changes": changes_out,
-        "changes_omitted": changes_omitted,
-        "change_summary": summary_out,
-        "change_summary_omitted": summary_omitted,
+        **_plan_header(plan),
+        **_capped("changes", effective_changes, change_cap),
+        **_capped("change_summary", summary_all, change_cap),
         "counts": counts,
         "processed_space": copy.deepcopy(processed_space),
-        "marker_legend": legend_out,
-        "marker_legend_omitted": legend_omitted,
-        "evidence": {
-            "target_proxies": proxies_out,
-            "target_proxies_omitted": proxies_omitted,
-        },
+        **_capped("marker_legend", legend_all, ev_cap),
+        "evidence": _target_proxy_fields(plan, ev_cap),
         "warnings": _build_target_proxy_warnings(plan.target_proxies),
         "validation": {
             "valid": bool(validation.get("valid", False)),
             "error": validation.get("error"),
         },
-        "open_questions_preview": open_out,
-        "open_questions_omitted": open_omitted,
+        **_capped(
+            "open_questions",
+            open_questions,
+            max(1, int(question_limit)),
+            preview_key="open_questions_preview",
+        ),
         "preprocessing_yaml_chars": len(yaml_str),
         "next_tools": next_tools,
     }
@@ -542,11 +555,7 @@ def edit_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Open questions: {q_tags}")
     if val.get("error"):
         lines.append(f"- Validation error: `{val['error']}`")
-    for w in payload.get("warnings", []):
-        cols_str = ", ".join(f"`{c}`" for c in w.get("columns", []))
-        lines.append(
-            f"- Warning `{w.get('code')}` (`{w.get('target')}`): {w.get('message')} ({cols_str})"
-        )
+    lines.extend(_warning_lines(payload))
 
     changes = payload.get("changes", [])
     lines.extend(["", "## Changes", ""])
@@ -579,8 +588,8 @@ def _calibrate_processed_space(
     """
     from sklearn.preprocessing import StandardScaler as SkScaler
 
-    pre_dict = plan_to_preprocessing_dict(plan)
     try:
+        pre_dict = plan_to_preprocessing_dict(plan)
         temp_cfg = load_config(
             {
                 "run": {"name": "calibrate", "data": data_path or "in_memory"},
@@ -588,7 +597,7 @@ def _calibrate_processed_space(
             }
         )
         df_processed, _ = preprocess_dataframe(df, temp_cfg)
-    except (ValueError, TypeError, KeyError) as exc:
+    except Exception as exc:
         logger.info(
             "Processed-space calibration failed (%s); falling back to raw geometry",
             exc,

@@ -34,18 +34,11 @@ from pulsar.mcp.session import (
     _read_dataset_file,
     _resolve_dataset_path,
 )
-from pulsar.mcp.toolmeta import (
-    ANY,
-    BOOL,
-    INT,
-    NUM,
-    STR,
-    arr,
-    default_tool_timeout,
-    enum,
-    nullable,
-    obj,
-    tool_meta,
+from pulsar.mcp.toolmeta import default_tool_timeout, tool_meta
+from pulsar.mcp.tools.preprocessing_schemas import (
+    DRAFT_PLAN_SCHEMA,
+    EDIT_PLAN_SCHEMA,
+    VALIDATE_SCHEMA,
 )
 from pulsar.preprocessing import preprocess_dataframe
 
@@ -57,443 +50,62 @@ def _compact_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-_OPEN = obj({}, additional=True)
+def _plan_result(
+    payload: dict[str, Any],
+    response_format: Literal["markdown", "json"],
+    to_markdown: Any,
+) -> ToolResult:
+    if response_format == "markdown":
+        return mcp_result(payload, text=to_markdown(payload))
+    return mcp_result(payload, text=_compact_json(payload))
 
-_COUNTS_SCHEMA = obj(
-    {
-        "columns": INT,
-        "feature_columns": INT,
-        "dropped": INT,
-        "open_entries": INT,
-        "open_questions": INT,
-        "decided_by": obj(
-            {"default": INT, "agent": INT, "user": INT},
-            ["default", "agent", "user"],
-        ),
-    },
-    [
-        "columns",
-        "feature_columns",
-        "dropped",
-        "open_entries",
-        "open_questions",
-        "decided_by",
-    ],
-)
 
-_EDIT_COUNTS_SCHEMA = obj(
-    {
-        "columns": INT,
-        "feature_columns": INT,
-        "dropped": INT,
-        "open_entries": INT,
-        "open_questions": INT,
-        "decided_by": obj(
-            {"default": INT, "agent": INT, "user": INT},
-            ["default", "agent", "user"],
-        ),
-        "confirmed_without_change": INT,
-    },
-    [
-        "columns",
-        "feature_columns",
-        "dropped",
-        "open_entries",
-        "open_questions",
-        "decided_by",
-        "confirmed_without_change",
-    ],
-)
-
-_PROCESSED_SPACE_SCHEMA = nullable(
-    obj(
-        {
-            "feature_count": INT,
-            "missing_marker_count": INT,
-            "dummy_column_count": INT,
-        },
-        ["feature_count", "missing_marker_count", "dummy_column_count"],
+def _edit_error_action(exc: PlanEditError) -> str:
+    if exc.details.get("topic") == "outcome_columns":
+        return (
+            "To mark outcome columns, call edit_preprocessing_plan with "
+            "edits=[{column, role: 'target'}]."
+        )
+    elif exc.details.get("topic") == "code_columns":
+        return (
+            "To treat code columns as categories or drop them, call "
+            "edit_preprocessing_plan with edits=[{column, encode: 'one_hot'}] "
+            "or edits=[{column, role: 'drop'}]."
+        )
+    elif exc.details.get("n_missing") == 0 or "has no blanks" in exc.message:
+        return "Remove the impute/indicator edit for this column; it has no blanks."
+    return (
+        "Check question_id, option_id, column names, and edit fields in "
+        "details, then retry."
     )
-)
 
-_MARKER_LEGEND_ITEM_SCHEMA = obj(
-    {
-        "marker_column": STR,
-        "columns_preview": arr(STR),
-        "columns_count": INT,
-    },
-    ["marker_column", "columns_preview", "columns_count"],
-)
 
-_QUESTION_ITEM_SCHEMA = obj(
-    {
-        "question_id": STR,
-        "topic": enum(
-            [
-                "blank_meaning",
-                "code_columns",
-                "conditional_column",
-                "date_columns",
-                "duplicate_signal",
-                "mixed_values",
-                "mostly_blank",
-                "outcome_columns",
-            ]
+def _revision_conflict_error(
+    plan_id: str, current_revision: int, base_revision: int
+) -> ToolResult:
+    return mcp_error(
+        "edit_preprocessing_plan",
+        (
+            f"Plan '{plan_id}' is at revision {current_revision}, "
+            f"but base_revision={base_revision} was supplied."
         ),
-        "text": STR,
-        "applies_to_preview": arr(STR),
-        "applies_to_count": INT,
-        "rows_affected": INT,
-        "options": arr(
-            obj(
-                {"option_id": STR, "label": STR, "effect": STR},
-                ["option_id", "label", "effect"],
-            )
+        error_code="SESSION_REVISION_CONFLICT",
+        agent_action=(
+            f"Inspect the current plan or retry edit_preprocessing_plan with "
+            f"base_revision={current_revision}."
         ),
-        "default_option_id": STR,
-        "stakes": nullable(
-            obj(
-                {
-                    "neighbors_kept": NUM,
-                    "feature_count_delta": INT,
-                    "rows_sampled": INT,
-                    "k": INT,
-                },
-                ["neighbors_kept", "feature_count_delta", "rows_sampled", "k"],
-            )
-        ),
-    },
-    [
-        "question_id",
-        "topic",
-        "text",
-        "applies_to_preview",
-        "applies_to_count",
-        "rows_affected",
-        "options",
-        "default_option_id",
-        "stakes",
-    ],
-)
-
-_EVIDENCE_SCHEMA = obj(
-    {
-        "missing_groups": arr(
-            obj(
-                {
-                    "group_id": STR,
-                    "columns_preview": arr(STR),
-                    "columns_count": INT,
-                    "n_missing": INT,
-                    "zero_free_columns_preview": arr(STR),
-                },
-                [
-                    "group_id",
-                    "columns_preview",
-                    "columns_count",
-                    "n_missing",
-                    "zero_free_columns_preview",
-                ],
-            )
-        ),
-        "missing_groups_omitted": INT,
-        "mask_dependencies": arr(
-            obj(
-                {
-                    "column": STR,
-                    "partner": STR,
-                    "relation": STR,
-                    "n_missing": INT,
-                    "n_other_partners": INT,
-                },
-                ["column", "partner", "relation", "n_missing", "n_other_partners"],
-            )
-        ),
-        "mask_dependencies_omitted": INT,
-        "relations": arr(
-            obj(
-                {
-                    "kind": STR,
-                    "target": STR,
-                    "sources": arr(STR),
-                    "value": NUM,
-                    "rows_used": INT,
-                },
-                ["kind", "target", "sources", "value", "rows_used"],
-            )
-        ),
-        "relations_omitted": INT,
-        "rare_binary_leverage": arr(
-            obj(
-                {"column": STR, "minority_fraction": NUM, "max_abs_z": NUM},
-                ["column", "minority_fraction", "max_abs_z"],
-            )
-        ),
-        "rare_binary_leverage_omitted": INT,
-        "constant_columns_preview": arr(STR),
-        "constant_columns_count": INT,
-        "constant_columns_omitted": INT,
-        "datetime_columns_preview": arr(STR),
-        "datetime_columns_count": INT,
-        "datetime_columns_omitted": INT,
-        "integer_coded_preview": arr(
-            obj({"column": STR, "n_unique": INT}, ["column", "n_unique"])
-        ),
-        "integer_coded_omitted": INT,
-        "target_proxies": arr(
-            obj(
-                {
-                    "column": STR,
-                    "target": STR,
-                    "marker_rows": INT,
-                    "share_with_target": NUM,
-                    "target_base_rate": NUM,
-                },
-                [
-                    "column",
-                    "target",
-                    "marker_rows",
-                    "share_with_target",
-                    "target_base_rate",
-                ],
-            )
-        ),
-        "target_proxies_omitted": INT,
-        "most_missing_columns": arr(
-            obj(
-                {
-                    "column": STR,
-                    "missing_fraction": NUM,
-                    "n_missing": INT,
-                    "missing_group": nullable(STR),
-                    "plan_role": STR,
-                    "plan_impute_method": nullable(STR),
-                },
-                [
-                    "column",
-                    "missing_fraction",
-                    "n_missing",
-                    "missing_group",
-                    "plan_role",
-                    "plan_impute_method",
-                ],
-            )
-        ),
-        "most_missing_columns_omitted": INT,
-    },
-    [
-        "missing_groups",
-        "missing_groups_omitted",
-        "mask_dependencies",
-        "mask_dependencies_omitted",
-        "relations",
-        "relations_omitted",
-        "rare_binary_leverage",
-        "rare_binary_leverage_omitted",
-        "constant_columns_preview",
-        "constant_columns_count",
-        "constant_columns_omitted",
-        "datetime_columns_preview",
-        "datetime_columns_count",
-        "datetime_columns_omitted",
-        "integer_coded_preview",
-        "integer_coded_omitted",
-        "target_proxies",
-        "target_proxies_omitted",
-        "most_missing_columns",
-        "most_missing_columns_omitted",
-    ],
-)
-
-_TARGET_PROXY_WARNING_SCHEMA = obj(
-    {
-        "code": STR,
-        "target": STR,
-        "columns": arr(STR),
-        "message": STR,
-    },
-    ["code", "target", "columns", "message"],
-)
-
-_EDIT_EVIDENCE_SCHEMA = obj(
-    {
-        "target_proxies": arr(
-            obj(
-                {
-                    "column": STR,
-                    "target": STR,
-                    "marker_rows": INT,
-                    "share_with_target": NUM,
-                    "target_base_rate": NUM,
-                },
-                [
-                    "column",
-                    "target",
-                    "marker_rows",
-                    "share_with_target",
-                    "target_base_rate",
-                ],
-            )
-        ),
-        "target_proxies_omitted": INT,
-    },
-    ["target_proxies", "target_proxies_omitted"],
-)
-
-_DRAFT_PLAN_SCHEMA = obj(
-    {
-        "status": enum(["ok"]),
-        "plan_id": STR,
-        "dataset_id": STR,
-        "revision": INT,
-        "plan_fingerprint": STR,
-        "detail": enum(["summary", "full"]),
-        "counts": _COUNTS_SCHEMA,
-        "processed_space": _PROCESSED_SPACE_SCHEMA,
-        "marker_legend": arr(_MARKER_LEGEND_ITEM_SCHEMA),
-        "marker_legend_omitted": INT,
-        "questions": arr(_QUESTION_ITEM_SCHEMA),
-        "questions_omitted": INT,
-        "evidence": _EVIDENCE_SCHEMA,
-        "warnings": arr(_TARGET_PROXY_WARNING_SCHEMA),
-        "weak_hints": obj(
-            {
-                "event_flag_columns": {
-                    **arr(STR),
-                    "description": (
-                        "complete 0/1 or count columns whose value exactly explains "
-                        "other columns' blanks (often events or exposures; only you "
-                        "can say whether any is an outcome)"
-                    ),
-                },
-                "event_flag_columns_omitted": INT,
-                "description": STR,
-            },
-            ["event_flag_columns", "event_flag_columns_omitted", "description"],
-        ),
-        "preprocessing_yaml_chars": INT,
-        "cost": _OPEN,
-        "how_to_use": STR,
-        "next_tools": arr(STR),
-        # detail="full" only
-        "preprocessing_yaml": STR,
-        "entries": _OPEN,
-    },
-    [
-        "status",
-        "plan_id",
-        "dataset_id",
-        "revision",
-        "plan_fingerprint",
-        "detail",
-        "counts",
-        "processed_space",
-        "marker_legend",
-        "marker_legend_omitted",
-        "questions",
-        "questions_omitted",
-        "evidence",
-        "warnings",
-        "weak_hints",
-        "preprocessing_yaml_chars",
-        "cost",
-        "how_to_use",
-        "next_tools",
-    ],
-)
-
-_EDIT_PLAN_SCHEMA = obj(
-    {
-        "status": enum(["ok"]),
-        "plan_id": STR,
-        "dataset_id": STR,
-        "revision": INT,
-        "plan_fingerprint": STR,
-        "changes": arr(
-            obj(
-                {"column": STR, "field": STR, "was": ANY, "now": ANY},
-                ["column", "field", "was", "now"],
-            )
-        ),
-        "changes_omitted": INT,
-        "change_summary": arr(
-            obj(
-                {"field": STR, "was": ANY, "now": ANY, "count": INT},
-                ["field", "was", "now", "count"],
-            )
-        ),
-        "change_summary_omitted": INT,
-        "counts": _EDIT_COUNTS_SCHEMA,
-        "processed_space": _PROCESSED_SPACE_SCHEMA,
-        "marker_legend": arr(_MARKER_LEGEND_ITEM_SCHEMA),
-        "marker_legend_omitted": INT,
-        "evidence": _EDIT_EVIDENCE_SCHEMA,
-        "warnings": arr(_TARGET_PROXY_WARNING_SCHEMA),
-        "validation": obj(
-            {"valid": BOOL, "error": nullable(STR)},
-            ["valid", "error"],
-        ),
-        "open_questions_preview": arr(_QUESTION_ITEM_SCHEMA),
-        "open_questions_omitted": INT,
-        "preprocessing_yaml_chars": INT,
-        "next_tools": arr(STR),
-    },
-    [
-        "status",
-        "plan_id",
-        "dataset_id",
-        "revision",
-        "plan_fingerprint",
-        "changes",
-        "changes_omitted",
-        "change_summary",
-        "change_summary_omitted",
-        "counts",
-        "processed_space",
-        "marker_legend",
-        "marker_legend_omitted",
-        "evidence",
-        "warnings",
-        "validation",
-        "open_questions_preview",
-        "open_questions_omitted",
-        "preprocessing_yaml_chars",
-        "next_tools",
-    ],
-)
-
-_VALIDATE_SCHEMA = obj(
-    {
-        "status": enum(["ok"]),
-        "valid": BOOL,
-        "input_rows": INT,
-        "output_rows": INT,
-        "output_feature_count": INT,
-        "dummy_expansion_count": INT,
-        "missingness_flag_count": INT,
-        "high_cardinality_encoded_columns": arr(STR),
-        "feature_names_preview": arr(STR),
-        "nan_remaining": INT,
-    },
-    [
-        "status",
-        "valid",
-        "input_rows",
-        "output_rows",
-        "output_feature_count",
-        "dummy_expansion_count",
-        "missingness_flag_count",
-        "high_cardinality_encoded_columns",
-        "feature_names_preview",
-        "nan_remaining",
-    ],
-)
+        details={
+            "plan_id": plan_id,
+            "current_revision": int(current_revision),
+            "base_revision": int(base_revision),
+        },
+    )
 
 
 def _draft_plan_worker(
     df: Any,
     dataset_id: str,
-    target_columns: list[str],
+    target_columns: list[str] | None,
     entity_column: str,
     time_column: str,
     stakes: bool,
@@ -504,7 +116,7 @@ def _draft_plan_worker(
     plan = draft_plan(
         df,
         dataset_id,
-        target_columns=target_columns,
+        target_columns=list(target_columns or ()),
         entity_column=entity_column,
         time_column=time_column,
         stakes=stakes,
@@ -529,7 +141,7 @@ def _draft_plan_worker(
     read_only=False,
     idempotent=False,
     timeout=default_tool_timeout(),
-    output_schema=_DRAFT_PLAN_SCHEMA,
+    output_schema=DRAFT_PLAN_SCHEMA,
     title="Draft Preprocessing Plan",
 )
 async def draft_preprocessing_plan(
@@ -637,12 +249,17 @@ async def draft_preprocessing_plan(
 
     try:
         session = _get_session(ctx)
-        df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
+        try:
+            df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
+        except LookupError:
+            return unknown_handle_error(
+                "draft_preprocessing_plan", "dataset_id", dataset_id
+            )
         plan, payload = await asyncio.to_thread(
             _draft_plan_worker,
             df,
             dataset_id,
-            list(target_columns or ()),
+            target_columns,
             entity_column,
             time_column,
             stakes,
@@ -651,9 +268,7 @@ async def draft_preprocessing_plan(
             evidence_limit,
         )
         session.preprocessing_plans[plan.plan_id] = plan
-        if response_format == "markdown":
-            return mcp_result(payload, text=draft_plan_payload_to_markdown(payload))
-        return mcp_result(payload, text=_compact_json(payload))
+        return _plan_result(payload, response_format, draft_plan_payload_to_markdown)
     except PlanEditError as exc:
         return mcp_error(
             "draft_preprocessing_plan",
@@ -664,10 +279,6 @@ async def draft_preprocessing_plan(
                 "entity_column, and time_column."
             ),
             details=exc.details,
-        )
-    except LookupError:
-        return unknown_handle_error(
-            "draft_preprocessing_plan", "dataset_id", dataset_id
         )
     except Exception as exc:
         logger.error("Error in draft_preprocessing_plan: %s", exc)
@@ -684,14 +295,14 @@ async def draft_preprocessing_plan(
 def _edit_plan_worker(
     df: Any,
     plan: PreprocessingPlan,
-    answers: list[dict[str, Any]],
-    edits: list[dict[str, Any]],
+    answers: list[dict[str, Any]] | None,
+    edits: list[dict[str, Any]] | None,
     source: Literal["agent", "user"],
 ) -> tuple[PreprocessingPlan, dict[str, Any]]:
     updated = apply_answers_and_edits(
         plan,
-        answers=answers,
-        edits=edits,
+        answers=list(answers or ()),
+        edits=list(edits or ()),
         source=source,
     )
     changes = diff_plan_entries(plan, updated)
@@ -705,10 +316,30 @@ def _edit_plan_worker(
     return updated, payload
 
 
+def _store_updated_plan(
+    session: Any,
+    plan_id: str,
+    plan: Any,
+    updated: Any,
+    expected_revision: int,
+) -> ToolResult | None:
+    current = session.preprocessing_plans.get(plan_id)
+    if current is not plan:
+        return _revision_conflict_error(
+            plan_id,
+            int(current.revision if current is not None else plan.revision),
+            expected_revision,
+        )
+    # Pop and re-insert so dict insertion order marks this plan as most recently active for create_config.
+    session.preprocessing_plans.pop(plan.plan_id, None)
+    session.preprocessing_plans[plan.plan_id] = updated
+    return None
+
+
 @tool_meta(
     read_only=False,
     idempotent=False,
-    output_schema=_EDIT_PLAN_SCHEMA,
+    output_schema=EDIT_PLAN_SCHEMA,
     title="Edit Preprocessing Plan",
 )
 async def edit_preprocessing_plan(
@@ -787,71 +418,40 @@ async def edit_preprocessing_plan(
     if plan is None:
         return unknown_handle_error("edit_preprocessing_plan", "plan_id", plan_id)
 
-    if base_revision is not None and int(base_revision) != int(plan.revision):
-        return mcp_error(
-            "edit_preprocessing_plan",
-            (
-                f"Plan '{plan_id}' is at revision {plan.revision}, "
-                f"but base_revision={base_revision} was supplied."
-            ),
-            error_code="SESSION_REVISION_CONFLICT",
-            agent_action=(
-                f"Inspect the current plan or retry edit_preprocessing_plan with "
-                f"base_revision={plan.revision}."
-            ),
-            details={
-                "plan_id": plan_id,
-                "current_revision": int(plan.revision),
-                "base_revision": int(base_revision),
-            },
-        )
+    expected_revision = (
+        int(plan.revision) if base_revision is None else int(base_revision)
+    )
+    if expected_revision != int(plan.revision):
+        return _revision_conflict_error(plan_id, int(plan.revision), expected_revision)
 
     try:
-        df, _ = await _load_session_dataframe(session, dataset_id=plan.dataset_id)
+        try:
+            df, _ = await _load_session_dataframe(session, dataset_id=plan.dataset_id)
+        except LookupError:
+            return unknown_handle_error(
+                "edit_preprocessing_plan", "dataset_id", plan.dataset_id
+            )
         updated, payload = await asyncio.to_thread(
             _edit_plan_worker,
             df,
             plan,
-            list(answers or ()),
-            list(edits or ()),
+            answers,
+            edits,
             source,
         )
-        session.preprocessing_plans.pop(plan.plan_id, None)
-        session.preprocessing_plans[plan.plan_id] = updated
-        if response_format == "markdown":
-            return mcp_result(payload, text=edit_plan_payload_to_markdown(payload))
-        return mcp_result(payload, text=_compact_json(payload))
+        conflict = _store_updated_plan(
+            session, plan_id, plan, updated, expected_revision
+        )
+        if conflict is not None:
+            return conflict
+        return _plan_result(payload, response_format, edit_plan_payload_to_markdown)
     except PlanEditError as exc:
-        if exc.details.get("topic") == "outcome_columns":
-            agent_action = (
-                "To mark outcome columns, call edit_preprocessing_plan with "
-                "edits=[{column, role: 'target'}]."
-            )
-        elif exc.details.get("topic") == "code_columns":
-            agent_action = (
-                "To treat code columns as categories or drop them, call "
-                "edit_preprocessing_plan with edits=[{column, encode: 'one_hot'}] "
-                "or edits=[{column, role: 'drop'}]."
-            )
-        elif exc.details.get("n_missing") == 0 or "has no blanks" in exc.message:
-            agent_action = (
-                "Remove the impute/indicator edit for this column; it has no blanks."
-            )
-        else:
-            agent_action = (
-                "Check question_id, option_id, column names, and edit fields in "
-                "details, then retry."
-            )
         return mcp_error(
             "edit_preprocessing_plan",
             exc.message,
             error_code=exc.code,
-            agent_action=agent_action,
+            agent_action=_edit_error_action(exc),
             details=exc.details,
-        )
-    except LookupError:
-        return unknown_handle_error(
-            "edit_preprocessing_plan", "dataset_id", plan.dataset_id
         )
     except Exception as exc:
         logger.error("Error in edit_preprocessing_plan: %s", exc)
@@ -897,12 +497,27 @@ async def _resolve_validation_dataframe(
         return None, path_access_error("validate_preprocessing_config", resolved)
 
 
-def _build_validation_payload(data: Any, layout: Any) -> dict[str, Any]:
+def _count_dummy_columns(
+    output_names: list[str], input_cols: set[Any], cfg: Any
+) -> int:
+    encode_prefixes = tuple(f"{col}_" for col in cfg.encode.keys())
+    if not encode_prefixes:
+        return 0
+    return sum(
+        1
+        for name in output_names
+        if not str(name).endswith("_was_missing")
+        and name not in input_cols
+        and str(name).startswith(encode_prefixes)
+    )
+
+
+def _build_validation_payload(
+    data: Any, df_proc: Any, layout: Any, cfg: Any
+) -> dict[str, Any]:
     input_cols = set(data.columns)
     output_names = layout.feature_names
-    dummy_count = sum(
-        1 for name in output_names if "_" in name and name not in input_cols
-    )
+    dummy_count = _count_dummy_columns(output_names, input_cols, cfg)
     missingness_flag_count = sum(
         1 for name in output_names if name.endswith("_was_missing")
     )
@@ -922,14 +537,14 @@ def _build_validation_payload(data: Any, layout: Any) -> dict[str, Any]:
         "missingness_flag_count": missingness_flag_count,
         "high_cardinality_encoded_columns": high_cardinality_encoded,
         "feature_names_preview": col_preview,
-        "nan_remaining": 0,
+        "nan_remaining": int(df_proc.isna().sum().sum()),
     }
 
 
 @tool_meta(
     read_only=True,
     idempotent=True,
-    output_schema=_VALIDATE_SCHEMA,
+    output_schema=VALIDATE_SCHEMA,
     title="Validate Preprocessing Config",
 )
 async def validate_preprocessing_config(
@@ -978,8 +593,8 @@ async def validate_preprocessing_config(
             )
 
         cfg = load_config(config_dict)
-        _, layout = await asyncio.to_thread(preprocess_dataframe, data, cfg)
-        return mcp_result(_build_validation_payload(data, layout))
+        df_proc, layout = await asyncio.to_thread(preprocess_dataframe, data, cfg)
+        return mcp_result(_build_validation_payload(data, df_proc, layout, cfg))
 
     except yaml.YAMLError as e:
         return mcp_error(
