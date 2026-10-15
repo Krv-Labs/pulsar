@@ -106,6 +106,36 @@ def _normalize_construction(value: Any) -> Literal["minhash", "exact"]:
 # ---------------------------------------------------------------------------
 
 
+def _validate_fill_value(value: Any) -> float | int | str:
+    if value is None:
+        raise ValueError("ImputeSpec with method 'fill_value' requires 'value'.")
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"ImputeSpec 'value' must be finite numeric or string, got bool {value!r}."
+        )
+    if isinstance(value, (int, float, np.number)):
+        try:
+            fval = float(value)
+        except OverflowError as exc:
+            raise ValueError(
+                f"ImputeSpec 'value' must be finite, got {value!r}."
+            ) from exc
+        if not math.isfinite(fval):
+            raise ValueError(f"ImputeSpec 'value' must be finite, got {value!r}.")
+        if isinstance(value, np.floating):
+            return float(value)
+        if isinstance(value, np.integer):
+            return int(value)
+        return value
+    if isinstance(value, np.str_):
+        return str(value)
+    if not isinstance(value, str):
+        raise ValueError(
+            f"ImputeSpec 'value' must be finite numeric or str, got {type(value).__name__}."
+        )
+    return value
+
+
 @dataclass
 class ImputeSpec:
     method: str  # sample_normal | sample_categorical | fill_mean | fill_median | fill_mode | fill_value
@@ -120,40 +150,11 @@ class ImputeSpec:
             )
         self.indicator = bool(self.indicator)
         if self.method == "fill_value":
-            if self.value is None:
-                raise ValueError(
-                    "ImputeSpec with method 'fill_value' requires 'value'."
-                )
-            if isinstance(self.value, (bool, np.bool_)):
-                raise ValueError(
-                    f"ImputeSpec 'value' must be finite numeric or string, got bool {self.value!r}."
-                )
-            if isinstance(self.value, (int, float, np.number)):
-                try:
-                    fval = float(self.value)
-                except OverflowError as exc:
-                    raise ValueError(
-                        f"ImputeSpec 'value' must be finite, got {self.value!r}."
-                    ) from exc
-                if not math.isfinite(fval):
-                    raise ValueError(
-                        f"ImputeSpec 'value' must be finite, got {self.value!r}."
-                    )
-                if isinstance(self.value, np.floating):
-                    self.value = float(self.value)
-                elif isinstance(self.value, np.integer):
-                    self.value = int(self.value)
-            elif isinstance(self.value, np.str_):
-                self.value = str(self.value)
-            elif not isinstance(self.value, str):
-                raise ValueError(
-                    f"ImputeSpec 'value' must be finite numeric or str, got {type(self.value).__name__}."
-                )
-        else:
-            if self.value is not None:
-                raise ValueError(
-                    f"ImputeSpec 'value' is only valid with method 'fill_value', got method {self.method!r}."
-                )
+            self.value = _validate_fill_value(self.value)
+        elif self.value is not None:
+            raise ValueError(
+                f"ImputeSpec 'value' is only valid with method 'fill_value', got method {self.method!r}."
+            )
 
 
 @dataclass
@@ -214,6 +215,30 @@ class CosmicGraphSpec:
     minhash_seed: int = 42
 
 
+def _validate_indicator_group_columns(
+    group_key: str, cols: Any, seen_columns: dict[str, str]
+) -> list[str]:
+    if not isinstance(cols, (list, tuple)):
+        raise ValueError(
+            f"missing_indicator_groups[{group_key!r}] must be a list of column names."
+        )
+    col_list: list[str] = []
+    for col in cols:
+        if not isinstance(col, str) or not col.strip():
+            raise ValueError(
+                f"missing_indicator_groups[{group_key!r}] column names must be non-empty strings."
+            )
+        col_str = str(col)
+        if col_str in seen_columns:
+            raise ValueError(
+                f"Column '{col_str}' appears in more than one missing_indicator_group "
+                f"({seen_columns[col_str]!r} and {group_key!r})."
+            )
+        seen_columns[col_str] = group_key
+        col_list.append(col_str)
+    return col_list
+
+
 def _validate_missing_indicator_groups(
     groups: Any,
 ) -> dict[str, list[str]]:
@@ -231,26 +256,50 @@ def _validate_missing_indicator_groups(
                 "missing_indicator_groups group names must be non-empty strings."
             )
         group_key = str(group_name)
-        if not isinstance(cols, (list, tuple)):
-            raise ValueError(
-                f"missing_indicator_groups[{group_key!r}] must be a list of column names."
-            )
-        col_list: list[str] = []
-        for col in cols:
-            if not isinstance(col, str) or not col.strip():
-                raise ValueError(
-                    f"missing_indicator_groups[{group_key!r}] column names must be non-empty strings."
-                )
-            col_str = str(col)
-            if col_str in seen_columns:
-                raise ValueError(
-                    f"Column '{col_str}' appears in more than one missing_indicator_group "
-                    f"({seen_columns[col_str]!r} and {group_key!r})."
-                )
-            seen_columns[col_str] = group_key
-            col_list.append(col_str)
-        normalized[group_key] = col_list
+        normalized[group_key] = _validate_indicator_group_columns(
+            group_key, cols, seen_columns
+        )
     return normalized
+
+
+def _check_single_group_flag(
+    group_name: str,
+    per_col_flag_names: set[str],
+    configured_cols: set[str],
+    seen_group_flags: set[str],
+) -> None:
+    flag_name = f"{group_name}_was_missing"
+    if flag_name in per_col_flag_names:
+        raise ValueError(
+            f"missing indicator name collision: group {group_name!r} flag "
+            f"'{flag_name}' collides with per-column indicator."
+        )
+    if flag_name in configured_cols:
+        raise ValueError(
+            f"missing indicator name collision: group {group_name!r} flag "
+            f"'{flag_name}' collides with configured column '{flag_name}'."
+        )
+    if flag_name in seen_group_flags:
+        raise ValueError(
+            f"missing indicator name collision: duplicate group flag '{flag_name}'."
+        )
+    seen_group_flags.add(flag_name)
+
+
+def _check_config_group_flag_collisions(cfg: PulsarConfig) -> None:
+    grouped_cols = {c for cols in cfg.missing_indicator_groups.values() for c in cols}
+    drop_set = set(cfg.drop_columns)
+    per_col_flag_names = {
+        f"{col}_was_missing"
+        for col, spec in cfg.impute.items()
+        if spec.indicator and col not in grouped_cols and col not in drop_set
+    }
+    configured_cols = set(cfg.impute) | set(cfg.encode) | drop_set | grouped_cols
+    seen_group_flags: set[str] = set()
+    for group_name in cfg.missing_indicator_groups:
+        _check_single_group_flag(
+            group_name, per_col_flag_names, configured_cols, seen_group_flags
+        )
 
 
 @dataclass
@@ -277,34 +326,7 @@ class PulsarConfig:
         self.missing_indicator_groups = _validate_missing_indicator_groups(
             self.missing_indicator_groups
         )
-        grouped_cols = {
-            c for cols in self.missing_indicator_groups.values() for c in cols
-        }
-        drop_set = set(self.drop_columns)
-        per_col_flag_names = {
-            f"{col}_was_missing"
-            for col, spec in self.impute.items()
-            if spec.indicator and col not in grouped_cols and col not in drop_set
-        }
-        configured_cols = set(self.impute) | set(self.encode) | drop_set | grouped_cols
-        seen_group_flags: set[str] = set()
-        for group_name in self.missing_indicator_groups:
-            flag_name = f"{group_name}_was_missing"
-            if flag_name in per_col_flag_names:
-                raise ValueError(
-                    f"missing indicator name collision: group {group_name!r} flag "
-                    f"'{flag_name}' collides with per-column indicator."
-                )
-            if flag_name in configured_cols:
-                raise ValueError(
-                    f"missing indicator name collision: group {group_name!r} flag "
-                    f"'{flag_name}' collides with configured column '{flag_name}'."
-                )
-            if flag_name in seen_group_flags:
-                raise ValueError(
-                    f"missing indicator name collision: duplicate group flag '{flag_name}'."
-                )
-            seen_group_flags.add(flag_name)
+        _check_config_group_flag_collisions(self)
 
         default_projection = ProjectionSpec()
         if self.projection == default_projection and self.pca != PCASpec():
@@ -448,6 +470,25 @@ def _coerce_yaml_scalar(val: Any) -> Any:
     return str(val)
 
 
+def _format_impute_entry(spec: ImputeSpec) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "method": str(spec.method),
+        "seed": int(spec.seed),
+    }
+    if spec.value is not None:
+        entry["value"] = _coerce_yaml_scalar(spec.value)
+    if not spec.indicator:
+        entry["indicator"] = False
+    return entry
+
+
+def _format_encode_entry(spec: EncodeSpec) -> dict[str, Any]:
+    entry: dict[str, Any] = {"method": str(spec.method)}
+    if spec.max_categories is not None:
+        entry["max_categories"] = int(spec.max_categories)
+    return entry
+
+
 def _format_preprocessing_yaml(cfg: PulsarConfig) -> dict[str, Any]:
     pre: dict[str, Any] = {
         "drop_columns": [str(c) for c in cfg.drop_columns],
@@ -458,26 +499,13 @@ def _format_preprocessing_yaml(cfg: PulsarConfig) -> dict[str, Any]:
             for name, cols in cfg.missing_indicator_groups.items()
         }
     if cfg.impute:
-        impute_dict: dict[str, dict[str, Any]] = {}
-        for col, spec in cfg.impute.items():
-            entry: dict[str, Any] = {
-                "method": str(spec.method),
-                "seed": int(spec.seed),
-            }
-            if spec.value is not None:
-                entry["value"] = _coerce_yaml_scalar(spec.value)
-            if not spec.indicator:
-                entry["indicator"] = False
-            impute_dict[str(col)] = entry
-        pre["impute"] = impute_dict
+        pre["impute"] = {
+            str(col): _format_impute_entry(spec) for col, spec in cfg.impute.items()
+        }
     if cfg.encode:
-        encode_dict: dict[str, dict[str, Any]] = {}
-        for col, spec in cfg.encode.items():
-            entry = {"method": str(spec.method)}
-            if spec.max_categories is not None:
-                entry["max_categories"] = int(spec.max_categories)
-            encode_dict[str(col)] = entry
-        pre["encode"] = encode_dict
+        pre["encode"] = {
+            str(col): _format_encode_entry(spec) for col, spec in cfg.encode.items()
+        }
     return pre
 
 
