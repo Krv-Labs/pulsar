@@ -1041,3 +1041,191 @@ def test_r6_ux_improvements() -> None:
     for q in edited.questions.values():
         if q.status == "open":
             assert f"`{q.question_id}` [{q.topic}]" in md
+
+
+def test_mostly_blank_and_most_missing_columns_evidence() -> None:
+    from pulsar.mcp.preprocessing import (
+        build_draft_plan_payload,
+        draft_plan_payload_to_markdown,
+    )
+
+    rng = np.random.default_rng(123)
+    n = 100
+    # Complete baseline features
+    f1 = rng.normal(size=n)
+    f2 = rng.normal(size=n)
+
+    # 97%-blank numeric column with random mask (has negative values so not count-like)
+    lab_x = np.full(n, np.nan)
+    filled_idx = rng.choice(n, size=3, replace=False)
+    lab_x[filled_idx] = [-1.5, 0.0, 2.5]
+
+    # 30%-blank numeric column with random mask (has negative values so not count-like)
+    bmi_30 = rng.normal(loc=0.0, scale=1.0, size=n)
+    blank_30_idx = rng.choice(n, size=30, replace=False)
+    bmi_30[blank_30_idx] = np.nan
+
+    df_single = pd.DataFrame(
+        {
+            "f1": f1,
+            "f2": f2,
+            "lab_x": lab_x,
+            "bmi_30": bmi_30,
+        }
+    )
+
+    plan = draft_plan(df_single, "ds_mostly_blank", stakes=True, seed=0)
+
+    # 1. 97%-blank column -> default role "drop", status "open", never fill_median by default
+    assert plan.entries["lab_x"].role == "drop"
+    assert plan.entries["lab_x"].impute is None
+    assert plan.entries["lab_x"].indicator == "none"
+    assert plan.entries["lab_x"].status == "open"
+    assert plan.entries["lab_x"].decided_by == "default"
+
+    # 2. 30%-blank column -> unchanged default (fill_median + marker, resolved)
+    assert plan.entries["bmi_30"].role == "feature"
+    assert plan.entries["bmi_30"].impute == {"method": "fill_median"}
+    assert plan.entries["bmi_30"].indicator == "own"
+    assert plan.entries["bmi_30"].status == "resolved"
+
+    # 3. Single grouped mostly_blank question with plain language and stakes
+    mb_qs = [q for q in plan.questions.values() if q.topic == "mostly_blank"]
+    assert len(mb_qs) == 1
+    mb_q = mb_qs[0]
+    assert mb_q.applies_to == ["lab_x"]
+    assert mb_q.rows_affected == 97
+    assert mb_q.default_option_id == "leave_out"
+    assert [o.option_id for o in mb_q.options] == [
+        "leave_out",
+        "has_value",
+        "estimate_and_mark",
+    ]
+    assert (
+        "`lab_x` is blank for 97% of rows, and the data doesn't show why." in mb_q.text
+    )
+    est_opt = next(o for o in mb_q.options if o.option_id == "estimate_and_mark")
+    assert "about 97% of these values would be estimates" in est_opt.effect
+    assert mb_q.stakes is not None
+    assert 0.0 <= mb_q.stakes["neighbors_kept"] <= 1.0
+    pattern = re.compile(
+        r"\b(?:" + "|".join(re.escape(w) for w in FORBIDDEN_JARGON) + r")s?\b",
+        re.IGNORECASE,
+    )
+    assert not pattern.search(mb_q.text)
+    for leak in FORBIDDEN_SCHEMA_LEAKS:
+        assert leak not in mb_q.text
+    for opt in mb_q.options:
+        assert not pattern.search(opt.label)
+        assert not pattern.search(opt.effect)
+        for leak in FORBIDDEN_SCHEMA_LEAKS:
+            assert leak not in opt.label and leak not in opt.effect
+
+    # 4. Answering has_value runs cleanly through load_config + preprocess_dataframe
+    plan_hv = apply_answers_and_edits(
+        plan,
+        answers=[{"question_id": mb_q.question_id, "option_id": "has_value"}],
+        edits=[],
+        source="user",
+    )
+    assert plan_hv.entries["lab_x"].role == "drop"
+    assert plan_hv.entries["lab_x"].impute is None
+    assert plan_hv.entries["lab_x"].indicator == "group:lab_x"
+    assert plan_hv.entries["lab_x"].status == "resolved"
+    cfg_hv = load_config(
+        {
+            "run": {"name": "test_hv", "data": "in_memory"},
+            "preprocessing": plan_to_preprocessing_dict(plan_hv),
+        }
+    )
+    out_hv, layout_hv = preprocess_dataframe(df_single, cfg_hv)
+    assert "lab_x" not in layout_hv.feature_names
+    assert "lab_x_was_missing" in layout_hv.feature_names
+    assert int(out_hv["lab_x_was_missing"].sum()) == 97
+
+    # Answering estimate_and_mark also runs cleanly
+    plan_est = apply_answers_and_edits(
+        plan,
+        answers=[{"question_id": mb_q.question_id, "option_id": "estimate_and_mark"}],
+        edits=[],
+        source="user",
+    )
+    assert plan_est.entries["lab_x"].role == "feature"
+    assert plan_est.entries["lab_x"].impute == {"method": "fill_median"}
+    assert plan_est.entries["lab_x"].indicator == "own"
+    cfg_est = load_config(
+        {
+            "run": {"name": "test_est", "data": "in_memory"},
+            "preprocessing": plan_to_preprocessing_dict(plan_est),
+        }
+    )
+    _, layout_est = preprocess_dataframe(df_single, cfg_est)
+    assert "lab_x" in layout_est.feature_names
+    assert "lab_x_was_missing" in layout_est.feature_names
+
+    # 5. Multi-column mostly_blank (shared blank group + singleton) produces ONE grouped question
+    shared_mask = np.ones(n, dtype=bool)
+    shared_mask[rng.choice(n, size=20, replace=False)] = False  # 80% blank
+    grp_a = np.where(shared_mask, np.nan, rng.normal(size=n))
+    grp_b = np.where(shared_mask, np.nan, rng.normal(size=n))
+    df_multi = df_single.assign(grp_a=grp_a, grp_b=grp_b)
+    plan_multi = draft_plan(df_multi, "ds_multi_mb", stakes=True, seed=0)
+    mb_multi_qs = [
+        q for q in plan_multi.questions.values() if q.topic == "mostly_blank"
+    ]
+    assert len(mb_multi_qs) == 1
+    assert set(mb_multi_qs[0].applies_to) == {"lab_x", "grp_a", "grp_b"}
+    assert (
+        "`lab_x` is blank for 97% of rows (and 2 other columns are blank for more than half of rows: `grp_a` and `grp_b`)"
+        in mb_multi_qs[0].text
+    )
+    plan_multi_hv = apply_answers_and_edits(
+        plan_multi,
+        answers=[{"question_id": mb_multi_qs[0].question_id, "option_id": "has_value"}],
+        edits=[],
+        source="agent",
+    )
+    cfg_multi_hv = load_config(
+        {
+            "run": {"name": "test_multi_hv", "data": "in_memory"},
+            "preprocessing": plan_to_preprocessing_dict(plan_multi_hv),
+        }
+    )
+    _, layout_multi_hv = preprocess_dataframe(df_multi, cfg_multi_hv)
+    assert "lab_x_was_missing" in layout_multi_hv.feature_names
+    assert "grp_a_and_1_more_was_missing" in layout_multi_hv.feature_names
+
+    # 6. Evidence slice: most_missing_columns ranked by missing_fraction desc then name, capped at evidence_limit
+    space, _ = dry_run_processed_space(df_multi, plan_multi)
+    payload_capped = build_draft_plan_payload(
+        plan_multi, processed_space=space, detail="summary", evidence_limit=2
+    )
+    mm = payload_capped["evidence"]["most_missing_columns"]
+    assert len(mm) == 2
+    assert payload_capped["evidence"]["most_missing_columns_omitted"] == 2
+    assert [item["column"] for item in mm] == ["lab_x", "grp_a"]
+    assert mm[0] == {
+        "column": "lab_x",
+        "missing_fraction": 0.97,
+        "n_missing": 97,
+        "missing_group": None,
+        "plan_role": "drop",
+        "plan_impute_method": None,
+    }
+    assert mm[1]["column"] == "grp_a"
+    assert mm[1]["missing_fraction"] == 0.8
+    assert mm[1]["missing_group"] is not None
+    assert mm[1]["plan_role"] == "drop"
+    assert mm[1]["plan_impute_method"] is None
+
+    payload_full = build_draft_plan_payload(
+        plan_multi, processed_space=space, detail="full", evidence_limit=2
+    )
+    mm_full = payload_full["evidence"]["most_missing_columns"]
+    assert [item["column"] for item in mm_full] == ["lab_x", "grp_a", "grp_b", "bmi_30"]
+    assert mm_full[-1]["plan_role"] == "feature"
+    assert mm_full[-1]["plan_impute_method"] == "fill_median"
+    assert payload_full["evidence"]["most_missing_columns_omitted"] == 0
+
+    md_str = draft_plan_payload_to_markdown(payload_capped)
+    assert "- Most-missing columns: 2 (+2 omitted)" in md_str

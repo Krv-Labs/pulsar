@@ -136,6 +136,7 @@ _QUESTION_ITEM_SCHEMA = obj(
                 "date_columns",
                 "duplicate_signal",
                 "mixed_values",
+                "mostly_blank",
                 "outcome_columns",
             ]
         ),
@@ -258,6 +259,27 @@ _EVIDENCE_SCHEMA = obj(
             )
         ),
         "target_proxies_omitted": INT,
+        "most_missing_columns": arr(
+            obj(
+                {
+                    "column": STR,
+                    "missing_fraction": NUM,
+                    "n_missing": INT,
+                    "missing_group": nullable(STR),
+                    "plan_role": STR,
+                    "plan_impute_method": nullable(STR),
+                },
+                [
+                    "column",
+                    "missing_fraction",
+                    "n_missing",
+                    "missing_group",
+                    "plan_role",
+                    "plan_impute_method",
+                ],
+            )
+        ),
+        "most_missing_columns_omitted": INT,
     },
     [
         "missing_groups",
@@ -278,6 +300,8 @@ _EVIDENCE_SCHEMA = obj(
         "integer_coded_omitted",
         "target_proxies",
         "target_proxies_omitted",
+        "most_missing_columns",
+        "most_missing_columns_omitted",
     ],
 )
 

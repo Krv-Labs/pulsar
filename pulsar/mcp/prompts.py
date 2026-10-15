@@ -35,7 +35,7 @@ Reveal the dataset's topology; do not force convenient clusters.
    event flag) and drafts a versioned plan (`plan_id`, `revision`) with a fresh
    unique `plan_id` per draft, labeled defaults (`decided_by="default"`), and
    open questions (`blank_meaning`, `code_columns`, `conditional_column`,
-   `date_columns`, `duplicate_signal`, `mixed_values`, `outcome_columns`). The
+   `date_columns`, `duplicate_signal`, `mixed_values`, `mostly_blank`, `outcome_columns`). The
    plan is evidence + labeled defaults, not a verdict; `stakes`
    (`neighbors_kept`, `feature_count_delta`) measure how much the map's k-NN
    neighborhoods move between options, not a score to optimize.

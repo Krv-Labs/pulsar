@@ -201,6 +201,27 @@ def build_draft_plan_payload(
     proxies_all = [copy.deepcopy(p) for p in plan.target_proxies]
     proxies_out, proxies_omitted = _cap_list(proxies_all, ev_cap)
 
+    most_missing_all = sorted(
+        [
+            {
+                "column": col_ev.name,
+                "missing_fraction": float(col_ev.missing_fraction),
+                "n_missing": int(col_ev.n_missing),
+                "missing_group": col_ev.missing_group,
+                "plan_role": plan.entries[col_ev.name].role,
+                "plan_impute_method": (
+                    plan.entries[col_ev.name].impute.get("method")
+                    if isinstance(plan.entries[col_ev.name].impute, dict)
+                    else None
+                ),
+            }
+            for col_ev in ev.columns
+            if col_ev.n_missing > 0 and col_ev.name in plan.entries
+        ],
+        key=lambda item: (-item["missing_fraction"], item["column"]),
+    )
+    most_missing_out, most_missing_omitted = _cap_list(most_missing_all, ev_cap)
+
     legend_all = build_marker_legend(
         plan, preview_limit=5 if col_cap is not None else 10_000
     )
@@ -244,6 +265,8 @@ def build_draft_plan_payload(
             "integer_coded_omitted": int_coded_omitted,
             "target_proxies": proxies_out,
             "target_proxies_omitted": proxies_omitted,
+            "most_missing_columns": most_missing_out,
+            "most_missing_columns_omitted": most_missing_omitted,
         },
         "warnings": _build_target_proxy_warnings(plan.target_proxies),
         "weak_hints": {
@@ -360,6 +383,10 @@ def draft_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
     lines.append(
         f"- Exact relations (duplicate/sum_of): {len(ev.get('relations', []))} "
         f"(+{ev.get('relations_omitted', 0)} omitted)"
+    )
+    lines.append(
+        f"- Most-missing columns: {len(ev.get('most_missing_columns', []))} "
+        f"(+{ev.get('most_missing_columns_omitted', 0)} omitted)"
     )
     lines.append(f"- Constant columns dropped: {ev.get('constant_columns_count', 0)}")
     weak_hints = payload.get("weak_hints", {})

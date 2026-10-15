@@ -734,7 +734,8 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
                 )
                 assert full_res.structured_content["detail"] == "full"
                 assert "entries" in full_res.structured_content
-                assert full_res.content[0].text.startswith("#") is (fmt == "markdown")
+                if fmt == "markdown":
+                    assert "- Most-missing columns:" in full_res.content[0].text
 
             draft_sc = (
                 await _call(
@@ -743,6 +744,7 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
                     {
                         "dataset_id": ds_traps,
                         "stakes": True,
+                        "evidence_limit": 3,
                         "response_format": "json",
                     },
                 )
@@ -750,6 +752,14 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
             plan_id = draft_sc["plan_id"]
             assert draft_sc["revision"] == 1
             assert draft_sc["counts"]["open_questions"] >= 4
+            mm_cols = draft_sc["evidence"]["most_missing_columns"]
+            assert 1 <= len(mm_cols) <= 3
+            assert draft_sc["evidence"]["most_missing_columns_omitted"] >= 1
+            assert [
+                (round(-c["missing_fraction"], 6), c["column"]) for c in mm_cols
+            ] == sorted(
+                (round(-c["missing_fraction"], 6), c["column"]) for c in mm_cols
+            )
 
             # Unknown plan_id on edit -> PLAN_ID_UNKNOWN
             await _call(
