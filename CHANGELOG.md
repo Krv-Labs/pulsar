@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Evidence-first preprocessing plan (`pulsar-mcp`):** `draft_preprocessing_plan`
+  measures the dataset (co-missingness blocks, blanks explained by another
+  column, exact duplicates and sums, mixed numeric/text values, outcome-proxy
+  markers) and drafts a versioned per-column plan of labelled defaults
+  (`decided_by`: default / agent / user) plus plain-language questions with
+  options and measured stakes (k-NN neighbourhood overlap).
+  `edit_preprocessing_plan` records answers with provenance and revision
+  checks. `create_config(plan_id=...)` builds and calibrates from the same plan.
+- **`fill_value` imputation** (`{method: fill_value, value: 0}`) in Rust and
+  Python, `impute.<col>.indicator: false`, and
+  `preprocessing.missing_indicator_groups` for one shared "was blank" marker
+  per block of columns.
+- `pulsar.analysis.preprocessing_evidence`: dataset-agnostic preprocessing
+  measurements and `neighborhood_overlap`.
+
+### Changed
+
+- **Breaking (MCP):** `recommend_preprocessing` and
+  `repair_preprocessing_config` are removed in favour of the plan tools.
+  `create_config` without `plan_id` drafts labelled baseline defaults and warns
+  `PREPROCESSING_QUESTIONS_OPEN`; default preprocessing no longer uses
+  `sample_normal`, `sample_categorical` or `fill_mean`.
+- `config_to_yaml` is now built with `yaml.safe_dump` and round-trips
+  losslessly: uneven epsilon grids are written as `values`, `neighborhood` and
+  the new impute keys are written, and the explanatory YAML comments are gone.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added
