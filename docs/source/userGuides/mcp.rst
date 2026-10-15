@@ -50,7 +50,7 @@ The Value Prop
 - Generates a statistical dossier (z-scores, trait profiles, separation metrics)
 - You read the story, not a confusion matrix
 
-Claude handles all the messy parts: imputation, categorical encoding, parameter selection, and iterating when the results look wrong. Dedicated tools let Claude fix preprocessing errors in ≤2 tool calls before re-running the sweep.
+Claude handles the heavy lifting: measuring column evidence, drafting a versioned preprocessing plan (asking you plain-language questions only when domain meaning is ambiguous), calibrating parameters, and iterating on the sweep.
 
 Setup
 -----
@@ -181,10 +181,10 @@ Once connected, give the AI a goal rather than instructions. The AI already know
 Under the hood the AI will:
 
 1. **Characterize geometry** — probe k-NN distances and projection dimensions to ground parameter choices; on large datasets, may include a ``minhash_advisory`` with suggested ``cosmic_graph.minhash_d`` that agents can apply via ``refine_config`` before expensive sweeps
-2. **Generate a preprocessing config** — recommend impute/encode rules for every column with rationale
-3. **Validate preprocessing** — dry-run the preprocessing stage before committing to a full sweep
-4. **Run a topological sweep** — find the most stable version of the data's shape
-5. **Iterate automatically** — repair preprocessing errors and tune epsilon if results are degenerate
+2. **Draft a preprocessing plan** — measure column evidence, apply labeled defaults, and surface plain-language questions ranked by how much each choice moves the map's neighborhoods
+3. **Resolve open preprocessing questions** — record what can be inferred from context (``source="agent"``) and ask you in plain language only when domain meaning is genuinely ambiguous (``source="user"``)
+4. **Calibrate and run a topological sweep** — build a calibrated baseline config from the plan and find the most stable version of the data's shape
+5. **Iterate on the sweep grid** — diagnose graph morphology and tune projection dimensions or epsilon when results are degenerate
 6. **Generate a Dossier** — statistical profiles of each discovered subpopulation
 
 Available MCP Tools
@@ -208,7 +208,7 @@ Core loop
    * - **characterize_dataset**
      - Quick exploratory summary: k-NN distances (is your data sparse or dense?), projection dimensions, missing value patterns. On large datasets (``n`` above the advisor threshold), may include ``minhash_advisory`` with suggested ``minhash_d``, memory estimate, and error bounds.
    * - **create_config**
-     - Builds a baseline sweep config calibrated against the *processed* feature space (after preprocessing + scaling) for a given ``dataset_id``. The mandatory first config-generation step — never let the agent guess parameters.
+     - Builds a baseline sweep config calibrated against the *processed* feature space (after preprocessing + scaling) for a given ``dataset_id`` and optional ``plan_id`` from ``draft_preprocessing_plan`` (or drafts baseline defaults when ``plan_id`` is omitted, emitting a ``PREPROCESSING_QUESTIONS_OPEN`` warning if open questions remain). The mandatory first config-generation step — never let the agent guess parameters.
    * - **run_topological_sweep**
      - Execute the full Pulsar pipeline: imputation → projection → Ball Mapper → cosmic graph, from inline YAML or a session's active config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
    * - **diagnose_cosmic_graph**
@@ -233,14 +233,71 @@ Preprocessing helpers
      - What It Does
    * - **probe_columns**
      - Per-column drilldown (≤20 columns per call): sample values, missingness, distributions. Use after ``characterize_dataset`` when a specific column needs a closer look.
-   * - **recommend_preprocessing**
-     - Analyze column profiles and return a complete ``preprocessing:`` YAML block with per-column rationale. Call this before the first sweep to avoid hand-writing impute/encode rules from raw stats.
+   * - **draft_preprocessing_plan**
+     - Measures column-level evidence (shared missing masks, conditional missingness, exact duplicates and sums, date/categorical/ID kinds) and stores a versioned ``PreprocessingPlan`` (``plan_id``, ``revision=1``) in the session with labeled defaults and open plain-language questions ranked by measured ``stakes``.
+   * - **edit_preprocessing_plan**
+     - Applies question ``answers`` and/or per-column ``edits`` to an existing plan at ``base_revision``, records who decided each change (``source="agent"`` or ``"user"``), dry-runs ``preprocess_dataframe`` to validate the schema, and returns the updated revision and ``preprocessing_yaml``.
    * - **validate_preprocessing_config**
-     - Dry-run only the preprocessing stage against the session data — no projection, no sweep cost. Returns PASS with a schema summary, or a structured error ready to pass to ``repair_preprocessing_config``.
-   * - **repair_preprocessing_config**
-     - Parse a preprocessing error from ``run_topological_sweep``, look up the offending column in the dataset profile, and return a patched config with a change log. Fixes most errors in one call.
+     - Dry-run only the preprocessing stage against the session data — no projection, no sweep cost. Returns PASS with a schema summary, or a structured error pointing to ``edit_preprocessing_plan`` or YAML edits.
    * - **validate_config**
      - Validates and normalizes a complete config into canonical YAML, independent of running a sweep.
+
+**Tool contracts and payload headlines**
+
+- **draft_preprocessing_plan**:
+
+  - *Purpose*: Measures dataset evidence without hard-coded domain rules and drafts a versioned preprocessing plan where every choice is labeled with ``decided_by`` (``"default"``, ``"agent"``, or ``"user"``) and ``status`` (``"resolved"`` or ``"open"``). Open choices carry plain-language question cards across five topics (``blank_meaning``, ``conditional_column``, ``date_columns``, ``duplicate_signal``, ``outcome_columns``) sorted by measured ``stakes`` (``neighbors_kept``, the k-NN neighborhood Jaccard overlap on a deterministic row sample vs. the default option, plus ``feature_count_delta``).
+  - *Parameters*: ``dataset_id``, ``target_columns=[]``, ``entity_column=""``, ``time_column=""``, ``stakes=True``, ``detail="summary" | "full"``, ``question_limit=8``, ``evidence_limit=12``, ``response_format="markdown" | "json"``.
+  - *Payload headline*: ``plan_id``, ``dataset_id``, ``revision``, ``plan_fingerprint``, ``counts`` (``columns``, ``features``, ``dropped``, ``open_entries``, ``open_questions``, ``decided_by``), ``processed_space`` (``feature_count``, ``missing_marker_count``, ``dummy_column_count``), capped ``questions`` (with ``options``, ``default_option_id``, and ``stakes``), ``evidence`` (``missing_groups``, ``mask_dependencies``, ``relations``, ``rare_binary_leverage``, ``constant_columns_preview``, ``datetime_columns_preview``, ``integer_coded_preview``), ``weak_hints`` (``event_partner_columns``), ``preprocessing_yaml``, ``cost``, ``how_to_use``, and ``next_tools`` (``["edit_preprocessing_plan", "create_config", "probe_columns"]``). ``detail="full"`` adds per-column ``entries`` and uncapped lists.
+
+- **edit_preprocessing_plan**:
+
+  - *Purpose*: Updates a stored plan at ``base_revision`` with question ``answers`` or direct column ``edits`` while tracking decision provenance (``source="agent"`` when inferred from context or schema; ``source="user"`` when relaying a human answer). Stale ``base_revision`` values fail with ``SESSION_REVISION_CONFLICT``; invalid dry-run schemas return ``validation: {valid: false, error: ...}`` so the agent can adjust before running a sweep.
+  - *Parameters*: ``plan_id``, ``base_revision``, ``answers=[{question_id, option_id}]``, ``edits=[{column, role?, impute_method?, impute_value?, indicator?, encode?}]``, ``source="agent" | "user"``, ``response_format="markdown" | "json"``.
+  - *Payload headline*: ``plan_id``, ``revision``, ``plan_fingerprint``, ``changes`` (capped diff of ``{column, field, was, now}``), ``counts``, ``processed_space``, ``validation`` (``{valid, error}``), ``open_questions_preview``, ``preprocessing_yaml``, and ``next_tools``.
+
+**Example question/answer flow**
+
+The plan is evidence plus labeled defaults, not a verdict, and ``stakes`` measure how much the map moves rather than a score to optimize. Agents resolve what they can infer from context (``source="agent"``) and ask the user only high-stakes questions whose answer cannot be inferred, rephrased in the user's own domain language:
+
+1. ``draft_preprocessing_plan(dataset_id="ds_1")`` reports missing group ``mg1`` (``n_inpatient_claims``, ``inpatient_days``, ``inpatient_payment``) where all three columns are blank on the exact same rows and never record a ``0``. It opens question ``q1`` (topic ``blank_meaning``, ``stakes.neighbors_kept: 0.41``) with options ``none`` (fill with ``0``, no missingness marker) and ``unknown`` (default: ``fill_median`` plus shared marker ``mg1_was_missing``).
+2. Rather than repeating server wording verbatim, the agent asks the clinician in domain terms: *"If a patient has no recorded hospital stays, does that mean they had none, or that we don't know?"*
+3. The clinician replies that blanks mean zero stays. The agent records the answer with ``source="user"``:
+
+   .. code-block:: python
+
+      edit_preprocessing_plan(
+          plan_id="pp_9f2c1a04b8",
+          base_revision=1,
+          answers=[{"question_id": "q1", "option_id": "none"}],
+          source="user",
+      )
+
+4. The agent passes the updated ``plan_id`` to ``create_config(dataset_id="ds_1", plan_id="pp_9f2c1a04b8")``, which embeds ``# preprocessing plan pp_9f2c1a04b8 revision 2 (<fingerprint>)`` and the resolved ``preprocessing:`` block into the sweep config.
+
+**Preprocessing config reference**
+
+In addition to ``fill_mean``, ``fill_median``, ``fill_mode``, ``sample_normal``, ``sample_categorical``, and ``one_hot``, the ``preprocessing:`` YAML block supports:
+
+- ``impute.<column>.method: fill_value`` with ``value: <number | string>`` — replaces missing entries with a finite numeric constant (for numeric columns, e.g. ``{method: fill_value, value: 0}``) or a literal category label (for string/categorical columns before ``one_hot``, e.g. ``{method: fill_value, value: "(blank)"}``). Works even when a column has 100% missing values.
+- ``impute.<column>.indicator: true | false`` (default ``true``) — controls whether ``preprocess_dataframe`` emits a per-column ``<column>_was_missing`` binary indicator. Per-column indicators are emitted only when ``indicator: true`` and the column does not belong to any group in ``missing_indicator_groups``.
+- ``missing_indicator_groups: {<group_name>: [<col1>, <col2>, ...]}`` — emits a single shared ``<group_name>_was_missing`` (``0.0`` / ``1.0``) column indicating whether any listed column was missing in the input data. Evaluated *before* ``drop_columns`` so dropped columns (such as raw dates) can still contribute a presence/absence flag without duplicating identical per-column markers across a block.
+
+.. code-block:: yaml
+
+   # preprocessing plan pp_9f2c1a04b8 revision 2 (a1b2c3d4e5f6)
+   preprocessing:
+     drop_columns: ["patient_id", "death_date"]
+     missing_indicator_groups:
+       mg1: ["outpatient_visits", "outpatient_cost"]
+     impute:
+       n_inpatient_claims: {method: fill_value, value: 0, indicator: false}
+       inpatient_days: {method: fill_value, value: 0, indicator: false}
+       outpatient_visits: {method: fill_median, indicator: false}
+       outpatient_cost: {method: fill_median, indicator: false}
+       race: {method: fill_value, value: "(blank)", indicator: false}
+     encode:
+       race: {method: one_hot}
 
 Sweep history and graph structure
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
