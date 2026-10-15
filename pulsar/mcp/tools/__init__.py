@@ -43,8 +43,8 @@ from pulsar.mcp.tools.reporting import (
     export_dataset_bundle,
 )
 from pulsar.mcp.tools.preprocessing import (
-    recommend_preprocessing,
-    repair_preprocessing_config,
+    draft_preprocessing_plan,
+    edit_preprocessing_plan,
     validate_preprocessing_config,
 )
 from pulsar.mcp.tools.longitudinal import (
@@ -123,8 +123,8 @@ ALL_TOOLS_LIST = [
     probe_columns,
     export_dataset_bundle,
     # Preprocessing
-    recommend_preprocessing,
-    repair_preprocessing_config,
+    draft_preprocessing_plan,
+    edit_preprocessing_plan,
     validate_preprocessing_config,
     # Longitudinal
     build_longitudinal_graph,
@@ -167,8 +167,8 @@ __all__ = [
     "export_html_report",
     "probe_columns",
     "export_dataset_bundle",
-    "recommend_preprocessing",
-    "repair_preprocessing_config",
+    "draft_preprocessing_plan",
+    "edit_preprocessing_plan",
     "validate_preprocessing_config",
     "build_longitudinal_graph",
     "diagnose_longitudinal_graph",

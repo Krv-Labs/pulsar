@@ -30,8 +30,8 @@ from pulsar.mcp.tools import reporting as reporting_mod
 # tool name -> (read_only, idempotent)
 EXPECTED_ANNOTATIONS: dict[str, tuple[bool, bool | None]] = {
     "probe_columns": (True, True),
-    "recommend_preprocessing": (True, True),
-    "repair_preprocessing_config": (True, True),
+    "draft_preprocessing_plan": (False, False),
+    "edit_preprocessing_plan": (False, False),
     "validate_preprocessing_config": (True, True),
     "ingest_dataset": (False, None),
     "sample_longitudinal_entities": (False, None),
@@ -47,7 +47,11 @@ UPLOAD_TOOLS = (
     ingestion_mod.append_dataset_chunk,
     ingestion_mod.finalize_dataset_upload,
 )
-TIMEOUT_TOOLS = {"export_html_report", "export_dataset_bundle"}
+TIMEOUT_TOOLS = {
+    "export_html_report",
+    "export_dataset_bundle",
+    "draft_preprocessing_plan",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -144,8 +148,8 @@ def test_every_owned_tool_declares_metadata_and_described_params():
             assert "run_id" in tools[name].input_schema["properties"]
         for name in (
             "probe_columns",
-            "recommend_preprocessing",
-            "repair_preprocessing_config",
+            "draft_preprocessing_plan",
+            "edit_preprocessing_plan",
             "validate_preprocessing_config",
         ):
             assert "run_id" not in tools[name].input_schema["properties"]
@@ -273,51 +277,27 @@ def test_error_paths_for_ingestion_and_preprocessing(tmp_path):
             )
             await _call(
                 client,
-                "recommend_preprocessing",
+                "draft_preprocessing_plan",
                 {"dataset_id": ""},
                 error="MISSING_INPUT",
             )
             await _call(
                 client,
-                "recommend_preprocessing",
+                "draft_preprocessing_plan",
                 {"dataset_id": "ds_nope"},
                 error="DATASET_ID_UNKNOWN",
             )
             await _call(
                 client,
-                "recommend_preprocessing",
-                {"dataset_id": dataset_id, "rationale_limit": 0},
-                error="INVALID_RATIONALE_LIMIT",
+                "draft_preprocessing_plan",
+                {"dataset_id": dataset_id, "target_columns": ["no_such_col"]},
+                error="INVALID_ARGUMENT",
             )
             await _call(
                 client,
-                "repair_preprocessing_config",
-                {
-                    "error_message": "x",
-                    "config_yaml": "run: {name: x}",
-                    "dataset_id": "ds_nope",
-                },
-                error="DATASET_ID_UNKNOWN",
-            )
-            await _call(
-                client,
-                "repair_preprocessing_config",
-                {
-                    "error_message": "something unrelated",
-                    "config_yaml": "run: {name: x}",
-                    "dataset_id": dataset_id,
-                },
-                error="ERROR_PATTERN_UNRECOGNIZED",
-            )
-            await _call(
-                client,
-                "repair_preprocessing_config",
-                {
-                    "error_message": "x",
-                    "config_yaml": "- just\n- a list",
-                    "dataset_id": dataset_id,
-                },
-                error="CONFIG_YAML_INVALID",
+                "edit_preprocessing_plan",
+                {"plan_id": "pp_nope"},
+                error="PLAN_ID_UNKNOWN",
             )
 
     asyncio.run(_run())
@@ -404,11 +384,12 @@ def test_full_loop_variants_and_exports(tmp_path):
                 await _call(client, "ingest_dataset", {"path": str(csv)})
             ).structured_content["dataset_id"]
 
+            last_plan_id = None
             for detail in ("summary", "full"):
                 for fmt in ("markdown", "json"):
                     res = await _call(
                         client,
-                        "recommend_preprocessing",
+                        "draft_preprocessing_plan",
                         {
                             "dataset_id": dataset_id,
                             "detail": detail,
@@ -417,15 +398,29 @@ def test_full_loop_variants_and_exports(tmp_path):
                     )
                     sc = res.structured_content
                     assert sc["detail"] == detail
-                    assert ("rationale" in sc) is (detail == "full")
+                    assert ("entries" in sc) is (detail == "full")
+                    assert sc["preprocessing_yaml"]
                     text = res.content[0].text
                     assert text.startswith("#") is (fmt == "markdown")
-            summary = (
-                await _call(
-                    client, "recommend_preprocessing", {"dataset_id": dataset_id}
+                    last_plan_id = sc["plan_id"]
+
+            assert last_plan_id is not None
+            # Edit plan (markdown + json)
+            for fmt in ("markdown", "json"):
+                edit_res = await _call(
+                    client,
+                    "edit_preprocessing_plan",
+                    {
+                        "plan_id": last_plan_id,
+                        "answers": [{"question_id": "q1", "option_id": "none_of_them"}],
+                        "response_format": fmt,
+                    },
                 )
-            ).structured_content
-            assert summary["preprocessing_yaml"]
+                esc = edit_res.structured_content
+                assert esc["plan_id"] == last_plan_id
+                assert esc["revision"] >= 2
+                assert esc["validation"]["valid"] is True
+                assert edit_res.content[0].text.startswith("#") is (fmt == "markdown")
 
             for fmt in ("markdown", "json"):
                 res = await _call(
@@ -441,8 +436,24 @@ def test_full_loop_variants_and_exports(tmp_path):
                 assert res.structured_content["columns_returned"] == 2
                 assert res.content[0].text.startswith("#") is (fmt == "markdown")
 
-            cfg = await _call(client, "create_config", {"dataset_id": dataset_id})
+            # create_config with explicit plan_id
+            cfg = await _call(
+                client,
+                "create_config",
+                {"dataset_id": dataset_id, "plan_id": last_plan_id},
+            )
             config_yaml = cfg.structured_content["config_yaml"]
+            assert (
+                cfg.structured_content["preprocessing_plan"]["source"]
+                == "explicit_plan"
+            )
+            assert (
+                cfg.structured_content["preprocessing_plan"]["plan_id"] == last_plan_id
+            )
+            fp = cfg.structured_content["preprocessing_plan"]["plan_fingerprint"]
+            assert f"# preprocessing plan {last_plan_id} revision " in config_yaml
+            assert f"({fp})" in config_yaml
+
             await _call(
                 client,
                 "validate_preprocessing_config",
@@ -454,20 +465,6 @@ def test_full_loop_variants_and_exports(tmp_path):
             )
             assert res.structured_content["valid"] is True
             assert res.structured_content["input_rows"] == 24
-
-            res = await _call(
-                client,
-                "repair_preprocessing_config",
-                {
-                    "error_message": "NaN values remain after imputation: 'f1' (3 rows)",
-                    "config_yaml": config_yaml,
-                    "dataset_id": dataset_id,
-                },
-            )
-            sc = res.structured_content
-            assert sc["change_count"] == 1 and sc["changes"][0]["column"] == "f1"
-            assert "impute" in sc["config_yaml"]
-            assert "## Patched Config" in res.content[0].text
 
             sweep = await _call(
                 client,
@@ -594,14 +591,16 @@ def test_schemas_are_declared_on_every_owned_function():
                 assert meta.output_schema["type"] == "object", name
 
 
-def test_recommend_preprocessing_dataset_id_is_required_in_schema():
+def test_draft_preprocessing_plan_dataset_id_is_required_in_schema():
     async def _run():
         async with Client(_server()) as client:
             tools = {t.name: t for t in await client.list_tools()}
-        schema = tools["recommend_preprocessing"].input_schema
+        schema = tools["draft_preprocessing_plan"].input_schema
         assert "dataset_id" in schema["required"]
         assert "default" not in schema["properties"]["dataset_id"]
         assert "Required" in schema["properties"]["dataset_id"]["description"]
+        edit_schema = tools["edit_preprocessing_plan"].input_schema
+        assert "plan_id" in edit_schema["required"]
         validate = tools["validate_preprocessing_config"].input_schema
         assert "dataset_id" in validate["properties"]
         assert "dataset_id" not in validate.get("required", [])
@@ -657,7 +656,11 @@ def test_validate_preprocessing_config_does_not_rebind_other_session_data(tmp_pa
             cfg = (
                 await _call(client, "create_config", {"dataset_id": id_a})
             ).structured_content["config_yaml"]
-            await _call(client, "recommend_preprocessing", {"dataset_id": id_a})
+            await _call(
+                client,
+                "draft_preprocessing_plan",
+                {"dataset_id": id_a, "stakes": False},
+            )
             bound = {k: v.data_dataset_id for k, v in session_mod._sessions.items()}
             res = await _call(
                 client,
@@ -671,49 +674,153 @@ def test_validate_preprocessing_config_does_not_rebind_other_session_data(tmp_pa
     asyncio.run(_run())
 
 
-def test_repair_errors_carry_codes_from_the_source(tmp_path):
+def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
+    from tests.fixtures.preprocessing_traps import make_preprocessing_traps
+
     async def _run():
-        csv = _write_csv(tmp_path / "r.csv")
+        traps_csv = tmp_path / "traps.csv"
+        make_preprocessing_traps(n=120, seed=0).to_csv(traps_csv, index=False)
+        other_csv = _write_csv(tmp_path / "other.csv", n_rows=20)
         async with Client(_server()) as client:
-            dataset_id = (
-                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ds_traps = (
+                await _call(client, "ingest_dataset", {"path": str(traps_csv)})
             ).structured_content["dataset_id"]
-            base = {"dataset_id": dataset_id}
-            res = await _call(
-                client,
-                "repair_preprocessing_config",
-                {**base, "error_message": "x", "config_yaml": "- a\n- b"},
-                error="CONFIG_YAML_INVALID",
+            ds_other = (
+                await _call(client, "ingest_dataset", {"path": str(other_csv)})
+            ).structured_content["dataset_id"]
+
+            # 1. create_config WITHOUT plan_id drafts baseline defaults and warns PREPROCESSING_QUESTIONS_OPEN
+            cfg_no_plan = (
+                await _call(client, "create_config", {"dataset_id": ds_traps})
+            ).structured_content
+            assert cfg_no_plan["preprocessing_plan"]["source"] == "baseline_defaults"
+            assert cfg_no_plan["preprocessing_plan"]["plan_id"].startswith("pp_")
+            assert cfg_no_plan["preprocessing_plan"]["open_questions"] > 0
+            assert any(
+                w["code"] == "PREPROCESSING_QUESTIONS_OPEN"
+                for w in cfg_no_plan["warnings"]
             )
-            assert "mapping" in res.structured_content["agent_action"]
-            res = await _call(
+
+            # 2. draft_preprocessing_plan + edit_preprocessing_plan revision and conflict checks
+            draft_sc = (
+                await _call(
+                    client,
+                    "draft_preprocessing_plan",
+                    {
+                        "dataset_id": ds_traps,
+                        "stakes": True,
+                        "response_format": "json",
+                    },
+                )
+            ).structured_content
+            plan_id = draft_sc["plan_id"]
+            assert draft_sc["revision"] == 1
+            assert draft_sc["counts"]["open_questions"] >= 4
+
+            # Answer a question at base_revision=1 -> revision 2
+            q_id = draft_sc["questions"][0]["question_id"]
+            opt_id = draft_sc["questions"][0]["options"][0]["option_id"]
+            edit_sc = (
+                await _call(
+                    client,
+                    "edit_preprocessing_plan",
+                    {
+                        "plan_id": plan_id,
+                        "base_revision": 1,
+                        "answers": [{"question_id": q_id, "option_id": opt_id}],
+                        "source": "user",
+                        "response_format": "json",
+                    },
+                )
+            ).structured_content
+            assert edit_sc["revision"] == 2
+
+            # Stale base_revision=1 -> SESSION_REVISION_CONFLICT
+            await _call(
                 client,
-                "repair_preprocessing_config",
-                {**base, "error_message": "totally unknown", "config_yaml": "a: 1"},
-                error="ERROR_PATTERN_UNRECOGNIZED",
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "base_revision": 1,
+                    "edits": [{"column": "bmi", "role": "drop"}],
+                },
+                error="SESSION_REVISION_CONFLICT",
             )
-            assert (
-                "validate_preprocessing_config"
-                in res.structured_content["agent_action"]
+
+            # Invalid answer -> INVALID_ARGUMENT
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "answers": [{"question_id": "q_nope", "option_id": "none"}],
+                },
+                error="INVALID_ARGUMENT",
+            )
+
+            # Invalid edit -> INVALID_ARGUMENT
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "edits": [{"column": "unknown_col", "role": "drop"}],
+                },
+                error="INVALID_ARGUMENT",
+            )
+
+            # Edit that causes dry-run failure still returns tool success with validation.valid == False
+            bad_edit = (
+                await _call(
+                    client,
+                    "edit_preprocessing_plan",
+                    {
+                        "plan_id": plan_id,
+                        "edits": [
+                            {
+                                "column": "patient_id",
+                                "role": "feature",
+                                "encode": None,
+                            }
+                        ],
+                        "response_format": "json",
+                    },
+                )
+            ).structured_content
+            assert bad_edit["validation"]["valid"] is False
+            assert bad_edit["validation"]["error"]
+            assert bad_edit["processed_space"] is None
+
+            # Restore patient_id role="id"
+            fixed_edit = (
+                await _call(
+                    client,
+                    "edit_preprocessing_plan",
+                    {
+                        "plan_id": plan_id,
+                        "edits": [{"column": "patient_id", "role": "id"}],
+                        "response_format": "json",
+                    },
+                )
+            ).structured_content
+            assert fixed_edit["validation"]["valid"] is True
+
+            # 3. create_config with wrong dataset's plan_id -> INVALID_ARGUMENT
+            await _call(
+                client,
+                "create_config",
+                {"dataset_id": ds_other, "plan_id": plan_id},
+                error="INVALID_ARGUMENT",
+            )
+            # Unknown plan_id -> INVALID_ARGUMENT
+            await _call(
+                client,
+                "create_config",
+                {"dataset_id": ds_traps, "plan_id": "pp_missing"},
+                error="INVALID_ARGUMENT",
             )
 
     asyncio.run(_run())
-
-
-def test_repair_config_source_returns_coded_errors():
-    from pulsar.mcp.preprocessing import repair_config
-
-    for cfg, msg, code in [
-        (
-            "- a",
-            "NaN values remain after imputation: 'f1' (3 rows)",
-            "CONFIG_YAML_INVALID",
-        ),
-        ("a: 1", "nothing recognizable", "ERROR_PATTERN_UNRECOGNIZED"),
-    ]:
-        res = repair_config(cfg, msg, {})
-        assert res.structured_content["error_code"] == code
-        assert res.structured_content["agent_action"]
 
 
 def test_validate_preprocessing_config_malformed_yaml_is_config_yaml_invalid(

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
-import re
 from typing import Annotated, Any, Literal
 
 import yaml
@@ -12,26 +10,22 @@ from fastmcp.tools import ToolResult
 from pydantic import Field
 
 from pulsar.config import load_config
-from pulsar.preprocessing import preprocess_dataframe
 from pulsar.mcp.errors import mcp_error, path_access_error, unknown_handle_error
-from pulsar.mcp.results import mcp_result
-from pulsar.mcp.toolmeta import (
-    BOOL,
-    INT,
-    STR,
-    arr,
-    enum,
-    obj,
-    tool_meta,
-)
 from pulsar.mcp.preprocessing import (
-    _preprocessing_block_to_yaml,
-    _recommend_preprocessing_block,
-    build_preprocessing_recommendation_payload,
-    enrich_dirty_numeric_samples,
-    preprocessing_recommendation_to_markdown,
-    repair_config,
+    build_draft_plan_payload,
+    build_edit_plan_payload,
+    draft_plan_payload_to_markdown,
+    edit_plan_payload_to_markdown,
 )
+from pulsar.mcp.preprocessing_plan import (
+    PlanEditError,
+    PreprocessingPlan,
+    apply_answers_and_edits,
+    diff_plan_entries,
+    draft_plan,
+    dry_run_processed_space,
+)
+from pulsar.mcp.results import mcp_result
 from pulsar.mcp.session import (
     _get_session,
     _load_session_dataframe,
@@ -39,79 +33,285 @@ from pulsar.mcp.session import (
     _read_dataset_file,
     _resolve_dataset_path,
 )
+from pulsar.mcp.toolmeta import (
+    ANY,
+    BOOL,
+    INT,
+    NUM,
+    STR,
+    arr,
+    default_tool_timeout,
+    enum,
+    nullable,
+    obj,
+    tool_meta,
+)
+from pulsar.preprocessing import preprocess_dataframe
 
 logger = logging.getLogger(__name__)
 
 _OPEN = obj({}, additional=True)
 
-_RECOMMEND_SCHEMA = obj(
+_COUNTS_SCHEMA = obj(
     {
-        "status": enum(["ok"]),
-        "detail": enum(["summary", "full"]),
-        "recommended_action": STR,
-        "next_tool_call": obj({"tool": STR, "args": _OPEN}, ["tool"], additional=True),
-        "preprocessing_yaml": STR,
-        "decision_counts": obj(
-            {k: INT for k in ("drop", "impute", "encode", "review", "no_action")},
-            ["drop", "impute", "encode", "review", "no_action"],
+        "columns": INT,
+        "features": INT,
+        "dropped": INT,
+        "open_entries": INT,
+        "open_questions": INT,
+        "decided_by": obj(
+            {"default": INT, "agent": INT, "user": INT},
+            ["default", "agent", "user"],
         ),
-        "expansion_estimate": INT,
-        "warnings": arr(_OPEN),
-        "dirty_numeric_detection": _OPEN,
-        "actioned_columns_preview": obj(
-            {"drop": arr(STR), "impute": arr(STR), "encode": arr(STR)},
-            ["drop", "impute", "encode"],
-        ),
-        "high_missingness_columns": arr(_OPEN),
-        "high_missingness_columns_omitted": INT,
-        "numeric_categorical_candidates": arr(_OPEN),
-        "numeric_categorical_candidates_omitted": INT,
-        "rationale_preview": arr(_OPEN),
-        "rationale_omitted": INT,
-        "recommended_next_tools": arr(STR),
-        # detail="full" only
-        "rationale": arr(_OPEN),
-        "column_decisions": _OPEN,
-        "high_missingness_columns_full": arr(_OPEN),
-        "numeric_categorical_candidates_full": arr(_OPEN),
-        "profile_source": _OPEN,
     },
     [
-        "status",
-        "detail",
-        "recommended_action",
-        "next_tool_call",
-        "preprocessing_yaml",
-        "decision_counts",
-        "expansion_estimate",
-        "warnings",
-        "dirty_numeric_detection",
-        "actioned_columns_preview",
-        "high_missingness_columns",
-        "high_missingness_columns_omitted",
-        "numeric_categorical_candidates",
-        "numeric_categorical_candidates_omitted",
-        "rationale_preview",
-        "rationale_omitted",
-        "recommended_next_tools",
+        "columns",
+        "features",
+        "dropped",
+        "open_entries",
+        "open_questions",
+        "decided_by",
     ],
 )
 
-_REPAIR_SCHEMA = obj(
+_PROCESSED_SPACE_SCHEMA = nullable(
+    obj(
+        {
+            "feature_count": INT,
+            "missing_marker_count": INT,
+            "dummy_column_count": INT,
+        },
+        ["feature_count", "missing_marker_count", "dummy_column_count"],
+    )
+)
+
+_MARKER_LEGEND_ITEM_SCHEMA = obj(
     {
-        "status": enum(["ok"]),
-        "classification": STR,
-        "change_count": INT,
-        "changes": arr(
+        "marker_column": STR,
+        "columns_preview": arr(STR),
+        "columns_count": INT,
+    },
+    ["marker_column", "columns_preview", "columns_count"],
+)
+
+_QUESTION_ITEM_SCHEMA = obj(
+    {
+        "question_id": STR,
+        "topic": STR,
+        "text": STR,
+        "applies_to_preview": arr(STR),
+        "applies_to_count": INT,
+        "rows_affected": INT,
+        "options": arr(
             obj(
-                {"column": STR, "was": STR, "now": STR, "rationale": STR},
-                ["column", "was", "now", "rationale"],
+                {"option_id": STR, "label": STR, "effect": STR},
+                ["option_id", "label", "effect"],
             )
         ),
-        "config_yaml": STR,
-        "next_step": STR,
+        "default_option_id": STR,
+        "stakes": nullable(
+            obj(
+                {
+                    "neighbors_kept": NUM,
+                    "feature_count_delta": INT,
+                    "rows_sampled": INT,
+                    "k": INT,
+                },
+                ["neighbors_kept", "feature_count_delta", "rows_sampled", "k"],
+            )
+        ),
     },
-    ["status", "classification", "change_count", "changes", "config_yaml", "next_step"],
+    [
+        "question_id",
+        "topic",
+        "text",
+        "applies_to_preview",
+        "applies_to_count",
+        "rows_affected",
+        "options",
+        "default_option_id",
+        "stakes",
+    ],
+)
+
+_EVIDENCE_SCHEMA = obj(
+    {
+        "missing_groups": arr(
+            obj(
+                {
+                    "group_id": STR,
+                    "columns_preview": arr(STR),
+                    "columns_count": INT,
+                    "n_missing": INT,
+                    "zero_free_columns_preview": arr(STR),
+                },
+                [
+                    "group_id",
+                    "columns_preview",
+                    "columns_count",
+                    "n_missing",
+                    "zero_free_columns_preview",
+                ],
+            )
+        ),
+        "missing_groups_omitted": INT,
+        "mask_dependencies": arr(
+            obj(
+                {
+                    "column": STR,
+                    "partner": STR,
+                    "relation": STR,
+                    "n_missing": INT,
+                    "n_other_partners": INT,
+                },
+                ["column", "partner", "relation", "n_missing", "n_other_partners"],
+            )
+        ),
+        "mask_dependencies_omitted": INT,
+        "relations": arr(
+            obj(
+                {
+                    "kind": STR,
+                    "target": STR,
+                    "sources": arr(STR),
+                    "value": NUM,
+                    "rows_used": INT,
+                },
+                ["kind", "target", "sources", "value", "rows_used"],
+            )
+        ),
+        "relations_omitted": INT,
+        "rare_binary_leverage": arr(
+            obj(
+                {"column": STR, "minority_fraction": NUM, "max_abs_z": NUM},
+                ["column", "minority_fraction", "max_abs_z"],
+            )
+        ),
+        "rare_binary_leverage_omitted": INT,
+        "constant_columns_preview": arr(STR),
+        "constant_columns_count": INT,
+        "constant_columns_omitted": INT,
+        "datetime_columns_preview": arr(STR),
+        "datetime_columns_count": INT,
+        "datetime_columns_omitted": INT,
+        "integer_coded_preview": arr(
+            obj({"column": STR, "n_unique": INT}, ["column", "n_unique"])
+        ),
+        "integer_coded_omitted": INT,
+    },
+    [
+        "missing_groups",
+        "missing_groups_omitted",
+        "mask_dependencies",
+        "mask_dependencies_omitted",
+        "relations",
+        "relations_omitted",
+        "rare_binary_leverage",
+        "rare_binary_leverage_omitted",
+        "constant_columns_preview",
+        "constant_columns_count",
+        "constant_columns_omitted",
+        "datetime_columns_preview",
+        "datetime_columns_count",
+        "datetime_columns_omitted",
+        "integer_coded_preview",
+        "integer_coded_omitted",
+    ],
+)
+
+_DRAFT_PLAN_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "plan_id": STR,
+        "dataset_id": STR,
+        "revision": INT,
+        "plan_fingerprint": STR,
+        "detail": enum(["summary", "full"]),
+        "counts": _COUNTS_SCHEMA,
+        "processed_space": _PROCESSED_SPACE_SCHEMA,
+        "marker_legend": arr(_MARKER_LEGEND_ITEM_SCHEMA),
+        "marker_legend_omitted": INT,
+        "questions": arr(_QUESTION_ITEM_SCHEMA),
+        "questions_omitted": INT,
+        "evidence": _EVIDENCE_SCHEMA,
+        "weak_hints": obj(
+            {"event_partner_columns": arr(STR)},
+            ["event_partner_columns"],
+        ),
+        "preprocessing_yaml": STR,
+        "cost": _OPEN,
+        "how_to_use": STR,
+        "next_tools": arr(STR),
+        # detail="full" only
+        "entries": _OPEN,
+    },
+    [
+        "status",
+        "plan_id",
+        "dataset_id",
+        "revision",
+        "plan_fingerprint",
+        "detail",
+        "counts",
+        "processed_space",
+        "marker_legend",
+        "marker_legend_omitted",
+        "questions",
+        "questions_omitted",
+        "evidence",
+        "weak_hints",
+        "preprocessing_yaml",
+        "cost",
+        "how_to_use",
+        "next_tools",
+    ],
+)
+
+_EDIT_PLAN_SCHEMA = obj(
+    {
+        "status": enum(["ok"]),
+        "plan_id": STR,
+        "dataset_id": STR,
+        "revision": INT,
+        "plan_fingerprint": STR,
+        "changes": arr(
+            obj(
+                {"column": STR, "field": STR, "was": ANY, "now": ANY},
+                ["column", "field", "was", "now"],
+            )
+        ),
+        "changes_omitted": INT,
+        "counts": _COUNTS_SCHEMA,
+        "processed_space": _PROCESSED_SPACE_SCHEMA,
+        "marker_legend": arr(_MARKER_LEGEND_ITEM_SCHEMA),
+        "marker_legend_omitted": INT,
+        "validation": obj(
+            {"valid": BOOL, "error": nullable(STR)},
+            ["valid", "error"],
+        ),
+        "open_questions_preview": arr(_QUESTION_ITEM_SCHEMA),
+        "open_questions_omitted": INT,
+        "preprocessing_yaml": STR,
+        "next_tools": arr(STR),
+    },
+    [
+        "status",
+        "plan_id",
+        "dataset_id",
+        "revision",
+        "plan_fingerprint",
+        "changes",
+        "changes_omitted",
+        "counts",
+        "processed_space",
+        "marker_legend",
+        "marker_legend_omitted",
+        "validation",
+        "open_questions_preview",
+        "open_questions_omitted",
+        "preprocessing_yaml",
+        "next_tools",
+    ],
 )
 
 _VALIDATE_SCHEMA = obj(
@@ -141,101 +341,50 @@ _VALIDATE_SCHEMA = obj(
     ],
 )
 
-_REPAIR_ROW = re.compile(r"^\|\s*`(?P<col>[^`]*)`\s*\|(?P<rest>.*)\|\s*$")
 
-
-def _parse_repair_markdown(markdown: str) -> dict[str, Any]:
-    """Split repair_config's markdown report into structured fields."""
-    cls = re.search(r"## Error Classification\n(.*?) — (\d+) change", markdown)
-    changes = []
-    for line in markdown.splitlines():
-        m = _REPAIR_ROW.match(line)
-        if not m:
-            continue
-        cells = [c.strip() for c in m.group("rest").split("|")]
-        if len(cells) < 3:
-            continue
-        changes.append(
-            {
-                "column": m.group("col"),
-                "was": cells[0],
-                "now": cells[1],
-                "rationale": " | ".join(cells[2:]),
-            }
-        )
-    yml = re.search(r"```yaml\n(.*?)```", markdown, re.S)
-    return {
-        "status": "ok",
-        "classification": cls.group(1).strip("` ") if cls else "",
-        "change_count": int(cls.group(2)) if cls else len(changes),
-        "changes": changes,
-        "config_yaml": yml.group(1) if yml else "",
-        "next_step": (
-            "Call validate_preprocessing_config with config_yaml before re-running "
-            "run_topological_sweep."
-        ),
-    }
-
-
-def _recommend_preprocessing_worker(
-    normalized_path: str,
+def _draft_plan_worker(
     df: Any,
     dataset_id: str,
+    target_columns: list[str],
+    entity_column: str,
+    time_column: str,
+    stakes: bool,
     detail: Literal["summary", "full"],
-    rationale_limit: int,
-) -> dict[str, Any]:
-    from pulsar.analysis.characterization import characterize_dataset as _char
-
-    result = _char(normalized_path, dataframe=df)
-    geo = dataclasses.asdict(result)
-
-    n_samples = geo.get("n_samples", 0)
-    column_profiles = geo.get("column_profiles", [])
-
-    column_profiles, dirty_numeric_detection = enrich_dirty_numeric_samples(
-        column_profiles, df
+    question_limit: int,
+    evidence_limit: int,
+) -> tuple[PreprocessingPlan, dict[str, Any]]:
+    plan = draft_plan(
+        df,
+        dataset_id,
+        target_columns=target_columns,
+        entity_column=entity_column,
+        time_column=time_column,
+        stakes=stakes,
+        stakes_max_questions=2 * int(question_limit),
     )
-    drop, impute, encode, rationale = _recommend_preprocessing_block(
-        column_profiles, n_samples
-    )
-
-    preprocessing_yaml = _preprocessing_block_to_yaml(drop, impute, encode)
-
-    # Estimate expansion: each encoded column adds ~n_unique dummy columns
-    expansion_estimate = 0
-    for raw_cp in column_profiles:
-        cp = (
-            raw_cp
-            if isinstance(raw_cp, dict)
-            else {"name": raw_cp.name, "n_unique": raw_cp.n_unique}
+    processed_space, validation = dry_run_processed_space(df, plan)
+    if processed_space is None and validation.get("error"):
+        plan.cost.setdefault("stakes_notes", []).append(
+            f"Processed-space dry-run failed: {validation['error']}"
         )
-        name = cp["name"]
-        if name in encode:
-            expansion_estimate += cp.get("n_unique", 2)
-
-    return build_preprocessing_recommendation_payload(
-        drop=drop,
-        impute=impute,
-        encode=encode,
-        rationale=rationale,
-        column_profiles=column_profiles,
-        preprocessing_yaml=preprocessing_yaml,
-        expansion_estimate=expansion_estimate,
-        dirty_numeric_detection=dirty_numeric_detection,
-        dataset_id=dataset_id,
-        n_samples=n_samples,
+    payload = build_draft_plan_payload(
+        plan,
+        processed_space=processed_space,
         detail=detail,
-        rationale_limit=rationale_limit,
+        question_limit=question_limit,
+        evidence_limit=evidence_limit,
     )
+    return plan, payload
 
 
 @tool_meta(
-    read_only=True,
-    idempotent=True,
-    output_schema=_RECOMMEND_SCHEMA,
-    title="Recommend Preprocessing",
+    read_only=False,
+    idempotent=False,
+    timeout=default_tool_timeout(),
+    output_schema=_DRAFT_PLAN_SCHEMA,
+    title="Draft Preprocessing Plan",
 )
-async def recommend_preprocessing(
+async def draft_preprocessing_plan(
     dataset_id: Annotated[
         str,
         Field(
@@ -245,15 +394,59 @@ async def recommend_preprocessing(
             )
         ),
     ],
+    target_columns: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Columns to hold out as evaluation outcomes (role='target', "
+                "decided_by='agent', excluded from map features)."
+            )
+        ),
+    ] = None,
+    entity_column: Annotated[
+        str,
+        Field(
+            description=(
+                "Optional entity identifier column (role='entity', excluded from "
+                "map features)."
+            )
+        ),
+    ] = "",
+    time_column: Annotated[
+        str,
+        Field(
+            description=(
+                "Optional longitudinal time column (role='time', excluded from "
+                "map features)."
+            )
+        ),
+    ] = "",
+    stakes: Annotated[
+        bool,
+        Field(
+            description=(
+                "Compute k-NN neighborhood overlap stakes for open questions on "
+                "a deterministic row sample (up to 2 * question_limit questions)."
+            )
+        ),
+    ] = True,
     detail: Annotated[
         Literal["summary", "full"],
         Field(
             description=(
-                "summary: bounded previews of decisions and flagged columns. "
-                "full: also every per-column decision and flagged-column list."
+                "summary: capped question and evidence previews. full: uncapped "
+                "lists plus every column entry in `entries`."
             )
         ),
     ] = "summary",
+    question_limit: Annotated[
+        int,
+        Field(description="Max open questions returned in summary mode (>= 1)."),
+    ] = 8,
+    evidence_limit: Annotated[
+        int,
+        Field(description="Max items per evidence list in summary mode (>= 1)."),
+    ] = 12,
     response_format: Annotated[
         Literal["markdown", "json"],
         Field(
@@ -262,132 +455,244 @@ async def recommend_preprocessing(
             )
         ),
     ] = "markdown",
-    rationale_limit: Annotated[
-        int,
-        Field(description="Max rows in each preview list (>= 1); extras are counted."),
-    ] = 20,
     ctx: Context = None,
 ) -> ToolResult:
-    """Recommend a preprocessing policy (drop / impute / encode) from column profiles.
+    """Measure dataset evidence and draft a versioned preprocessing plan (`plan_id`, `revision=1`).
 
-    Returns `preprocessing_yaml` to paste into a config, rationale previews,
-    warnings, and a one-hot expansion estimate. A starting point, not a verdict:
-    follow up with probe_columns on flagged columns, then validate_config.
+    Returns labeled defaults (`decided_by="default"`), open plain-language questions
+    ranked by measured k-NN `stakes`, evidence, `marker_legend`, and `preprocessing_yaml`.
+    Constant, all-missing, and ID drops are resolved defaults reversible via
+    `edit_preprocessing_plan`. Infer what you can (`source="agent"`); ask the user in
+    domain words only when needed.
     """
-    if rationale_limit < 1:
-        return mcp_error(
-            "recommend_preprocessing",
-            f"rationale_limit must be >= 1, got '{rationale_limit}'",
-            error_code="INVALID_RATIONALE_LIMIT",
-            agent_action="Pass rationale_limit >= 1 (default 20).",
-        )
     if not dataset_id:
         return mcp_error(
-            "recommend_preprocessing",
+            "draft_preprocessing_plan",
             "dataset_id is required.",
             error_code="MISSING_INPUT",
             agent_action="Pass dataset_id from ingest_dataset.",
         )
+    if question_limit < 1:
+        return mcp_error(
+            "draft_preprocessing_plan",
+            f"question_limit must be >= 1, got '{question_limit}'.",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass question_limit >= 1 (default 8).",
+        )
+    if evidence_limit < 1:
+        return mcp_error(
+            "draft_preprocessing_plan",
+            f"evidence_limit must be >= 1, got '{evidence_limit}'.",
+            error_code="INVALID_ARGUMENT",
+            agent_action="Pass evidence_limit >= 1 (default 12).",
+        )
+
     try:
         session = _get_session(ctx)
-        df, normalized_path = await _load_session_dataframe(
-            session,
-            dataset_id=dataset_id,
-        )
-        payload = await asyncio.to_thread(
-            _recommend_preprocessing_worker,
-            normalized_path,
+        df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
+        plan, payload = await asyncio.to_thread(
+            _draft_plan_worker,
             df,
             dataset_id,
+            list(target_columns or ()),
+            entity_column,
+            time_column,
+            stakes,
             detail,
-            rationale_limit,
+            question_limit,
+            evidence_limit,
         )
+        session.preprocessing_plans[plan.plan_id] = plan
         if response_format == "markdown":
-            return mcp_result(
-                payload, text=preprocessing_recommendation_to_markdown(payload)
-            )
+            return mcp_result(payload, text=draft_plan_payload_to_markdown(payload))
         return mcp_result(payload)
-
-    except LookupError:
-        return unknown_handle_error("recommend_preprocessing", "dataset_id", dataset_id)
-    except Exception as e:
-        logger.error(f"Error in recommend_preprocessing: {e}")
+    except PlanEditError as exc:
         return mcp_error(
-            "recommend_preprocessing",
-            str(e),
-            error_code="RECOMMEND_PREPROCESSING_FAILED",
+            "draft_preprocessing_plan",
+            exc.message,
+            error_code=exc.code,
             agent_action=(
-                "Check the dataset loads (characterize_dataset) and retry; the "
-                "reason field has the underlying failure."
+                "Pass only column names present in the dataset for target_columns, "
+                "entity_column, and time_column."
+            ),
+            details=exc.details,
+        )
+    except LookupError:
+        return unknown_handle_error(
+            "draft_preprocessing_plan", "dataset_id", dataset_id
+        )
+    except Exception as exc:
+        logger.error("Error in draft_preprocessing_plan: %s", exc)
+        return mcp_error(
+            "draft_preprocessing_plan",
+            str(exc),
+            error_code="DRAFT_PLAN_FAILED",
+            agent_action=(
+                "Verify the dataset loads via characterize_dataset and retry."
             ),
         )
+
+
+def _edit_plan_worker(
+    df: Any,
+    plan: PreprocessingPlan,
+    answers: list[dict[str, Any]],
+    edits: list[dict[str, Any]],
+    source: Literal["agent", "user"],
+) -> tuple[PreprocessingPlan, dict[str, Any]]:
+    updated = apply_answers_and_edits(
+        plan,
+        answers=answers,
+        edits=edits,
+        source=source,
+    )
+    changes = diff_plan_entries(plan, updated)
+    processed_space, validation = dry_run_processed_space(df, updated)
+    payload = build_edit_plan_payload(
+        updated,
+        changes=changes,
+        processed_space=processed_space,
+        validation=validation,
+    )
+    return updated, payload
 
 
 @tool_meta(
-    read_only=True,
-    idempotent=True,
-    output_schema=_REPAIR_SCHEMA,
-    title="Repair Preprocessing Config",
+    read_only=False,
+    idempotent=False,
+    output_schema=_EDIT_PLAN_SCHEMA,
+    title="Edit Preprocessing Plan",
 )
-async def repair_preprocessing_config(
-    error_message: Annotated[
+async def edit_preprocessing_plan(
+    plan_id: Annotated[
         str,
         Field(
             description=(
-                "Full text of the preprocessing error from a failed sweep or "
-                "validate_preprocessing_config call."
+                "Plan handle returned by draft_preprocessing_plan or create_config."
             )
         ),
     ],
-    config_yaml: Annotated[
-        str,
-        Field(description="The config YAML (as text) that produced the error."),
-    ],
-    dataset_id: Annotated[
-        str,
+    base_revision: Annotated[
+        int | None,
         Field(
-            description="Dataset handle from ingest_dataset, used to profile columns."
+            description=(
+                "Revision number being edited; mismatches return "
+                "SESSION_REVISION_CONFLICT. If omitted, edits the current revision."
+            )
         ),
-    ],
+    ] = None,
+    answers: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            description=(
+                "Question answers as [{'question_id': 'q1', 'option_id': 'none'}]."
+            )
+        ),
+    ] = None,
+    edits: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            description=(
+                "Direct column edits as [{'column': col, 'role'?: ..., "
+                "'impute_method'?: ..., 'impute_value'?: ..., 'indicator'?: ..., "
+                "'encode'?: ...}]."
+            )
+        ),
+    ] = None,
+    source: Annotated[
+        Literal["agent", "user"],
+        Field(
+            description=(
+                "Decision provenance: 'agent' when inferred from context/schema; "
+                "'user' when relaying a user's answer."
+            )
+        ),
+    ] = "agent",
+    response_format: Annotated[
+        Literal["markdown", "json"],
+        Field(
+            description=(
+                "Text view: 'markdown' or 'json'. structured_content is identical."
+            )
+        ),
+    ] = "markdown",
     ctx: Context = None,
 ) -> ToolResult:
-    """Repair a config after a preprocessing error; returns patched `config_yaml` and a change log.
+    """Apply question `answers` and/or per-column `edits` to a stored preprocessing plan.
 
-    Handles remaining NaNs, non-numeric columns, numeric-imputation coercion
-    failures, all-missing columns and cardinality limits. Does not run anything:
-    re-check with validate_preprocessing_config.
+    Checks `base_revision` (`SESSION_REVISION_CONFLICT` on mismatch), records
+    decision provenance (`source="agent"` or `"user"`), dry-runs preprocessing
+    (`validation.valid=false` with error text on schema failure, without raising),
+    and stores the new revision in the session.
     """
-    try:
-        from pulsar.analysis.characterization import characterize_dataset as _char
-
-        session = _get_session(ctx)
-        try:
-            dataset_path = _resolve_dataset_path(dataset_id)
-        except LookupError:
-            return unknown_handle_error(
-                "repair_preprocessing_config", "dataset_id", dataset_id
-            )
-        df, _ = await _load_session_dataframe(session, dataset_id=dataset_id)
-        result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
-        geo = dataclasses.asdict(result)
-
-        profiles_by_name: dict[str, Any] = {}
-        for cp in geo.get("column_profiles", []):
-            pname = cp["name"] if isinstance(cp, dict) else cp.name
-            profiles_by_name[pname] = cp
-        repaired = repair_config(config_yaml, error_message, profiles_by_name)
-        if isinstance(repaired, ToolResult):
-            return repaired
-        return mcp_result(_parse_repair_markdown(repaired), text=repaired)
-    except Exception as e:
-        logger.error(f"Error in repair_preprocessing_config: {e}")
+    if not plan_id:
         return mcp_error(
-            "repair_preprocessing_config",
-            str(e),
-            error_code="REPAIR_FAILED",
-            agent_action=(
-                "Check that config_yaml parses and dataset_id is valid, then retry."
+            "edit_preprocessing_plan",
+            "plan_id is required.",
+            error_code="MISSING_INPUT",
+            agent_action="Pass plan_id from draft_preprocessing_plan or create_config.",
+        )
+
+    session = _get_session(ctx)
+    plan = session.preprocessing_plans.get(plan_id)
+    if plan is None:
+        return unknown_handle_error("edit_preprocessing_plan", "plan_id", plan_id)
+
+    if base_revision is not None and int(base_revision) != int(plan.revision):
+        return mcp_error(
+            "edit_preprocessing_plan",
+            (
+                f"Plan '{plan_id}' is at revision {plan.revision}, "
+                f"but base_revision={base_revision} was supplied."
             ),
+            error_code="SESSION_REVISION_CONFLICT",
+            agent_action=(
+                f"Inspect the current plan or retry edit_preprocessing_plan with "
+                f"base_revision={plan.revision}."
+            ),
+            details={
+                "plan_id": plan_id,
+                "current_revision": int(plan.revision),
+                "base_revision": int(base_revision),
+            },
+        )
+
+    try:
+        df, _ = await _load_session_dataframe(session, dataset_id=plan.dataset_id)
+        updated, payload = await asyncio.to_thread(
+            _edit_plan_worker,
+            df,
+            plan,
+            list(answers or ()),
+            list(edits or ()),
+            source,
+        )
+        session.preprocessing_plans[plan.plan_id] = updated
+        if response_format == "markdown":
+            return mcp_result(payload, text=edit_plan_payload_to_markdown(payload))
+        return mcp_result(payload)
+    except PlanEditError as exc:
+        return mcp_error(
+            "edit_preprocessing_plan",
+            exc.message,
+            error_code=exc.code,
+            agent_action=(
+                "Check question_id, option_id, column names, and edit fields in "
+                "details, then retry."
+            ),
+            details=exc.details,
+        )
+    except LookupError:
+        return unknown_handle_error(
+            "edit_preprocessing_plan", "dataset_id", plan.dataset_id
+        )
+    except Exception as exc:
+        logger.error("Error in edit_preprocessing_plan: %s", exc)
+        return mcp_error(
+            "edit_preprocessing_plan",
+            str(exc),
+            error_code="EDIT_PLAN_FAILED",
+            agent_action="Check the answers and edits arguments, then retry.",
         )
 
 
@@ -486,9 +791,9 @@ async def validate_preprocessing_config(
     """Dry-run only the preprocessing of a config against a dataset.
 
     Cheap (no sweep), read-only. Returns row/feature counts and expansion
-    diagnostics, or a CONFIG_INVALID error with a repair hint. Pass dataset_id, or
-    omit it to use the session's loaded data; validate_config does the full
-    schema check.
+    diagnostics, or a CONFIG_INVALID error with guidance to fix via
+    `edit_preprocessing_plan` or YAML edits. Pass dataset_id, or omit it to use
+    the session's loaded data; validate_config does the full schema check.
     """
     session = _get_session(ctx)
     data, err = await _resolve_validation_dataframe(session, dataset_id)
@@ -526,8 +831,9 @@ async def validate_preprocessing_config(
             str(e),
             error_code="CONFIG_INVALID",
             agent_action=(
-                "Call repair_preprocessing_config(error_message=..., "
-                "config_yaml=..., dataset_id=...) to fix this automatically."
+                "Update the preprocessing plan via edit_preprocessing_plan (then "
+                "create_config) or edit the preprocessing block in config_yaml, "
+                "then re-run validate_preprocessing_config."
             ),
             details={"valid": False},
         )

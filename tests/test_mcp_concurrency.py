@@ -22,7 +22,7 @@ from pulsar.mcp.tools.clustering import generate_cluster_dossier
 from pulsar.mcp.tools.config import create_config
 from pulsar.mcp.tools.ingestion import ingest_dataset
 from pulsar.mcp.tools.meta import get_runtime_context
-from pulsar.mcp.tools.preprocessing import recommend_preprocessing
+from pulsar.mcp.tools.preprocessing import draft_preprocessing_plan
 from pulsar.mcp.tools.reporting import export_labeled_data
 from pulsar.mcp.tools.sweeping import get_sweep_history, run_topological_sweep
 from pulsar.pipeline import ThemaRS
@@ -403,8 +403,8 @@ def test_loop_stays_responsive_when_binding_dataset_during_sweep(
         assert session._worker_mutation_lock.locked()
 
         probe_task = asyncio.create_task(
-            recommend_preprocessing(
-                dataset_id=dataset_b, response_format="json", ctx=ctx
+            draft_preprocessing_plan(
+                dataset_id=dataset_b, stakes=False, response_format="json", ctx=ctx
             )
         )
         t0 = time.perf_counter()
