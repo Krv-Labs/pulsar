@@ -24,6 +24,7 @@ import json
 import math
 import time
 from typing import Any, Literal
+import uuid
 import warnings
 
 import numpy as np
@@ -43,6 +44,7 @@ Role = Literal["feature", "drop", "id", "entity", "time", "target"]
 DecidedBy = Literal["default", "agent", "user"]
 QuestionTopic = Literal[
     "blank_meaning",
+    "code_columns",
     "conditional_column",
     "date_columns",
     "duplicate_signal",
@@ -179,6 +181,7 @@ class PreprocessingPlan:
     evidence: PreprocessingEvidence
     created_at: str
     cost: dict[str, Any] = field(default_factory=dict)
+    target_proxies: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _is_count_like_zero_free(ev: ColumnEvidence) -> bool:
@@ -681,37 +684,114 @@ def draft_plan(
 
     # Question type 5: mixed_values (one shared question for all numeric_text columns with n_non_numeric > 0)
     if mixed_value_cols:
+        total_non_num = sum(
+            int(ev_by_col[c].n_non_numeric or 0) for c in mixed_value_cols
+        )
         c_top = max(
             mixed_value_cols,
             key=lambda c: int(ev_by_col[c].n_non_numeric or 0),
         )
         ev_top = ev_by_col[c_top]
-        top_val, top_cnt = (
+        top_val, _ = (
             ev_top.non_numeric_values[0]
             if ev_top.non_numeric_values
             else ("", int(ev_top.n_non_numeric or 0))
         )
         top_n = int(ev_top.n_non_numeric or 0)
         row_word = "row" if top_n == 1 else "rows"
-        entry_word = "entry" if top_cnt == 1 else "entries"
+        entry_word = "entry" if total_non_num == 1 else "entries"
         verb_phrase = (
             "becomes a blank and is estimated"
-            if top_cnt == 1
+            if total_non_num == 1
             else "become blanks and are estimated"
         )
         cols_preview = _format_col_list(mixed_value_cols, limit=3)
+        parsed_ranges: list[tuple[float, float] | None] = []
+        for c in mixed_value_cols:
+            s_clean = (
+                df[c]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .str.replace(r"(?<=\d),(?=\d{3}(?!\d))", "", regex=True)
+            )
+            s_num = pd.to_numeric(s_clean[s_clean != ""], errors="coerce").dropna()
+            s_num_arr = s_num.to_numpy(dtype=np.float64)
+            s_num_arr = s_num_arr[np.isfinite(s_num_arr)]
+            if len(s_num_arr) > 0:
+                parsed_ranges.append((float(s_num_arr.min()), float(s_num_arr.max())))
+            else:
+                parsed_ranges.append(None)
+        single_num_val: float | None = None
+        if (
+            parsed_ranges
+            and parsed_ranges[0] is not None
+            and all(
+                r is not None and r[0] == r[1] == parsed_ranges[0][0]
+                for r in parsed_ranges
+            )
+        ):
+            single_num_val = parsed_ranges[0][0]
+        mostly_num_all = all(
+            (
+                ev_by_col[c].n_rows
+                - ev_by_col[c].n_missing
+                - int(ev_by_col[c].n_non_numeric or 0)
+            )
+            > int(ev_by_col[c].n_non_numeric or 0)
+            for c in mixed_value_cols
+        )
         if len(mixed_value_cols) == 1:
-            q_mixed_text = (
-                f"`{c_top}` mostly holds numbers but also the value {top_val!r} "
-                f"({top_n:,} {row_word}). Should those values count as their own "
-                "category, or as unreadable entries treated like blanks?"
-            )
+            if single_num_val is not None:
+                num_str = (
+                    str(int(single_num_val))
+                    if float(single_num_val).is_integer()
+                    else str(single_num_val)
+                )
+                q_mixed_text = (
+                    f"`{c_top}` holds the number {num_str} and the value {top_val!r} "
+                    f"({top_n:,} {row_word}). Should those values count as their own "
+                    "category, or as unreadable entries treated like blanks?"
+                )
+            elif mostly_num_all:
+                q_mixed_text = (
+                    f"`{c_top}` mostly holds numbers but also the value {top_val!r} "
+                    f"({top_n:,} {row_word}). Should those values count as their own "
+                    "category, or as unreadable entries treated like blanks?"
+                )
+            else:
+                q_mixed_text = (
+                    f"`{c_top}` holds numbers and the value {top_val!r} "
+                    f"({top_n:,} {row_word}). Should those values count as their own "
+                    "category, or as unreadable entries treated like blanks?"
+                )
         else:
-            q_mixed_text = (
-                f"{cols_preview}: `{c_top}` mostly holds numbers but also the value "
-                f"{top_val!r} ({top_n:,} {row_word}). Should those values count as "
-                "their own category, or as unreadable entries treated like blanks?"
-            )
+            if single_num_val is not None:
+                num_str = (
+                    str(int(single_num_val))
+                    if float(single_num_val).is_integer()
+                    else str(single_num_val)
+                )
+                q_mixed_text = (
+                    f"{len(mixed_value_cols)} columns hold the number {num_str} and "
+                    f"the value {top_val!r} ({total_non_num:,} {entry_word} in total; "
+                    f"e.g. `{c_top}`: {top_n:,}). Should those values count as their "
+                    "own category, or as unreadable entries treated like blanks?"
+                )
+            elif mostly_num_all:
+                q_mixed_text = (
+                    f"{len(mixed_value_cols)} columns mostly hold numbers but also "
+                    f"the value {top_val!r} ({total_non_num:,} {entry_word} in total; "
+                    f"e.g. `{c_top}`: {top_n:,}). Should those values count as their "
+                    "own category, or as unreadable entries treated like blanks?"
+                )
+            else:
+                q_mixed_text = (
+                    f"{len(mixed_value_cols)} columns hold numbers and the value "
+                    f"{top_val!r} ({total_non_num:,} {entry_word} in total; e.g. "
+                    f"`{c_top}`: {top_n:,}). Should those values count as their own "
+                    "category, or as unreadable entries treated like blanks?"
+                )
         rows_aff = max(
             int(ev_by_col[c].n_non_numeric or 0) + ev_by_col[c].n_missing
             for c in mixed_value_cols
@@ -776,7 +856,7 @@ def draft_plan(
                     option_id="as_blank",
                     label="Treat non-numeric text as blank",
                     effect=(
-                        f"{top_cnt:,} {top_val!r} {entry_word} {verb_phrase} with "
+                        f"{total_non_num:,} {top_val!r} {entry_word} {verb_phrase} with "
                         "the median of observed numbers, plus a 0/1 blank marker"
                     ),
                     edits=as_blank_edits,
@@ -879,10 +959,12 @@ def draft_plan(
         gid = ev_by_col[col].missing_group or f"singleton:{col}"
         grouped_7b.setdefault(gid, []).append(col)
 
+    blank_group_cols: set[str] = set()
     for gid, cols in grouped_7b.items():
         count_like_cols = [c for c in cols if _is_count_like_zero_free(ev_by_col[c])]
         if not count_like_cols:
             continue
+        blank_group_cols.update(cols)
         for c in cols:
             entries[c].status = "open"
         rows_aff = ev_by_col[cols[0]].n_missing
@@ -936,7 +1018,7 @@ def draft_plan(
             )
             if n_with_zero > 0:
                 other_phrase = (
-                    "the other 1 column sometimes does"
+                    "1 other column sometimes does"
                     if n_with_zero == 1
                     else f"the other {n_with_zero} columns sometimes do"
                 )
@@ -950,7 +1032,9 @@ def draft_plan(
                     f"{partner_sentence} Does a blank mean none (zero), or that the value is unknown?"
                 )
             none_effect = (
-                f"All {len(cols)} columns get 0 where blank; no extra marker column"
+                "Both columns get 0 where blank; no extra marker column"
+                if len(cols) == 2
+                else f"All {len(cols)} columns get 0 where blank; no extra marker column"
             )
             unknown_effect = (
                 "Blanks are filled with the median of observed rows, plus one "
@@ -1165,6 +1249,60 @@ def draft_plan(
         )
         pending_questions.append((q_dup, []))
 
+    # Question type 9b: code_columns (low-cardinality nonnegative integer columns).
+    # Columns in an exact sum/duplicate relation are additive amounts, not labels.
+    additive_cols = {
+        col
+        for rel in evidence.relations
+        if rel.kind in ("sum_of", "duplicate")
+        for col in (rel.target, *rel.sources)
+    }
+    code_cols = sorted(
+        [
+            col
+            for col, entry in entries.items()
+            if entry.role == "feature"
+            and ev_by_col[col].kind == "numeric"
+            and ev_by_col[col].integer_valued is True
+            and ev_by_col[col].nonnegative is True
+            and 3 <= ev_by_col[col].n_unique <= cat_threshold
+            and not _is_count_like_zero_free(ev_by_col[col])
+            and col not in blank_group_cols
+            and col not in additive_cols
+        ],
+        key=lambda c: (-ev_by_col[c].n_unique, c),
+    )
+    if code_cols:
+        top_code_preview = ", ".join(
+            f"`{c}`: {ev_by_col[c].n_unique} distinct values" for c in code_cols[:3]
+        )
+        code_paren = (
+            f"e.g. {top_code_preview}"
+            if len(code_cols) == 1
+            else f"e.g. {top_code_preview}; {len(code_cols)} columns"
+        )
+        q_code = PlanQuestion(
+            question_id="",
+            topic="code_columns",
+            text=(
+                f"Some whole-number columns might be labels rather than amounts "
+                f"({code_paren}). For labels, bigger numbers don't mean 'more'. "
+                "Are any of these labels or codes?"
+            ),
+            applies_to=list(code_cols),
+            rows_affected=int(n_rows),
+            options=[
+                QuestionOption(
+                    option_id="all_amounts",
+                    label="All are amounts",
+                    effect="Keeps all as numeric amounts in the map",
+                    edits=[],
+                )
+            ],
+            default_option_id="all_amounts",
+        )
+        pending_questions.append((q_code, []))
+
     # Question type 10: outcome_columns (when target_columns is empty)
     if not target_list:
         q_out = PlanQuestion(
@@ -1189,10 +1327,17 @@ def draft_plan(
         )
         pending_questions.append((q_out, []))
 
-    # C-AMENDMENT 5: Pre-sort open questions by rows_affected desc, with outcome_columns always last
+    def _framing_rank(topic: str) -> int:
+        if topic == "code_columns":
+            return 1
+        if topic == "outcome_columns":
+            return 2
+        return 0
+
+    # C-AMENDMENT 5: Pre-sort open questions by rows_affected desc, with framing questions at the end
     pending_questions.sort(
         key=lambda item: (
-            1 if item[0].topic == "outcome_columns" else 0,
+            _framing_rank(item[0].topic),
             -item[0].rows_affected,
         )
     )
@@ -1206,30 +1351,12 @@ def draft_plan(
         provisional_questions[prov_id] = q
         provisional_links[prov_id] = linked_cols
 
-    plan_id_seed = json.dumps(
-        {
-            "shape": [int(evidence.n_rows), int(evidence.n_columns)],
-            "columns": [str(c) for c in df.columns],
-            "target_columns": target_list,
-            "entity_column": entity_col,
-            "time_column": time_col,
-            "entries": {
-                col: {
-                    "role": e.role,
-                    "impute": e.impute,
-                    "indicator": e.indicator,
-                    "encode": e.encode,
-                    "reason": e.reason,
-                }
-                for col, e in entries.items()
-            },
-        },
-        sort_keys=True,
-    )
-    plan_id = f"pp_{hashlib.sha256(plan_id_seed.encode('utf-8')).hexdigest()[:10]}"
+    plan_id = f"pp_{uuid.uuid4().hex[:10]}"
 
     eligible_stakes_questions = [
-        q for q, _ in pending_questions if q.topic != "outcome_columns"
+        q
+        for q, _ in pending_questions
+        if q.topic not in ("outcome_columns", "code_columns")
     ]
 
     plan = PreprocessingPlan(
@@ -1284,12 +1411,12 @@ def draft_plan(
         plan.cost["stakes_questions_skipped"] = skipped_count
         plan.cost["stakes_questions_failed"] = failed_count
 
-    # Final sort: outcome_columns always LAST; otherwise computed stakes first by
-    # neighbors_kept asc (ties by rows_affected desc), then null-stakes by rows_affected desc.
+    # Final sort: framing questions (code_columns, outcome_columns) at the end; otherwise
+    # computed stakes first by neighbors_kept asc (ties by rows_affected desc), then null-stakes by rows_affected desc.
     sorted_prov = sorted(
         pending_questions,
         key=lambda item: (
-            1 if item[0].topic == "outcome_columns" else 0,
+            _framing_rank(item[0].topic),
             0 if item[0].stakes is not None else 1,
             float(item[0].stakes["neighbors_kept"])
             if item[0].stakes is not None
@@ -1308,6 +1435,7 @@ def draft_plan(
                 entries[col].question_id = qid
 
     plan.questions = final_questions
+    dry_run_processed_space(df, plan)
     return plan
 
 
@@ -1530,7 +1658,10 @@ def _apply_single_edit(
         if role_val not in VALID_ROLES:
             raise PlanEditError(
                 "INVALID_ARGUMENT",
-                f"Invalid role {role_val!r} for column {col!r}.",
+                (
+                    f"Invalid role {role_val!r} for column {col!r}; "
+                    f"valid roles are {sorted(VALID_ROLES)} (for outcomes use role 'target')."
+                ),
                 {"column": col, "role": role_val, "valid_roles": sorted(VALID_ROLES)},
             )
         entry.role = role_val  # type: ignore[assignment]
@@ -1765,6 +1896,16 @@ def apply_answers_and_edits(
         qid: copy.deepcopy(q) for qid, q in plan.questions.items()
     }
 
+    _protected_roles = frozenset({"target", "entity", "time"})
+    # Track columns explicitly assigned a protected role in this call's edit_list
+    incoming_protected_roles: dict[str, str] = {
+        str(e["column"]): str(e["role"])
+        for e in edit_list
+        if isinstance(e, dict)
+        and isinstance(e.get("column"), str)
+        and e.get("role") in _protected_roles
+    }
+
     for ans in ans_list:
         if not isinstance(ans, dict):
             raise PlanEditError(
@@ -1801,7 +1942,44 @@ def apply_answers_and_edits(
                 },
             )
 
+        effective_roles = {
+            c: incoming_protected_roles.get(c, new_entries[c].role)
+            for c in q.applies_to
+            if c in new_entries
+        }
+        all_protected = bool(effective_roles) and all(
+            r in _protected_roles for r in effective_roles.values()
+        )
+        if q.status != "open" or all_protected:
+            roles_str = (
+                ", ".join(f"{c}={r}" for c, r in effective_roles.items())
+                or ", ".join(
+                    f"{c}={incoming_protected_roles.get(c, e.role)}"
+                    for c, e in new_entries.items()
+                    if incoming_protected_roles.get(c, e.role) in _protected_roles
+                )
+                or "resolved"
+            )
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"question {qid} no longer applies (columns now: {roles_str})",
+                {
+                    "question_id": qid,
+                    "topic": q.topic,
+                    "status": q.status,
+                    "columns": effective_roles,
+                },
+            )
+
         for edit_spec in matched_opt.edits:
+            col_name = edit_spec.get("column") if isinstance(edit_spec, dict) else None
+            if (
+                isinstance(col_name, str)
+                and col_name in new_entries
+                and incoming_protected_roles.get(col_name, new_entries[col_name].role)
+                in _protected_roles
+            ):
+                continue
             _apply_single_edit(
                 new_entries,
                 edit_spec,
@@ -1810,7 +1988,11 @@ def apply_answers_and_edits(
                 ev_by_col=ev_by_col,
             )
         for col in q.applies_to:
-            if col in new_entries:
+            if (
+                col in new_entries
+                and incoming_protected_roles.get(col, new_entries[col].role)
+                not in _protected_roles
+            ):
                 new_entries[col].decided_by = source
                 new_entries[col].status = "resolved"
         q.status = "answered"
@@ -2046,12 +2228,128 @@ def summarize_plan_counts(plan: PreprocessingPlan) -> dict[str, Any]:
     n_open_questions = sum(1 for q in plan.questions.values() if q.status == "open")
     return {
         "columns": len(plan.entries),
-        "features": n_features,
+        "feature_columns": n_features,
         "dropped": n_dropped,
         "open_entries": n_open_entries,
         "open_questions": n_open_questions,
         "decided_by": decided_by_counts,
     }
+
+
+def _target_non_zero_mask(series: pd.Series) -> np.ndarray:
+    """Return boolean mask of rows where *series* is non-zero / True."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).to_numpy(dtype=bool)
+    num = pd.to_numeric(series, errors="coerce")
+    if num.notna().any():
+        return num.fillna(0.0).to_numpy(dtype=np.float64) != 0.0
+    vals = series.dropna().astype(str).str.strip().str.lower()
+    mask = np.zeros(len(series), dtype=bool)
+    notna_idx = np.flatnonzero(series.notna().to_numpy())
+    mask[notna_idx] = ~vals.isin(
+        {"", "0", "0.0", "false", "no", "f", "n", "none", "nan"}
+    ).to_numpy(dtype=bool)
+    return mask
+
+
+def _measure_target_proxies(
+    df: pd.DataFrame,
+    df_proc: pd.DataFrame,
+    output_names: Sequence[str],
+    encode_prefixes: tuple[str, ...],
+    plan: PreprocessingPlan,
+) -> list[dict[str, Any]]:
+    """Measure overlap between processed marker/dummy columns and target or boolean event-flag columns."""
+    n_rows = len(df)
+    if n_rows == 0 or df_proc.shape[0] != n_rows:
+        return []
+
+    target_cols = [
+        col
+        for col, entry in plan.entries.items()
+        if entry.role == "target" and col in df.columns
+    ]
+    if not target_cols:
+        ev_by_col = {c.name: c for c in plan.evidence.columns}
+        for md in plan.evidence.mask_dependencies:
+            p = md.partner
+            if (
+                p not in target_cols
+                and p in df.columns
+                and p in ev_by_col
+                and ev_by_col[p].kind == "boolean"
+            ):
+                target_cols.append(p)
+    if not target_cols:
+        return []
+
+    input_cols = set(df.columns)
+    candidate_cols: list[str] = []
+    for c in output_names:
+        c_str = str(c)
+        is_marker = c_str.endswith("_was_missing")
+        is_dummy = (
+            not is_marker
+            and c not in input_cols
+            and bool(encode_prefixes)
+            and c_str.startswith(encode_prefixes)
+        )
+        if (is_marker or is_dummy) and c in df_proc.columns:
+            candidate_cols.append(c_str)
+    if not candidate_cols:
+        return []
+
+    proxies: list[dict[str, Any]] = []
+    for tgt in target_cols:
+        t_mask = _target_non_zero_mask(df[tgt])
+        n_target = int(np.sum(t_mask))
+        base_rate = round(float(n_target / n_rows), 4)
+        for col in candidate_cols:
+            arr = df_proc[col].to_numpy(dtype=np.float64)
+            m1 = arr == 1.0
+            m1_rows = int(np.sum(m1))
+            n_both_1 = int(np.sum(m1 & t_mask))
+            if col.endswith("_was_missing") and n_both_1 == 0:
+                m0 = arr == 0.0
+                m0_rows = int(np.sum(m0))
+                n_both_0 = int(np.sum(m0 & t_mask))
+                if m0_rows > 0 and n_both_0 == m0_rows:
+                    proxies.append(
+                        {
+                            "column": col,
+                            "target": tgt,
+                            "marker_rows": m0_rows,
+                            "share_with_target": 1.0,
+                            "target_base_rate": base_rate,
+                        }
+                    )
+                    continue
+            if m1_rows <= 0:
+                continue
+            share = (
+                1.0
+                if n_both_1 == m1_rows
+                else min(0.9999, round(float(n_both_1 / m1_rows), 4))
+            )
+            proxies.append(
+                {
+                    "column": col,
+                    "target": tgt,
+                    "marker_rows": m1_rows,
+                    "share_with_target": share,
+                    "target_base_rate": base_rate,
+                }
+            )
+
+    proxies.sort(
+        key=lambda item: (
+            -item["share_with_target"],
+            -item["marker_rows"],
+            item["column"],
+            item["target"],
+        )
+    )
+    return proxies
 
 
 def dry_run_processed_space(
@@ -2082,6 +2380,9 @@ def dry_run_processed_space(
             if encode_prefixes
             else 0
         )
+        plan.target_proxies = _measure_target_proxies(
+            df, df_proc, output_names, encode_prefixes, plan
+        )
         return (
             {
                 "feature_count": int(df_proc.shape[1]),
@@ -2091,4 +2392,5 @@ def dry_run_processed_space(
             {"valid": True, "error": None},
         )
     except Exception as exc:
+        plan.target_proxies = []
         return None, {"valid": False, "error": str(exc)}

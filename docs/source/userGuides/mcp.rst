@@ -208,7 +208,7 @@ Core loop
    * - **characterize_dataset**
      - Quick exploratory summary: k-NN distances (is your data sparse or dense?), projection dimensions, missing value patterns. On large datasets (``n`` above the advisor threshold), may include ``minhash_advisory`` with suggested ``minhash_d``, memory estimate, and error bounds.
    * - **create_config**
-     - Builds a baseline sweep config calibrated against the *processed* feature space (after preprocessing + scaling) for a given ``dataset_id`` and optional ``plan_id`` from ``draft_preprocessing_plan`` (or drafts baseline defaults when ``plan_id`` is omitted, emitting a ``PREPROCESSING_QUESTIONS_OPEN`` warning if open questions remain). The mandatory first config-generation step — never let the agent guess parameters.
+     - Builds a baseline sweep config calibrated against the *processed* feature space (after preprocessing + scaling) for a given ``dataset_id`` and optional ``plan_id`` from ``draft_preprocessing_plan`` (or drafts baseline defaults when ``plan_id`` is omitted, emitting ``PREPROCESSING_QUESTIONS_OPEN`` if open questions remain and ``PREPROCESSING_PLAN_NOT_USED`` if the session already holds an edited plan for the dataset). The mandatory first config-generation step — never let the agent guess parameters.
    * - **run_topological_sweep**
      - Execute the full Pulsar pipeline: imputation → projection → Ball Mapper → cosmic graph, from inline YAML or a session's active config. Returns structured JSON with metrics and experiment diff. Config persistence is opt-in. Results cached per session.
    * - **diagnose_cosmic_graph**
@@ -234,7 +234,7 @@ Preprocessing helpers
    * - **probe_columns**
      - Per-column drilldown (≤20 columns per call): sample values, missingness, distributions. Use after ``characterize_dataset`` when a specific column needs a closer look.
    * - **draft_preprocessing_plan**
-     - Measures column-level evidence (shared missing masks, conditional missingness, exact duplicates and sums, date/categorical/ID kinds) and stores a versioned ``PreprocessingPlan`` (``plan_id``, ``revision=1``) in the session with labeled defaults and open plain-language questions ranked by measured ``stakes``.
+     - Measures column-level evidence (shared missing masks, conditional missingness, exact duplicates and sums, date/categorical/ID kinds, and ``target_proxies``) and stores a versioned ``PreprocessingPlan`` with a fresh unique ``plan_id`` (``revision=1``) in the session with labeled defaults and open plain-language questions ranked by measured ``stakes``.
    * - **edit_preprocessing_plan**
      - Applies question ``answers`` and/or per-column ``edits`` to an existing plan at ``base_revision``, records who decided each change (``source="agent"`` or ``"user"``), dry-runs ``preprocess_dataframe`` to validate the schema, and returns the updated revision and ``preprocessing_yaml_chars``.
    * - **validate_preprocessing_config**
@@ -246,15 +246,15 @@ Preprocessing helpers
 
 - **draft_preprocessing_plan**:
 
-  - *Purpose*: Measures dataset evidence without hard-coded domain rules and drafts a versioned preprocessing plan where every choice is labeled with ``decided_by`` (``"default"``, ``"agent"``, or ``"user"``) and ``status`` (``"resolved"`` or ``"open"``). Open choices carry plain-language question cards across six topics (``blank_meaning``, ``conditional_column``, ``date_columns``, ``duplicate_signal``, ``mixed_values``, ``outcome_columns``) sorted by measured ``stakes`` (``neighbors_kept``, the k-NN neighborhood Jaccard overlap on a deterministic row sample vs. the default option, plus ``feature_count_delta``).
+  - *Purpose*: Measures dataset evidence without hard-coded domain rules and drafts a versioned preprocessing plan where every choice is labeled with ``decided_by`` (``"default"``, ``"agent"``, or ``"user"``) and ``status`` (``"resolved"`` or ``"open"``). Open choices carry plain-language question cards across seven topics (``blank_meaning``, ``code_columns``, ``conditional_column``, ``date_columns``, ``duplicate_signal``, ``mixed_values``, ``outcome_columns``) sorted by measured ``stakes`` (``neighbors_kept``, the k-NN neighborhood Jaccard overlap on a deterministic row sample vs. the default option, plus ``feature_count_delta``), with framing questions (``code_columns``, ``outcome_columns``) at the end.
   - *Parameters*: ``dataset_id``, ``target_columns=[]``, ``entity_column=""``, ``time_column=""``, ``stakes=True``, ``detail="summary" | "full"``, ``question_limit=8``, ``evidence_limit=12``, ``response_format="markdown" | "json"``.
-  - *Payload headline*: ``plan_id``, ``dataset_id``, ``revision``, ``plan_fingerprint``, ``counts`` (``columns``, ``features``, ``dropped``, ``open_entries``, ``open_questions``, ``decided_by``), ``processed_space`` (``feature_count``, ``missing_marker_count``, ``dummy_column_count``), capped ``questions`` (with ``options``, ``default_option_id``, and ``stakes``), ``evidence`` (``missing_groups``, ``mask_dependencies``, ``relations``, ``rare_binary_leverage``, ``constant_columns_preview``, ``datetime_columns_preview``, ``integer_coded_preview``), ``weak_hints`` (``event_flag_columns`` and ``description``), ``preprocessing_yaml_chars``, ``cost``, ``how_to_use``, and ``next_tools`` (``["edit_preprocessing_plan", "create_config", "probe_columns"]``). ``detail="full"`` adds per-column ``entries``, ``preprocessing_yaml``, and uncapped lists.
+  - *Payload headline*: ``plan_id``, ``dataset_id``, ``revision``, ``plan_fingerprint``, ``counts`` (``columns``, ``feature_columns``, ``dropped``, ``open_entries``, ``open_questions``, ``decided_by``), ``processed_space`` (``feature_count``, ``missing_marker_count``, ``dummy_column_count``), capped ``questions`` (with ``options``, ``default_option_id``, and ``stakes``), ``evidence`` (``missing_groups``, ``mask_dependencies``, ``relations``, ``rare_binary_leverage``, ``target_proxies``, ``constant_columns_preview``, ``datetime_columns_preview``, ``integer_coded_preview``), ``warnings`` (such as ``TARGET_PROXY_COLUMNS`` when a processed marker or dummy has ``share_with_target == 1.0``), ``weak_hints`` (``event_flag_columns`` and ``description``), ``preprocessing_yaml_chars``, ``cost``, ``how_to_use``, and ``next_tools`` (``["edit_preprocessing_plan", "create_config", "probe_columns"]``). ``detail="full"`` adds per-column ``entries``, ``preprocessing_yaml``, and uncapped lists.
 
 - **edit_preprocessing_plan**:
 
   - *Purpose*: Updates a stored plan at ``base_revision`` with question ``answers`` or direct column ``edits`` while tracking decision provenance (``source="agent"`` when inferred from context or schema; ``source="user"`` when relaying a human answer). Stale ``base_revision`` values fail with ``SESSION_REVISION_CONFLICT``; invalid dry-run schemas return ``validation: {valid: false, error: ...}`` so the agent can adjust before running a sweep.
   - *Parameters*: ``plan_id``, ``base_revision``, ``answers=[{question_id, option_id}]``, ``edits=[{column, role?, impute_method?, impute_value?, indicator?, encode?}]``, ``source="agent" | "user"``, ``response_format="markdown" | "json"``.
-  - *Payload headline*: ``plan_id``, ``revision``, ``plan_fingerprint``, ``changes`` (capped diff of effective ``{column, field, was, now}`` rows), ``change_summary`` (grouped ``{field, was, now, count}`` transitions), ``counts``, ``processed_space``, ``validation`` (``{valid, error}``), ``open_questions_preview``, ``preprocessing_yaml_chars``, and ``next_tools``.
+  - *Payload headline*: ``plan_id``, ``revision``, ``plan_fingerprint``, ``changes`` (capped diff of effective ``{column, field, was, now}`` rows), ``change_summary`` (grouped ``{field, was, now, count}`` transitions), ``counts``, ``processed_space``, ``evidence`` (``target_proxies``), ``warnings`` (``TARGET_PROXY_COLUMNS``), ``validation`` (``{valid, error}``), ``open_questions_preview``, ``preprocessing_yaml_chars``, and ``next_tools``.
 
 **Example question/answer flow**
 
@@ -273,7 +273,7 @@ The plan is evidence plus labeled defaults, not a verdict, and ``stakes`` measur
           source="user",
       )
 
-4. The agent passes the updated ``plan_id`` to ``create_config(dataset_id="ds_1", plan_id="pp_9f2c1a04b8")``, which embeds ``# preprocessing plan pp_9f2c1a04b8 revision 2 (<fingerprint>)`` and the resolved ``preprocessing:`` block into the sweep config. (Calling ``create_config`` without ``plan_id`` drafts baseline defaults automatically and emits a ``PREPROCESSING_QUESTIONS_OPEN`` warning with ``open_questions_preview`` when open questions remain.)
+4. The agent passes the updated ``plan_id`` to ``create_config(dataset_id="ds_1", plan_id="pp_9f2c1a04b8")``, which embeds ``# preprocessing plan pp_9f2c1a04b8 revision 2 (<fingerprint>)`` and the resolved ``preprocessing:`` block into the sweep config. (Calling ``create_config`` without ``plan_id`` drafts baseline defaults automatically and emits ``PREPROCESSING_QUESTIONS_OPEN`` when open questions remain or ``PREPROCESSING_PLAN_NOT_USED`` when an edited plan already exists in the session.)
 
 **Preprocessing config reference**
 

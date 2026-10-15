@@ -384,7 +384,7 @@ def test_full_loop_variants_and_exports(tmp_path):
                 await _call(client, "ingest_dataset", {"path": str(csv)})
             ).structured_content["dataset_id"]
 
-            last_plan_id = None
+            plan_ids: list[str] = []
             for detail in ("summary", "full"):
                 for fmt in ("markdown", "json"):
                     res = await _call(
@@ -403,22 +403,26 @@ def test_full_loop_variants_and_exports(tmp_path):
                     assert sc["preprocessing_yaml_chars"] > 0
                     text = res.content[0].text
                     assert text.startswith("#") is (fmt == "markdown")
-                    last_plan_id = sc["plan_id"]
+                    plan_ids.append(sc["plan_id"])
 
-            assert last_plan_id is not None
-            # Edit plan (markdown + json)
-            for fmt in ("markdown", "json"):
+            assert len(plan_ids) == 4
+            last_plan_id = plan_ids[-1]
+            # Edit plan (markdown + json) on distinct fresh drafts so q1 is open in each
+            for pid_for_fmt, fmt in zip(plan_ids[-2:], ("markdown", "json")):
                 edit_res = await _call(
                     client,
                     "edit_preprocessing_plan",
                     {
-                        "plan_id": last_plan_id,
-                        "answers": [{"question_id": "q1", "option_id": "none_of_them"}],
+                        "plan_id": pid_for_fmt,
+                        "answers": [
+                            {"question_id": "q1", "option_id": "all_amounts"},
+                            {"question_id": "q2", "option_id": "none_of_them"},
+                        ],
                         "response_format": fmt,
                     },
                 )
                 esc = edit_res.structured_content
-                assert esc["plan_id"] == last_plan_id
+                assert esc["plan_id"] == pid_for_fmt
                 assert esc["revision"] >= 2
                 assert esc["validation"]["valid"] is True
                 assert edit_res.content[0].text.startswith("#") is (fmt == "markdown")
@@ -845,6 +849,24 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
                 },
                 error="INVALID_ARGUMENT",
             )
+            no_blanks_err = await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "edits": [
+                        {
+                            "column": "age",
+                            "impute": {"method": "fill_median"},
+                        }
+                    ],
+                },
+                error="INVALID_ARGUMENT",
+            )
+            assert (
+                no_blanks_err.structured_content["agent_action"]
+                == "Remove the impute/indicator edit for this column; it has no blanks."
+            )
 
             # Edit that causes dry-run failure still returns tool success with validation.valid == False
             bad_edit = (
@@ -882,7 +904,49 @@ def test_plan_edit_conflicts_and_create_config_provenance(tmp_path: Path):
             ).structured_content
             assert fixed_edit["validation"]["valid"] is True
 
-            # 3. create_config with wrong dataset's plan_id -> INVALID_ARGUMENT
+            # 3. R1: Re-drafting gets a NEW plan_id and keeps the edited plan intact
+            redraft_sc = (
+                await _call(
+                    client,
+                    "draft_preprocessing_plan",
+                    {
+                        "dataset_id": ds_traps,
+                        "stakes": False,
+                        "response_format": "json",
+                    },
+                )
+            ).structured_content
+            assert redraft_sc["plan_id"] != plan_id
+            assert redraft_sc["revision"] == 1
+            # Editing the first plan with a stale revision after re-draft still conflicts
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "base_revision": 1,
+                    "edits": [{"column": "bmi", "role": "drop"}],
+                },
+                error="SESSION_REVISION_CONFLICT",
+            )
+            # create_config without plan_id after edits warns PREPROCESSING_PLAN_NOT_USED with edited plan_id
+            cfg_after_edit = (
+                await _call(client, "create_config", {"dataset_id": ds_traps})
+            ).structured_content
+            assert cfg_after_edit["preprocessing_plan"]["plan_id"] not in {
+                plan_id,
+                redraft_sc["plan_id"],
+            }
+            not_used_warn = next(
+                w
+                for w in cfg_after_edit["warnings"]
+                if w["code"] == "PREPROCESSING_PLAN_NOT_USED"
+            )
+            assert plan_id in not_used_warn["message"]
+            assert f"revision {fixed_edit['revision']}" in not_used_warn["message"]
+            assert f"Pass plan_id={plan_id} to use it." in not_used_warn["message"]
+
+            # 4. create_config with wrong dataset's plan_id -> INVALID_ARGUMENT
             await _call(
                 client,
                 "create_config",
