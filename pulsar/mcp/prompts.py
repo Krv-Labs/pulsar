@@ -28,11 +28,28 @@ Reveal the dataset's topology; do not force convenient clusters.
    `probe_columns(dataset_id, ['col_name'])` for deep per-column inspection
    (sample values, distributions). Call `characterize_dataset` once per dataset;
    do not repeat it casually on wide tables. Max 20 columns per probe call.
-3. Calibrate: `create_config(dataset_id)` is mandatory. It returns the
-   baseline config, processed-space distance percentiles, and a
-   `sweep_strategy` block. Treat this as a broad first pass, not a final
-   answer.
-4. Validate Config: `validate_config(config_yaml, dataset_id)`.
+3. Preprocess: `draft_preprocessing_plan(dataset_id, target_columns=..., entity_column=..., time_column=...)`
+   measures column evidence (shared missing masks, conditional columns, exact
+   duplicates/sums, date/text kinds) and drafts a versioned plan (`plan_id`,
+   `revision`) of labeled defaults (`decided_by="default"`) plus open questions
+   (`blank_meaning`, `conditional_column`, `date_columns`, `duplicate_signal`,
+   `outcome_columns`). The plan is evidence + labeled defaults, not a verdict;
+   `stakes` (`neighbors_kept`, `feature_count_delta`) measure how much the map's
+   k-NN neighborhoods move between options, not a score to optimize.
+   - Read the questions and evidence first. Record choices you can infer from
+     context or schema via `edit_preprocessing_plan(plan_id, base_revision, answers=[...], edits=[...], source="agent")`.
+   - Ask the user ONLY questions whose answer cannot be inferred and whose
+     stakes are material. Never present the server's question text verbatim to a
+     non-technical user; translate it into their domain vocabulary.
+   - Example (clinician, `blank_meaning` on `n_inpatient_claims` with no 0s):
+     ask *"If a patient has no recorded hospital stays, does that mean they had
+     none, or that we don't know?"* → if they say "none", call
+     `edit_preprocessing_plan(plan_id, base_revision=1, answers=[{"question_id": "q1", "option_id": "none"}], source="user")`.
+4. Calibrate & Validate: `create_config(dataset_id, plan_id=plan_id)` consumes
+   the plan and returns the baseline config, processed-space distance
+   percentiles, and `sweep_strategy` (treat as a broad first pass, not a final
+   answer). Use `validate_preprocessing_config` or `validate_config(config_yaml, dataset_id)`
+   when checking manual YAML edits.
 
 ## PHASE II: EXECUTE & VALIDATE
 5. Run: `run_topological_sweep`.
