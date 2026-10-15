@@ -114,18 +114,28 @@ class ImputeSpec:
     indicator: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.indicator, (bool, np.bool_)):
+            raise ValueError(
+                f"ImputeSpec indicator must be true or false (bool), got {self.indicator!r}."
+            )
         self.indicator = bool(self.indicator)
         if self.method == "fill_value":
             if self.value is None:
                 raise ValueError(
                     "ImputeSpec with method 'fill_value' requires 'value'."
                 )
-            if isinstance(self.value, bool):
+            if isinstance(self.value, (bool, np.bool_)):
                 raise ValueError(
                     f"ImputeSpec 'value' must be finite numeric or string, got bool {self.value!r}."
                 )
             if isinstance(self.value, (int, float, np.number)):
-                if not math.isfinite(float(self.value)):
+                try:
+                    fval = float(self.value)
+                except OverflowError as exc:
+                    raise ValueError(
+                        f"ImputeSpec 'value' must be finite, got {self.value!r}."
+                    ) from exc
+                if not math.isfinite(fval):
                     raise ValueError(
                         f"ImputeSpec 'value' must be finite, got {self.value!r}."
                     )
@@ -133,6 +143,8 @@ class ImputeSpec:
                     self.value = float(self.value)
                 elif isinstance(self.value, np.integer):
                     self.value = int(self.value)
+            elif isinstance(self.value, np.str_):
+                self.value = str(self.value)
             elif not isinstance(self.value, str):
                 raise ValueError(
                     f"ImputeSpec 'value' must be finite numeric or str, got {type(self.value).__name__}."
@@ -218,24 +230,26 @@ def _validate_missing_indicator_groups(
             raise ValueError(
                 "missing_indicator_groups group names must be non-empty strings."
             )
+        group_key = str(group_name)
         if not isinstance(cols, (list, tuple)):
             raise ValueError(
-                f"missing_indicator_groups[{group_name!r}] must be a list of column names."
+                f"missing_indicator_groups[{group_key!r}] must be a list of column names."
             )
         col_list: list[str] = []
         for col in cols:
             if not isinstance(col, str) or not col.strip():
                 raise ValueError(
-                    f"missing_indicator_groups[{group_name!r}] column names must be non-empty strings."
+                    f"missing_indicator_groups[{group_key!r}] column names must be non-empty strings."
                 )
-            if col in seen_columns:
+            col_str = str(col)
+            if col_str in seen_columns:
                 raise ValueError(
-                    f"Column '{col}' appears in more than one missing_indicator_group "
-                    f"({seen_columns[col]!r} and {group_name!r})."
+                    f"Column '{col_str}' appears in more than one missing_indicator_group "
+                    f"({seen_columns[col_str]!r} and {group_key!r})."
                 )
-            seen_columns[col] = group_name
-            col_list.append(col)
-        normalized[group_name] = col_list
+            seen_columns[col_str] = group_key
+            col_list.append(col_str)
+        normalized[group_key] = col_list
     return normalized
 
 
@@ -254,9 +268,44 @@ class PulsarConfig:
     missing_indicator_groups: dict[str, list[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.data = str(self.data)
+        self.run_name = str(self.run_name)
+        self.n_reps = int(self.n_reps)
+        self.drop_columns = [str(c) for c in self.drop_columns]
+        self.impute = {str(k): v for k, v in self.impute.items()}
+        self.encode = {str(k): v for k, v in self.encode.items()}
         self.missing_indicator_groups = _validate_missing_indicator_groups(
             self.missing_indicator_groups
         )
+        grouped_cols = {
+            c for cols in self.missing_indicator_groups.values() for c in cols
+        }
+        drop_set = set(self.drop_columns)
+        per_col_flag_names = {
+            f"{col}_was_missing"
+            for col, spec in self.impute.items()
+            if spec.indicator and col not in grouped_cols and col not in drop_set
+        }
+        configured_cols = set(self.impute) | set(self.encode) | drop_set | grouped_cols
+        seen_group_flags: set[str] = set()
+        for group_name in self.missing_indicator_groups:
+            flag_name = f"{group_name}_was_missing"
+            if flag_name in per_col_flag_names:
+                raise ValueError(
+                    f"missing indicator name collision: group {group_name!r} flag "
+                    f"'{flag_name}' collides with per-column indicator."
+                )
+            if flag_name in configured_cols:
+                raise ValueError(
+                    f"missing indicator name collision: group {group_name!r} flag "
+                    f"'{flag_name}' collides with configured column '{flag_name}'."
+                )
+            if flag_name in seen_group_flags:
+                raise ValueError(
+                    f"missing indicator name collision: duplicate group flag '{flag_name}'."
+                )
+            seen_group_flags.add(flag_name)
+
         default_projection = ProjectionSpec()
         if self.projection == default_projection and self.pca != PCASpec():
             self.projection = ProjectionSpec(
@@ -275,22 +324,21 @@ class PulsarConfig:
 def _parse_preprocessing(
     pre: dict,
 ) -> tuple[list[str], dict[str, ImputeSpec], dict[str, EncodeSpec]]:
-    drop_columns = list(pre.get("drop_columns", []) or [])
+    drop_columns = [str(c) for c in (pre.get("drop_columns", []) or [])]
     _validate_missing_indicator_groups(pre.get("missing_indicator_groups"))
     impute = {
-        col: ImputeSpec(
-            method=spec["method"],
+        str(col): ImputeSpec(
+            method=str(spec["method"]),
             seed=int(spec.get("seed", 42)),
             value=spec.get("value"),
-            indicator=True
-            if spec.get("indicator") is None
-            else bool(spec["indicator"]),
+            indicator=True if spec.get("indicator") is None else spec["indicator"],
         )
         for col, spec in (pre.get("impute") or {}).items()
     }
     encode = {
-        col: EncodeSpec(
-            method=spec["method"], max_categories=spec.get("max_categories")
+        str(col): EncodeSpec(
+            method=str(spec["method"]),
+            max_categories=_optional_int(spec.get("max_categories")),
         )
         for col, spec in (pre.get("encode") or {}).items()
     }
@@ -390,34 +438,45 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     )
 
 
+def _coerce_yaml_scalar(val: Any) -> Any:
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    if isinstance(val, (float, np.floating)):
+        return float(val)
+    return str(val)
+
+
 def _format_preprocessing_yaml(cfg: PulsarConfig) -> dict[str, Any]:
     pre: dict[str, Any] = {
-        "drop_columns": list(cfg.drop_columns),
+        "drop_columns": [str(c) for c in cfg.drop_columns],
     }
     if cfg.missing_indicator_groups:
         pre["missing_indicator_groups"] = {
-            name: list(cols) for name, cols in cfg.missing_indicator_groups.items()
+            str(name): [str(c) for c in cols]
+            for name, cols in cfg.missing_indicator_groups.items()
         }
     if cfg.impute:
         impute_dict: dict[str, dict[str, Any]] = {}
         for col, spec in cfg.impute.items():
             entry: dict[str, Any] = {
-                "method": spec.method,
+                "method": str(spec.method),
                 "seed": int(spec.seed),
             }
             if spec.value is not None:
-                entry["value"] = spec.value
+                entry["value"] = _coerce_yaml_scalar(spec.value)
             if not spec.indicator:
                 entry["indicator"] = False
-            impute_dict[col] = entry
+            impute_dict[str(col)] = entry
         pre["impute"] = impute_dict
     if cfg.encode:
         encode_dict: dict[str, dict[str, Any]] = {}
         for col, spec in cfg.encode.items():
-            entry = {"method": spec.method}
+            entry = {"method": str(spec.method)}
             if spec.max_categories is not None:
                 entry["max_categories"] = int(spec.max_categories)
-            encode_dict[col] = entry
+            encode_dict[str(col)] = entry
         pre["encode"] = encode_dict
     return pre
 
@@ -441,7 +500,7 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
             "range": {
                 "min": float(epsilons[0]),
                 "max": float(epsilons[-1]),
-                "steps": len(epsilons),
+                "steps": int(len(epsilons)),
             }
         }
     else:
@@ -456,13 +515,13 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
 
     doc: dict[str, Any] = {
         "run": {
-            "name": cfg.run_name or "experiment",
-            "data": cfg.data,
+            "name": str(cfg.run_name),
+            "data": str(cfg.data),
         },
         "preprocessing": _format_preprocessing_yaml(cfg),
         "sweep": {
             "projection": {
-                "method": cfg.projection.method,
+                "method": str(cfg.projection.method),
                 "dimensions": {"values": list(dims)},
                 "seed": {"values": list(seeds)},
                 "center": bool(cfg.projection.center),
@@ -477,15 +536,17 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
         },
         "cosmic_graph": {
             "construction_threshold": threshold_val,
-            "neighborhood": cfg.cosmic_graph.neighborhood,
+            "neighborhood": str(cfg.cosmic_graph.neighborhood),
             "sparsify": bool(cfg.cosmic_graph.sparsify),
             "sparsify_epsilon": float(cfg.cosmic_graph.sparsify_epsilon),
             "sparsify_seed": int(cfg.cosmic_graph.sparsify_seed),
-            "sparsify_sketch_dim": cfg.cosmic_graph.sparsify_sketch_dim,
-            "sparsify_sample_count": cfg.cosmic_graph.sparsify_sample_count,
+            "sparsify_sketch_dim": _optional_int(cfg.cosmic_graph.sparsify_sketch_dim),
+            "sparsify_sample_count": _optional_int(
+                cfg.cosmic_graph.sparsify_sample_count
+            ),
             "sparsify_pcg_tol": float(cfg.cosmic_graph.sparsify_pcg_tol),
             "sparsify_max_iter": int(cfg.cosmic_graph.sparsify_max_iter),
-            "construction": cfg.cosmic_graph.construction,
+            "construction": str(cfg.cosmic_graph.construction),
             "minhash_d": int(cfg.cosmic_graph.minhash_d),
             "minhash_seed": int(cfg.cosmic_graph.minhash_seed),
         },
