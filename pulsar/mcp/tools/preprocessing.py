@@ -62,7 +62,7 @@ _OPEN = obj({}, additional=True)
 _COUNTS_SCHEMA = obj(
     {
         "columns": INT,
-        "features": INT,
+        "feature_columns": INT,
         "dropped": INT,
         "open_entries": INT,
         "open_questions": INT,
@@ -73,7 +73,7 @@ _COUNTS_SCHEMA = obj(
     },
     [
         "columns",
-        "features",
+        "feature_columns",
         "dropped",
         "open_entries",
         "open_questions",
@@ -84,7 +84,7 @@ _COUNTS_SCHEMA = obj(
 _EDIT_COUNTS_SCHEMA = obj(
     {
         "columns": INT,
-        "features": INT,
+        "feature_columns": INT,
         "dropped": INT,
         "open_entries": INT,
         "open_questions": INT,
@@ -96,7 +96,7 @@ _EDIT_COUNTS_SCHEMA = obj(
     },
     [
         "columns",
-        "features",
+        "feature_columns",
         "dropped",
         "open_entries",
         "open_questions",
@@ -131,6 +131,7 @@ _QUESTION_ITEM_SCHEMA = obj(
         "topic": enum(
             [
                 "blank_meaning",
+                "code_columns",
                 "conditional_column",
                 "date_columns",
                 "duplicate_signal",
@@ -238,6 +239,25 @@ _EVIDENCE_SCHEMA = obj(
             obj({"column": STR, "n_unique": INT}, ["column", "n_unique"])
         ),
         "integer_coded_omitted": INT,
+        "target_proxies": arr(
+            obj(
+                {
+                    "column": STR,
+                    "target": STR,
+                    "marker_rows": INT,
+                    "share_with_target": NUM,
+                    "target_base_rate": NUM,
+                },
+                [
+                    "column",
+                    "target",
+                    "marker_rows",
+                    "share_with_target",
+                    "target_base_rate",
+                ],
+            )
+        ),
+        "target_proxies_omitted": INT,
     },
     [
         "missing_groups",
@@ -256,7 +276,44 @@ _EVIDENCE_SCHEMA = obj(
         "datetime_columns_omitted",
         "integer_coded_preview",
         "integer_coded_omitted",
+        "target_proxies",
+        "target_proxies_omitted",
     ],
+)
+
+_TARGET_PROXY_WARNING_SCHEMA = obj(
+    {
+        "code": STR,
+        "target": STR,
+        "columns": arr(STR),
+        "message": STR,
+    },
+    ["code", "target", "columns", "message"],
+)
+
+_EDIT_EVIDENCE_SCHEMA = obj(
+    {
+        "target_proxies": arr(
+            obj(
+                {
+                    "column": STR,
+                    "target": STR,
+                    "marker_rows": INT,
+                    "share_with_target": NUM,
+                    "target_base_rate": NUM,
+                },
+                [
+                    "column",
+                    "target",
+                    "marker_rows",
+                    "share_with_target",
+                    "target_base_rate",
+                ],
+            )
+        ),
+        "target_proxies_omitted": INT,
+    },
+    ["target_proxies", "target_proxies_omitted"],
 )
 
 _DRAFT_PLAN_SCHEMA = obj(
@@ -274,6 +331,7 @@ _DRAFT_PLAN_SCHEMA = obj(
         "questions": arr(_QUESTION_ITEM_SCHEMA),
         "questions_omitted": INT,
         "evidence": _EVIDENCE_SCHEMA,
+        "warnings": arr(_TARGET_PROXY_WARNING_SCHEMA),
         "weak_hints": obj(
             {
                 "event_flag_columns": {
@@ -311,6 +369,7 @@ _DRAFT_PLAN_SCHEMA = obj(
         "questions",
         "questions_omitted",
         "evidence",
+        "warnings",
         "weak_hints",
         "preprocessing_yaml_chars",
         "cost",
@@ -344,6 +403,8 @@ _EDIT_PLAN_SCHEMA = obj(
         "processed_space": _PROCESSED_SPACE_SCHEMA,
         "marker_legend": arr(_MARKER_LEGEND_ITEM_SCHEMA),
         "marker_legend_omitted": INT,
+        "evidence": _EDIT_EVIDENCE_SCHEMA,
+        "warnings": arr(_TARGET_PROXY_WARNING_SCHEMA),
         "validation": obj(
             {"valid": BOOL, "error": nullable(STR)},
             ["valid", "error"],
@@ -367,6 +428,8 @@ _EDIT_PLAN_SCHEMA = obj(
         "processed_space",
         "marker_legend",
         "marker_legend_omitted",
+        "evidence",
+        "warnings",
         "validation",
         "open_questions_preview",
         "open_questions_omitted",
@@ -729,6 +792,7 @@ async def edit_preprocessing_plan(
             list(edits or ()),
             source,
         )
+        session.preprocessing_plans.pop(plan.plan_id, None)
         session.preprocessing_plans[plan.plan_id] = updated
         if response_format == "markdown":
             return mcp_result(payload, text=edit_plan_payload_to_markdown(payload))
@@ -738,6 +802,16 @@ async def edit_preprocessing_plan(
             agent_action = (
                 "To mark outcome columns, call edit_preprocessing_plan with "
                 "edits=[{column, role: 'target'}]."
+            )
+        elif exc.details.get("topic") == "code_columns":
+            agent_action = (
+                "To treat code columns as categories or drop them, call "
+                "edit_preprocessing_plan with edits=[{column, encode: 'one_hot'}] "
+                "or edits=[{column, role: 'drop'}]."
+            )
+        elif exc.details.get("n_missing") == 0 or "has no blanks" in exc.message:
+            agent_action = (
+                "Remove the impute/indicator edit for this column; it has no blanks."
             )
         else:
             agent_action = (

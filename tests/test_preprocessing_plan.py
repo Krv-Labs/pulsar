@@ -532,12 +532,12 @@ def test_duplicate_signal_bundling_and_blank_meaning_group_with_partner() -> Non
     assert len(blank_qs) == 1
     assert set(blank_qs[0].applies_to) == {"claim_cnt", "claim_pay"}
     assert (
-        "`claim_cnt` never records a 0 (the other 1 column sometimes does)."
+        "`claim_cnt` never records a 0 (1 other column sometimes does)."
         in blank_qs[0].text
     )
     assert "blank exactly where `visits` is 0" in blank_qs[0].text
     none_opt = next(o for o in blank_qs[0].options if o.option_id == "none")
-    assert "All 2 columns get 0 where blank" in none_opt.effect
+    assert "Both columns get 0 where blank" in none_opt.effect
     assert not any(q.topic == "conditional_column" for q in plan.questions.values())
 
 
@@ -742,8 +742,9 @@ def test_d1_mixed_values_esrd_not_coerced_to_zero() -> None:
     mq = mixed_qs[0]
     assert mq.applies_to == ["bene_esrd_ind_2008", "bene_esrd_ind_2009"]
     assert mq.default_option_id == "as_categories"
+    total_y = n_y + 150
     assert (
-        f"`bene_esrd_ind_2009` mostly holds numbers but also the value 'Y' ({n_y:,} rows)."
+        f"2 columns hold the number 0 and the value 'Y' ({total_y:,} entries in total; e.g. `bene_esrd_ind_2009`: {n_y:,})."
         in mq.text
     )
     assert [o.option_id for o in mq.options] == [
@@ -752,7 +753,10 @@ def test_d1_mixed_values_esrd_not_coerced_to_zero() -> None:
         "leave_out",
     ]
     as_blank_opt = next(o for o in mq.options if o.option_id == "as_blank")
-    assert f"{n_y:,} 'Y' entries become blanks and are estimated" in as_blank_opt.effect
+    assert (
+        f"{total_y:,} 'Y' entries become blanks and are estimated"
+        in as_blank_opt.effect
+    )
 
     # 3. Default plan keeps 'Y' distinguishable after preprocess_dataframe
     cfg = load_config(
@@ -789,3 +793,251 @@ def test_d1_mixed_values_esrd_not_coerced_to_zero() -> None:
         "Should those values count as their own category, or as unreadable entries "
         "treated like blanks?"
     ) == high_qs[0].text
+
+
+def test_r1_unique_plan_id_per_draft() -> None:
+    df = make_preprocessing_traps(n=60, seed=0)
+    plan1 = draft_plan(df, "ds_traps", stakes=False)
+    plan2 = draft_plan(df, "ds_traps", stakes=False)
+    assert plan1.plan_id.startswith("pp_")
+    assert plan2.plan_id.startswith("pp_")
+    assert plan1.plan_id != plan2.plan_id
+    # Content fingerprint is still identical for identical decisions
+    assert plan_fingerprint(plan1) == plan_fingerprint(plan2)
+
+
+def test_r2_protected_roles_not_overridden_by_question_answers() -> None:
+    df = make_preprocessing_traps(n=120, seed=0)
+    df["index_date"] = [f"2008-01-{(i % 28) + 1:02d}" for i in range(len(df))]
+    plan = draft_plan(df, "ds_traps", stakes=False)
+
+    cond_q = next(q for q in plan.questions.values() if q.topic == "conditional_column")
+    date_q = next(q for q in plan.questions.values() if q.topic == "date_columns")
+    assert cond_q.applies_to == ["days_to_death"]
+    assert set(date_q.applies_to) == {"death_date", "index_date"}
+
+    # 1. Mark days_to_death and death_date as target
+    plan_target = apply_answers_and_edits(
+        plan,
+        answers=[],
+        edits=[
+            {"column": "days_to_death", "role": "target"},
+            {"column": "death_date", "role": "target"},
+        ],
+        source="agent",
+    )
+    assert plan_target.entries["days_to_death"].role == "target"
+    assert plan_target.entries["death_date"].role == "target"
+    assert plan_target.questions[cond_q.question_id].status == "answered"
+
+    # 2. Answering conditional_column after marking days_to_death target is rejected; role stays target
+    with pytest.raises(PlanEditError) as exc_info:
+        apply_answers_and_edits(
+            plan_target,
+            answers=[{"question_id": cond_q.question_id, "option_id": "leave_out"}],
+            edits=[],
+            source="agent",
+        )
+    assert exc_info.value.code == "INVALID_ARGUMENT"
+    assert (
+        f"question {cond_q.question_id} no longer applies (columns now: days_to_death=target)"
+        in exc_info.value.message
+    )
+    assert plan_target.entries["days_to_death"].role == "target"
+
+    # 3. Answering multi-column date_columns (death_date + index_date) skips protected death_date
+    plan_after_date = apply_answers_and_edits(
+        plan_target,
+        answers=[{"question_id": date_q.question_id, "option_id": "ignore"}],
+        edits=[],
+        source="agent",
+    )
+    assert plan_after_date.entries["death_date"].role == "target"
+    assert plan_after_date.entries["index_date"].role == "drop"
+
+
+def test_r3_outcome_proxies_and_target_proxy_warnings() -> None:
+    from pulsar.mcp.preprocessing import (
+        build_draft_plan_payload,
+        build_edit_plan_payload,
+    )
+    from pulsar.mcp.preprocessing_plan import diff_plan_entries
+
+    df = make_preprocessing_traps(n=200, seed=0)
+    # 1. Even with no target declared, boolean event_flag_columns (died) are checked.
+    # Add a non-constant column that is blank on a subset of died==True rows (like 2009/2010 enrollment in SynPUF).
+    died_idx = np.flatnonzero(df["died"].astype(bool).to_numpy())
+    cov = np.arange(len(df), dtype=float)
+    cov[died_idx[:10]] = np.nan
+    df["post_year_coverage"] = cov
+
+    plan_no_target = draft_plan(df, "ds_traps", stakes=False)
+    space0, _ = dry_run_processed_space(df, plan_no_target)
+    payload0 = build_draft_plan_payload(plan_no_target, processed_space=space0)
+    proxies0 = payload0["evidence"]["target_proxies"]
+    assert any(
+        p["column"] == "post_year_coverage_was_missing"
+        and p["target"] == "died"
+        and p["share_with_target"] == 1.0
+        for p in proxies0
+    )
+    assert any(
+        w["code"] == "TARGET_PROXY_COLUMNS"
+        and w["target"] == "died"
+        and "post_year_coverage_was_missing" in w["columns"]
+        and w["message"]
+        == "these columns are 1 only for rows where died is set; they would let the map encode the outcome"
+        for w in payload0["warnings"]
+    )
+
+    # 2. On traps with target_columns=["died"], answering date_columns with has_date on death_date
+    # flags death_date_was_missing with share_with_target == 1.0.
+    df_traps = make_preprocessing_traps(n=200, seed=0)
+    plan_t = draft_plan(df_traps, "ds_traps", target_columns=["died"], stakes=False)
+    date_q = next(q for q in plan_t.questions.values() if q.topic == "date_columns")
+    plan_has_date = apply_answers_and_edits(
+        plan_t,
+        answers=[{"question_id": date_q.question_id, "option_id": "has_date"}],
+        edits=[],
+        source="agent",
+    )
+    space_edit, val_edit = dry_run_processed_space(df_traps, plan_has_date)
+    edit_payload = build_edit_plan_payload(
+        plan_has_date,
+        changes=diff_plan_entries(plan_t, plan_has_date),
+        processed_space=space_edit,
+        validation=val_edit,
+    )
+    edit_proxies = edit_payload["evidence"]["target_proxies"]
+    assert any(
+        p["column"] == "death_date_was_missing"
+        and p["target"] == "died"
+        and p["share_with_target"] == 1.0
+        for p in edit_proxies
+    )
+    assert any(
+        w["code"] == "TARGET_PROXY_COLUMNS"
+        and w["target"] == "died"
+        and "death_date_was_missing" in w["columns"]
+        for w in edit_payload["warnings"]
+    )
+
+
+def test_r4_mixed_values_single_and_multi_number_phrasing() -> None:
+    rng = np.random.default_rng(7)
+    n = 100
+    # Single column holding only '0' and 'Y'
+    df_single = pd.DataFrame(
+        {
+            "num": rng.normal(size=n),
+            "esrd": ["Y" if i < 20 else "0" for i in range(n)],
+        }
+    )
+    p_single = draft_plan(df_single, "ds_s", stakes=False)
+    mq_s = next(q for q in p_single.questions.values() if q.topic == "mixed_values")
+    assert "`esrd` holds the number 0 and the value 'Y' (20 rows)." in mq_s.text
+
+    # Single column with multiple distinct numbers, mostly numbers vs mostly text
+    df_multi_num = pd.DataFrame(
+        {
+            "num": rng.normal(size=n),
+            "mostly_num": ["N/A" if i < 15 else str(i % 5) for i in range(n)],
+        }
+    )
+    p_mn = draft_plan(df_multi_num, "ds_mn", stakes=False)
+    mq_mn = next(q for q in p_mn.questions.values() if q.topic == "mixed_values")
+    assert "`mostly_num` mostly holds numbers" in mq_mn.text
+
+
+def test_r5_code_columns_question() -> None:
+    rng = np.random.default_rng(11)
+    n = 100
+    df = pd.DataFrame(
+        {
+            "continuous": rng.normal(size=n),
+            "sp_state_code": [int(i % 8) + 1 for i in range(n)],
+            "bene_race_cd": [int(i % 4) + 1 for i in range(n)],
+            "binary_flag": [int(i % 2) for i in range(n)],
+        }
+    )
+    plan = draft_plan(df, "ds_codes", stakes=True, seed=0)
+    q_topics = [q.topic for q in plan.questions.values()]
+    assert "code_columns" in q_topics
+    # Framing questions (code_columns, outcome_columns) appear at the end
+    assert q_topics[-2:] == ["code_columns", "outcome_columns"]
+
+    code_q = next(q for q in plan.questions.values() if q.topic == "code_columns")
+    assert code_q.stakes is None
+    assert code_q.default_option_id == "all_amounts"
+    assert code_q.applies_to == ["sp_state_code", "bene_race_cd"]
+    assert (
+        "Some whole-number columns might be labels rather than amounts "
+        "(e.g. `sp_state_code`: 8 distinct values, `bene_race_cd`: 4 distinct values; 2 columns)."
+        in code_q.text
+    )
+
+    # Answering all_amounts + overriding sp_state_code to one_hot
+    edited = apply_answers_and_edits(
+        plan,
+        answers=[{"question_id": code_q.question_id, "option_id": "all_amounts"}],
+        edits=[{"column": "sp_state_code", "encode": "one_hot"}],
+        source="agent",
+    )
+    assert edited.questions[code_q.question_id].status == "answered"
+    assert edited.entries["sp_state_code"].encode == "one_hot"
+    assert edited.entries["bene_race_cd"].encode is None
+
+
+def test_r6_ux_improvements() -> None:
+    from pulsar.mcp.preprocessing import (
+        build_draft_plan_payload,
+        build_edit_plan_payload,
+        edit_plan_payload_to_markdown,
+    )
+    from pulsar.mcp.preprocessing_plan import diff_plan_entries, summarize_plan_counts
+
+    df = make_preprocessing_traps(n=80, seed=0)
+    plan = draft_plan(df, "ds_traps", stakes=False)
+
+    # 1. Invalid role error message lists valid roles and hints at 'target'
+    with pytest.raises(PlanEditError) as exc_info:
+        apply_answers_and_edits(
+            plan,
+            answers=[],
+            edits=[{"column": "died", "role": "outcome"}],
+            source="agent",
+        )
+    assert exc_info.value.code == "INVALID_ARGUMENT"
+    assert "Invalid role 'outcome' for column 'died'" in exc_info.value.message
+    assert "valid roles are" in exc_info.value.message
+    assert "for outcomes use role 'target'" in exc_info.value.message
+
+    # 2. counts uses feature_columns instead of features
+    counts = summarize_plan_counts(plan)
+    assert "feature_columns" in counts
+    assert "features" not in counts
+    draft_payload = build_draft_plan_payload(plan, processed_space=None)
+    assert "feature_columns" in draft_payload["counts"]
+    assert "features" not in draft_payload["counts"]
+
+    # 3. Edit summary markdown lists open question IDs and topics
+    first_qid = next(iter(plan.questions))
+    first_opt = plan.questions[first_qid].default_option_id
+    edited = apply_answers_and_edits(
+        plan,
+        answers=[{"question_id": first_qid, "option_id": first_opt}],
+        edits=[],
+        source="agent",
+    )
+    space, val = dry_run_processed_space(df, edited)
+    edit_payload = build_edit_plan_payload(
+        edited,
+        changes=diff_plan_entries(plan, edited),
+        processed_space=space,
+        validation=val,
+    )
+    md = edit_plan_payload_to_markdown(edit_payload)
+    assert "- Open questions: " in md
+    for q in edited.questions.values():
+        if q.status == "open":
+            assert f"`{q.question_id}` [{q.topic}]" in md

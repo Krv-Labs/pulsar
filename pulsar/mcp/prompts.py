@@ -30,14 +30,19 @@ Reveal the dataset's topology; do not force convenient clusters.
    do not repeat it casually on wide tables. Max 20 columns per probe call.
 3. Preprocess: `draft_preprocessing_plan(dataset_id, target_columns=..., entity_column=..., time_column=...)`
    measures column evidence (shared missing masks, conditional columns, exact
-   duplicates/sums, date/text kinds) and drafts a versioned plan (`plan_id`,
-   `revision`) of labeled defaults (`decided_by="default"`) plus open questions
-   (`blank_meaning`, `conditional_column`, `date_columns`, `duplicate_signal`,
-   `mixed_values`, `outcome_columns`). The plan is evidence + labeled defaults,
-   not a verdict; `stakes` (`neighbors_kept`, `feature_count_delta`) measure how
-   much the map's k-NN neighborhoods move between options, not a score to optimize.
-   - Read the questions and evidence first. Record choices you can infer from
-     context or schema via `edit_preprocessing_plan(plan_id, base_revision, answers=[...], edits=[...], source="agent")`.
+   duplicates/sums, date/text kinds, and `evidence.target_proxies` measuring
+   whether missingness markers or category dummies encode a target or boolean
+   event flag) and drafts a versioned plan (`plan_id`, `revision`) with a fresh
+   unique `plan_id` per draft, labeled defaults (`decided_by="default"`), and
+   open questions (`blank_meaning`, `code_columns`, `conditional_column`,
+   `date_columns`, `duplicate_signal`, `mixed_values`, `outcome_columns`). The
+   plan is evidence + labeled defaults, not a verdict; `stakes`
+   (`neighbors_kept`, `feature_count_delta`) measure how much the map's k-NN
+   neighborhoods move between options, not a score to optimize.
+   - Read the questions, `evidence.target_proxies`, and `warnings` (such as
+     `TARGET_PROXY_COLUMNS` when `share_with_target == 1.0`) first. Record
+     choices you can infer from context or schema via
+     `edit_preprocessing_plan(plan_id, base_revision, answers=[...], edits=[...], source="agent")`.
    - Ask the user ONLY questions whose answer cannot be inferred and whose
      stakes are material. Never present the server's question text verbatim to a
      non-technical user; translate it into their domain vocabulary.
@@ -51,9 +56,11 @@ Reveal the dataset's topology; do not force convenient clusters.
    described in `marker_legend`) and returns the baseline config, processed-space
    distance percentiles, and `sweep_strategy` (treat as a broad first pass, not a final
    answer). Calling `create_config` without `plan_id` drafts baseline defaults
-   automatically and emits a `PREPROCESSING_QUESTIONS_OPEN` warning when open
-   questions remain. Use `validate_preprocessing_config` or
-   `validate_config(config_yaml, dataset_id)` when checking manual YAML edits.
+   automatically (with a fresh `plan_id`) and emits `PREPROCESSING_QUESTIONS_OPEN`
+   when open questions remain or `PREPROCESSING_PLAN_NOT_USED` when the session
+   already holds an edited plan (`revision > 1`) for the dataset. Use
+   `validate_preprocessing_config` or `validate_config(config_yaml, dataset_id)`
+   when checking manual YAML edits.
 
 ## PHASE II: EXECUTE & VALIDATE
 5. Run: `run_topological_sweep`.

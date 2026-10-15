@@ -351,7 +351,8 @@ class _PulsarSession:
         bytes_total += _embeddings_memory_bytes(self.embeddings)
         bytes_total += _longitudinal_memory_bytes(self.longitudinal)
         bytes_total += sum(
-            len(getattr(p, "entries", {})) * 256
+            (len(getattr(p, "entries", {})) + len(getattr(p, "questions", {}))) * 256
+            + 512
             for p in self.preprocessing_plans.values()
         )
         return round(float(bytes_total) / (1024 * 1024), 2)

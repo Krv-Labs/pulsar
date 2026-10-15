@@ -31,8 +31,40 @@ _HOW_TO_USE = (
     "words only when the answer cannot be inferred and stakes are material, "
     "then record with edit_preprocessing_plan(source='user'). "
     "To hold out outcome columns, pass edits=[{'column': '<col>', 'role': 'target'}] "
-    "to edit_preprocessing_plan (or target_columns=[...] to draft_preprocessing_plan)."
+    "to edit_preprocessing_plan (or target_columns=[...] to draft_preprocessing_plan). "
+    "To remove TARGET_PROXY_COLUMNS, set indicator='none' or role='drop' on the source columns in edits. "
+    "For code_columns that are labels rather than amounts, pass edits=[{'column': '<col>', 'encode': 'one_hot'}] or role='drop'."
 )
+
+
+def _build_target_proxy_warnings(
+    target_proxies: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    warnings_out: list[dict[str, Any]] = []
+    seen_targets: list[str] = []
+    for item in target_proxies:
+        if item.get("share_with_target") == 1.0:
+            tgt = str(item.get("target"))
+            if tgt not in seen_targets:
+                seen_targets.append(tgt)
+    for tgt in seen_targets:
+        cols = [
+            str(item["column"])
+            for item in target_proxies
+            if item.get("target") == tgt and item.get("share_with_target") == 1.0
+        ]
+        warnings_out.append(
+            {
+                "code": "TARGET_PROXY_COLUMNS",
+                "target": tgt,
+                "columns": cols,
+                "message": (
+                    f"these columns are 1 only for rows where {tgt} is set; "
+                    "they would let the map encode the outcome"
+                ),
+            }
+        )
+    return warnings_out
 
 
 def _format_question_item(
@@ -166,6 +198,9 @@ def build_draft_plan_payload(
     ]
     int_coded_out, int_coded_omitted = _cap_list(int_coded_all, ev_cap)
 
+    proxies_all = [copy.deepcopy(p) for p in plan.target_proxies]
+    proxies_out, proxies_omitted = _cap_list(proxies_all, ev_cap)
+
     legend_all = build_marker_legend(
         plan, preview_limit=5 if col_cap is not None else 10_000
     )
@@ -207,7 +242,10 @@ def build_draft_plan_payload(
             "datetime_columns_omitted": date_omitted,
             "integer_coded_preview": int_coded_out,
             "integer_coded_omitted": int_coded_omitted,
+            "target_proxies": proxies_out,
+            "target_proxies_omitted": proxies_omitted,
         },
+        "warnings": _build_target_proxy_warnings(plan.target_proxies),
         "weak_hints": {
             "event_flag_columns": partners_out,
             "event_flag_columns_omitted": partners_omitted,
@@ -255,7 +293,7 @@ def draft_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
         f"- Dataset: `{payload.get('dataset_id')}` | Fingerprint: `{payload.get('plan_fingerprint')}`",
         (
             f"- Columns: {counts.get('columns', 0)} "
-            f"(features: {counts.get('features', 0)}, "
+            f"(feature columns: {counts.get('feature_columns', 0)}, "
             f"dropped/held-out: {counts.get('dropped', 0)}, "
             f"open questions: {counts.get('open_questions', 0)})"
         ),
@@ -268,6 +306,12 @@ def draft_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
         )
     else:
         lines.append("- Processed space: dry-run unavailable")
+
+    for w in payload.get("warnings", []):
+        cols_str = ", ".join(f"`{c}`" for c in w.get("columns", []))
+        lines.append(
+            f"- Warning `{w.get('code')}` (`{w.get('target')}`): {w.get('message')} ({cols_str})"
+        )
 
     questions = payload.get("questions", [])
     lines.extend(["", "## Open Questions", ""])
@@ -357,6 +401,7 @@ def build_edit_plan_payload(
     validation: dict[str, Any],
     question_limit: int = 8,
     change_limit: int = 20,
+    evidence_limit: int = 12,
 ) -> dict[str, Any]:
     """Build the structured payload for ``edit_preprocessing_plan``."""
     effective_changes = [
@@ -398,6 +443,8 @@ def build_edit_plan_payload(
     open_out, open_omitted = _cap_list(open_questions, max(1, int(question_limit)))
     legend_all = build_marker_legend(plan, preview_limit=5)
     legend_out, legend_omitted = _cap_list(legend_all, 12)
+    proxies_all = [copy.deepcopy(p) for p in plan.target_proxies]
+    proxies_out, proxies_omitted = _cap_list(proxies_all, max(1, int(evidence_limit)))
 
     effective_changed_cols = {ch["column"] for ch in effective_changes}
     provenance_changed_cols = {
@@ -428,6 +475,11 @@ def build_edit_plan_payload(
         "processed_space": copy.deepcopy(processed_space),
         "marker_legend": legend_out,
         "marker_legend_omitted": legend_omitted,
+        "evidence": {
+            "target_proxies": proxies_out,
+            "target_proxies_omitted": proxies_omitted,
+        },
+        "warnings": _build_target_proxy_warnings(plan.target_proxies),
         "validation": {
             "valid": bool(validation.get("valid", False)),
             "error": validation.get("error"),
@@ -448,14 +500,26 @@ def edit_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- Fingerprint: `{payload.get('plan_fingerprint')}` | Valid: `{val.get('valid')}`",
         (
-            f"- Counts: {counts.get('features', 0)} features, "
+            f"- Counts: {counts.get('feature_columns', 0)} feature columns, "
             f"{counts.get('dropped', 0)} dropped/held-out, "
             f"{counts.get('open_questions', 0)} open questions"
         ),
         f"- Preprocessing YAML: {payload.get('preprocessing_yaml_chars', 0)} chars",
     ]
+    open_preview = payload.get("open_questions_preview", [])
+    if open_preview:
+        q_tags = ", ".join(f"`{q['question_id']}` [{q['topic']}]" for q in open_preview)
+        omitted = payload.get("open_questions_omitted", 0)
+        if omitted:
+            q_tags += f" (+{omitted} more)"
+        lines.append(f"- Open questions: {q_tags}")
     if val.get("error"):
         lines.append(f"- Validation error: `{val['error']}`")
+    for w in payload.get("warnings", []):
+        cols_str = ", ".join(f"`{c}`" for c in w.get("columns", []))
+        lines.append(
+            f"- Warning `{w.get('code')}` (`{w.get('target')}`): {w.get('message')} ({cols_str})"
+        )
 
     changes = payload.get("changes", [])
     lines.extend(["", "## Changes", ""])

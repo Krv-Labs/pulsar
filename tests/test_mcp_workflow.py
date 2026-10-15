@@ -105,6 +105,9 @@ def _normalize_config_data_path(config_yaml: str) -> str:
     for line in config_yaml.splitlines():
         if line.startswith("  data: "):
             lines.append("  data: <normalized>")
+        elif line.startswith("# preprocessing plan pp_") and " revision " in line:
+            _, rest = line.split(" revision ", 1)
+            lines.append(f"# preprocessing plan pp_<normalized> revision {rest}")
         else:
             lines.append(line)
     return "\n".join(lines)

@@ -185,6 +185,16 @@ async def create_config(
             plan = None
             plan_source = "baseline_defaults"
 
+        edited_plan = None
+        if plan is None:
+            edited_candidates = [
+                p
+                for p in session.preprocessing_plans.values()
+                if p.dataset_id == dataset_id and p.revision > 1
+            ]
+            if edited_candidates:
+                edited_plan = edited_candidates[-1]
+
         df, normalized_path = await _load_session_dataframe(
             session,
             dataset_id=dataset_id,
@@ -305,9 +315,27 @@ async def create_config(
                 ],
             },
         }
+        warnings_list: list[dict[str, str]] = []
+        if edited_plan is not None:
+            edited_counts = summarize_plan_counts(edited_plan)
+            n_decisions = int(edited_counts["decided_by"]["agent"]) + int(
+                edited_counts["decided_by"]["user"]
+            )
+            warnings_list.append(
+                {
+                    "code": "PREPROCESSING_PLAN_NOT_USED",
+                    "message": (
+                        f"Session holds edited plan '{edited_plan.plan_id}' (revision "
+                        f"{edited_plan.revision}, {n_decisions} agent/user decisions) "
+                        f"for dataset '{dataset_id}', but plan_id was not passed so a "
+                        f"fresh default plan '{plan.plan_id}' was drafted instead. "
+                        f"Pass plan_id={edited_plan.plan_id} to use it."
+                    ),
+                }
+            )
         if open_q > 0:
             preview_json = json.dumps(open_q_preview, separators=(",", ":"))
-            response["warnings"] = [
+            warnings_list.append(
                 {
                     "code": "PREPROCESSING_QUESTIONS_OPEN",
                     "message": (
@@ -318,7 +346,9 @@ async def create_config(
                         "or edit_preprocessing_plan(plan_id, ...)."
                     ),
                 }
-            ]
+            )
+        if warnings_list:
+            response["warnings"] = warnings_list
         if processed is not None:
             response["processed_feature_count"] = processed.n_features
             raw_features = geo["n_features"]
