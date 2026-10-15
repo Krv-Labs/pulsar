@@ -29,7 +29,9 @@ _HOW_TO_USE = (
     "Resolve questions you can infer from context via "
     "edit_preprocessing_plan(source='agent'); ask the user in their own domain "
     "words only when the answer cannot be inferred and stakes are material, "
-    "then record with edit_preprocessing_plan(source='user')."
+    "then record with edit_preprocessing_plan(source='user'). "
+    "To hold out outcome columns, pass edits=[{'column': '<col>', 'role': 'target'}] "
+    "to edit_preprocessing_plan (or target_columns=[...] to draft_preprocessing_plan)."
 )
 
 
@@ -173,6 +175,7 @@ def build_draft_plan_payload(
     for md in ev.mask_dependencies:
         if md.partner not in seen_partners:
             seen_partners.append(md.partner)
+    partners_out, partners_omitted = _cap_list(seen_partners, ev_cap)
 
     payload: dict[str, Any] = {
         "status": "ok",
@@ -206,7 +209,8 @@ def build_draft_plan_payload(
             "integer_coded_omitted": int_coded_omitted,
         },
         "weak_hints": {
-            "event_partner_columns": seen_partners,
+            "event_partner_columns": partners_out,
+            "event_partner_columns_omitted": partners_omitted,
         },
         "preprocessing_yaml": plan_to_preprocessing_yaml(plan, include_header=True),
         "cost": copy.deepcopy(plan.cost),
@@ -306,10 +310,15 @@ def draft_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
         f"(+{ev.get('relations_omitted', 0)} omitted)"
     )
     lines.append(f"- Constant columns dropped: {ev.get('constant_columns_count', 0)}")
-    hints = payload.get("weak_hints", {}).get("event_partner_columns", [])
+    weak_hints = payload.get("weak_hints", {})
+    hints = weak_hints.get("event_partner_columns", [])
+    hints_omitted = weak_hints.get("event_partner_columns_omitted", 0)
     if hints:
+        omitted_suffix = f" (+{hints_omitted} omitted)" if hints_omitted else ""
         lines.append(
-            "- Event-partner weak hints: " + ", ".join(f"`{c}`" for c in hints)
+            "- Event-partner weak hints: "
+            + ", ".join(f"`{c}`" for c in hints)
+            + omitted_suffix
         )
 
     lines.extend(
@@ -347,6 +356,19 @@ def build_edit_plan_payload(
     legend_all = build_marker_legend(plan, preview_limit=5)
     legend_out, legend_omitted = _cap_list(legend_all, 12)
 
+    effective_changed_cols = {
+        ch["column"]
+        for ch in changes
+        if ch.get("field") in ("role", "impute", "indicator", "encode")
+    }
+    provenance_changed_cols = {
+        ch["column"] for ch in changes if ch.get("field") in ("status", "decided_by")
+    }
+    counts = summarize_plan_counts(plan)
+    counts["confirmed_without_change"] = len(
+        provenance_changed_cols - effective_changed_cols
+    )
+
     next_tools = (
         ["edit_preprocessing_plan", "create_config"]
         if open_questions
@@ -360,7 +382,7 @@ def build_edit_plan_payload(
         "plan_fingerprint": plan_fingerprint(plan),
         "changes": changes_out,
         "changes_omitted": changes_omitted,
-        "counts": summarize_plan_counts(plan),
+        "counts": counts,
         "processed_space": copy.deepcopy(processed_space),
         "marker_legend": legend_out,
         "marker_legend_omitted": legend_omitted,

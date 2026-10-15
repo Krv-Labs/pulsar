@@ -190,10 +190,27 @@ def _is_count_like_zero_free(ev: ColumnEvidence) -> bool:
     )
 
 
+def _format_col_list(cols: Sequence[str], limit: int = 3) -> str:
+    """Format a sequence of column names in backticks, capped at *limit* names."""
+    items = [f"`{c}`" for c in cols]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) <= limit:
+        if len(items) == 2:
+            return f"{items[0]} and {items[1]}"
+        return f"{', '.join(items[:-1])}, and {items[-1]}"
+    return f"{', '.join(items[:limit])}, and {len(items) - limit} more"
+
+
 def _format_missing_reason(
-    ev: ColumnEvidence, missing_groups: dict[str, list[str]]
+    ev: ColumnEvidence,
+    missing_groups: dict[str, list[str]],
+    ev_by_col: dict[str, ColumnEvidence] | None = None,
 ) -> str:
-    parts = [f"{ev.n_missing:,} blanks"]
+    blank_word = "blank" if ev.n_missing == 1 else "blanks"
+    parts = [f"{ev.n_missing:,} {blank_word}"]
     if ev.n_zero == 0 and ev.nonnegative is True:
         parts.append("no recorded 0")
     if ev.missing_group is not None and ev.missing_group in missing_groups:
@@ -203,6 +220,17 @@ def _format_missing_reason(
             parts.append(
                 f"blank on the same rows as {n_others} other {noun} ({ev.missing_group})"
             )
+    if ev.mask_dependency is not None:
+        md = ev.mask_dependency
+        partner_ev = ev_by_col.get(md.partner) if ev_by_col is not None else None
+        if partner_ev is None or partner_ev.kind != "boolean":
+            cond_str = (
+                f"{md.partner} is 0"
+                if md.relation == "missing_when_partner_zero"
+                else f"{md.partner} is not 0"
+            )
+            row_word = "row" if ev.n_missing == 1 else "rows"
+            parts.append(f"blank on the exact {row_word} where {cond_str}")
     return "; ".join(parts)
 
 
@@ -218,6 +246,7 @@ def draft_plan(
     stakes_k: int = 10,
     stakes_max_questions: int = 16,
     seed: int = 0,
+    evidence: PreprocessingEvidence | None = None,
 ) -> PreprocessingPlan:
     """Measure *df* and construct a revision-1 :class:`PreprocessingPlan`."""
     col_set = set(map(str, df.columns))
@@ -246,7 +275,8 @@ def draft_plan(
             },
         )
 
-    evidence = measure_preprocessing_evidence(df)
+    if evidence is None:
+        evidence = measure_preprocessing_evidence(df)
     ev_by_col: dict[str, ColumnEvidence] = {c.name: c for c in evidence.columns}
     missing_groups: dict[str, list[str]] = {
         mg.group_id: list(mg.columns) for mg in evidence.missing_groups
@@ -351,6 +381,7 @@ def draft_plan(
 
         # Rule 4: datetime_like -> drop, open, shared date_columns question
         if ev.kind == "datetime_like":
+            blank_word = "blank" if ev.n_missing == 1 else "blanks"
             entries[col] = PlanEntry(
                 column=col,
                 role="drop",
@@ -359,20 +390,27 @@ def draft_plan(
                 encode=None,
                 decided_by="default",
                 status="open",
-                reason=f"date/time text ({ev.n_unique:,} distinct values; {ev.n_missing:,} blanks)",
+                reason=f"date/time text ({ev.n_unique:,} distinct values; {ev.n_missing:,} {blank_word})",
             )
             date_cols.append(col)
             continue
 
         # Rule 5: numeric_text -> treated as numeric (fill_median triggers coercion), then rule 7
         if ev.kind == "numeric_text":
-            if ev.mask_dependency is not None:
-                md = ev.mask_dependency
+            md = ev.mask_dependency
+            partner_ev = ev_by_col.get(md.partner) if md is not None else None
+            if (
+                md is not None
+                and partner_ev is not None
+                and partner_ev.kind == "boolean"
+            ):
                 cond_str = (
                     f"{md.partner} is 0"
                     if md.relation == "missing_when_partner_zero"
                     else f"{md.partner} is not 0"
                 )
+                blank_word = "blank" if ev.n_missing == 1 else "blanks"
+                row_word = "row" if ev.n_missing == 1 else "rows"
                 entries[col] = PlanEntry(
                     column=col,
                     role="drop",
@@ -381,11 +419,12 @@ def draft_plan(
                     encode=None,
                     decided_by="default",
                     status="open",
-                    reason=f"{ev.n_missing:,} blanks; blank on the exact rows where {cond_str}",
+                    reason=f"{ev.n_missing:,} {blank_word}; blank on the exact {row_word} where {cond_str}",
                 )
                 conditional_by_partner.setdefault(md.partner, []).append(col)
             else:
                 ind = f"group:{ev.missing_group}" if ev.missing_group else "own"
+                blank_word = "blank" if ev.n_missing == 1 else "blanks"
                 entries[col] = PlanEntry(
                     column=col,
                     role="feature",
@@ -395,7 +434,7 @@ def draft_plan(
                     decided_by="default",
                     status="resolved",
                     reason=(
-                        f"numeric text with non-numeric strings ({ev.n_missing:,} blanks); "
+                        f"numeric text with non-numeric strings ({ev.n_missing:,} {blank_word}); "
                         "coerced to numbers with median fill and blank marker"
                     ),
                 )
@@ -423,8 +462,9 @@ def draft_plan(
                     if ev.n_missing > 0
                     else None
                 )
+                blank_word = "blank" if ev.n_missing == 1 else "blanks"
                 reason = (
-                    f"text column with {ev.n_unique:,} categories and {ev.n_missing:,} blanks; "
+                    f"text column with {ev.n_unique:,} categories and {ev.n_missing:,} {blank_word}; "
                     "blanks become '(blank)' category"
                     if ev.n_missing > 0
                     else f"complete text column with {ev.n_unique:,} categories"
@@ -455,14 +495,17 @@ def draft_plan(
             )
             continue
 
-        # Rule 7a: mask_dependency
-        if ev.mask_dependency is not None:
-            md = ev.mask_dependency
+        # Rule 7a: mask_dependency on a boolean event partner -> conditional_column
+        md = ev.mask_dependency
+        partner_ev = ev_by_col.get(md.partner) if md is not None else None
+        if md is not None and partner_ev is not None and partner_ev.kind == "boolean":
             cond_str = (
                 f"{md.partner} is 0"
                 if md.relation == "missing_when_partner_zero"
                 else f"{md.partner} is not 0"
             )
+            blank_word = "blank" if ev.n_missing == 1 else "blanks"
+            row_word = "row" if ev.n_missing == 1 else "rows"
             entries[col] = PlanEntry(
                 column=col,
                 role="drop",
@@ -471,12 +514,12 @@ def draft_plan(
                 encode=None,
                 decided_by="default",
                 status="open",
-                reason=f"{ev.n_missing:,} blanks; blank on the exact rows where {cond_str}",
+                reason=f"{ev.n_missing:,} {blank_word}; blank on the exact {row_word} where {cond_str}",
             )
             conditional_by_partner.setdefault(md.partner, []).append(col)
             continue
 
-        # Rule 7b: standard missing numeric/boolean
+        # Rule 7b: standard missing numeric/boolean (including non-boolean mask_dependency)
         ind = f"group:{ev.missing_group}" if ev.missing_group else "own"
         entries[col] = PlanEntry(
             column=col,
@@ -486,7 +529,7 @@ def draft_plan(
             encode=None,
             decided_by="default",
             status="resolved",
-            reason=_format_missing_reason(ev, missing_groups),
+            reason=_format_missing_reason(ev, missing_groups, ev_by_col),
         )
         rule7b_cols.append(col)
 
@@ -495,7 +538,10 @@ def draft_plan(
 
     # Question type 4: date_columns (one shared question for all datetime_like columns)
     if date_cols:
-        ex_col = date_cols[0]
+        dates_with_blanks = [
+            c for c in date_cols if 0 < ev_by_col[c].n_missing < ev_by_col[c].n_rows
+        ]
+        n_complete_dates = len(date_cols) - len(dates_with_blanks)
         rows_aff = max(
             ev_by_col[c].n_missing
             if ev_by_col[c].n_missing > 0
@@ -505,21 +551,36 @@ def draft_plan(
         partners = sorted(
             {
                 ev_by_col[c].mask_dependency.partner
-                for c in date_cols
+                for c in dates_with_blanks
                 if ev_by_col[c].mask_dependency is not None
             }
         )
-        if partners:
-            partner_str = ", ".join(f"`{p}`" for p in partners)
-            has_date_effect = (
-                f"Leaves raw dates out of the map and adds a 0/1 blank marker "
-                f"(note: this marker would repeat {partner_str})"
-            )
+        if dates_with_blanks:
+            if partners:
+                partner_str = _format_col_list(partners, limit=3)
+                has_date_effect = (
+                    f"Leaves raw dates out of the map and adds a 0/1 blank marker "
+                    f"(note: this marker would repeat {partner_str})"
+                )
+            else:
+                has_date_effect = (
+                    "Leaves raw dates out of the map and adds a 0/1 marker for "
+                    "whether each date is filled in"
+                )
+            if n_complete_dates > 0:
+                complete_clause = (
+                    "1 date column has no blanks and stays out"
+                    if n_complete_dates == 1
+                    else f"{n_complete_dates} date columns have no blanks and stay out"
+                )
+                has_date_effect = f"{has_date_effect}; {complete_clause}"
         else:
-            has_date_effect = (
-                "Leaves raw dates out of the map and adds a 0/1 marker for "
-                "whether each date is filled in"
+            complete_clause = (
+                "1 date column has no blanks and stays out"
+                if n_complete_dates == 1
+                else f"{n_complete_dates} date columns have no blanks and stay out"
             )
+            has_date_effect = f"Leaves raw dates out of the map ({complete_clause})"
 
         ignore_edits = [
             {"column": c, "role": "drop", "indicator": "none"} for c in date_cols
@@ -534,13 +595,14 @@ def draft_plan(
                     else f"group:{c}"
                 ),
             }
-            for c in date_cols
+            for c in dates_with_blanks
         ]
+        date_preview = _format_col_list(date_cols, limit=3)
         q_date = PlanQuestion(
             question_id="",
             topic="date_columns",
             text=(
-                f"Some columns hold dates (e.g. `{ex_col}`). Should the map ignore "
+                f"Some columns hold dates ({date_preview}). Should the map ignore "
                 "them, or use only whether each date is filled in?"
             ),
             applies_to=list(date_cols),
@@ -563,7 +625,7 @@ def draft_plan(
         )
         pending_questions.append((q_date, list(date_cols)))
 
-    # Question type 7a: conditional_column (one per partner)
+    # Question type 7a: conditional_column (one per boolean event partner)
     for partner, cols in conditional_by_partner.items():
         first_md = ev_by_col[cols[0]].mask_dependency
         assert first_md is not None
@@ -572,15 +634,15 @@ def draft_plan(
             if first_md.relation == "missing_when_partner_zero"
             else f"when `{partner}` is 0"
         )
+        cols_preview = _format_col_list(cols, limit=3)
         if len(cols) == 1:
             q_text = (
                 f"`{cols[0]}` only has a value {when_phrase} — it is blank for "
                 "everyone else. Should the map use it?"
             )
         else:
-            preview = ", ".join(f"`{c}`" for c in cols[:3])
             q_text = (
-                f"{len(cols)} columns (e.g. {preview}) only have values {when_phrase} "
+                f"{len(cols)} columns ({cols_preview}) only have values {when_phrase} "
                 "— they are blank for everyone else. Should the map use them?"
             )
         rows_aff = max(ev_by_col[c].n_missing for c in cols)
@@ -594,7 +656,7 @@ def draft_plan(
                 QuestionOption(
                     option_id="leave_out",
                     label="Leave out",
-                    effect=f"Leaves {', '.join(f'`{c}`' for c in cols)} out of the map because the blank pattern largely repeats `{partner}`",
+                    effect=f"Leaves {cols_preview} out of the map because the blank pattern largely repeats `{partner}`",
                     edits=[
                         {
                             "column": c,
@@ -656,22 +718,72 @@ def draft_plan(
             continue
         for c in cols:
             entries[c].status = "open"
-        ex_col = count_like_cols[0]
         rows_aff = ev_by_col[cols[0]].n_missing
+        row_word = "row" if rows_aff == 1 else "rows"
+
+        # Order zero-free columns with count-like columns first
+        zero_free_cols = list(count_like_cols) + [
+            c for c in cols if ev_by_col[c].n_zero == 0 and c not in count_like_cols
+        ]
+        n_with_zero = len(cols) - len(zero_free_cols)
+
+        # Check for non-boolean mask_dependency on any column in the group
+        dep_md = next(
+            (
+                ev_by_col[c].mask_dependency
+                for c in cols
+                if ev_by_col[c].mask_dependency is not None
+            ),
+            None,
+        )
+        if dep_md is not None:
+            cond_val = (
+                "0" if dep_md.relation == "missing_when_partner_zero" else "not 0"
+            )
+            subj = "It is" if len(cols) == 1 else "They are"
+            partner_sentence = (
+                f" {subj} blank exactly where `{dep_md.partner}` is {cond_val}."
+            )
+        else:
+            partner_sentence = ""
+
         if len(cols) == 1:
             q_text = (
-                f"`{ex_col}` is blank for {rows_aff:,} rows and never records a 0. "
-                "Does a blank mean none (zero), or that the value is unknown?"
+                f"`{cols[0]}` is blank for {rows_aff:,} {row_word} and never records a 0."
+                f"{partner_sentence} Does a blank mean none (zero), or that the value is unknown?"
             )
+            none_effect = "Blanks become 0; no extra marker column"
             unknown_effect = (
                 "Blanks are filled with the median of observed rows, plus a 0/1 "
                 "marker column for which rows were blank"
             )
         else:
-            q_text = (
-                f"{len(cols)} columns (e.g. `{ex_col}`) are blank for the same "
-                f"{rows_aff:,} rows, and none of them ever records a 0. Does a blank "
-                "mean none (zero), or that the value is unknown?"
+            zf_str = _format_col_list(zero_free_cols, limit=3)
+            verb = (
+                "never records a 0" if len(zero_free_cols) == 1 else "never record a 0"
+            )
+            same_rows_phrase = (
+                f"Both are blank for the same {rows_aff:,} {row_word}."
+                if len(cols) == 2
+                else f"All {len(cols)} are blank for the same {rows_aff:,} {row_word}."
+            )
+            if n_with_zero > 0:
+                other_phrase = (
+                    "the other 1 column sometimes does"
+                    if n_with_zero == 1
+                    else f"the other {n_with_zero} columns sometimes do"
+                )
+                q_text = (
+                    f"{zf_str} {verb} ({other_phrase}). {same_rows_phrase}"
+                    f"{partner_sentence} Does a blank mean none (zero), or that the value is unknown?"
+                )
+            else:
+                q_text = (
+                    f"{zf_str} {verb}. {same_rows_phrase}"
+                    f"{partner_sentence} Does a blank mean none (zero), or that the value is unknown?"
+                )
+            none_effect = (
+                f"All {len(cols)} columns get 0 where blank; no extra marker column"
             )
             unknown_effect = (
                 "Blanks are filled with the median of observed rows, plus one "
@@ -687,7 +799,7 @@ def draft_plan(
                 QuestionOption(
                     option_id="none",
                     label="Blank means zero (none)",
-                    effect="Blanks become 0; no extra marker column",
+                    effect=none_effect,
                     edits=[
                         {
                             "column": c,
@@ -722,7 +834,19 @@ def draft_plan(
         )
         pending_questions.append((q_blank, list(cols)))
 
-    # Question type 9: duplicate_signal (relations: duplicate, sum_of)
+    # Question type 9: duplicate_signal (ONE question for sum_of, ONE question for duplicate)
+    sum_targets: list[str] = []
+    sum_targets_set: set[str] = set()
+    sum_sources: list[str] = []
+    sum_sources_set: set[str] = set()
+    accepted_sums: list[Any] = []
+
+    dup_kept: list[str] = []
+    dup_kept_set: set[str] = set()
+    dup_dropped: list[str] = []
+    dup_dropped_set: set[str] = set()
+    accepted_dups: list[Any] = []
+
     for rel in evidence.relations:
         if rel.kind not in ("duplicate", "sum_of"):
             continue
@@ -730,84 +854,149 @@ def draft_plan(
         if any(c not in entries or entries[c].role != "feature" for c in rel_cols):
             continue
         if rel.kind == "sum_of":
-            sources_str = ", ".join(f"`{s}`" for s in rel.sources)
-            q_rel = PlanQuestion(
-                question_id="",
-                topic="duplicate_signal",
-                text=(
-                    f"`{rel.target}` is exactly the sum of {sources_str}, so the map "
-                    "counts that signal twice. Keep everything, keep only the total, "
-                    "or keep only the parts?"
-                ),
-                applies_to=[rel.target, *rel.sources],
-                rows_affected=int(rel.rows_used),
-                options=[
-                    QuestionOption(
-                        option_id="keep_all",
-                        label="Keep everything",
-                        effect="Keeps both the total column and the part columns in the map",
-                        edits=[
-                            {"column": c, "role": "feature"}
-                            for c in [rel.target, *rel.sources]
-                        ],
-                    ),
-                    QuestionOption(
-                        option_id="keep_total",
-                        label="Keep only the total",
-                        effect=f"Keeps `{rel.target}` and leaves {sources_str} out of the map",
-                        edits=[
-                            {"column": rel.target, "role": "feature"},
-                            *[{"column": s, "role": "drop"} for s in rel.sources],
-                        ],
-                    ),
-                    QuestionOption(
-                        option_id="keep_parts",
-                        label="Keep only the parts",
-                        effect=f"Keeps {sources_str} and leaves `{rel.target}` out of the map",
-                        edits=[
-                            {"column": rel.target, "role": "drop"},
-                            *[{"column": s, "role": "feature"} for s in rel.sources],
-                        ],
-                    ),
-                ],
-                default_option_id="keep_all",
-            )
-            pending_questions.append((q_rel, []))
+            # Skip if target overlaps existing totals/sources or any source is already a total
+            if (
+                rel.target in sum_targets_set
+                or rel.target in sum_sources_set
+                or any(s in sum_targets_set for s in rel.sources)
+            ):
+                continue
+            sum_targets_set.add(rel.target)
+            sum_targets.append(rel.target)
+            for s in rel.sources:
+                if s not in sum_sources_set:
+                    sum_sources_set.add(s)
+                    sum_sources.append(s)
+            accepted_sums.append(rel)
         elif rel.kind == "duplicate":
             col_a = rel.sources[0]
             col_b = rel.target
-            q_rel = PlanQuestion(
-                question_id="",
-                topic="duplicate_signal",
-                text=(
-                    f"`{col_b}` has identical values to `{col_a}`, so the map counts "
-                    f"that signal twice. Keep both columns, or keep only `{col_a}`?"
-                ),
-                applies_to=[col_a, col_b],
-                rows_affected=int(rel.rows_used),
-                options=[
-                    QuestionOption(
-                        option_id="keep_both",
-                        label="Keep both",
-                        effect=f"Keeps both `{col_a}` and `{col_b}` in the map",
-                        edits=[
-                            {"column": col_a, "role": "feature"},
-                            {"column": col_b, "role": "feature"},
-                        ],
-                    ),
-                    QuestionOption(
-                        option_id="keep_one",
-                        label="Keep only one",
-                        effect=f"Keeps `{col_a}` and leaves duplicate `{col_b}` out of the map",
-                        edits=[
-                            {"column": col_a, "role": "feature"},
-                            {"column": col_b, "role": "drop"},
-                        ],
-                    ),
-                ],
-                default_option_id="keep_both",
+            if (
+                col_a in dup_dropped_set
+                or col_b in dup_kept_set
+                or col_b in dup_dropped_set
+            ):
+                continue
+            if col_a not in dup_kept_set:
+                dup_kept_set.add(col_a)
+                dup_kept.append(col_a)
+            dup_dropped_set.add(col_b)
+            dup_dropped.append(col_b)
+            accepted_dups.append(rel)
+
+    if accepted_sums:
+        r0 = accepted_sums[0]
+        if len(r0.sources) <= 2:
+            rhs = " + ".join(f"`{s}`" for s in r0.sources)
+        else:
+            rhs = " + ".join(f"`{s}`" for s in r0.sources[:2]) + " + …"
+        ex_formula = f"`{r0.target}` = {rhs}"
+        if len(accepted_sums) == 1:
+            q_sum_text = (
+                f"1 total in this table is an exact sum of other columns ({ex_formula}). "
+                "Counting both gives those signals extra weight. Keep everything, "
+                "keep only the totals, or keep only the parts?"
             )
-            pending_questions.append((q_rel, []))
+        else:
+            q_sum_text = (
+                f"{len(accepted_sums)} totals in this table are exact sums of other "
+                f"columns (e.g. {ex_formula}). Counting both gives those signals extra "
+                "weight. Keep everything, keep only the totals, or keep only the parts?"
+            )
+        sum_applies = [*sum_targets, *sum_sources]
+        sum_rows_aff = max(int(r.rows_used) for r in accepted_sums)
+        targets_str = _format_col_list(sum_targets, limit=3)
+        sources_str = _format_col_list(sum_sources, limit=3)
+        q_sum = PlanQuestion(
+            question_id="",
+            topic="duplicate_signal",
+            text=q_sum_text,
+            applies_to=sum_applies,
+            rows_affected=sum_rows_aff,
+            options=[
+                QuestionOption(
+                    option_id="keep_all",
+                    label="Keep everything",
+                    effect="Keeps both the total columns and the part columns in the map",
+                    edits=[{"column": c, "role": "feature"} for c in sum_applies],
+                ),
+                QuestionOption(
+                    option_id="keep_totals",
+                    label="Keep only the totals",
+                    effect=f"Keeps {targets_str} and leaves {sources_str} out of the map",
+                    edits=[
+                        *[{"column": t, "role": "feature"} for t in sum_targets],
+                        *[{"column": s, "role": "drop"} for s in sum_sources],
+                    ],
+                ),
+                QuestionOption(
+                    option_id="keep_parts",
+                    label="Keep only the parts",
+                    effect=f"Keeps {sources_str} and leaves {targets_str} out of the map",
+                    edits=[
+                        *[{"column": t, "role": "drop"} for t in sum_targets],
+                        *[{"column": s, "role": "feature"} for s in sum_sources],
+                    ],
+                ),
+            ],
+            default_option_id="keep_all",
+        )
+        pending_questions.append((q_sum, []))
+
+    if accepted_dups:
+        dup_applies = [*dup_kept, *dup_dropped]
+        dup_rows_aff = max(int(r.rows_used) for r in accepted_dups)
+        if len(accepted_dups) == 1:
+            col_a = accepted_dups[0].sources[0]
+            col_b = accepted_dups[0].target
+            q_dup_text = (
+                f"`{col_b}` has identical values to `{col_a}`, so the map counts "
+                f"that signal twice. Keep both columns, or keep only `{col_a}`?"
+            )
+            keep_both_effect = f"Keeps both `{col_a}` and `{col_b}` in the map"
+            keep_one_effect = (
+                f"Keeps `{col_a}` and leaves duplicate `{col_b}` out of the map"
+            )
+        else:
+            r0 = accepted_dups[0]
+            ex_pair = f"`{r0.target}` = `{r0.sources[0]}`"
+            q_dup_text = (
+                f"{len(accepted_dups)} columns have identical values to another column "
+                f"(e.g. {ex_pair}), so the map counts those signals twice. Keep all of "
+                "them, or leave out the duplicates?"
+            )
+            kept_str = _format_col_list(dup_kept, limit=3)
+            dropped_str = _format_col_list(dup_dropped, limit=3)
+            keep_both_effect = "Keeps all duplicate columns in the map"
+            keep_one_effect = (
+                f"Keeps {kept_str} and leaves duplicate {dropped_str} out of the map"
+            )
+        q_dup = PlanQuestion(
+            question_id="",
+            topic="duplicate_signal",
+            text=q_dup_text,
+            applies_to=dup_applies,
+            rows_affected=dup_rows_aff,
+            options=[
+                QuestionOption(
+                    option_id="keep_both",
+                    label="Keep both",
+                    effect=keep_both_effect,
+                    edits=[{"column": c, "role": "feature"} for c in dup_applies],
+                ),
+                QuestionOption(
+                    option_id="keep_one",
+                    label="Keep only one",
+                    effect=keep_one_effect,
+                    edits=[
+                        *[{"column": c, "role": "feature"} for c in dup_kept],
+                        *[{"column": c, "role": "drop"} for c in dup_dropped],
+                    ],
+                ),
+            ],
+            default_option_id="keep_both",
+        )
+        pending_questions.append((q_dup, []))
 
     # Question type 10: outcome_columns (when target_columns is empty)
     if not target_list:
@@ -825,7 +1014,7 @@ def draft_plan(
                 QuestionOption(
                     option_id="none_of_them",
                     label="None of them",
-                    effect="Keeps all current columns as map inputs; set role='target' in edits to hold out outcome columns",
+                    effect="Keeps all current columns as map inputs",
                     edits=[],
                 )
             ],
@@ -833,12 +1022,11 @@ def draft_plan(
         )
         pending_questions.append((q_out, []))
 
-    # C-AMENDMENT 5: Pre-sort open questions by rows_affected desc
-    # For ties in rows_affected, put questions with concrete applies_to columns before outcome_columns
+    # C-AMENDMENT 5: Pre-sort open questions by rows_affected desc, with outcome_columns always last
     pending_questions.sort(
         key=lambda item: (
-            -item[0].rows_affected,
             1 if item[0].topic == "outcome_columns" else 0,
+            -item[0].rows_affected,
         )
     )
 
@@ -873,6 +1061,10 @@ def draft_plan(
     )
     plan_id = f"pp_{hashlib.sha256(plan_id_seed.encode('utf-8')).hexdigest()[:10]}"
 
+    eligible_stakes_questions = [
+        q for q, _ in pending_questions if q.topic != "outcome_columns"
+    ]
+
     plan = PreprocessingPlan(
         plan_id=plan_id,
         dataset_id=dataset_id,
@@ -885,20 +1077,21 @@ def draft_plan(
         cost={
             "rows": int(evidence.n_rows),
             "columns": int(evidence.n_columns),
-            "evidence_ms": round(
-                float(evidence.cost.get("elapsed_seconds", 0.0)) * 1000.0, 2
-            ),
+            "evidence_ms": round(float(evidence.cost.get("elapsed_ms", 0.0)), 2),
             "stakes_ms": 0.0,
             "stakes_rows_sampled": 0,
             "stakes_questions_computed": 0,
-            "stakes_questions_skipped": len(pending_questions),
+            "stakes_questions_skipped": len(eligible_stakes_questions),
+            "stakes_questions_failed": 0,
         },
     )
 
-    if stakes and pending_questions and stakes_max_questions > 0:
+    if stakes and eligible_stakes_questions and stakes_max_questions > 0:
         budget_ids = [
-            q.question_id for q, _ in pending_questions[: int(stakes_max_questions)]
+            q.question_id
+            for q in eligible_stakes_questions[: int(stakes_max_questions)]
         ]
+        skipped_count = len(eligible_stakes_questions) - len(budget_ids)
         t0 = time.perf_counter()
         stakes_by_id = compute_stakes(
             df,
@@ -909,8 +1102,10 @@ def draft_plan(
             seed=seed,
         )
         stakes_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-        computed_count = sum(1 for v in stakes_by_id.values() if v is not None)
-        skipped_count = len(pending_questions) - computed_count
+        computed_count = sum(
+            1 for qid in budget_ids if stakes_by_id.get(qid) is not None
+        )
+        failed_count = len(budget_ids) - computed_count
         sampled_rows = 0
         for qid, st in stakes_by_id.items():
             provisional_questions[qid].stakes = st
@@ -920,18 +1115,19 @@ def draft_plan(
         plan.cost["stakes_rows_sampled"] = sampled_rows
         plan.cost["stakes_questions_computed"] = computed_count
         plan.cost["stakes_questions_skipped"] = skipped_count
+        plan.cost["stakes_questions_failed"] = failed_count
 
-    # Final sort: computed stakes first by neighbors_kept asc (ties by rows_affected desc),
-    # then uncomputed by rows_affected desc.
+    # Final sort: outcome_columns always LAST; otherwise computed stakes first by
+    # neighbors_kept asc (ties by rows_affected desc), then null-stakes by rows_affected desc.
     sorted_prov = sorted(
         pending_questions,
         key=lambda item: (
+            1 if item[0].topic == "outcome_columns" else 0,
             0 if item[0].stakes is not None else 1,
             float(item[0].stakes["neighbors_kept"])
             if item[0].stakes is not None
             else 1.0,
             -item[0].rows_affected,
-            1 if item[0].topic == "outcome_columns" else 0,
         ),
     )
 
@@ -1028,61 +1224,33 @@ def compute_stakes(
         )
         return results
 
-    weak_hint_cols = sorted(
-        {
-            md.partner
-            for md in plan.evidence.mask_dependencies
-            if md.partner in plan.entries and plan.entries[md.partner].role == "feature"
-        }
-    )
-
     for qid in target_qids:
         q = plan.questions.get(qid)
-        if q is None:
+        if q is None or q.topic == "outcome_columns":
             continue
         non_default_opts = [
-            opt
-            for opt in q.options
-            if opt.option_id != q.default_option_id and opt.edits
+            opt for opt in q.options if opt.option_id != q.default_option_id
         ]
-        # For outcome_columns (no non-default option edits), measure the impact of
-        # holding out event-partner weak_hints if any exist; otherwise 0 delta.
         counterfactual_edit_sets: list[list[dict[str, Any]]] = [
             opt.edits for opt in non_default_opts
         ]
-        if not counterfactual_edit_sets and q.topic == "outcome_columns":
-            if weak_hint_cols:
-                counterfactual_edit_sets = [
-                    [{"column": c, "role": "target"} for c in weak_hint_cols]
-                ]
-            else:
-                results[qid] = {
-                    "neighbors_kept": 1.0,
-                    "feature_count_delta": 0,
-                    "rows_sampled": int(n_sampled),
-                    "k": int(k_eff),
-                }
-                continue
-
         if not counterfactual_edit_sets:
-            results[qid] = {
-                "neighbors_kept": 1.0,
-                "feature_count_delta": 0,
-                "rows_sampled": int(n_sampled),
-                "k": int(k_eff),
-            }
             continue
 
         min_overlap: float | None = None
         best_delta: int = 0
         for edit_list in counterfactual_edit_sets:
             try:
-                alt_plan = apply_answers_and_edits(
-                    plan, answers=(), edits=edit_list, source="agent"
-                )
-                X_opt = _plan_to_matrix(sample_df, alt_plan)
-                overlap = _padded_overlap(X_base, X_opt, k=k_eff)
-                delta = int(X_opt.shape[1] - X_base.shape[1])
+                if not edit_list:
+                    overlap = 1.0
+                    delta = 0
+                else:
+                    alt_plan = apply_answers_and_edits(
+                        plan, answers=(), edits=edit_list, source="agent"
+                    )
+                    X_opt = _plan_to_matrix(sample_df, alt_plan)
+                    overlap = _padded_overlap(X_base, X_opt, k=k_eff)
+                    delta = int(X_opt.shape[1] - X_base.shape[1])
                 if min_overlap is None or (
                     overlap < min_overlap
                     or (overlap == min_overlap and abs(delta) > abs(best_delta))
@@ -1108,25 +1276,44 @@ def compute_stakes(
 def _validate_indicator(
     indicator: str,
     col: str,
-    entries: dict[str, PlanEntry],
+    ev: ColumnEvidence | None,
     missing_groups: dict[str, list[str]],
 ) -> str:
     ind = str(indicator).strip()
-    if ind in ("none", "own"):
-        return ind
-    if ind.startswith("group:"):
+    if ind == "none":
+        return "none"
+    if ind == "own":
+        normalized = "own"
+    elif ind.startswith("group:"):
         gid = ind.split(":", 1)[1].strip()
-        if gid and (gid in missing_groups or gid in entries):
-            return f"group:{gid}"
-    raise PlanEditError(
-        "INVALID_ARGUMENT",
-        f"Invalid indicator {indicator!r} for column {col!r}. Expected 'none', 'own', or 'group:<gid>'.",
-        {
-            "column": col,
-            "indicator": indicator,
-            "known_groups": sorted(missing_groups.keys()),
-        },
-    )
+        if not gid or (gid not in missing_groups and gid != col):
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"Invalid indicator {indicator!r} for column {col!r}: group must be an evidence missingness group or {col!r}.",
+                {
+                    "column": col,
+                    "indicator": indicator,
+                    "known_groups": sorted(missing_groups.keys()),
+                },
+            )
+        normalized = f"group:{gid}"
+    else:
+        raise PlanEditError(
+            "INVALID_ARGUMENT",
+            f"Invalid indicator {indicator!r} for column {col!r}. Expected 'none', 'own', or 'group:<gid>'.",
+            {
+                "column": col,
+                "indicator": indicator,
+                "known_groups": sorted(missing_groups.keys()),
+            },
+        )
+    if ev is not None and ev.n_missing == 0:
+        raise PlanEditError(
+            "INVALID_ARGUMENT",
+            f"Column {col!r} has no blanks; indicator must be 'none'.",
+            {"column": col, "indicator": indicator, "n_missing": 0},
+        )
+    return normalized
 
 
 def _apply_single_edit(
@@ -1135,6 +1322,7 @@ def _apply_single_edit(
     *,
     source: DecidedBy,
     missing_groups: dict[str, list[str]],
+    ev_by_col: dict[str, ColumnEvidence],
 ) -> None:
     if not isinstance(edit, dict):
         raise PlanEditError(
@@ -1146,8 +1334,9 @@ def _apply_single_edit(
     if unknown_keys:
         raise PlanEditError(
             "INVALID_ARGUMENT",
-            f"Unsupported edit field(s): {sorted(unknown_keys)}.",
+            f"Unsupported edit field(s) for column {edit.get('column')!r}: {sorted(unknown_keys)}.",
             {
+                "column": edit.get("column"),
                 "unsupported_fields": sorted(unknown_keys),
                 "allowed_fields": sorted(_EDIT_ALLOWED_KEYS),
             },
@@ -1161,6 +1350,7 @@ def _apply_single_edit(
         )
 
     entry = entries[col]
+    ev = ev_by_col.get(col)
 
     if "role" in edit and edit["role"] is not None:
         role_val = str(edit["role"])
@@ -1196,6 +1386,12 @@ def _apply_single_edit(
                     )
                 imp_dict: dict[str, Any] = {"method": str(method)}
                 if "value" in raw_imp and raw_imp["value"] is not None:
+                    if isinstance(raw_imp["value"], bool):
+                        raise PlanEditError(
+                            "INVALID_ARGUMENT",
+                            f"impute_value for column {col!r} cannot be a boolean.",
+                            {"column": col, "impute_value": raw_imp["value"]},
+                        )
                     imp_dict["value"] = raw_imp["value"]
                 entry.impute = imp_dict
         else:
@@ -1243,20 +1439,77 @@ def _apply_single_edit(
             entry.impute = dict(entry.impute)
             entry.impute["value"] = val
 
+    if (
+        has_impute_edit
+        and entry.impute is not None
+        and ev is not None
+        and ev.n_missing == 0
+    ):
+        raise PlanEditError(
+            "INVALID_ARGUMENT",
+            f"Column {col!r} has no blanks; impute is not applicable.",
+            {"column": col, "n_missing": 0},
+        )
+
     if entry.impute is not None:
-        if entry.impute.get("method") == "fill_value":
+        method_now = entry.impute.get("method")
+        if method_now == "fill_value":
             if "value" not in entry.impute or entry.impute["value"] is None:
                 raise PlanEditError(
                     "INVALID_ARGUMENT",
                     f"impute_method 'fill_value' for column {col!r} requires 'impute_value'.",
                     {"column": col},
                 )
+            val_now = entry.impute["value"]
+            if isinstance(val_now, (float, np.floating)) and (
+                math.isnan(float(val_now)) or math.isinf(float(val_now))
+            ):
+                raise PlanEditError(
+                    "INVALID_ARGUMENT",
+                    f"impute_value for column {col!r} must be finite, got {val_now!r}.",
+                    {"column": col, "impute_value": str(val_now)},
+                )
+            if ev is not None:
+                if ev.kind in ("numeric", "boolean", "numeric_text"):
+                    if isinstance(val_now, str) or not isinstance(
+                        val_now, (int, float, np.number)
+                    ):
+                        raise PlanEditError(
+                            "INVALID_ARGUMENT",
+                            f"Column {col!r} is {ev.kind}; impute_value for 'fill_value' must be numeric, got {val_now!r}.",
+                            {"column": col, "kind": ev.kind, "impute_value": val_now},
+                        )
+                elif ev.kind in ("text", "datetime_like"):
+                    if isinstance(val_now, (int, float, np.number)) and not isinstance(
+                        val_now, bool
+                    ):
+                        entry.impute["value"] = str(val_now)
         elif "value" in entry.impute:
             raise PlanEditError(
                 "INVALID_ARGUMENT",
                 f"impute_value is only valid with impute_method='fill_value' (column {col!r}).",
-                {"column": col, "impute_method": entry.impute.get("method")},
+                {"column": col, "impute_method": method_now},
             )
+        if ev is not None:
+            if ev.kind in ("text", "datetime_like") and method_now in (
+                "fill_median",
+                "fill_mean",
+                "sample_normal",
+            ):
+                raise PlanEditError(
+                    "INVALID_ARGUMENT",
+                    f"Column {col!r} is {ev.kind}; numeric impute_method {method_now!r} cannot be used on text.",
+                    {"column": col, "kind": ev.kind, "impute_method": method_now},
+                )
+            if ev.kind in ("numeric", "boolean", "numeric_text") and method_now in (
+                "fill_mode",
+                "sample_categorical",
+            ):
+                raise PlanEditError(
+                    "INVALID_ARGUMENT",
+                    f"Column {col!r} is {ev.kind}; categorical impute_method {method_now!r} cannot be used on numbers.",
+                    {"column": col, "kind": ev.kind, "impute_method": method_now},
+                )
 
     if "encode" in edit:
         enc = edit["encode"]
@@ -1278,7 +1531,7 @@ def _apply_single_edit(
 
     if "indicator" in edit and edit["indicator"] is not None:
         entry.indicator = _validate_indicator(
-            str(edit["indicator"]), col, entries, missing_groups
+            str(edit["indicator"]), col, ev, missing_groups
         )
 
     # When a column is set to a non-feature role without explicit impute/encode/indicator,
@@ -1309,6 +1562,16 @@ def apply_answers_and_edits(
             {"source": source, "valid_sources": ["agent", "user"]},
         )
 
+    ans_list = list(answers or ())
+    edit_list = list(edits or ())
+    if not ans_list and not edit_list:
+        raise PlanEditError(
+            "INVALID_ARGUMENT",
+            "Nothing to change: provide at least one answer or edit.",
+            {"answers": [], "edits": []},
+        )
+
+    ev_by_col: dict[str, ColumnEvidence] = {c.name: c for c in plan.evidence.columns}
     new_entries: dict[str, PlanEntry] = {
         col: copy.deepcopy(entry) for col, entry in plan.entries.items()
     }
@@ -1316,7 +1579,7 @@ def apply_answers_and_edits(
         qid: copy.deepcopy(q) for qid, q in plan.questions.items()
     }
 
-    for ans in answers or ():
+    for ans in ans_list:
         if not isinstance(ans, dict):
             raise PlanEditError(
                 "INVALID_ARGUMENT",
@@ -1357,6 +1620,7 @@ def apply_answers_and_edits(
                 edit_spec,
                 source=source,
                 missing_groups=plan.missing_groups,
+                ev_by_col=ev_by_col,
             )
         for col in q.applies_to:
             if col in new_entries:
@@ -1366,12 +1630,13 @@ def apply_answers_and_edits(
         q.answer = {"option_id": oid, "decided_by": source}
 
     target_role_added = False
-    for edit_spec in edits or ():
+    for edit_spec in edit_list:
         _apply_single_edit(
             new_entries,
             edit_spec,
             source=source,
             missing_groups=plan.missing_groups,
+            ev_by_col=ev_by_col,
         )
         if isinstance(edit_spec, dict) and edit_spec.get("role") == "target":
             target_role_added = True
