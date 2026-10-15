@@ -8,6 +8,7 @@ alternative representations.
 
 from __future__ import annotations
 
+import re
 import time
 import warnings
 from collections.abc import Sequence
@@ -23,6 +24,8 @@ _TYPE_SAMPLE_SIZE = 200
 _SUM_COEFF_TOL = 1e-6
 _SUM_OTHER_COEFF_TOL = 1e-4
 _SUM_RESIDUAL_REL_TOL = 1e-9
+_THOUSANDS_COMMA_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+_DATE_SEP_BETWEEN_DIGITS_RE = re.compile(r"\d[-/:.T]\d")
 
 
 @dataclass(frozen=True)
@@ -94,12 +97,19 @@ def _detect_object_kind(series: pd.Series, n_observed: int) -> ColumnKind:
 
     str_vals = obs.astype(str).str.strip()
     non_empty = str_vals != ""
-    num_coerced = pd.to_numeric(str_vals.where(non_empty), errors="coerce")
+    num_clean = str_vals.str.replace(_THOUSANDS_COMMA_RE, "", regex=True)
+    num_coerced = pd.to_numeric(num_clean.where(non_empty), errors="coerce")
     num_arr = num_coerced.to_numpy(dtype=np.float64, na_value=np.nan)
     is_plain_number = np.isfinite(num_arr)
 
     if float(np.mean(is_plain_number)) >= 0.5:
         return "numeric_text"
+
+    has_date_sep = str_vals.str.contains(
+        _DATE_SEP_BETWEEN_DIGITS_RE, regex=True, na=False
+    ).to_numpy(dtype=bool)
+    if not np.any(has_date_sep & (~is_plain_number)):
+        return "text"
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -110,7 +120,9 @@ def _detect_object_kind(series: pd.Series, n_observed: int) -> ColumnKind:
         except TypeError:
             dt_coerced = pd.to_datetime(str_vals.where(non_empty), errors="coerce")
 
-    is_date = dt_coerced.notna().to_numpy(dtype=bool) & (~is_plain_number)
+    is_date = (
+        dt_coerced.notna().to_numpy(dtype=bool) & (~is_plain_number) & has_date_sep
+    )
     if float(np.mean(is_date)) >= 0.5:
         return "datetime_like"
 
@@ -140,11 +152,20 @@ def _profile_single_column(
     """
     dtype = series.dtype
     is_bool_dt = pd.api.types.is_bool_dtype(dtype)
+    is_td64 = pd.api.types.is_timedelta64_dtype(dtype)
     is_dt64 = pd.api.types.is_datetime64_any_dtype(dtype)
-    is_num_dt = pd.api.types.is_numeric_dtype(dtype) and not is_bool_dt
+    is_complex_dt = pd.api.types.is_complex_dtype(dtype)
+    is_num_dt = (
+        pd.api.types.is_numeric_dtype(dtype) and not is_bool_dt and not is_complex_dt
+    ) or is_td64
 
     if is_bool_dt or is_num_dt:
-        float_arr = series.to_numpy(dtype=np.float64, na_value=np.nan)
+        if is_td64:
+            float_arr = series.dt.total_seconds().to_numpy(
+                dtype=np.float64, na_value=np.nan
+            )
+        else:
+            float_arr = series.to_numpy(dtype=np.float64, na_value=np.nan)
         isna_arr = np.isnan(float_arr)
         n_missing = int(isna_arr.sum())
         n_observed = n_rows - n_missing
@@ -175,13 +196,20 @@ def _profile_single_column(
                 float_arr,
             )
 
-        obs_min = float(obs.min())
-        obs_max = float(obs.max())
+        finite_mask = np.isfinite(obs)
+        all_finite = bool(np.all(finite_mask))
+        obs_finite = obs if all_finite else obs[finite_mask]
+        obs_min: float | None = float(obs_finite.min()) if len(obs_finite) > 0 else None
+        obs_max: float | None = float(obs_finite.max()) if len(obs_finite) > 0 else None
         n_zero = int(n_observed - np.count_nonzero(obs))
         is_01 = bool(
             is_bool_dt
             or (
-                obs_min >= 0.0
+                not is_td64
+                and all_finite
+                and obs_min is not None
+                and obs_max is not None
+                and obs_min >= 0.0
                 and obs_max <= 1.0
                 and int(np.count_nonzero((obs == 0.0) | (obs == 1.0))) == n_observed
             )
@@ -196,34 +224,33 @@ def _profile_single_column(
             )
             integer_valued = None
         else:
-            if obs_min == obs_max:
+            if all_finite and obs_min is not None and obs_min == obs_max:
                 n_unique = 1
                 minority_fraction = None
             else:
-                n_unique = int(len(pd.unique(obs)))
+                uniques = pd.unique(obs)
+                n_unique = int(len(uniques))
                 if n_unique == 2:
-                    c_min = int(np.count_nonzero(obs == obs_min))
+                    c_first = int(np.count_nonzero(obs == uniques[0]))
                     minority_fraction = float(
-                        min(c_min, n_observed - c_min) / n_observed
+                        min(c_first, n_observed - c_first) / n_observed
                     )
                 else:
                     minority_fraction = None
             if pd.api.types.is_integer_dtype(dtype):
                 integer_valued = True
             else:
-                integer_valued = bool(
-                    np.all(np.isfinite(obs)) and np.all(np.floor(obs) == obs)
-                )
+                integer_valued = bool(all_finite and np.all(np.floor(obs) == obs))
 
         unique_ratio = float(n_unique / max(n_observed, 1))
         is_constant = bool(n_unique <= 1)
-        nonnegative = bool(obs_min >= 0.0)
+        nonnegative = bool(obs_min >= 0.0) if obs_min is not None else None
 
-        if is_constant:
+        if is_constant or len(obs_finite) < 2 or obs_min is None or obs_max is None:
             max_abs_z = None
         else:
-            mean = float(obs.mean())
-            std = float(obs.std(ddof=0))
+            mean = float(obs_finite.mean())
+            std = float(obs_finite.std(ddof=0))
             if std > 0.0 and np.isfinite(std):
                 max_abs_z = float(max(abs(obs_max - mean), abs(obs_min - mean)) / std)
             else:
@@ -256,20 +283,34 @@ def _profile_single_column(
     n_missing = int(isna_arr.sum())
     n_observed = n_rows - n_missing
     missing_fraction = float(n_missing / n_rows)
-    n_unique = int(series.nunique(dropna=True)) if n_observed > 0 else 0
+    unhashable = False
+    str_obs: pd.Series | None = None
+    if n_observed > 0:
+        try:
+            n_unique = int(series.nunique(dropna=True))
+        except TypeError:
+            unhashable = True
+            str_obs = series.dropna().astype(str)
+            n_unique = int(str_obs.nunique(dropna=True))
+    else:
+        n_unique = 0
     unique_ratio = float(n_unique / max(n_observed, 1))
     is_constant = bool(n_unique <= 1)
 
     if is_dt64:
         kind = "datetime_like"
+    elif unhashable:
+        kind = "text"
     else:
         kind = _detect_object_kind(series, n_observed)
 
-    minority_fraction = (
-        _compute_minority_fraction_from_series(series, n_observed)
-        if n_unique == 2
-        else None
-    )
+    if n_unique == 2:
+        minority_series = str_obs if str_obs is not None else series
+        minority_fraction = _compute_minority_fraction_from_series(
+            minority_series, n_observed
+        )
+    else:
+        minority_fraction = None
     partial_mask = isna_arr if 0 < n_missing < n_rows else None
 
     return (
@@ -306,6 +347,9 @@ def _compute_relations(
     n_sub, p = X_sample.shape
     if n_sub < 2 or p < 2:
         return ()
+
+    if not np.all(np.isfinite(X_sample) | np.isnan(X_sample)):
+        X_sample = np.where(np.isfinite(X_sample), X_sample, np.nan)
 
     # Filter out columns that are constant on the sample
     obs_mask = ~np.isnan(X_sample)
@@ -404,23 +448,38 @@ def _compute_relations(
         for pos, orig_j in enumerate(active_indices)
         if orig_j not in duplicate_targets
     ]
-    resolved_sum_targets: set[int] = set()
+    eligible_cand_mask = np.ones(n_act, dtype=bool)
+    if duplicate_targets:
+        for pos, orig_j in enumerate(active_indices):
+            if orig_j in duplicate_targets:
+                eligible_cand_mask[pos] = False
 
     if len(non_dup_positions) >= 3 and max_sum_sources >= 2:
         for t_pos in non_dup_positions:
             orig_t = active_indices[t_pos]
-            cand_positions = [
-                pos
-                for pos in non_dup_positions
-                if pos != t_pos and active_indices[pos] not in resolved_sum_targets
-            ]
-            if len(cand_positions) < 2:
+            n_cands = int(eligible_cand_mask.sum()) - (
+                1 if eligible_cand_mask[t_pos] else 0
+            )
+            if n_cands < 2:
                 continue
 
-            cand_positions.sort(
-                key=lambda pos: (-float(abs_R[t_pos, pos]), active_indices[pos])
-            )
-            top_cands = cand_positions[:max_sum_sources]
+            neg_scores = np.where(eligible_cand_mask, -abs_R[t_pos], 1.0)
+            neg_scores[t_pos] = 1.0
+            k_take = min(max_sum_sources, n_cands)
+            if n_act > k_take:
+                kth_val = float(np.partition(neg_scores, k_take - 1)[k_take - 1])
+                strict_better = np.flatnonzero(neg_scores < kth_val)
+                need = k_take - len(strict_better)
+                ties = np.flatnonzero(neg_scores == kth_val)[:need]
+                top_pool = (
+                    np.concatenate([strict_better, ties])
+                    if len(strict_better) > 0
+                    else ties
+                )
+            else:
+                top_pool = np.flatnonzero(neg_scores <= 0.0)
+            order = np.lexsort((top_pool, neg_scores[top_pool]))
+            top_cands = top_pool[order]
             if len(top_cands) < 2:
                 continue
 
@@ -431,9 +490,12 @@ def _compute_relations(
             if n_joint <= 2 * len(top_cands):
                 continue
 
-            coeffs, _, _, _ = np.linalg.lstsq(
-                X_cands[joint_mask], y_col[joint_mask], rcond=None
-            )
+            try:
+                coeffs, _, _, _ = np.linalg.lstsq(
+                    X_cands[joint_mask], y_col[joint_mask], rcond=None
+                )
+            except np.linalg.LinAlgError:
+                continue
             unit_mask = np.abs(coeffs - 1.0) <= _SUM_COEFF_TOL
             other_mask = ~unit_mask
             if int(unit_mask.sum()) < 2:
@@ -444,7 +506,7 @@ def _compute_relations(
             ):
                 continue
 
-            chosen_positions = [pos for pos, is_u in zip(top_cands, unit_mask) if is_u]
+            chosen_positions = top_cands[unit_mask].tolist()
             X_chosen = X_act[:, chosen_positions]
             recheck_mask = (~np.isnan(y_col)) & np.all(~np.isnan(X_chosen), axis=1)
             n_recheck = int(recheck_mask.sum())
@@ -466,41 +528,62 @@ def _compute_relations(
                         rows_used=n_recheck,
                     )
                 )
-                resolved_sum_targets.add(orig_t)
+                eligible_cand_mask[t_pos] = False
                 for src_idx in chosen_orig:
                     pair = (min(src_idx, orig_t), max(src_idx, orig_t))
                     reported_pairs.add(pair)
 
     # 4. strong_correlation relations: top max_correlation_pairs by |r| desc
-    corr_candidates: list[tuple[float, int, int, int]] = []
+    corr_relations: list[ColumnRelation] = []
     if max_correlation_pairs > 0:
+        eligible_pair_mask = valid_corr.copy()
+        if reported_pairs:
+            orig_to_pos = {orig: pos for pos, orig in enumerate(active_indices)}
+            for orig_a, orig_b in reported_pairs:
+                pa = orig_to_pos.get(orig_a)
+                pb = orig_to_pos.get(orig_b)
+                if pa is not None and pb is not None:
+                    eligible_pair_mask[pa, pb] = False
+                    eligible_pair_mask[pb, pa] = False
+
         iu, ju = np.triu_indices(n_act, k=1)
-        valid_pairs = valid_corr[iu, ju]
+        valid_pairs = eligible_pair_mask[iu, ju]
         iu_v = iu[valid_pairs]
         ju_v = ju[valid_pairs]
-        for a_pos, b_pos in zip(iu_v.tolist(), ju_v.tolist()):
-            orig_i = active_indices[a_pos]
-            orig_j = active_indices[b_pos]
-            pair = (orig_i, orig_j)
-            if pair in reported_pairs:
-                continue
-            r_abs = float(abs_R[a_pos, b_pos])
-            n_used = int(N_mat[a_pos, b_pos])
-            corr_candidates.append((r_abs, orig_i, orig_j, n_used))
+        n_valid_pairs = len(iu_v)
+        if n_valid_pairs > 0:
+            r_vals = abs_R[iu_v, ju_v]
+            neg_r = -r_vals
+            k_corr = min(max_correlation_pairs, n_valid_pairs)
+            if n_valid_pairs > k_corr:
+                kth_val = float(np.partition(neg_r, k_corr - 1)[k_corr - 1])
+                strict_better = np.flatnonzero(neg_r < kth_val)
+                need = k_corr - len(strict_better)
+                ties = np.flatnonzero(neg_r == kth_val)[:need]
+                sel = (
+                    np.concatenate([strict_better, ties])
+                    if len(strict_better) > 0
+                    else ties
+                )
+            else:
+                sel = np.arange(n_valid_pairs)
 
-        corr_candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
-        corr_candidates = corr_candidates[:max_correlation_pairs]
-
-    corr_relations = [
-        ColumnRelation(
-            kind="strong_correlation",
-            target=col_names[orig_j],
-            sources=(col_names[orig_i],),
-            value=r_abs,
-            rows_used=n_used,
-        )
-        for r_abs, orig_i, orig_j, n_used in corr_candidates
-    ]
+            order = np.lexsort((ju_v[sel], iu_v[sel], neg_r[sel]))
+            top_sel = sel[order]
+            for idx_pair in top_sel.tolist():
+                a_pos = int(iu_v[idx_pair])
+                b_pos = int(ju_v[idx_pair])
+                orig_i = active_indices[a_pos]
+                orig_j = active_indices[b_pos]
+                corr_relations.append(
+                    ColumnRelation(
+                        kind="strong_correlation",
+                        target=col_names[orig_j],
+                        sources=(col_names[orig_i],),
+                        value=float(r_vals[idx_pair]),
+                        rows_used=int(N_mat[a_pos, b_pos]),
+                    )
+                )
 
     return tuple(duplicates + sum_relations + corr_relations)
 
@@ -520,8 +603,8 @@ def measure_preprocessing_evidence(
 
     if exclude_columns:
         excluded_set = {str(c) for c in exclude_columns}
-        kept = [col for col in df.columns if str(col) not in excluded_set]
-        df = df[kept]
+        keep_mask = [str(col) not in excluded_set for col in df.columns]
+        df = df.loc[:, keep_mask]
 
     n_rows, n_cols = df.shape
     if n_rows == 0 and n_cols == 0:
@@ -530,6 +613,37 @@ def measure_preprocessing_evidence(
         raise ValueError("DataFrame has no rows.")
     if n_cols == 0:
         raise ValueError("DataFrame has no columns.")
+
+    raw_cols = list(df.columns)
+    seen_raw_keys: set[tuple[type, Any]] = set()
+    dup_raw_keys: set[tuple[type, Any]] = set()
+    dup_raw: list[Any] = []
+    for col in raw_cols:
+        key: tuple[type, Any] = (type(col), col)
+        try:
+            in_seen = key in seen_raw_keys
+        except TypeError:
+            key = (type(col), repr(col))
+            in_seen = key in seen_raw_keys
+        if in_seen:
+            if key not in dup_raw_keys:
+                dup_raw_keys.add(key)
+                dup_raw.append(col)
+        else:
+            seen_raw_keys.add(key)
+    if dup_raw:
+        raise ValueError(f"DataFrame has duplicate column names: {dup_raw!r}.")
+
+    seen_str: dict[str, Any] = {}
+    for col in raw_cols:
+        col_s = str(col)
+        if col_s in seen_str:
+            prev_col = seen_str[col_s]
+            raise ValueError(
+                f"DataFrame column names must be unique after str(): "
+                f"{prev_col!r} and {col!r} both map to {col_s!r}."
+            )
+        seen_str[col_s] = col
 
     raw_profiles: list[dict[str, Any]] = []
     partial_packed: dict[str, bytes] = {}
@@ -540,10 +654,12 @@ def measure_preprocessing_evidence(
     zero_partner_buckets: dict[bytes, list[str]] = {}
     nonzero_partner_buckets: dict[bytes, list[str]] = {}
 
-    for idx, col in enumerate(df.columns):
+    for idx, col in enumerate(raw_cols):
         col_name = str(col)
         col_order_index[col_name] = idx
-        raw, partial_mask, float_arr = _profile_single_column(col_name, df[col], n_rows)
+        raw, partial_mask, float_arr = _profile_single_column(
+            col_name, df.iloc[:, idx], n_rows
+        )
         raw_profiles.append(raw)
 
         if partial_mask is not None:

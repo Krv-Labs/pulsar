@@ -66,7 +66,10 @@ def impute_string_column(df: pd.DataFrame, col: str, spec: ImputeSpec) -> None:
         return
 
     if spec.method == "fill_value":
-        if not isinstance(spec.value, str) and not is_numeric_dtype(df[col]):
+        if isinstance(df[col].dtype, pd.CategoricalDtype):
+            if spec.value not in df[col].cat.categories:
+                df[col] = df[col].cat.add_categories([spec.value])
+        elif not isinstance(spec.value, str) and not is_numeric_dtype(df[col]):
             df[col] = df[col].astype(object)
         df.loc[missing_mask, col] = spec.value
         return
@@ -137,25 +140,54 @@ def preprocess_dataframe(
     """
     n_rows_input = len(data)
 
-    # 0. Compute group missingness indicators from input BEFORE drop_columns
-    group_indicators: dict[str, pd.Series] = {}
+    # 0. Validate group indicator collisions and capture pre-drop masks for dropped group columns
+    drop_set = set(cfg.drop_columns)
+    grouped_columns = {
+        c for cols in cfg.missing_indicator_groups.values() for c in cols
+    }
+    per_col_flag_names = {
+        f"{col}_was_missing"
+        for col, spec in cfg.impute.items()
+        if spec.indicator and col not in grouped_columns and col not in drop_set
+    }
+    input_col_names = {str(c) for c in data.columns}
+    seen_group_flags: set[str] = set()
+    pre_drop_group_masks: dict[str, pd.Series] = {}
     for group_name, group_cols in cfg.missing_indicator_groups.items():
-        present_cols = [c for c in group_cols if c in data.columns]
-        if not present_cols:
-            continue
-        group_indicators[f"{group_name}_was_missing"] = (
-            data[present_cols].isna().any(axis=1).astype(np.float64)
-        )
+        flag_name = f"{group_name}_was_missing"
+        if flag_name in input_col_names:
+            raise ValueError(
+                f"missing indicator name collision: group {group_name!r} flag "
+                f"'{flag_name}' collides with existing input column '{flag_name}'."
+            )
+        if flag_name in per_col_flag_names:
+            raise ValueError(
+                f"missing indicator name collision: group {group_name!r} flag "
+                f"'{flag_name}' collides with per-column indicator '{flag_name}'."
+            )
+        if flag_name in seen_group_flags:
+            raise ValueError(
+                f"missing indicator name collision: duplicate group flag '{flag_name}'."
+            )
+        seen_group_flags.add(flag_name)
+        dropped_present = [c for c in group_cols if c in data.columns and c in drop_set]
+        if dropped_present:
+            pre_drop_group_masks[group_name] = data[dropped_present].isna().any(axis=1)
 
     # 1. Drop unwanted columns
     drop = [c for c in cfg.drop_columns if c in data.columns]
-    df = data.drop(columns=drop)
+    df = data.drop(columns=drop).copy()
 
     # 2. Coerce configured numeric-impute columns
     for col, spec in cfg.impute.items():
         if col not in df.columns:
             continue
-        if spec.method not in _NUMERIC_IMPUTE_METHODS:
+        is_numeric_fill_value = (
+            spec.method == "fill_value"
+            and isinstance(spec.value, (int, float, np.number))
+            and not isinstance(spec.value, (bool, np.bool_))
+        )
+        if spec.method not in _NUMERIC_IMPUTE_METHODS and not is_numeric_fill_value:
             continue
         if is_numeric_dtype(df[col]):
             continue
@@ -173,7 +205,7 @@ def preprocess_dataframe(
                 f"Sample: {sample!r}. Clean the data or use a string "
                 f"imputation method."
             )
-        df[col] = coerced
+        df[col] = coerced.astype(np.float64)
 
     # 3. All-missing guard for impute/encode targets
     for col in list(cfg.impute) + list(cfg.encode):
@@ -187,12 +219,20 @@ def preprocess_dataframe(
                 f"without observed values."
             )
 
-    # 4. Imputation indicator flags
-    for flag_col, flag_series in group_indicators.items():
-        df[flag_col] = flag_series
-    grouped_columns = {
-        c for cols in cfg.missing_indicator_groups.values() for c in cols
-    }
+    # 4. Imputation indicator flags (group masks combine pre-drop dropped cols and post-coercion kept cols)
+    for group_name, group_cols in cfg.missing_indicator_groups.items():
+        kept_present = [c for c in group_cols if c in df.columns]
+        pre_mask = pre_drop_group_masks.get(group_name)
+        if pre_mask is None and not kept_present:
+            continue
+        if pre_mask is not None and kept_present:
+            combined_mask = pre_mask | df[kept_present].isna().any(axis=1)
+        elif pre_mask is not None:
+            combined_mask = pre_mask
+        else:
+            combined_mask = df[kept_present].isna().any(axis=1)
+        df[f"{group_name}_was_missing"] = combined_mask.astype(np.float64)
+
     for col, spec in cfg.impute.items():
         if col in df.columns and spec.indicator and col not in grouped_columns:
             df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
