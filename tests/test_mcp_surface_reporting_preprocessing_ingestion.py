@@ -995,3 +995,203 @@ def test_validate_preprocessing_config_malformed_yaml_is_config_yaml_invalid(
             assert res.structured_content["details"] == {"valid": False}
 
     asyncio.run(_run())
+
+
+def test_edit_preprocessing_plan_concurrent_lost_update_guard(tmp_path: Path) -> None:
+    """Concurrent edits on the same base_revision allow one update and reject the racing one."""
+    from tests.fixtures.preprocessing_traps import make_preprocessing_traps
+
+    async def _run() -> None:
+        traps_csv = tmp_path / "traps.csv"
+        make_preprocessing_traps(n=80, seed=0).to_csv(traps_csv, index=False)
+        async with Client(_server()) as client:
+            ds_id = (
+                await _call(client, "ingest_dataset", {"path": str(traps_csv)})
+            ).structured_content["dataset_id"]
+            draft = (
+                await _call(
+                    client,
+                    "draft_preprocessing_plan",
+                    {"dataset_id": ds_id, "stakes": False, "response_format": "json"},
+                )
+            ).structured_content
+            plan_id = draft["plan_id"]
+            res_a, res_b = await asyncio.gather(
+                client.call_tool(
+                    "edit_preprocessing_plan",
+                    {
+                        "plan_id": plan_id,
+                        "base_revision": 1,
+                        "edits": [{"column": "bmi", "role": "drop"}],
+                        "response_format": "json",
+                    },
+                    raise_on_error=False,
+                ),
+                client.call_tool(
+                    "edit_preprocessing_plan",
+                    {
+                        "plan_id": plan_id,
+                        "base_revision": 1,
+                        "edits": [{"column": "age", "role": "drop"}],
+                        "response_format": "json",
+                    },
+                    raise_on_error=False,
+                ),
+            )
+            statuses = sorted(
+                [
+                    res_a.structured_content["status"],
+                    res_b.structured_content["status"],
+                ]
+            )
+            assert statuses == ["error", "ok"]
+            ok_sc = (
+                res_a.structured_content
+                if res_a.structured_content["status"] == "ok"
+                else res_b.structured_content
+            )
+            err_sc = (
+                res_a.structured_content
+                if res_a.structured_content["status"] == "error"
+                else res_b.structured_content
+            )
+            assert ok_sc["revision"] == 2
+            assert err_sc["error_code"] == "SESSION_REVISION_CONFLICT"
+
+    asyncio.run(_run())
+
+
+def test_plan_workers_internal_keyerror_is_not_masked_as_unknown_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Internal KeyError inside plan workers maps to DRAFT_PLAN_FAILED / EDIT_PLAN_FAILED."""
+
+    async def _run() -> None:
+        csv = _write_csv(tmp_path / "v.csv")
+        async with Client(_server()) as client:
+            dataset_id = (
+                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ).structured_content["dataset_id"]
+            draft = (
+                await _call(
+                    client,
+                    "draft_preprocessing_plan",
+                    {"dataset_id": dataset_id, "stakes": False},
+                )
+            ).structured_content
+            plan_id = draft["plan_id"]
+
+            def _boom(*_args: object, **_kwargs: object) -> object:
+                raise KeyError("boom")
+
+            monkeypatch.setattr(preprocessing_mod, "_draft_plan_worker", _boom)
+            monkeypatch.setattr(preprocessing_mod, "_edit_plan_worker", _boom)
+
+            await _call(
+                client,
+                "draft_preprocessing_plan",
+                {"dataset_id": dataset_id, "stakes": False},
+                error="DRAFT_PLAN_FAILED",
+            )
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan_id,
+                    "edits": [{"column": "a", "role": "drop"}],
+                },
+                error="EDIT_PLAN_FAILED",
+            )
+
+    asyncio.run(_run())
+
+
+def test_validate_preprocessing_config_dummy_count_excludes_missingness_markers_and_measures_nans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """validate_preprocessing_config separates dummy_expansion_count from missingness_flag_count and measures nan_remaining."""
+    from pulsar.preprocessing import PreprocessLayout
+
+    async def _run() -> None:
+        nan = float("nan")
+        df = pd.DataFrame(
+            {
+                "num_miss": [1.0, nan, 3.0, 4.0, nan, 6.0],
+                "cat": ["red", "blue", "green", "red", "blue", "green"],
+            }
+        )
+        csv = tmp_path / "dummy_markers.csv"
+        df.to_csv(csv, index=False)
+        cfg_yaml = """
+preprocessing:
+  impute:
+    num_miss:
+      method: fill_median
+      indicator: true
+  encode:
+    cat:
+      method: one_hot
+      drop_first: false
+"""
+        async with Client(_server()) as client:
+            dataset_id = (
+                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ).structured_content["dataset_id"]
+            res = (
+                await _call(
+                    client,
+                    "validate_preprocessing_config",
+                    {"config_yaml": cfg_yaml, "dataset_id": dataset_id},
+                )
+            ).structured_content
+            assert res["missingness_flag_count"] == 1
+            assert res["dummy_expansion_count"] == 3
+            assert res["nan_remaining"] == 0
+
+            # Also verify nan_remaining is computed from df_proc rather than hard-coded.
+            def _fake_preprocess(
+                data: pd.DataFrame, _cfg: object
+            ) -> tuple[pd.DataFrame, PreprocessLayout]:
+                out = pd.DataFrame(
+                    {
+                        "num_miss": [1.0, nan, 3.0, 4.0, nan, 6.0],
+                        "num_miss_was_missing": [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+                    }
+                )
+                layout = PreprocessLayout(
+                    feature_names=tuple(out.columns),
+                    vocab={},
+                    n_rows=len(out),
+                )
+                return out, layout
+
+            monkeypatch.setattr(
+                preprocessing_mod, "preprocess_dataframe", _fake_preprocess
+            )
+            res_nan = (
+                await _call(
+                    client,
+                    "validate_preprocessing_config",
+                    {"config_yaml": cfg_yaml, "dataset_id": dataset_id},
+                )
+            ).structured_content
+            assert res_nan["nan_remaining"] == 2
+
+    asyncio.run(_run())
+
+
+def test_calibrate_processed_space_catches_unexpected_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_calibrate_processed_space logs and returns None when preprocess_dataframe raises RuntimeError."""
+    import pulsar.mcp.preprocessing as mcp_prep_mod
+    from pulsar.mcp.preprocessing_plan import draft_plan
+
+    df = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]})
+    plan = draft_plan(df, dataset_id="ds_test", stakes=False)
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(mcp_prep_mod, "preprocess_dataframe", _boom)
+    assert mcp_prep_mod._calibrate_processed_space(df, plan) is None
