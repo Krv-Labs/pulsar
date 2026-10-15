@@ -44,6 +44,17 @@ _PREPROCESSING_PLAN_PROVENANCE_SCHEMA = obj(
         "plan_fingerprint": STR,
         "source": enum(["explicit_plan", "baseline_defaults"]),
         "open_questions": INT,
+        "open_questions_preview": arr(
+            obj(
+                {
+                    "question_id": STR,
+                    "topic": STR,
+                    "rows_affected": INT,
+                    "stakes": nullable(_OPEN),
+                },
+                ["question_id", "topic", "rows_affected", "stakes"],
+            )
+        ),
         "decided_by": obj(
             {"default": INT, "agent": INT, "user": INT},
             ["default", "agent", "user"],
@@ -55,6 +66,7 @@ _PREPROCESSING_PLAN_PROVENANCE_SCHEMA = obj(
         "plan_fingerprint",
         "source",
         "open_questions",
+        "open_questions_preview",
         "decided_by",
     ],
 )
@@ -182,7 +194,8 @@ async def create_config(
                 draft_plan,
                 df,
                 dataset_id,
-                stakes=False,
+                stakes=True,
+                stakes_max_questions=6,
             )
             session.preprocessing_plans[plan.plan_id] = plan
 
@@ -236,6 +249,16 @@ async def create_config(
         )
         counts = summarize_plan_counts(plan)
         open_q = int(counts["open_questions"])
+        open_q_preview = [
+            {
+                "question_id": q.question_id,
+                "topic": q.topic,
+                "rows_affected": int(q.rows_affected),
+                "stakes": dict(q.stakes) if q.stakes is not None else None,
+            }
+            for q in plan.questions.values()
+            if q.status == "open"
+        ][:3]
         response: dict[str, Any] = {
             "status": "ok",
             "config_yaml": config_yaml,
@@ -246,6 +269,7 @@ async def create_config(
                 "plan_fingerprint": plan_fingerprint(plan),
                 "source": plan_source,
                 "open_questions": open_q,
+                "open_questions_preview": open_q_preview,
                 "decided_by": dict(counts["decided_by"]),
             },
             "sweep_strategy": {
@@ -282,13 +306,16 @@ async def create_config(
             },
         }
         if open_q > 0:
+            preview_json = json.dumps(open_q_preview, separators=(",", ":"))
             response["warnings"] = [
                 {
                     "code": "PREPROCESSING_QUESTIONS_OPEN",
                     "message": (
-                        f"{open_q} preprocessing questions are unanswered; "
+                        f"{open_q} preprocessing questions are unanswered on plan "
+                        f"'{plan.plan_id}' (open_questions_preview={preview_json}); "
                         "this config uses labelled defaults for them. "
-                        "See draft_preprocessing_plan."
+                        "call draft_preprocessing_plan(dataset_id) for the full cards, "
+                        "or edit_preprocessing_plan(plan_id, ...)."
                     ),
                 }
             ]

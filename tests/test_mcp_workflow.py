@@ -751,7 +751,8 @@ def test_draft_preprocessing_plan_summary_and_edit_workflow(tmp_path):
 
     assert payload["detail"] == "summary"
     assert "entries" not in payload
-    assert payload["preprocessing_yaml"]
+    assert "preprocessing_yaml" not in payload
+    assert payload["preprocessing_yaml_chars"] > 0
     plan_id = payload["plan_id"]
 
     edited = payload_of(
@@ -765,8 +766,11 @@ def test_draft_preprocessing_plan_summary_and_edit_workflow(tmp_path):
     )
     assert edited["revision"] == 2
     assert any(c["column"] == "y" for c in edited["changes"])
-    block = yaml.safe_load(edited["preprocessing_yaml"])["preprocessing"]
-    assert "y" in block["drop_columns"]
+    assert edited["change_summary"] == [
+        {"field": "role", "was": "feature", "now": "drop", "count": 1}
+    ]
+    assert "preprocessing_yaml" not in edited
+    assert edited["preprocessing_yaml_chars"] > 0
 
 
 def test_draft_preprocessing_plan_surfaces_blank_meaning_and_conditional_questions(

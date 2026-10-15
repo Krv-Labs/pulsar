@@ -209,16 +209,24 @@ def build_draft_plan_payload(
             "integer_coded_omitted": int_coded_omitted,
         },
         "weak_hints": {
-            "event_partner_columns": partners_out,
-            "event_partner_columns_omitted": partners_omitted,
+            "event_flag_columns": partners_out,
+            "event_flag_columns_omitted": partners_omitted,
+            "description": (
+                "complete 0/1 or count columns whose value exactly explains "
+                "other columns' blanks (often events or exposures; only you "
+                "can say whether any is an outcome)"
+            ),
         },
-        "preprocessing_yaml": plan_to_preprocessing_yaml(plan, include_header=True),
+        "preprocessing_yaml_chars": len(
+            yaml_str := plan_to_preprocessing_yaml(plan, include_header=True)
+        ),
         "cost": copy.deepcopy(plan.cost),
         "how_to_use": _HOW_TO_USE,
         "next_tools": ["edit_preprocessing_plan", "create_config", "probe_columns"],
     }
 
     if is_full:
+        payload["preprocessing_yaml"] = yaml_str
         payload["entries"] = {
             col: {
                 "column": entry.column,
@@ -311,28 +319,33 @@ def draft_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
     )
     lines.append(f"- Constant columns dropped: {ev.get('constant_columns_count', 0)}")
     weak_hints = payload.get("weak_hints", {})
-    hints = weak_hints.get("event_partner_columns", [])
-    hints_omitted = weak_hints.get("event_partner_columns_omitted", 0)
+    hints = weak_hints.get("event_flag_columns", [])
+    hints_omitted = weak_hints.get("event_flag_columns_omitted", 0)
     if hints:
         omitted_suffix = f" (+{hints_omitted} omitted)" if hints_omitted else ""
         lines.append(
-            "- Event-partner weak hints: "
+            "- Event-flag weak hints: "
             + ", ".join(f"`{c}`" for c in hints)
             + omitted_suffix
         )
 
-    lines.extend(
-        [
-            "",
-            "## Preprocessing YAML",
-            "",
-            "```yaml",
-            str(payload.get("preprocessing_yaml", "")).strip(),
-            "```",
-            "",
-            payload.get("how_to_use", _HOW_TO_USE),
-        ]
-    )
+    if "preprocessing_yaml" in payload:
+        lines.extend(
+            [
+                "",
+                "## Preprocessing YAML",
+                "",
+                "```yaml",
+                str(payload.get("preprocessing_yaml", "")).strip(),
+                "```",
+            ]
+        )
+    else:
+        lines.append(
+            f"- Preprocessing YAML: {payload.get('preprocessing_yaml_chars', 0)} chars "
+            "(pass `detail='full'` or call `create_config` to view)"
+        )
+    lines.extend(["", payload.get("how_to_use", _HOW_TO_USE)])
     return "\n".join(lines).strip()
 
 
@@ -346,7 +359,37 @@ def build_edit_plan_payload(
     change_limit: int = 20,
 ) -> dict[str, Any]:
     """Build the structured payload for ``edit_preprocessing_plan``."""
-    changes_out, changes_omitted = _cap_list(changes, max(1, int(change_limit)))
+    effective_changes = [
+        ch
+        for ch in changes
+        if ch.get("field") in ("role", "impute", "indicator", "encode")
+    ]
+    changes_out, changes_omitted = _cap_list(
+        effective_changes, max(1, int(change_limit))
+    )
+
+    summary_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for ch in effective_changes:
+        fld = str(ch.get("field"))
+        was_val = ch.get("was")
+        now_val = ch.get("now")
+        key = (
+            fld,
+            json.dumps(was_val, sort_keys=True, default=str),
+            json.dumps(now_val, sort_keys=True, default=str),
+        )
+        if key not in summary_groups:
+            summary_groups[key] = {
+                "field": fld,
+                "was": copy.deepcopy(was_val),
+                "now": copy.deepcopy(now_val),
+                "count": 1,
+            }
+        else:
+            summary_groups[key]["count"] += 1
+    summary_all = list(summary_groups.values())
+    summary_out, summary_omitted = _cap_list(summary_all, max(1, int(change_limit)))
+
     open_questions = [
         _format_question_item(q, col_preview_limit=5)
         for q in plan.questions.values()
@@ -356,11 +399,7 @@ def build_edit_plan_payload(
     legend_all = build_marker_legend(plan, preview_limit=5)
     legend_out, legend_omitted = _cap_list(legend_all, 12)
 
-    effective_changed_cols = {
-        ch["column"]
-        for ch in changes
-        if ch.get("field") in ("role", "impute", "indicator", "encode")
-    }
+    effective_changed_cols = {ch["column"] for ch in effective_changes}
     provenance_changed_cols = {
         ch["column"] for ch in changes if ch.get("field") in ("status", "decided_by")
     }
@@ -369,6 +408,7 @@ def build_edit_plan_payload(
         provenance_changed_cols - effective_changed_cols
     )
 
+    yaml_str = plan_to_preprocessing_yaml(plan, include_header=True)
     next_tools = (
         ["edit_preprocessing_plan", "create_config"]
         if open_questions
@@ -382,6 +422,8 @@ def build_edit_plan_payload(
         "plan_fingerprint": plan_fingerprint(plan),
         "changes": changes_out,
         "changes_omitted": changes_omitted,
+        "change_summary": summary_out,
+        "change_summary_omitted": summary_omitted,
         "counts": counts,
         "processed_space": copy.deepcopy(processed_space),
         "marker_legend": legend_out,
@@ -392,7 +434,7 @@ def build_edit_plan_payload(
         },
         "open_questions_preview": open_out,
         "open_questions_omitted": open_omitted,
-        "preprocessing_yaml": plan_to_preprocessing_yaml(plan, include_header=True),
+        "preprocessing_yaml_chars": len(yaml_str),
         "next_tools": next_tools,
     }
 
@@ -410,6 +452,7 @@ def edit_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
             f"{counts.get('dropped', 0)} dropped/held-out, "
             f"{counts.get('open_questions', 0)} open questions"
         ),
+        f"- Preprocessing YAML: {payload.get('preprocessing_yaml_chars', 0)} chars",
     ]
     if val.get("error"):
         lines.append(f"- Validation error: `{val['error']}`")
@@ -431,16 +474,6 @@ def edit_plan_payload_to_markdown(payload: dict[str, Any]) -> str:
     else:
         lines.append("- No effective entry changes.")
 
-    lines.extend(
-        [
-            "",
-            "## Preprocessing YAML",
-            "",
-            "```yaml",
-            str(payload.get("preprocessing_yaml", "")).strip(),
-            "```",
-        ]
-    )
     return "\n".join(lines).strip()
 
 

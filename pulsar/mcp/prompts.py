@@ -33,9 +33,9 @@ Reveal the dataset's topology; do not force convenient clusters.
    duplicates/sums, date/text kinds) and drafts a versioned plan (`plan_id`,
    `revision`) of labeled defaults (`decided_by="default"`) plus open questions
    (`blank_meaning`, `conditional_column`, `date_columns`, `duplicate_signal`,
-   `outcome_columns`). The plan is evidence + labeled defaults, not a verdict;
-   `stakes` (`neighbors_kept`, `feature_count_delta`) measure how much the map's
-   k-NN neighborhoods move between options, not a score to optimize.
+   `mixed_values`, `outcome_columns`). The plan is evidence + labeled defaults,
+   not a verdict; `stakes` (`neighbors_kept`, `feature_count_delta`) measure how
+   much the map's k-NN neighborhoods move between options, not a score to optimize.
    - Read the questions and evidence first. Record choices you can infer from
      context or schema via `edit_preprocessing_plan(plan_id, base_revision, answers=[...], edits=[...], source="agent")`.
    - Ask the user ONLY questions whose answer cannot be inferred and whose
@@ -44,7 +44,8 @@ Reveal the dataset's topology; do not force convenient clusters.
    - Example (clinician, `blank_meaning` on `n_inpatient_claims` with no 0s):
      ask *"If a patient has no recorded hospital stays, does that mean they had
      none, or that we don't know?"* → if they say "none", call
-     `edit_preprocessing_plan(plan_id, base_revision=1, answers=[{"question_id": "q1", "option_id": "none"}], source="user")`.
+     `edit_preprocessing_plan(plan_id, base_revision=1, answers=[{"question_id": "<question_id>", "option_id": "<option_id>"}], source="user")`
+     (use the `question_id` and `option_id` values the payload lists).
 4. Calibrate & Validate: `create_config(dataset_id, plan_id=plan_id)` consumes
    the plan (emitting readable group markers like `n_inpatient_claims_and_2_more_was_missing`,
    described in `marker_legend`) and returns the baseline config, processed-space

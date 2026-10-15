@@ -354,7 +354,7 @@ def test_cost_evidence_ms_and_stakes_false_skipped_count() -> None:
     df = make_preprocessing_traps(n=120, seed=0)
     plan_with_stakes = draft_plan(df, "ds_traps", stakes=True, stakes_sample_rows=80)
     assert plan_with_stakes.cost["evidence_ms"] > 0.0
-    assert plan_with_stakes.cost["stakes_questions_computed"] == 4
+    assert plan_with_stakes.cost["stakes_questions_computed"] == 5
     assert plan_with_stakes.cost["stakes_questions_skipped"] == 0
 
     plan_no_stakes = draft_plan(df, "ds_traps", stakes=False)
@@ -362,21 +362,21 @@ def test_cost_evidence_ms_and_stakes_false_skipped_count() -> None:
     assert plan_no_stakes.cost["stakes_ms"] == 0.0
     assert plan_no_stakes.cost["stakes_rows_sampled"] == 0
     assert plan_no_stakes.cost["stakes_questions_computed"] == 0
-    # 4 non-outcome_columns questions are skipped when stakes=False
-    assert plan_no_stakes.cost["stakes_questions_skipped"] == 4
+    # 5 non-outcome_columns questions are skipped when stakes=False
+    assert plan_no_stakes.cost["stakes_questions_skipped"] == 5
 
 
 def test_outcome_columns_always_last_stakes_none_and_weak_hints_cap() -> None:
     from pulsar.mcp.preprocessing import build_draft_plan_payload
 
     df = make_preprocessing_traps(n=120, seed=0)
-    plan = draft_plan(df, "ds_traps", stakes=True, stakes_max_questions=4, seed=0)
+    plan = draft_plan(df, "ds_traps", stakes=True, stakes_max_questions=5, seed=0)
     q_list = list(plan.questions.values())
     assert q_list[-1].topic == "outcome_columns"
     assert q_list[-1].question_id == f"q{len(q_list)}"
     assert q_list[-1].stakes is None
     assert q_list[-1].options[0].effect == "Keeps all current columns as map inputs"
-    # None of the 4 real questions were bumped by outcome_columns
+    # None of the 5 real questions were bumped by outcome_columns
     assert all(q.stakes is not None for q in q_list[:-1])
 
     # Add a second boolean event partner to verify weak_hints capping
@@ -387,11 +387,21 @@ def test_outcome_columns_always_last_stakes_none_and_weak_hints_cap() -> None:
     payload_capped = build_draft_plan_payload(
         plan2, processed_space=None, detail="summary", evidence_limit=1
     )
-    assert len(payload_capped["weak_hints"]["event_partner_columns"]) == 1
-    assert payload_capped["weak_hints"]["event_partner_columns_omitted"] == 1
+    assert len(payload_capped["weak_hints"]["event_flag_columns"]) == 1
+    assert payload_capped["weak_hints"]["event_flag_columns_omitted"] == 1
+    assert (
+        payload_capped["weak_hints"]["description"]
+        == "complete 0/1 or count columns whose value exactly explains other columns' blanks (often events or exposures; only you can say whether any is an outcome)"
+    )
+    assert "preprocessing_yaml" not in payload_capped
+    assert payload_capped["preprocessing_yaml_chars"] > 0
     payload_full = build_draft_plan_payload(plan2, processed_space=None, detail="full")
-    assert len(payload_full["weak_hints"]["event_partner_columns"]) == 2
-    assert payload_full["weak_hints"]["event_partner_columns_omitted"] == 0
+    assert len(payload_full["weak_hints"]["event_flag_columns"]) == 2
+    assert payload_full["weak_hints"]["event_flag_columns_omitted"] == 0
+    assert "preprocessing_yaml" in payload_full
+    assert payload_full["preprocessing_yaml_chars"] == len(
+        payload_full["preprocessing_yaml"]
+    )
 
 
 def test_object_boolean_columns_profiled_as_boolean_and_preprocessed() -> None:
@@ -592,7 +602,8 @@ def test_edit_plan_rejects_empty_and_tracks_confirmed_without_change() -> None:
         apply_answers_and_edits(plan, answers=[], edits=[], source="agent")
     assert exc_info.value.code == "INVALID_ARGUMENT"
 
-    # Answering with the default option records decided_by and confirmed_without_change
+    # Answering with the default option records decided_by and confirmed_without_change,
+    # while payload['changes'] and payload['change_summary'] omit status/decided_by rows.
     q1 = plan.questions["q1"]
     plan_confirmed = apply_answers_and_edits(
         plan,
@@ -607,6 +618,36 @@ def test_edit_plan_rejects_empty_and_tracks_confirmed_without_change() -> None:
         plan_confirmed, changes=changes, processed_space=space, validation=val
     )
     assert payload["counts"]["confirmed_without_change"] == len(q1.applies_to)
+    assert payload["changes"] == []
+    assert payload["changes_omitted"] == 0
+    assert payload["change_summary"] == []
+    assert payload["change_summary_omitted"] == 0
+    assert "preprocessing_yaml" not in payload
+    assert payload["preprocessing_yaml_chars"] > 0
+
+    # Answering a non-default option on a multi-column question populates change_summary
+    blank_q = next(q for q in plan.questions.values() if q.topic == "blank_meaning")
+    plan_edited = apply_answers_and_edits(
+        plan,
+        answers=[{"question_id": blank_q.question_id, "option_id": "none"}],
+        edits=[],
+        source="user",
+    )
+    changes_eff = diff_plan_entries(plan, plan_edited)
+    space_eff, val_eff = dry_run_processed_space(df, plan_edited)
+    payload_eff = build_edit_plan_payload(
+        plan_edited, changes=changes_eff, processed_space=space_eff, validation=val_eff
+    )
+    assert all(
+        ch["field"] in ("role", "impute", "indicator", "encode")
+        for ch in payload_eff["changes"]
+    )
+    assert any(
+        s["field"] == "impute"
+        and s["now"] == {"method": "fill_value", "value": 0}
+        and s["count"] == len(blank_q.applies_to)
+        for s in payload_eff["change_summary"]
+    )
 
 
 def test_edit_validation_rejects_incompatible_impute_encode_indicator() -> None:
@@ -654,3 +695,97 @@ def test_edit_validation_rejects_incompatible_impute_encode_indicator() -> None:
         source="agent",
     )
     assert plan_num_oh.entries["age"].encode == "one_hot"
+
+
+def test_d1_mixed_values_esrd_not_coerced_to_zero() -> None:
+    n_rows = 1200
+    n_y = 200
+    rng = np.random.default_rng(11)
+    esrd_2008 = ["Y"] * 150 + ["0"] * (n_rows - 150)
+    esrd_2009 = ["Y"] * n_y + ["0"] * (n_rows - n_y)
+    # Also include a numeric_text column whose only non-numeric entries are whitespace/blanks
+    pure_num_text = [str(i % 10) for i in range(n_rows - 20)] + ["  "] * 20
+    df = pd.DataFrame(
+        {
+            "age": rng.integers(50, 85, size=n_rows).astype(float),
+            "bene_esrd_ind_2008": pd.Series(esrd_2008, dtype=object),
+            "bene_esrd_ind_2009": pd.Series(esrd_2009, dtype=object),
+            "pure_num_text": pd.Series(pure_num_text, dtype=object),
+        }
+    )
+
+    plan = draft_plan(df, "ds_esrd", stakes=True, stakes_sample_rows=200, seed=0)
+
+    # 1. pure_num_text has n_non_numeric == 0 -> treated as numeric as before, resolved
+    pure_ev = next(c for c in plan.evidence.columns if c.name == "pure_num_text")
+    assert pure_ev.kind == "numeric_text"
+    assert pure_ev.n_non_numeric == 0
+    assert pure_ev.non_numeric_values == ()
+    assert plan.entries["pure_num_text"].status == "resolved"
+    assert plan.entries["pure_num_text"].impute == {"method": "fill_median"}
+    assert plan.entries["pure_num_text"].encode is None
+
+    # 2. bene_esrd_ind_2009 has n_non_numeric == 200 and n_unique == 2 <= sqrt(1200) -> as_categories default
+    esrd_ev = next(c for c in plan.evidence.columns if c.name == "bene_esrd_ind_2009")
+    assert esrd_ev.kind == "numeric_text"
+    assert esrd_ev.n_non_numeric == n_y
+    assert esrd_ev.non_numeric_values == (("Y", n_y),)
+
+    esrd_entry = plan.entries["bene_esrd_ind_2009"]
+    assert esrd_entry.status == "open"
+    assert esrd_entry.encode == "one_hot"
+    assert esrd_entry.impute is None
+    assert esrd_entry.indicator == "none"
+
+    mixed_qs = [q for q in plan.questions.values() if q.topic == "mixed_values"]
+    assert len(mixed_qs) == 1
+    mq = mixed_qs[0]
+    assert mq.applies_to == ["bene_esrd_ind_2008", "bene_esrd_ind_2009"]
+    assert mq.default_option_id == "as_categories"
+    assert (
+        f"`bene_esrd_ind_2009` mostly holds numbers but also the value 'Y' ({n_y:,} rows)."
+        in mq.text
+    )
+    assert [o.option_id for o in mq.options] == [
+        "as_categories",
+        "as_blank",
+        "leave_out",
+    ]
+    as_blank_opt = next(o for o in mq.options if o.option_id == "as_blank")
+    assert f"{n_y:,} 'Y' entries become blanks and are estimated" in as_blank_opt.effect
+
+    # 3. Default plan keeps 'Y' distinguishable after preprocess_dataframe
+    cfg = load_config(
+        {
+            "run": {"name": "test", "data": "in_memory"},
+            "preprocessing": plan_to_preprocessing_dict(plan),
+        }
+    )
+    out_df, layout = preprocess_dataframe(df, cfg)
+    assert "bene_esrd_ind_2009_Y" in layout.feature_names
+    assert int(out_df["bene_esrd_ind_2009_Y"].sum()) == n_y
+    assert "bene_esrd_ind_2009_0" in layout.feature_names
+    assert int(out_df["bene_esrd_ind_2009_0"].sum()) == n_rows - n_y
+
+    # 4. High-cardinality numeric_text column (n_unique > sqrt(n_rows)) defaults to as_blank
+    high_card_vals = [str(i) for i in range(n_rows - 15)] + ["N/A"] * 15
+    df_high = pd.DataFrame(
+        {
+            "age": rng.integers(50, 85, size=n_rows).astype(float),
+            "lab_reading": pd.Series(high_card_vals, dtype=object),
+        }
+    )
+    plan_high = draft_plan(df_high, "ds_lab", stakes=False)
+    lab_entry = plan_high.entries["lab_reading"]
+    assert lab_entry.status == "open"
+    assert lab_entry.encode is None
+    assert lab_entry.impute == {"method": "fill_median"}
+    assert lab_entry.indicator == "own"
+    high_qs = [q for q in plan_high.questions.values() if q.topic == "mixed_values"]
+    assert len(high_qs) == 1
+    assert high_qs[0].default_option_id == "as_blank"
+    assert (
+        "`lab_reading` mostly holds numbers but also the value 'N/A' (15 rows). "
+        "Should those values count as their own category, or as unreadable entries "
+        "treated like blanks?"
+    ) == high_qs[0].text

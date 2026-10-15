@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Annotated, Any, Literal
 
@@ -49,6 +50,12 @@ from pulsar.mcp.toolmeta import (
 from pulsar.preprocessing import preprocess_dataframe
 
 logger = logging.getLogger(__name__)
+
+
+def _compact_json(payload: dict[str, Any]) -> str:
+    # Plan payloads are large; keep the JSON text view token-lean.
+    return json.dumps(payload, separators=(",", ":"))
+
 
 _OPEN = obj({}, additional=True)
 
@@ -121,7 +128,16 @@ _MARKER_LEGEND_ITEM_SCHEMA = obj(
 _QUESTION_ITEM_SCHEMA = obj(
     {
         "question_id": STR,
-        "topic": STR,
+        "topic": enum(
+            [
+                "blank_meaning",
+                "conditional_column",
+                "date_columns",
+                "duplicate_signal",
+                "mixed_values",
+                "outcome_columns",
+            ]
+        ),
         "text": STR,
         "applies_to_preview": arr(STR),
         "applies_to_count": INT,
@@ -260,16 +276,25 @@ _DRAFT_PLAN_SCHEMA = obj(
         "evidence": _EVIDENCE_SCHEMA,
         "weak_hints": obj(
             {
-                "event_partner_columns": arr(STR),
-                "event_partner_columns_omitted": INT,
+                "event_flag_columns": {
+                    **arr(STR),
+                    "description": (
+                        "complete 0/1 or count columns whose value exactly explains "
+                        "other columns' blanks (often events or exposures; only you "
+                        "can say whether any is an outcome)"
+                    ),
+                },
+                "event_flag_columns_omitted": INT,
+                "description": STR,
             },
-            ["event_partner_columns", "event_partner_columns_omitted"],
+            ["event_flag_columns", "event_flag_columns_omitted", "description"],
         ),
-        "preprocessing_yaml": STR,
+        "preprocessing_yaml_chars": INT,
         "cost": _OPEN,
         "how_to_use": STR,
         "next_tools": arr(STR),
         # detail="full" only
+        "preprocessing_yaml": STR,
         "entries": _OPEN,
     },
     [
@@ -287,7 +312,7 @@ _DRAFT_PLAN_SCHEMA = obj(
         "questions_omitted",
         "evidence",
         "weak_hints",
-        "preprocessing_yaml",
+        "preprocessing_yaml_chars",
         "cost",
         "how_to_use",
         "next_tools",
@@ -308,6 +333,13 @@ _EDIT_PLAN_SCHEMA = obj(
             )
         ),
         "changes_omitted": INT,
+        "change_summary": arr(
+            obj(
+                {"field": STR, "was": ANY, "now": ANY, "count": INT},
+                ["field", "was", "now", "count"],
+            )
+        ),
+        "change_summary_omitted": INT,
         "counts": _EDIT_COUNTS_SCHEMA,
         "processed_space": _PROCESSED_SPACE_SCHEMA,
         "marker_legend": arr(_MARKER_LEGEND_ITEM_SCHEMA),
@@ -318,7 +350,7 @@ _EDIT_PLAN_SCHEMA = obj(
         ),
         "open_questions_preview": arr(_QUESTION_ITEM_SCHEMA),
         "open_questions_omitted": INT,
-        "preprocessing_yaml": STR,
+        "preprocessing_yaml_chars": INT,
         "next_tools": arr(STR),
     },
     [
@@ -329,6 +361,8 @@ _EDIT_PLAN_SCHEMA = obj(
         "plan_fingerprint",
         "changes",
         "changes_omitted",
+        "change_summary",
+        "change_summary_omitted",
         "counts",
         "processed_space",
         "marker_legend",
@@ -336,7 +370,7 @@ _EDIT_PLAN_SCHEMA = obj(
         "validation",
         "open_questions_preview",
         "open_questions_omitted",
-        "preprocessing_yaml",
+        "preprocessing_yaml_chars",
         "next_tools",
     ],
 )
@@ -532,7 +566,7 @@ async def draft_preprocessing_plan(
         session.preprocessing_plans[plan.plan_id] = plan
         if response_format == "markdown":
             return mcp_result(payload, text=draft_plan_payload_to_markdown(payload))
-        return mcp_result(payload)
+        return mcp_result(payload, text=_compact_json(payload))
     except PlanEditError as exc:
         return mcp_error(
             "draft_preprocessing_plan",
@@ -612,7 +646,8 @@ async def edit_preprocessing_plan(
         list[dict[str, Any]] | None,
         Field(
             description=(
-                "Question answers as [{'question_id': 'q1', 'option_id': 'none'}]."
+                "Question answers as [{'question_id': '<question_id>', 'option_id': '<option_id>'}]; "
+                "use the question_id and option_id values the payload lists."
             )
         ),
     ] = None,
@@ -697,16 +732,23 @@ async def edit_preprocessing_plan(
         session.preprocessing_plans[plan.plan_id] = updated
         if response_format == "markdown":
             return mcp_result(payload, text=edit_plan_payload_to_markdown(payload))
-        return mcp_result(payload)
+        return mcp_result(payload, text=_compact_json(payload))
     except PlanEditError as exc:
+        if exc.details.get("topic") == "outcome_columns":
+            agent_action = (
+                "To mark outcome columns, call edit_preprocessing_plan with "
+                "edits=[{column, role: 'target'}]."
+            )
+        else:
+            agent_action = (
+                "Check question_id, option_id, column names, and edit fields in "
+                "details, then retry."
+            )
         return mcp_error(
             "edit_preprocessing_plan",
             exc.message,
             error_code=exc.code,
-            agent_action=(
-                "Check question_id, option_id, column names, and edit fields in "
-                "details, then retry."
-            ),
+            agent_action=agent_action,
             details=exc.details,
         )
     except LookupError:
