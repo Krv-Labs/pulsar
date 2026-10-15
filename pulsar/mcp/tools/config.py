@@ -22,6 +22,11 @@ from pulsar.mcp.errors import mcp_error, unknown_handle_error
 from pulsar.mcp.results import mcp_result
 from pulsar.mcp.toolmeta import INT, NUM, STR, arr, enum, nullable, obj, tool_meta
 from pulsar.mcp.preprocessing import _calibrate_processed_space
+from pulsar.mcp.preprocessing_plan import (
+    draft_plan,
+    plan_fingerprint,
+    summarize_plan_counts,
+)
 from pulsar.mcp.session import (
     _get_session,
     _load_session_dataframe,
@@ -32,11 +37,43 @@ logger = logging.getLogger(__name__)
 
 _OPEN = obj({}, additional=True)
 
+_PREPROCESSING_PLAN_PROVENANCE_SCHEMA = obj(
+    {
+        "plan_id": STR,
+        "revision": INT,
+        "plan_fingerprint": STR,
+        "source": enum(["explicit_plan", "baseline_defaults"]),
+        "open_questions": INT,
+        "decided_by": obj(
+            {"default": INT, "agent": INT, "user": INT},
+            ["default", "agent", "user"],
+        ),
+    },
+    [
+        "plan_id",
+        "revision",
+        "plan_fingerprint",
+        "source",
+        "open_questions",
+        "decided_by",
+    ],
+)
+
+_CREATE_WARNING_SCHEMA = obj(
+    {
+        "code": STR,
+        "message": STR,
+    },
+    ["code", "message"],
+)
+
 _CREATE_SCHEMA = obj(
     {
         "status": STR,
         "config_yaml": STR,
         "calibration_space": enum(["processed", "raw"]),
+        "preprocessing_plan": _PREPROCESSING_PLAN_PROVENANCE_SCHEMA,
+        "warnings": arr(_CREATE_WARNING_SCHEMA),
         "sweep_strategy": _OPEN,
         "processed_feature_count": INT,
         "raw_to_processed_expansion_ratio": NUM,
@@ -49,6 +86,7 @@ _CREATE_SCHEMA = obj(
         "status",
         "config_yaml",
         "calibration_space",
+        "preprocessing_plan",
         "sweep_strategy",
         "calibration_note",
     ],
@@ -90,32 +128,73 @@ async def create_config(
             description="Optional short run name (e.g. 'baseline') stored as run.name in the config. Defaults to 'initial_sweep'."
         ),
     ] = "",
+    plan_id: Annotated[
+        str,
+        Field(
+            description="Optional preprocessing plan handle from draft_preprocessing_plan. If omitted, baseline defaults are drafted and stored automatically."
+        ),
+    ] = "",
     ctx: Context = None,
 ) -> ToolResult:
     """Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset.
 
-    Epsilon and dimensions are calibrated in the processed feature space, not raw
-    columns. The YAML becomes the session's active config. A starting grid, not
-    the answer; refine with refine_config after diagnosing a run."""
+    Epsilon and dimensions are calibrated in the processed feature space under the
+    preprocessing plan (or baseline defaults if plan_id is omitted, with a warning
+    when open questions remain). Stores the YAML as the session's active config."""
     try:
         dataset_path = _resolve_dataset_path(dataset_id)
         from pulsar.analysis.characterization import characterize_dataset as _char
 
         session = _get_session(ctx)
+        if plan_id:
+            plan = session.preprocessing_plans.get(plan_id)
+            if plan is None:
+                return mcp_error(
+                    "create_config",
+                    f"Unknown plan_id '{plan_id}'.",
+                    error_code="INVALID_ARGUMENT",
+                    agent_action="Call draft_preprocessing_plan(dataset_id) first and pass the returned plan_id, or omit plan_id to use baseline defaults.",
+                    details={"plan_id": plan_id},
+                )
+            if plan.dataset_id != dataset_id:
+                return mcp_error(
+                    "create_config",
+                    f"Plan '{plan_id}' belongs to dataset '{plan.dataset_id}', not '{dataset_id}'.",
+                    error_code="INVALID_ARGUMENT",
+                    agent_action="Pass a plan_id created for this dataset_id, or call draft_preprocessing_plan(dataset_id).",
+                    details={
+                        "plan_id": plan_id,
+                        "plan_dataset_id": plan.dataset_id,
+                        "dataset_id": dataset_id,
+                    },
+                )
+            plan_source = "explicit_plan"
+        else:
+            plan = None
+            plan_source = "baseline_defaults"
+
         df, normalized_path = await _load_session_dataframe(
             session,
             dataset_id=dataset_id,
         )
+        if plan is None:
+            plan = await asyncio.to_thread(
+                draft_plan,
+                df,
+                dataset_id,
+                stakes=False,
+            )
+            session.preprocessing_plans[plan.plan_id] = plan
+
         result = await asyncio.to_thread(_char, dataset_path, dataframe=df)
         geo = dataclasses.asdict(result)
         run_name = intent.strip() or "initial_sweep"
 
-        # Calibrate against processed feature space
+        # Calibrate against processed feature space using the SAME preprocessing plan
         processed = await asyncio.to_thread(
             _calibrate_processed_space,
             df,
-            geo["column_profiles"],
-            geo["n_samples"],
+            plan,
             normalized_path,
         )
 
@@ -124,11 +203,12 @@ async def create_config(
             data_path=normalized_path,
             run_name=run_name,
             processed_profile=processed,
+            plan=plan,
         )
         session.active_config_yaml = config_yaml
         session.active_config_dataset_id = dataset_id
 
-        # Build response with calibration provenance
+        # Build response with calibration and plan provenance
         calibration_space = "processed" if processed is not None else "raw"
         resolved_cfg = yaml.safe_load(config_yaml)
         projection = resolved_cfg.get("sweep", {}).get("projection", {})
@@ -154,10 +234,20 @@ async def create_config(
             .get("range", {})
             .get("steps", 0)
         )
+        counts = summarize_plan_counts(plan)
+        open_q = int(counts["open_questions"])
         response: dict[str, Any] = {
             "status": "ok",
             "config_yaml": config_yaml,
             "calibration_space": calibration_space,
+            "preprocessing_plan": {
+                "plan_id": plan.plan_id,
+                "revision": plan.revision,
+                "plan_fingerprint": plan_fingerprint(plan),
+                "source": plan_source,
+                "open_questions": open_q,
+                "decided_by": dict(counts["decided_by"]),
+            },
             "sweep_strategy": {
                 "projection_method": projection_method,
                 "projection_dimensions": projection_dimensions,
@@ -191,6 +281,17 @@ async def create_config(
                 ],
             },
         }
+        if open_q > 0:
+            response["warnings"] = [
+                {
+                    "code": "PREPROCESSING_QUESTIONS_OPEN",
+                    "message": (
+                        f"{open_q} preprocessing questions are unanswered; "
+                        "this config uses labelled defaults for them. "
+                        "See draft_preprocessing_plan."
+                    ),
+                }
+            ]
         if processed is not None:
             response["processed_feature_count"] = processed.n_features
             raw_features = geo["n_features"]
@@ -205,7 +306,7 @@ async def create_config(
                 "p95": round(processed.knn_p95, 4),
             }
             response["calibration_note"] = (
-                "Geometry calibrated under recommended initial preprocessing policy. "
+                "Geometry calibrated under the active preprocessing plan. "
                 "Epsilon and projection dimensions reflect the processed feature "
                 "space (after drop/impute/encode/scale), not raw columns. Dimensions "
                 "are selected from the cumulative-variance structure (frontiers + "

@@ -46,10 +46,13 @@ Reveal the dataset's topology; do not force convenient clusters.
      none, or that we don't know?"* → if they say "none", call
      `edit_preprocessing_plan(plan_id, base_revision=1, answers=[{"question_id": "q1", "option_id": "none"}], source="user")`.
 4. Calibrate & Validate: `create_config(dataset_id, plan_id=plan_id)` consumes
-   the plan and returns the baseline config, processed-space distance
-   percentiles, and `sweep_strategy` (treat as a broad first pass, not a final
-   answer). Use `validate_preprocessing_config` or `validate_config(config_yaml, dataset_id)`
-   when checking manual YAML edits.
+   the plan (emitting readable group markers like `n_inpatient_claims_and_2_more_was_missing`,
+   described in `marker_legend`) and returns the baseline config, processed-space
+   distance percentiles, and `sweep_strategy` (treat as a broad first pass, not a final
+   answer). Calling `create_config` without `plan_id` drafts baseline defaults
+   automatically and emits a `PREPROCESSING_QUESTIONS_OPEN` warning when open
+   questions remain. Use `validate_preprocessing_config` or
+   `validate_config(config_yaml, dataset_id)` when checking manual YAML edits.
 
 ## PHASE II: EXECUTE & VALIDATE
 5. Run: `run_topological_sweep`.

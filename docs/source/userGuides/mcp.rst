@@ -260,7 +260,7 @@ Preprocessing helpers
 
 The plan is evidence plus labeled defaults, not a verdict, and ``stakes`` measure how much the map moves rather than a score to optimize. Agents resolve what they can infer from context (``source="agent"``) and ask the user only high-stakes questions whose answer cannot be inferred, rephrased in the user's own domain language:
 
-1. ``draft_preprocessing_plan(dataset_id="ds_1")`` reports missing group ``mg1`` (``n_inpatient_claims``, ``inpatient_days``, ``inpatient_payment``) where all three columns are blank on the exact same rows and never record a ``0``. It opens question ``q1`` (topic ``blank_meaning``, ``stakes.neighbors_kept: 0.41``) with options ``none`` (fill with ``0``, no missingness marker) and ``unknown`` (default: ``fill_median`` plus shared marker ``mg1_was_missing``).
+1. ``draft_preprocessing_plan(dataset_id="ds_1")`` reports missing group ``mg1`` (``n_inpatient_claims``, ``inpatient_days``, ``inpatient_payment``) where all three columns are blank on the exact same rows and never record a ``0``. It opens question ``q1`` (topic ``blank_meaning``, ``stakes.neighbors_kept: 0.41``) with options ``none`` (fill with ``0``, no missingness marker) and ``unknown`` (default: ``fill_median`` plus shared marker ``n_inpatient_claims_and_2_more_was_missing``).
 2. Rather than repeating server wording verbatim, the agent asks the clinician in domain terms: *"If a patient has no recorded hospital stays, does that mean they had none, or that we don't know?"*
 3. The clinician replies that blanks mean zero stays. The agent records the answer with ``source="user"``:
 
@@ -273,7 +273,7 @@ The plan is evidence plus labeled defaults, not a verdict, and ``stakes`` measur
           source="user",
       )
 
-4. The agent passes the updated ``plan_id`` to ``create_config(dataset_id="ds_1", plan_id="pp_9f2c1a04b8")``, which embeds ``# preprocessing plan pp_9f2c1a04b8 revision 2 (<fingerprint>)`` and the resolved ``preprocessing:`` block into the sweep config.
+4. The agent passes the updated ``plan_id`` to ``create_config(dataset_id="ds_1", plan_id="pp_9f2c1a04b8")``, which embeds ``# preprocessing plan pp_9f2c1a04b8 revision 2 (<fingerprint>)`` and the resolved ``preprocessing:`` block into the sweep config. (Calling ``create_config`` without ``plan_id`` drafts baseline defaults automatically and emits a ``PREPROCESSING_QUESTIONS_OPEN`` warning when open questions remain.)
 
 **Preprocessing config reference**
 
@@ -289,7 +289,7 @@ In addition to ``fill_mean``, ``fill_median``, ``fill_mode``, ``sample_normal``,
    preprocessing:
      drop_columns: ["patient_id", "death_date"]
      missing_indicator_groups:
-       mg1: ["outpatient_visits", "outpatient_cost"]
+       outpatient_visits_and_1_more: ["outpatient_visits", "outpatient_cost"]
      impute:
        n_inpatient_claims: {method: fill_value, value: 0, indicator: false}
        inpatient_days: {method: fill_value, value: 0, indicator: false}
