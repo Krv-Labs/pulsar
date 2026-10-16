@@ -4,7 +4,6 @@ ThemaRS — orchestrates the full Pulsar pipeline.
 
 from __future__ import annotations
 
-import gc
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -253,7 +252,6 @@ class ThemaRS:
             if builder is None:
                 builder = _CosmicBuilder(n, cfg.cosmic_graph)
             builder.accumulate(batch_ball_maps)
-            gc.collect()
             progress.update(
                 "sweep_batches",
                 batch_index / total_batches,
@@ -497,9 +495,11 @@ class ThemaRS:
                     if builder is None:
                         builder = _CosmicBuilder(n, cfg.cosmic_graph)
                     builder.accumulate(batch_ball_maps)
-                    # Release batch memory aggressively in notebook contexts
+                    # Refcounting frees the batch (and its Rust memory) here. No
+                    # gc.collect(): ball maps hold no reference cycles, and a full
+                    # collection holds the GIL for tens to hundreds of ms in a
+                    # long-lived process, stalling the MCP event loop.
                     del batch_ball_maps
-                    gc.collect()
                     progress.update(
                         f"{prefix}sweep_batches",
                         batch_index / total_batches,
@@ -509,7 +509,6 @@ class ThemaRS:
 
                 # Drop per-dataset intermediates promptly
                 del embeddings, X_scaled, X, df
-                gc.collect()
 
         self._ball_maps = all_ball_maps if store_ball_maps else []
 

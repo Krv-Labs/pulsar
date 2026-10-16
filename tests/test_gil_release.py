@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
 from collections.abc import Callable
 from typing import TypeVar
@@ -124,6 +125,26 @@ def test_event_loop_responsive_during_rust_sweep() -> None:
 
     np.testing.assert_equal(model.cosmic_rust.n, 1800)
     _assert_responsive_ticks(deltas)
+
+
+def test_fit_never_forces_gc_collect(monkeypatch) -> None:
+    """``fit``/``fit_multi`` must not call ``gc.collect()`` from the worker thread.
+
+    A full collection holds the GIL for its whole duration (tens to hundreds of
+    ms in a long-lived MCP process), which stalls the event loop; the
+    responsiveness test above only catches that on large heaps. Ball maps hold
+    no reference cycles, so refcounting already frees each batch.
+    """
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("gc.collect() called inside the sweep")
+
+    monkeypatch.setattr(gc, "collect", _forbidden)
+    df = _make_sweep_dataframe(n=300, d=8, seed=7)
+    cfg = _make_sweep_config(method="jl")
+
+    ThemaRS(cfg).fit(df)
+    ThemaRS(cfg).fit_multi([df, df.copy()], ballmap_batch_size=2)
 
 
 def test_event_loop_responsive_during_primitives() -> None:
