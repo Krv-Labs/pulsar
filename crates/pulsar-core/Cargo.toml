@@ -2,6 +2,7 @@
 name = "pulsar-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Pure-Rust core of the Pulsar topological data analysis engine."
 license = "MIT"
 

@@ -1,0 +1,16 @@
+[package]
+name = "pulsar-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The `pulsar` command-line binary."
+
+[[bin]]
+name = "pulsar"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+pulsar-mcp = { path = "../pulsar-mcp" }

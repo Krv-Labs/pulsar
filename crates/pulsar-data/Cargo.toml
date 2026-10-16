@@ -1,0 +1,11 @@
+[package]
+name = "pulsar-data"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Tabular ingest (CSV/Parquet), column profiling, and the preprocessing recipe executor."
+
+[dependencies]
+pulsar-core = { path = "../pulsar-core" }

@@ -39,6 +39,22 @@ pub enum PulsarError {
     SvdFailed,
 }
 
+impl PulsarError {
+    /// Stable, machine-readable code for this error.
+    ///
+    /// Callers (the MCP error envelope, CLI `--json` output) branch on this
+    /// code, never on the `Display` text. Codes are part of the public
+    /// contract: renaming one is a breaking change.
+    pub fn code(&self) -> &'static str {
+        match self {
+            PulsarError::ShapeMismatch { .. } => "SHAPE_MISMATCH",
+            PulsarError::EmptyInput { .. } => "EMPTY_INPUT",
+            PulsarError::InvalidParameter { .. } => "INVALID_PARAMETER",
+            PulsarError::SvdFailed => "SVD_FAILED",
+        }
+    }
+}
+
 /// Convert a `PulsarError` into a Python `ValueError`.
 ///
 /// This impl is required by PyO3: any `Result<_, PulsarError>` returned from

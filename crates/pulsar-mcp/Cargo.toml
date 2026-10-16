@@ -1,0 +1,14 @@
+[package]
+name = "pulsar-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Pulsar MCP server."
+
+[dependencies]
+pulsar-analysis = { path = "../pulsar-analysis" }
+pulsar-pipeline = { path = "../pulsar-pipeline" }
+pulsar-report = { path = "../pulsar-report" }
+pulsar-store = { path = "../pulsar-store" }

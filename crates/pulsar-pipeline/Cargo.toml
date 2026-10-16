@@ -1,0 +1,13 @@
+[package]
+name = "pulsar-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Sweep orchestration: projection and Ball Mapper grids, fit_multi, caching, progress events."
+
+[dependencies]
+pulsar-config = { path = "../pulsar-config" }
+pulsar-core = { path = "../pulsar-core" }
+pulsar-data = { path = "../pulsar-data" }
