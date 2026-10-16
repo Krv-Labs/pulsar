@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use rand::SeedableRng;
 use rand::prelude::*;
+use rand::SeedableRng;
 use rand_distr::{Normal, WeightedIndex};
+use std::collections::HashMap;
 
 use crate::error::PulsarError;
 
