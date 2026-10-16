@@ -58,7 +58,13 @@ distribution channel they support best.
    expression language, or is deferred, rather than full SQL.
 5. **Toolchain.**
    - Edition 2021 for existing crates; new crates may use 2024.
-   - Workspace MSRV is **1.88**, set by `rmcp`. `arrow`/`parquet` need 1.85.
+   - Workspace MSRV is **1.90**.
+     - `rmcp` needs 1.88 and `arrow`/`parquet` need 1.85.
+     - The current lockfile sets the actual floor: `ordered-float` 5.5 (via
+       `kiddo`) needs 1.90.
+     - Users install prebuilt binaries, so the MSRV only affects contributors.
+       It follows the lockfile instead of pinning dependencies backwards.
+     - CI checks it in the `msrv` job.
 6. **Not in v1.0:**
    - Publishing library crates to crates.io. All crates stay `publish = false`
      until there is an external Rust consumer.
