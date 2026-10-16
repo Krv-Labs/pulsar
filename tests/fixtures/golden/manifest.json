@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "package": "thema-pulsar",
+    "version": "0.5.0",
+    "generator_commit": "894936ab1a139b7bf2dd6ee80e81299d5323ac50",
+    "python": "3.12.12",
+    "numpy": "2.5.4",
+    "pandas": "3.0.6",
+    "scikit-learn": "1.9.1",
+    "scipy": "1.18.1",
+    "platform": "Darwin-arm64"
+  },
+  "ingest": {
+    "note": "input.csv was read with pandas.read_csv defaults; the Rust reader must treat these tokens as null",
+    "null_tokens": [
+      "",
+      "#N/A",
+      "#N/A N/A",
+      "#NA",
+      "-1.#IND",
+      "-1.#QNAN",
+      "-NaN",
+      "-nan",
+      "1.#IND",
+      "1.#QNAN",
+      "<NA>",
+      "N/A",
+      "NA",
+      "NULL",
+      "NaN",
+      "None",
+      "n/a",
+      "nan",
+      "null"
+    ]
+  },
+  "matrix_layout": "row-major; {shape: [rows, cols], data: [...]}",
+  "edge_layout": "[i, j, weight] with i < j, sorted",
+  "tolerances": {
+    "preprocessed": {
+      "mode": "rtol",
+      "rtol": 1e-12
+    },
+    "scaled": {
+      "mode": "rtol",
+      "rtol": 1e-12
+    },
+    "embeddings": {
+      "mode": "rtol",
+      "rtol": 1e-09
+    },
+    "pca_embeddings": {
+      "mode": "rtol",
+      "rtol": 1e-06,
+      "note": "randomized SVD (Halko); a re-implementation may need per-column sign alignment"
+    },
+    "ball_maps": {
+      "mode": "exact"
+    },
+    "cosmic_exact": {
+      "mode": "rtol",
+      "rtol": 1e-12
+    },
+    "cosmic_minhash": {
+      "mode": "rtol",
+      "rtol": 1e-12
+    },
+    "stability": {
+      "mode": "rtol",
+      "rtol": 1e-12
+    },
+    "graph": {
+      "mode": "exact"
+    },
+    "threshold_options": {
+      "mode": "rtol",
+      "rtol": 1e-09
+    },
+    "breakpoints": {
+      "mode": "rtol",
+      "rtol": 1e-09
+    },
+    "clusters_agglomerative": {
+      "mode": "partition",
+      "min_ari": 1.0
+    },
+    "clusters_spectral": {
+      "mode": "partition",
+      "min_ari": 0.9,
+      "note": "sklearn SpectralClustering is RNG-seeded (random_state=None)"
+    }
+  },
+  "cases": {
+    "penguins": {
+      "n_rows": 344,
+      "n_features": 17,
+      "n_ball_maps": 8
+    },
+    "blobs": {
+      "n_rows": 150,
+      "n_features": 4,
+      "n_ball_maps": 8
+    }
+  }
+}
