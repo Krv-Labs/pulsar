@@ -13,7 +13,6 @@ uv.lock
 
 # Rust
 /target/
-Cargo.lock
 
 # Misc
 .DS_Store
