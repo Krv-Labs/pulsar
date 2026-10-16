@@ -36,7 +36,13 @@ impl PCA {
     #[new]
     #[pyo3(signature = (n_components, seed, n_oversamples=10, n_power_iter=2))]
     pub fn new(n_components: usize, seed: u64, n_oversamples: usize, n_power_iter: usize) -> Self {
-        PCA { n_components, seed, n_oversamples, n_power_iter, inner: None }
+        PCA {
+            n_components,
+            seed,
+            n_oversamples,
+            n_power_iter,
+            inner: None,
+        }
     }
 
     /// Fit PCA and return the low-dimensional projection.
@@ -76,13 +82,11 @@ impl PCA {
 
     /// Explained variance per component.
     #[getter]
-    pub fn explained_variance<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-        let inner = self.inner.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("call fit_transform first")
-        })?;
+    pub fn explained_variance<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("call fit_transform first"))?;
         let arr = numpy::ndarray::Array1::from_vec(inner.explained_variance.clone());
         Ok(arr.into_pyarray_bound(py))
     }

@@ -11,10 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Member crates whose versions must stay in sync with the workspace version.
-MEMBER_MANIFESTS = (
-    ROOT / "crates/pulsar-core/Cargo.toml",
-    ROOT / "crates/pulsar-python/Cargo.toml",
-)
+MEMBER_MANIFESTS = tuple(sorted(ROOT.glob("crates/*/Cargo.toml")))
 
 # The ``[workspace.package]`` (or legacy ``[package]``) table of the root
 # Cargo.toml, up to the next table header or EOF.

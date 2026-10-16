@@ -7,6 +7,41 @@ on:
     branches: [main]
 
 jobs:
+  # Pure-Rust workspace (v1.0 port, ADR 0001). `thema-pulsar` is the PyO3
+  # extension; it needs a host Python and is built and tested by `build`.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --exclude thema-pulsar --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --exclude thema-pulsar
+
+      - name: Smoke-test the pulsar binary
+        run: cargo run -p pulsar-cli -- --version
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (workspace rust-version)
+        uses: dtolnay/rust-toolchain@1.90
+
+      - name: Check MSRV
+        run: cargo check --workspace --exclude thema-pulsar --locked
+
   mcp-latest:
     runs-on: ubuntu-latest
     steps:

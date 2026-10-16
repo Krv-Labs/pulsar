@@ -496,7 +496,8 @@ fn stability_from_bins(
     }
 
     // Always include the final 0.0 boundary so step-curve plots are complete.
-    if let (Some(&last_threshold), Some(&last_count)) = (thresholds.last(), component_counts.last()) {
+    if let (Some(&last_threshold), Some(&last_count)) = (thresholds.last(), component_counts.last())
+    {
         if dedup_thresholds.last().copied() != Some(last_threshold) {
             dedup_thresholds.push(last_threshold);
             dedup_counts.push(last_count);
@@ -582,11 +583,7 @@ mod tests {
     #[test]
     fn test_find_stable_thresholds_single_component() {
         // Fully connected graph with uniform weights
-        let w = arr2(&[
-            [0.0, 0.5, 0.5],
-            [0.5, 0.0, 0.5],
-            [0.5, 0.5, 0.0],
-        ]);
+        let w = arr2(&[[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]]);
 
         let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS).unwrap();
 
@@ -639,11 +636,7 @@ mod tests {
     #[test]
     fn test_empty_graph() {
         // No edges (all zeros)
-        let w = arr2(&[
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-        ]);
+        let w = arr2(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]);
 
         let result = find_stable_thresholds(&w, DEFAULT_NUM_BINS).unwrap();
 
@@ -666,11 +659,7 @@ mod tests {
     #[test]
     fn test_quantization_bins() {
         // Test that different bin counts produce consistent results
-        let w = arr2(&[
-            [0.0, 0.7, 0.3],
-            [0.7, 0.0, 0.3],
-            [0.3, 0.3, 0.0],
-        ]);
+        let w = arr2(&[[0.0, 0.7, 0.3], [0.7, 0.0, 0.3], [0.3, 0.3, 0.0]]);
 
         let result_coarse = find_stable_thresholds(&w, 10).unwrap();
         let result_fine = find_stable_thresholds(&w, 1000).unwrap();

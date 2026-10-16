@@ -41,8 +41,8 @@ pub use jl::{jl_grid, JLProjectionInner};
 pub use minhash::{cosmic_edges_minhash, MinHashSignatures};
 pub use pca::{pca_grid, PCAInner};
 pub use ph::{
-    find_stable_thresholds, find_stable_thresholds_from_edges, Plateau, StabilityResult,
-    UnionFind, DEFAULT_NUM_BINS,
+    find_stable_thresholds, find_stable_thresholds_from_edges, Plateau, StabilityResult, UnionFind,
+    DEFAULT_NUM_BINS,
 };
 pub use pseudolaplacian::{
     accumulate_pseudo_laplacians, accumulate_pseudo_laplacians_sparse, pseudo_laplacian_inner,

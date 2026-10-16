@@ -33,10 +33,17 @@ impl StandardScalerInner {
             let mean = col.sum() / nrows as f64;
             let variance = col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / nrows as f64;
             means[j] = mean;
-            stds[j] = if variance.sqrt() < 1e-10 { 1.0 } else { variance.sqrt() };
+            stds[j] = if variance.sqrt() < 1e-10 {
+                1.0
+            } else {
+                variance.sqrt()
+            };
         }
 
-        let scaler = StandardScalerInner { means: means.clone(), stds: stds.clone() };
+        let scaler = StandardScalerInner {
+            means: means.clone(),
+            stds: stds.clone(),
+        };
         let mut out = data.clone();
         for j in 0..ncols {
             out.column_mut(j).mapv_inplace(|x| (x - means[j]) / stds[j]);
@@ -59,7 +66,8 @@ impl StandardScalerInner {
         }
         let mut out = data.clone();
         for j in 0..ncols {
-            out.column_mut(j).mapv_inplace(|x| (x - self.means[j]) / self.stds[j]);
+            out.column_mut(j)
+                .mapv_inplace(|x| (x - self.means[j]) / self.stds[j]);
         }
         Ok(out)
     }
@@ -79,7 +87,8 @@ impl StandardScalerInner {
         }
         let mut out = data.clone();
         for j in 0..ncols {
-            out.column_mut(j).mapv_inplace(|x| x * self.stds[j] + self.means[j]);
+            out.column_mut(j)
+                .mapv_inplace(|x| x * self.stds[j] + self.means[j]);
         }
         Ok(out)
     }

@@ -1,0 +1,12 @@
+[package]
+name = "pulsar-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Graph analysis: clustering, threshold stability, diagnostics, dossier statistics, longitudinal."
+
+[dependencies]
+pulsar-core = { path = "../pulsar-core" }
+pulsar-pipeline = { path = "../pulsar-pipeline" }

@@ -1,5 +1,5 @@
-use ndarray::{s, Array1, Array2, Axis};
 use nalgebra::DMatrix;
+use ndarray::{s, Array1, Array2, Axis};
 use rand::prelude::*;
 use rand_distr::StandardNormal;
 use rayon::prelude::*;
@@ -71,16 +71,16 @@ impl PCAInner {
         let (n_samples, n_features) = (data.nrows(), data.ncols());
         if n_components > n_features {
             return Err(PulsarError::InvalidParameter {
-                msg: format!("n_components ({}) > n_features ({})", n_components, n_features),
+                msg: format!(
+                    "n_components ({}) > n_features ({})",
+                    n_components, n_features
+                ),
             });
         }
 
         if n_samples < 2 {
             return Err(PulsarError::InvalidParameter {
-                msg: format!(
-                    "PCA requires at least 2 samples, got {}",
-                    n_samples
-                ),
+                msg: format!("PCA requires at least 2 samples, got {}", n_samples),
             });
         }
 
@@ -91,7 +91,9 @@ impl PCAInner {
         }
 
         // Step 1: centre data
-        let means = data.mean_axis(Axis(0)).expect("non-empty axis guaranteed above");
+        let means = data
+            .mean_axis(Axis(0))
+            .expect("non-empty axis guaranteed above");
         let mut centered = data.clone();
         for mut row in centered.rows_mut() {
             row -= &means;
@@ -147,7 +149,11 @@ impl PCAInner {
             let max_abs_idx = row
                 .iter()
                 .enumerate()
-                .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).expect("NaN excluded above"))
+                .max_by(|a, b| {
+                    a.1.abs()
+                        .partial_cmp(&b.1.abs())
+                        .expect("NaN excluded above")
+                })
                 .map(|(idx, _)| idx)
                 .unwrap();
             if row[max_abs_idx] < 0.0 {
@@ -162,7 +168,11 @@ impl PCAInner {
             })
             .collect();
 
-        Ok(PCAInner { components, explained_variance, means })
+        Ok(PCAInner {
+            components,
+            explained_variance,
+            means,
+        })
     }
 
     /// Project data onto the fitted principal components.
