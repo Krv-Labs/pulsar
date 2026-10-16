@@ -1,0 +1,18 @@
+[package]
+name = "pulsar-parity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Parity harness: checks the Rust port against golden fixtures frozen from Pulsar v0.5 (Python)."
+
+[dependencies]
+ndarray = "0.16"
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: fixtures are written with Python's shortest round-trip float
+# repr; default serde_json parsing can be off by one ulp.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+pulsar-core = { path = "../pulsar-core" }
