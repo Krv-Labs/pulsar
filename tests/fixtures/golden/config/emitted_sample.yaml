@@ -1,0 +1,51 @@
+run:
+  name: my_experiment
+  data: path/to/data.csv
+preprocessing:
+  drop_columns: []
+  impute:
+    age: {method: sample_normal, seed: 42}
+    category: {method: sample_categorical, seed: 7}
+  encode:
+    category: {method: one_hot}
+sweep:
+  projection:
+    method: jl
+    dimensions:
+      values: [2, 3, 5]
+    seed:
+      values: [42, 7, 13]
+    center: true
+  # Legacy mirror of sweep.projection (dims/seeds) for backward compatibility.
+  # sweep.projection is the source of truth; the loader ignores sweep.pca when
+  # sweep.projection is present. Kept in sync here — do not hand-edit only one.
+  pca:
+    dimensions:
+      values: [2, 3, 5]
+    seed:
+      values: [42, 7, 13]
+  ball_mapper:
+    epsilon:
+      range:
+        min: 0.3000
+        max: 0.8000
+        steps: 3
+cosmic_graph:
+  construction_threshold: "auto"
+  # sparsify: opt-in spectral sparsifier. SLOW on large N (per-JL-sketch CG
+  # solves) and runs after the already-sparse graph is built — leave false
+  # unless you need a spectrum-preserving graph for downstream spectral analysis.
+  sparsify: false
+  sparsify_epsilon: 1.0
+  sparsify_seed: 42
+  sparsify_sketch_dim: null
+  sparsify_sample_count: null
+  sparsify_pcg_tol: 1e-06
+  sparsify_max_iter: 1000
+  # construction: "minhash" (approximate, fast, constant-memory; default) or
+  # "exact" (bit-identical sparse pseudo-Laplacian backbone).
+  construction: minhash
+  minhash_d: 256
+  minhash_seed: 42
+output:
+  n_reps: 4

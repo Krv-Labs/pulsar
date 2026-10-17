@@ -34,6 +34,9 @@ pub fn load<T: DeserializeOwned>(case: &str, artifact: &str) -> T {
 pub struct Manifest {
     pub tolerances: BTreeMap<String, Tolerance>,
     pub cases: BTreeMap<String, serde_json::Value>,
+    /// Configs frozen under `config/` (resolved by Python `load_config`).
+    #[serde(default)]
+    pub config_cases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

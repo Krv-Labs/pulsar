@@ -1,0 +1,623 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pulsar config",
+  "description": "A Pulsar run configuration (`params.yaml`).\n\nSweep parameters (`dimensions`, `seed`, `epsilon`) accept a scalar, a\nlist, `{values: [...]}`, `{range: {min, max, steps}}` (inclusive\nlinspace), or `{distribution: {type: uniform, min, max}}`.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "description": "Config format version. Default: 1 (the only version this build reads).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "run": {
+      "$ref": "#/$defs/RunFile",
+      "default": {}
+    },
+    "data": {
+      "description": "Legacy location of the data path. Prefer `run.data`; used only when\n`run.data` is absent.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "preprocessing": {
+      "$ref": "#/$defs/PreprocessingFile",
+      "default": {
+        "drop_columns": []
+      }
+    },
+    "sweep": {
+      "$ref": "#/$defs/SweepFile",
+      "default": {
+        "ball_mapper": {}
+      }
+    },
+    "cosmic_graph": {
+      "$ref": "#/$defs/CosmicGraphFile",
+      "default": {}
+    },
+    "output": {
+      "$ref": "#/$defs/OutputFile",
+      "default": {}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "RunFile": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Run name, used in reports and artifact names. Default: \"\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data": {
+          "description": "Path to the input table (CSV or Parquet). May be omitted when the\ncaller supplies the data directly.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PreprocessingFile": {
+      "description": "Column-level preprocessing applied before scaling and projection.",
+      "type": "object",
+      "properties": {
+        "drop_columns": {
+          "description": "Columns removed before anything else.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ColumnName"
+          },
+          "default": []
+        },
+        "missing_indicator_groups": {
+          "description": "Shared missingness markers: `{group: [columns]}` adds one\n`<group>_was_missing` column per group (1 where any listed column was\nblank) instead of one marker per column. A column may be in at most\none group.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ColumnName"
+            }
+          }
+        },
+        "impute": {
+          "description": "Per-column imputation, keyed by column name.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ImputeFile"
+          }
+        },
+        "encode": {
+          "description": "Per-column categorical encoding, keyed by column name.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/EncodeFile"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ColumnName": {
+      "description": "A column name. Integer names (e.g. a year column `2010`) are accepted and\ntreated as their decimal string.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        }
+      ]
+    },
+    "ImputeFile": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/ImputeMethod"
+        },
+        "seed": {
+          "description": "RNG seed for the sampling methods. Default: 42.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "value": {
+          "description": "The constant used by `fill_value` (required there, rejected\nelsewhere). A finite number or a string.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FillValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "indicator": {
+          "description": "Add a `<column>_was_missing` marker column. Default: true. Ignored\nfor columns covered by `missing_indicator_groups`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method"
+      ]
+    },
+    "ImputeMethod": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "sample_normal",
+            "sample_categorical",
+            "fill_mean",
+            "fill_median",
+            "fill_mode"
+          ]
+        },
+        {
+          "description": "Fill with the constant in `value`.",
+          "type": "string",
+          "const": "fill_value"
+        }
+      ]
+    },
+    "FillValue": {
+      "description": "A `fill_value` constant: an integer, a finite float, or a string.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "EncodeFile": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/EncodeMethod"
+        },
+        "max_categories": {
+          "description": "Fail if the column has more categories than this. Default: no hard\nlimit (a warning above 50).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method"
+      ]
+    },
+    "EncodeMethod": {
+      "type": "string",
+      "enum": [
+        "one_hot"
+      ]
+    },
+    "SweepFile": {
+      "type": "object",
+      "properties": {
+        "projection": {
+          "description": "Random projection grid. Takes precedence over the legacy `pca` block.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectionFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pca": {
+          "description": "Legacy projection grid (`dimensions`, `seed`), read as a JL projection\nonly when `projection` is absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LegacyPcaFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ball_mapper": {
+          "$ref": "#/$defs/BallMapperFile",
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProjectionFile": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "description": "Default: `jl`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectionMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dimensions": {
+          "description": "Target dimensions (integers >= 1). Default: [2].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParamSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "description": "Projection seeds (non-negative integers). Default: [42].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParamSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "center": {
+          "description": "Center columns before projecting. Default: true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProjectionMethod": {
+      "oneOf": [
+        {
+          "description": "Johnson–Lindenstrauss random projection.",
+          "type": "string",
+          "const": "jl"
+        },
+        {
+          "description": "Randomized PCA (legacy).",
+          "type": "string",
+          "const": "pca"
+        }
+      ]
+    },
+    "ParamSpec": {
+      "description": "A sweep parameter specification.",
+      "anyOf": [
+        {
+          "description": "A literal list of values.",
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        {
+          "description": "`{values: [...]}`.",
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "values"
+          ]
+        },
+        {
+          "description": "`{range: {min, max, steps}}`: `steps` evenly spaced values from `min`\nto `max` inclusive (numpy `linspace`).",
+          "type": "object",
+          "properties": {
+            "range": {
+              "$ref": "#/$defs/RangeSpec"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "range"
+          ]
+        },
+        {
+          "description": "`{distribution: {type: uniform, min, max}}`: expands to the bounds\n`[min, max]`; reserved for random search.",
+          "type": "object",
+          "properties": {
+            "distribution": {
+              "$ref": "#/$defs/DistributionSpec"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "distribution"
+          ]
+        },
+        {
+          "description": "A single value.",
+          "type": "number"
+        }
+      ]
+    },
+    "RangeSpec": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "number",
+          "format": "double"
+        },
+        "max": {
+          "type": "number",
+          "format": "double"
+        },
+        "steps": {
+          "description": "Number of values (>= 1). Default: 10.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "DistributionSpec": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "Distribution family. Default and only supported value: `uniform`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "min": {
+          "type": "number",
+          "format": "double"
+        },
+        "max": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "LegacyPcaFile": {
+      "type": "object",
+      "properties": {
+        "dimensions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParamSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParamSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "BallMapperFile": {
+      "type": "object",
+      "properties": {
+        "epsilon": {
+          "description": "Ball radii (finite, > 0). Default: [0.5].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParamSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CosmicGraphFile": {
+      "description": "Cosmic-graph construction and optional spectral sparsification.",
+      "type": "object",
+      "properties": {
+        "construction_threshold": {
+          "description": "Edge-weight cutoff in [0, 1], or `auto` to pick a stable plateau with\nH0 persistence. Default: `auto` (the safe default for unknown data;\n`0.0` usually yields a structureless, fully connected graph).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThresholdFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "neighborhood": {
+          "description": "Reserved. Default: `node`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sparsify": {
+          "description": "Opt-in spectral sparsifier; slow on large N. Default: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sparsify_epsilon": {
+          "description": "Sparsifier accuracy (> 0). Default: 1.0.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sparsify_seed": {
+          "description": "Default: 42.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sparsify_sketch_dim": {
+          "description": "JL sketch dimension (>= 1). Default: chosen from N.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sparsify_sample_count": {
+          "description": "Edge samples (>= 1). Default: chosen from N.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sparsify_pcg_tol": {
+          "description": "PCG tolerance (> 0). Default: 1e-6.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sparsify_max_iter": {
+          "description": "PCG iteration cap (>= 1). Default: 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "construction": {
+          "description": "`minhash` (approximate, constant memory) or `exact`. Default: `minhash`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Construction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "minhash_d": {
+          "description": "MinHash signature depth (>= 1); weight variance is J(1-J)/d. Default: 256.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "minhash_seed": {
+          "description": "Default: 42.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThresholdFile": {
+      "description": "`auto` or a number in [0, 1].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AutoLiteral"
+        },
+        {
+          "type": "number",
+          "format": "double",
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      ]
+    },
+    "AutoLiteral": {
+      "type": "string",
+      "enum": [
+        "auto"
+      ]
+    },
+    "Construction": {
+      "type": "string",
+      "enum": [
+        "minhash",
+        "exact"
+      ]
+    },
+    "OutputFile": {
+      "type": "object",
+      "properties": {
+        "n_reps": {
+          "description": "Number of representative ball maps to select (>= 1). Default: 4.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

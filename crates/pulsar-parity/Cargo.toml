@@ -15,4 +15,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
+pulsar-config = { path = "../pulsar-config" }
 pulsar-core = { path = "../pulsar-core" }

@@ -8,3 +8,11 @@ publish = false
 description = "Pulsar config model, parameter expansion, and JSON Schema."
 
 [dependencies]
+indexmap = { version = "2", features = ["serde"] }
+schemars = { version = "1", features = ["indexmap2", "preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps column order from the YAML (impute/encode/group maps);
+# float_roundtrip keeps parsed floats bit-exact with Python's json reader.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde_path_to_error = "0.1"
+serde_yaml_ng = "0.10"
