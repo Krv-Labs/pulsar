@@ -8,4 +8,12 @@ publish = false
 description = "Tabular ingest (CSV/Parquet), column profiling, and the preprocessing recipe executor."
 
 [dependencies]
+# arrow-rs, not Polars: see ADR 0001 (binary size and build time).
+arrow = { version = "57", default-features = false }
+csv = "1"
+indexmap = "2"
+ndarray = "0.16"
+parquet = { version = "57", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
+pulsar-config = { path = "../pulsar-config" }
 pulsar-core = { path = "../pulsar-core" }
+thiserror = "2"
