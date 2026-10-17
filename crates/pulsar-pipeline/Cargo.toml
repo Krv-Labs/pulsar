@@ -8,6 +8,13 @@ publish = false
 description = "Sweep orchestration: projection and Ball Mapper grids, fit_multi, caching, progress events."
 
 [dependencies]
+ndarray = "0.16"
 pulsar-config = { path = "../pulsar-config" }
 pulsar-core = { path = "../pulsar-core" }
 pulsar-data = { path = "../pulsar-data" }
+rand = "0.8"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
