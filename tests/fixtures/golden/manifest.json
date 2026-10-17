@@ -3,7 +3,7 @@
   "reference": {
     "package": "thema-pulsar",
     "version": "0.5.0",
-    "generator_commit": "894936ab1a139b7bf2dd6ee80e81299d5323ac50",
+    "generator_commit": "afe79414c96d2cf4ddea1038ba3ece3ad349b2cb",
     "python": "3.12.12",
     "numpy": "2.5.4",
     "pandas": "3.0.6",
@@ -102,5 +102,14 @@
       "n_features": 4,
       "n_ball_maps": 8
     }
-  }
+  },
+  "config_cases": [
+    "params_sample",
+    "coal_params",
+    "physionet_params",
+    "mmlu_params",
+    "penguins",
+    "blobs",
+    "emitted_sample"
+  ]
 }

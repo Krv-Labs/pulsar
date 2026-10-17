@@ -13,4 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+pulsar-config = { path = "../pulsar-config" }
 pulsar-mcp = { path = "../pulsar-mcp" }
+serde = "1"
+serde_json = "1"
