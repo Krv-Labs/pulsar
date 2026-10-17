@@ -29,6 +29,7 @@ import yaml
 
 from pulsar import StandardScaler, ThemaRS, cosmic_clusters, pca_grid
 from pulsar._pulsar import find_stable_thresholds_sparse
+from pulsar.config import PulsarConfig, config_to_yaml, load_config
 from pulsar.mcp.thresholds import (
     agent_threshold_options,
     prepare_threshold_graph_from_edges,
@@ -312,6 +313,74 @@ def _blobs() -> tuple[pd.DataFrame, dict[str, Any]]:
     return data, config
 
 
+CONFIG_SOURCES = (
+    "params.yaml.sample",
+    "demos/energy/coal_params.yaml",
+    "demos/ehr/physionet_params.yaml",
+    "demos/mmlu/mmlu_params.yaml",
+    "tests/fixtures/golden/penguins/config.yaml",
+    "tests/fixtures/golden/blobs/config.yaml",
+)
+
+
+def _resolved_config(cfg: PulsarConfig) -> dict[str, Any]:
+    cg = cfg.cosmic_graph
+    return {
+        "run_name": cfg.run_name,
+        "data": cfg.data,
+        "drop_columns": list(cfg.drop_columns),
+        "impute": {
+            c: {"method": s.method, "seed": s.seed} for c, s in cfg.impute.items()
+        },
+        "encode": {
+            c: {"method": s.method, "max_categories": s.max_categories}
+            for c, s in cfg.encode.items()
+        },
+        "projection": {
+            "method": cfg.projection.method,
+            "dimensions": list(cfg.projection.dimensions),
+            "seeds": list(cfg.projection.seeds),
+            "center": cfg.projection.center,
+        },
+        "epsilons": list(cfg.ball_mapper.epsilons),
+        "cosmic_graph": {
+            "construction_threshold": cg.construction_threshold,
+            "neighborhood": cg.neighborhood,
+            "sparsify": cg.sparsify,
+            "sparsify_epsilon": cg.sparsify_epsilon,
+            "sparsify_seed": cg.sparsify_seed,
+            "sparsify_sketch_dim": cg.sparsify_sketch_dim,
+            "sparsify_sample_count": cg.sparsify_sample_count,
+            "sparsify_pcg_tol": cg.sparsify_pcg_tol,
+            "sparsify_max_iter": cg.sparsify_max_iter,
+            "construction": cg.construction,
+            "minhash_d": cg.minhash_d,
+            "minhash_seed": cg.minhash_seed,
+        },
+        "n_reps": cfg.n_reps,
+    }
+
+
+def _config_cases() -> list[str]:
+    """Freeze ``load_config`` on the shipped configs plus Python-emitted YAML."""
+    out = OUT / "config"
+    out.mkdir(parents=True, exist_ok=True)
+    emitted = out / "emitted_sample.yaml"
+    emitted.write_text(config_to_yaml(load_config(str(ROOT / "params.yaml.sample"))))
+    sources = [*CONFIG_SOURCES, emitted.relative_to(ROOT).as_posix()]
+    cases = []
+    for source in sources:
+        path = Path(source)
+        if path.name == "config.yaml":
+            name = path.parent.name
+        else:
+            name = path.name.replace(".yaml", "").replace(".", "_")
+        resolved = _resolved_config(load_config(str(ROOT / source)))
+        _write(out, name, {"source": source, "resolved": resolved})
+        cases.append(name)
+    return cases
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     cases = {}
@@ -319,6 +388,8 @@ def main() -> None:
         data, config = factory()
         cases[name] = _run_case(name, data, config, k)
         print(f"{name}: {cases[name]}")
+    config_cases = _config_cases()
+    print(f"config: {config_cases}")
 
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -348,6 +419,7 @@ def main() -> None:
         "edge_layout": "[i, j, weight] with i < j, sorted",
         "tolerances": TOLERANCES,
         "cases": cases,
+        "config_cases": config_cases,
     }
     (OUT / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=False) + "\n"
