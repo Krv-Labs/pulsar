@@ -611,12 +611,16 @@ def test_mcp_multi_imputation_real_data_penguins_end_to_end():
     import yaml
     from pulsar.mcp.server import mcp
 
-    penguins_csv = Path(__file__).resolve().parents[1] / "demos" / "penguins" / "penguins.csv"
+    penguins_csv = (
+        Path(__file__).resolve().parents[1] / "demos" / "penguins" / "penguins.csv"
+    )
 
     async def _call(tool_name: str, **kwargs):
         res = await mcp.call_tool(tool_name, kwargs)
         sc = res.structured_content
-        assert sc is not None and sc.get("status") != "error", f"{tool_name} failed: {sc}"
+        assert sc is not None and sc.get("status") != "error", (
+            f"{tool_name} failed: {sc}"
+        )
         return sc
 
     async def _workflow():
@@ -710,4 +714,3 @@ def test_mcp_multi_imputation_real_data_penguins_end_to_end():
         assert comp["status"] == "ok"
 
     asyncio.run(_workflow())
-
