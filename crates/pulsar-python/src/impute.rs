@@ -57,4 +57,3 @@ pub fn impute_column<'py>(
     }
     Ok(arr.into_pyarray_bound(py))
 }
-
