@@ -74,6 +74,7 @@ class PlanEntry:
     status: Literal["resolved", "open"]
     reason: str
     question_id: str | None = None
+    impute_candidates: list[dict[str, Any]] | None = None
 
     @property
     def impute_method(self) -> str | None:
@@ -84,7 +85,7 @@ class PlanEntry:
         return self.impute.get("value") if self.impute else None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "column": self.column,
             "role": self.role,
             "impute": dict(self.impute) if self.impute is not None else None,
@@ -95,6 +96,9 @@ class PlanEntry:
             "reason": self.reason,
             "question_id": self.question_id,
         }
+        if self.impute_candidates and len(self.impute_candidates) > 1:
+            out["impute_candidates"] = [dict(c) for c in self.impute_candidates]
+        return out
 
 
 @dataclass
@@ -153,3 +157,4 @@ class PreprocessingPlan:
     created_at: str
     cost: dict[str, Any] = field(default_factory=dict)
     target_proxies: list[dict[str, Any]] = field(default_factory=list)
+    n_imputations: int = 1

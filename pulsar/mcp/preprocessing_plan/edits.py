@@ -108,12 +108,13 @@ def _edit_encode(entry: PlanEntry, edit: dict[str, Any], col: str) -> None:
             entry.encode = enc_str
 
 
-def _validate_impute_spec(
-    entry: PlanEntry, col: str, ev: ColumnEvidence | None
+def _validate_single_impute_dict(
+    imp: dict[str, Any],
+    entry: PlanEntry,
+    col: str,
+    ev: ColumnEvidence | None,
 ) -> None:
-    if entry.impute is None:
-        return
-    method_now = entry.impute.get("method")
+    method_now = imp.get("method")
     is_text_mode = ev is not None and (
         ev.kind in ("text", "datetime_like")
         or (ev.kind == "numeric_text" and entry.encode is not None)
@@ -123,13 +124,13 @@ def _validate_impute_spec(
         or (ev.kind == "numeric_text" and entry.encode is None)
     )
     if method_now == "fill_value":
-        if "value" not in entry.impute or entry.impute["value"] is None:
+        if "value" not in imp or imp["value"] is None:
             raise PlanEditError(
                 "INVALID_ARGUMENT",
                 f"impute_method 'fill_value' for column {col!r} requires 'impute_value'.",
                 {"column": col},
             )
-        val_now = entry.impute["value"]
+        val_now = imp["value"]
         if isinstance(val_now, (float, np.floating)) and (
             math.isnan(float(val_now)) or math.isinf(float(val_now))
         ):
@@ -152,8 +153,8 @@ def _validate_impute_spec(
                 if isinstance(val_now, (int, float, np.number)) and not isinstance(
                     val_now, bool
                 ):
-                    entry.impute["value"] = str(val_now)
-    elif "value" in entry.impute:
+                    imp["value"] = str(val_now)
+    elif "value" in imp:
         raise PlanEditError(
             "INVALID_ARGUMENT",
             f"impute_value is only valid with impute_method='fill_value' (column {col!r}).",
@@ -181,6 +182,17 @@ def _validate_impute_spec(
             )
 
 
+def _validate_impute_spec(
+    entry: PlanEntry, col: str, ev: ColumnEvidence | None
+) -> None:
+    if entry.impute is None:
+        return
+    _validate_single_impute_dict(entry.impute, entry, col, ev)
+    if entry.impute_candidates:
+        for cand in entry.impute_candidates:
+            _validate_single_impute_dict(cand, entry, col, ev)
+
+
 def _parse_impute_mapping(
     raw_imp: Any,
     col: str,
@@ -191,7 +203,7 @@ def _parse_impute_mapping(
     if not isinstance(raw_imp, dict):
         raise PlanEditError(
             "INVALID_ARGUMENT",
-            f"impute for column {col!r} must be a mapping or null.",
+            f"impute for column {col!r} must be a mapping, list of mappings, or null.",
             {"column": col, "impute": raw_imp},
         )
     method = raw_imp.get("method")
@@ -216,7 +228,64 @@ def _parse_impute_mapping(
                 {"column": col, "impute_value": raw_imp["value"]},
             )
         imp_dict["value"] = raw_imp["value"]
+    if "seed" in raw_imp and raw_imp["seed"] is not None:
+        if isinstance(raw_imp["seed"], bool) or not isinstance(raw_imp["seed"], int):
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"impute seed for column {col!r} must be an integer.",
+                {"column": col, "seed": raw_imp["seed"]},
+            )
+        imp_dict["seed"] = int(raw_imp["seed"])
     return imp_dict
+
+
+def _parse_impute_edit_value(
+    raw_imp: Any,
+    col: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
+    if isinstance(raw_imp, list):
+        if not raw_imp:
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"impute candidate list for column {col!r} must not be empty.",
+                {"column": col},
+            )
+        candidates: list[dict[str, Any]] = []
+        for item in raw_imp:
+            parsed = _parse_impute_mapping(item, col)
+            if parsed is None:
+                raise PlanEditError(
+                    "INVALID_ARGUMENT",
+                    f"impute candidate list for column {col!r} cannot contain null entries.",
+                    {"column": col, "impute": raw_imp},
+                )
+            candidates.append(parsed)
+        return candidates[0], (candidates if len(candidates) > 1 else None)
+    if isinstance(raw_imp, dict) and isinstance(raw_imp.get("method"), list):
+        methods = raw_imp["method"]
+        if not methods:
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"impute method list for column {col!r} must not be empty.",
+                {"column": col},
+            )
+        candidates = []
+        for m in methods:
+            spec_copy = dict(raw_imp)
+            spec_copy["method"] = m
+            if m != "fill_value":
+                spec_copy.pop("value", None)
+            parsed = _parse_impute_mapping(spec_copy, col)
+            if parsed is None:
+                raise PlanEditError(
+                    "INVALID_ARGUMENT",
+                    f"impute method list for column {col!r} cannot contain 'none'.",
+                    {"column": col},
+                )
+            candidates.append(parsed)
+        return candidates[0], (candidates if len(candidates) > 1 else None)
+    single = _parse_impute_mapping(raw_imp, col)
+    return single, None
 
 
 def _edit_impute(
@@ -228,13 +297,43 @@ def _edit_impute(
     has_impute_edit = False
     if "impute" in edit:
         has_impute_edit = True
-        entry.impute = _parse_impute_mapping(edit["impute"], col)
+        entry.impute, entry.impute_candidates = _parse_impute_edit_value(
+            edit["impute"], col
+        )
 
     if "impute_method" in edit:
         has_impute_edit = True
         method = edit["impute_method"]
         if method is None or method == "none" or method == "":
             entry.impute = None
+            entry.impute_candidates = None
+        elif isinstance(method, list):
+            if not method:
+                raise PlanEditError(
+                    "INVALID_ARGUMENT",
+                    f"impute_method list for column {col!r} must not be empty.",
+                    {"column": col},
+                )
+            prev_val = entry.impute.get("value") if entry.impute else None
+            candidates: list[dict[str, Any]] = []
+            for m in method:
+                m_str = str(m)
+                if m_str not in VALID_IMPUTE_METHODS:
+                    raise PlanEditError(
+                        "INVALID_ARGUMENT",
+                        f"Invalid impute_method {m_str!r} for column {col!r}.",
+                        {
+                            "column": col,
+                            "impute_method": m_str,
+                            "valid_methods": sorted(VALID_IMPUTE_METHODS),
+                        },
+                    )
+                cand_dict: dict[str, Any] = {"method": m_str}
+                if m_str == "fill_value" and prev_val is not None:
+                    cand_dict["value"] = prev_val
+                candidates.append(cand_dict)
+            entry.impute = candidates[0]
+            entry.impute_candidates = candidates if len(candidates) > 1 else None
         else:
             method_str = str(method)
             if method_str not in VALID_IMPUTE_METHODS:
@@ -252,6 +351,7 @@ def _edit_impute(
             if method_str == "fill_value" and prev_val is not None:
                 imp_dict["value"] = prev_val
             entry.impute = imp_dict
+            entry.impute_candidates = None
 
     if "impute_value" in edit and edit["impute_value"] is not None:
         has_impute_edit = True
@@ -267,6 +367,12 @@ def _edit_impute(
         else:
             entry.impute = dict(entry.impute)
             entry.impute["value"] = val
+        if entry.impute_candidates:
+            for cand in entry.impute_candidates:
+                if cand.get("method") == "fill_value":
+                    cand["value"] = val
+            if entry.impute.get("method") == "fill_value":
+                entry.impute_candidates[0]["value"] = val
 
     if (
         has_impute_edit
@@ -348,6 +454,7 @@ def _apply_single_edit(
     if entry.role != "feature":
         if not has_impute_edit:
             entry.impute = None
+            entry.impute_candidates = None
         if "encode" not in edit:
             entry.encode = None
         if "indicator" not in edit:
@@ -374,7 +481,7 @@ def _apply_single_answer(
             {"answer": ans},
         )
     qid = ans.get("question_id")
-    oid = ans.get("option_id")
+    raw_oid = ans.get("option_ids") if "option_ids" in ans else ans.get("option_id")
     if not isinstance(qid, str) or qid not in new_questions:
         raise PlanEditError(
             "INVALID_ARGUMENT",
@@ -385,20 +492,28 @@ def _apply_single_answer(
             },
         )
     q = new_questions[qid]
-    matched_opt: QuestionOption | None = next(
-        (opt for opt in q.options if opt.option_id == oid), None
-    )
-    if matched_opt is None:
+    option_ids = list(raw_oid) if isinstance(raw_oid, list) else [raw_oid]
+    if not option_ids:
         raise PlanEditError(
             "INVALID_ARGUMENT",
-            f"Unknown option_id {oid!r} for question {qid!r}.",
-            {
-                "question_id": qid,
-                "topic": q.topic,
-                "option_id": oid,
-                "valid_options": [o.option_id for o in q.options],
-            },
+            f"option_id list for question {qid!r} must not be empty.",
+            {"question_id": qid, "valid_options": [o.option_id for o in q.options]},
         )
+    matched_opts: list[QuestionOption] = []
+    for oid_item in option_ids:
+        opt = next((o for o in q.options if o.option_id == oid_item), None)
+        if opt is None:
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"Unknown option_id {oid_item!r} for question {qid!r}.",
+                {
+                    "question_id": qid,
+                    "topic": q.topic,
+                    "option_id": oid_item,
+                    "valid_options": [o.option_id for o in q.options],
+                },
+            )
+        matched_opts.append(opt)
 
     effective_roles = {
         c: incoming_protected_roles.get(c, new_entries[c].role)
@@ -429,22 +544,47 @@ def _apply_single_answer(
             },
         )
 
-    for edit_spec in matched_opt.edits:
-        col_name = edit_spec.get("column") if isinstance(edit_spec, dict) else None
-        if (
-            isinstance(col_name, str)
-            and col_name in new_entries
-            and incoming_protected_roles.get(col_name, new_entries[col_name].role)
-            in _PROTECTED_ROLES
-        ):
-            continue
-        _apply_single_edit(
-            new_entries,
-            edit_spec,
-            source=source,
-            missing_groups=missing_groups,
-            ev_by_col=ev_by_col,
-        )
+    candidates_by_col: dict[str, list[dict[str, Any]]] = {}
+    primary_impute_by_col: dict[str, dict[str, Any]] = {}
+    for opt_idx, matched_opt in enumerate(matched_opts):
+        for edit_spec in matched_opt.edits:
+            col_name = edit_spec.get("column") if isinstance(edit_spec, dict) else None
+            if (
+                isinstance(col_name, str)
+                and col_name in new_entries
+                and incoming_protected_roles.get(col_name, new_entries[col_name].role)
+                in _PROTECTED_ROLES
+            ):
+                continue
+            _apply_single_edit(
+                new_entries,
+                edit_spec,
+                source=source,
+                missing_groups=missing_groups,
+                ev_by_col=ev_by_col,
+            )
+            if (
+                isinstance(col_name, str)
+                and col_name in new_entries
+                and new_entries[col_name].impute is not None
+            ):
+                imp = dict(new_entries[col_name].impute)
+                if opt_idx == 0:
+                    primary_impute_by_col[col_name] = imp
+                cands = candidates_by_col.setdefault(col_name, [])
+                if imp not in cands:
+                    cands.append(imp)
+
+    if len(matched_opts) > 1:
+        for col_name, cands in candidates_by_col.items():
+            if col_name in new_entries and new_entries[col_name].role == "feature":
+                new_entries[col_name].impute = primary_impute_by_col.get(
+                    col_name, cands[0]
+                )
+                new_entries[col_name].impute_candidates = (
+                    cands if len(cands) > 1 else None
+                )
+
     for col in q.applies_to:
         if (
             col in new_entries
@@ -454,7 +594,10 @@ def _apply_single_answer(
             new_entries[col].decided_by = source
             new_entries[col].status = "resolved"
     q.status = "answered"
-    q.answer = {"option_id": oid, "decided_by": source}
+    q.answer = {
+        "option_id": option_ids[0] if len(option_ids) == 1 else option_ids,
+        "decided_by": source,
+    }
 
 
 def _sync_question_statuses(
@@ -561,6 +704,8 @@ def apply_answers_and_edits(
         evidence=plan.evidence,
         created_at=plan.created_at,
         cost=copy.deepcopy(plan.cost),
+        target_proxies=copy.deepcopy(plan.target_proxies),
+        n_imputations=plan.n_imputations,
     )
 
 
@@ -569,7 +714,15 @@ def diff_plan_entries(
 ) -> list[dict[str, Any]]:
     """Return a list of ``{column, field, was, now}`` diffs between two plan revisions."""
     changes: list[dict[str, Any]] = []
-    tracked_fields = ("role", "impute", "indicator", "encode", "status", "decided_by")
+    tracked_fields = (
+        "role",
+        "impute",
+        "impute_candidates",
+        "indicator",
+        "encode",
+        "status",
+        "decided_by",
+    )
     for col, old_entry in before.entries.items():
         new_entry = after.entries.get(col)
         if new_entry is None:

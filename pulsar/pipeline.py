@@ -26,7 +26,12 @@ from pulsar._pulsar import (
     pca_grid,
 )
 from pulsar.analysis import cosmic_to_networkx
-from pulsar.config import CosmicGraphSpec, PulsarConfig, load_config
+from pulsar.config import (
+    CosmicGraphSpec,
+    PulsarConfig,
+    expand_preprocessing_variants,
+    load_config,
+)
 from pulsar.preprocessing import preprocess_dataframe
 from pulsar.runtime.utils import (
     ProgressTracker,
@@ -174,10 +179,15 @@ class ThemaRS:
             else:
                 data = pd.read_csv(cfg.data)
 
+        variants = expand_preprocessing_variants(cfg)
+        n_variants = max(len(variants), 1)
         projection_count = (
             len(_precomputed_embeddings)
             if _precomputed_embeddings is not None
-            else max(len(cfg.projection.dimensions) * len(cfg.projection.seeds), 1)
+            else max(
+                n_variants * len(cfg.projection.dimensions) * len(cfg.projection.seeds),
+                1,
+            )
         )
         batch_count = (
             1
@@ -189,8 +199,8 @@ class ThemaRS:
         progress = ProgressTracker(
             [
                 ("load", 1.0),
-                ("preprocess", 1.0),
-                ("scale", 1.0),
+                ("preprocess", float(n_variants)),
+                ("scale", float(n_variants)),
                 ("projection", 0.1 if use_cached_pca else projection_count),
                 ("sweep_batches", batch_count * max(len(cfg.ball_mapper.epsilons), 1)),
                 ("cosmic_graph", 1.0 + (2.0 if cfg.cosmic_graph.sparsify else 0.0)),
@@ -207,7 +217,7 @@ class ThemaRS:
         self._data = data.copy()
 
         # 2–3. Preprocessing (drop, coerce, impute, encode, validate)
-        df, _layout = preprocess_dataframe(data, cfg)
+        df, _layout = preprocess_dataframe(data, variants[0])
         self._preprocessed_data = df
         progress.complete("preprocess")
 
@@ -226,7 +236,12 @@ class ThemaRS:
             ), "Precomputed embedding row count does not match current data"
             embeddings = _precomputed_embeddings
         else:
-            embeddings = projection_grid(X_scaled, cfg)
+            embeddings = projection_grid(X_scaled, variants[0])
+            for variant_cfg in variants[1:]:
+                df_k, _ = preprocess_dataframe(data, variant_cfg)
+                X_k = df_k.to_numpy(dtype=np.float64)
+                X_k_scaled = np.array(StandardScaler().fit_transform(X_k))
+                embeddings.extend(projection_grid(X_k_scaled, variant_cfg))
         # Cache embeddings for MCP session reuse
         self._embeddings = embeddings
         progress.complete(
