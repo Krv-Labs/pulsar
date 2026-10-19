@@ -8,7 +8,17 @@ publish = false
 description = "Pulsar MCP server."
 
 [dependencies]
+ndarray = "0.16"
 pulsar-analysis = { path = "../pulsar-analysis" }
+pulsar-config = { path = "../pulsar-config" }
+pulsar-core = { path = "../pulsar-core" }
+pulsar-data = { path = "../pulsar-data" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
-pulsar-report = { path = "../pulsar-report" }
 pulsar-store = { path = "../pulsar-store" }
+# Official MCP SDK, pinned to 3.5 per ADR 0001. `client` is for the in-process
+# contract tests and future CLI smoke tests.
+rmcp = { version = "3.5", features = ["server", "transport-io", "client"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
