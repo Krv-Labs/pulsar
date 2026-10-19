@@ -34,6 +34,9 @@ pub fn load<T: DeserializeOwned>(case: &str, artifact: &str) -> T {
 pub struct Manifest {
     pub tolerances: BTreeMap<String, Tolerance>,
     pub cases: BTreeMap<String, serde_json::Value>,
+    /// Configs frozen under `config/` (resolved by Python `load_config`).
+    #[serde(default)]
+    pub config_cases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,4 +106,71 @@ pub fn assert_edges_close(label: &str, got: &[(usize, usize, f64)], want: &[[f64
         );
         assert_close(&format!("{label} edge ({i},{j})"), &[w], &[exp[2]], rtol);
     }
+}
+
+/// Assert two JSON documents match: identical structure and keys, numbers
+/// within `rtol` (with the absolute floor), everything else equal.
+pub fn assert_json_close(
+    label: &str,
+    got: &serde_json::Value,
+    want: &serde_json::Value,
+    rtol: f64,
+) {
+    use serde_json::Value;
+    match (got, want) {
+        (Value::Number(g), Value::Number(w)) => {
+            let (g, w) = (
+                g.as_f64().unwrap_or(f64::NAN),
+                w.as_f64().unwrap_or(f64::NAN),
+            );
+            assert_close(label, &[g], &[w], rtol);
+        }
+        (Value::Array(g), Value::Array(w)) => {
+            assert_eq!(g.len(), w.len(), "{label}: array length mismatch");
+            for (k, (gi, wi)) in g.iter().zip(w).enumerate() {
+                assert_json_close(&format!("{label}[{k}]"), gi, wi, rtol);
+            }
+        }
+        (Value::Object(g), Value::Object(w)) => {
+            let gk: Vec<&String> = g.keys().collect();
+            let wk: Vec<&String> = w.keys().collect();
+            let mut gs = gk.clone();
+            let mut ws = wk.clone();
+            gs.sort();
+            ws.sort();
+            assert_eq!(gs, ws, "{label}: key sets differ");
+            for (key, wv) in w {
+                assert_json_close(&format!("{label}.{key}"), &g[key], wv, rtol);
+            }
+        }
+        _ => assert_eq!(got, want, "{label}: values differ"),
+    }
+}
+
+/// Adjusted Rand index between two labelings of the same points.
+pub fn adjusted_rand_index(a: &[usize], b: &[usize]) -> f64 {
+    assert_eq!(a.len(), b.len(), "labelings must have the same length");
+    let n = a.len();
+    if n == 0 {
+        return 1.0;
+    }
+    let ka = a.iter().copied().max().map_or(0, |m| m + 1);
+    let kb = b.iter().copied().max().map_or(0, |m| m + 1);
+    let mut table = vec![vec![0u64; kb]; ka];
+    for (&x, &y) in a.iter().zip(b) {
+        table[x][y] += 1;
+    }
+    let c2 = |x: u64| (x * x.saturating_sub(1) / 2) as f64;
+    let sum_ij: f64 = table.iter().flatten().map(|&v| c2(v)).sum();
+    let sum_a: f64 = table.iter().map(|row| c2(row.iter().sum())).sum();
+    let sum_b: f64 = (0..kb)
+        .map(|j| c2(table.iter().map(|row| row[j]).sum()))
+        .sum();
+    let total = c2(n as u64);
+    let expected = sum_a * sum_b / total;
+    let max_index = (sum_a + sum_b) / 2.0;
+    if (max_index - expected).abs() < f64::EPSILON {
+        return 1.0;
+    }
+    (sum_ij - expected) / (max_index - expected)
 }

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pure-Rust product crates (`pulsar-config`, `pulsar-pipeline`, `pulsar-store`, `pulsar-analysis`, `pulsar-mcp`):**
+  - `pulsar-config` (#61): `params.yaml` loader, JSON Schema generation, structured validation errors, and v0.5 preprocessing fields (`fill_value`, `indicator: false`, `missing_indicator_groups`).
+  - `pulsar-pipeline` (#63): `ThemaRS` `fit` and `fit_multi` pipeline in Rust with CSV/Parquet ingestion and v0.5 preprocessing parity.
+  - `pulsar-store` (#62): Run registry, typed handles (`DatasetId`, `RunId`, `PlanId`), and async job state machine.
+  - `pulsar-analysis` (#64): Spectral/component clustering, threshold stability dynamics, and Cosmic Graph diagnostics ported to Rust.
+  - `pulsar-mcp` (#71): Rust MCP server built on `rmcp` with typed tool contracts, store-backed handles, and asynchronous sweep jobs.
 - Multi-imputation ensembles: per-column candidates and method/seed/indicator
   sweeps, repeated stochastic draws via `n_imputations`, and fused Cosmic Graphs.
   MCP plans accept compatible multi-option answers and candidate edits; config
