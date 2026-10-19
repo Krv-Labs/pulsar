@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pulsar_pipeline::Graph;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::atomic::{
@@ -411,6 +412,62 @@ impl Store {
     /// Directory holding a run's record and sidecars.
     pub fn run_dir(&self, id: &RunId) -> PathBuf {
         self.dirs().run_dir(id.as_str())
+    }
+
+    fn run_blob_path(&self, id: &RunId, name: &str) -> Result<PathBuf, StoreError> {
+        let valid = !name.is_empty()
+            && name.ends_with(".json")
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            && !name.starts_with('.');
+        if !valid {
+            return Err(StoreError::InvalidArgument(format!(
+                "run blob name must be a plain `<name>.json`, got {name:?}"
+            )));
+        }
+        Ok(self.run_dir(id).join(name))
+    }
+
+    /// Attach an extra JSON document (for example a tool response) to a
+    /// completed run, atomically. `name` must be `<name>.json`.
+    pub fn write_run_json<T: Serialize>(
+        &self,
+        id: &RunId,
+        name: &str,
+        value: &T,
+    ) -> Result<(), StoreError> {
+        self.get_run(id)?;
+        let path = self.run_blob_path(id, name)?;
+        let mut bytes = serde_json::to_vec(value).map_err(|e| StoreError::CorruptRecord {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        bytes.push(b'\n');
+        crate::atomic::write_atomic(&path, &bytes, true)
+    }
+
+    /// Read a JSON document attached with [`Self::write_run_json`];
+    /// `Ok(None)` when the run exists but has no such document.
+    pub fn read_run_json(
+        &self,
+        id: &RunId,
+        name: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        self.get_run(id)?;
+        let path = self.run_blob_path(id, name)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|e| StoreError::CorruptRecord {
+                        path,
+                        message: e.to_string(),
+                    })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io("read", path)(e)),
+        }
     }
 
     pub(crate) fn write_run(
