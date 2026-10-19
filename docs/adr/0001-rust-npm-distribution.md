@@ -1,6 +1,6 @@
 # ADR 0001: Pure-Rust Pulsar distributed through npm
 
-- **Status:** Accepted
+- **Status:** Accepted, amended 2026-10-17 (decision 7: PyPI is kept, see below)
 - **Date:** 2026-10-16
 - **Issue:** #58 (milestone *v1.0: Rust-native Pulsar on npm*, tracking #77)
 
@@ -69,12 +69,23 @@ distribution channel they support best.
    - Publishing library crates to crates.io. All crates stay `publish = false`
      until there is an external Rust consumer.
    - napi bindings for embedding in Node.
-7. **PyPI sunset.**
-   - One final `thema-pulsar` release whose README and an import-time
-     `DeprecationWarning` point to `@krv-labs/pulsar`.
+7. **PyPI stays, as thin bindings.** *(Amended 2026-10-17; the original
+   decision was a PyPI sunset with one final deprecating release.)*
+   - npm is the primary channel and the one on the critical path; agent
+     hosts launch Pulsar with `npx` / `pnpm dlx`.
+   - `thema-pulsar` on PyPI continues, but as a thin PyO3 layer over the
+     Rust crates (`pulsar-python` wrapping `pulsar-pipeline`,
+     `pulsar-analysis`, …) for notebook and library users. No orchestration,
+     statistics or MCP logic lives in Python; the Python package exposes the
+     Rust API and converts to numpy / pandas at the boundary.
+   - Both channels build from the same workspace and the same
+     `[workspace.package].version`. #76 becomes "replace the Python
+     implementation with bindings over the Rust crates" rather than a
+     decommission.
    - Earlier versions are **not** yanked.
-   - The golden-fixture generator (#60) keeps a pinned Python environment so
-     the reference outputs stay reproducible.
+   - The golden-fixture generator (#60) keeps a pinned Python environment
+     (v0.5, the last Python implementation) so the reference outputs stay
+     reproducible.
 
 ## Spike evidence
 
@@ -145,15 +156,15 @@ than guess silently.
 | cargo-dist npm installer (downloads the binary in `postinstall`) | Fails under `ignore-scripts`, offline and in sandboxes. |
 | WASM (wasm-pack) | No rayon threads without extra setup; slower dense linear algebra; awkward file and mmap IO. |
 | Polars for IO and transforms | About 20× the binary size and 13× the build time (see above). |
-| Keep PyPI alongside npm | Two packaging pipelines and two ABIs for a product whose users are agents launched through npm. |
+| Drop PyPI entirely (the original decision 7) | Rejected on 2026-10-17: library and notebook users still want `pip install thema-pulsar`. The cost of a second channel is bounded because the Python package is bindings only; it carries no logic of its own. |
 
 ## Consequences
 
 - The workspace is restructured into product crates (#59). `pulsar-python`
-  stays buildable only until #76, so parity tests can call both
-  implementations.
+  keeps the v0.5 bindings until #76 rewires it over the product crates, so
+  parity tests can call both implementations in the meantime.
 - Every behaviour ported from Python is checked against golden fixtures (#60)
-  before the Python is deleted.
+  before the Python implementation is deleted.
 - Python-only dependencies need Rust replacements, recorded per issue:
   - networkx → CSR/edge-list structs plus `petgraph`;
   - scikit-learn → in-house or `linfa`-family code;
