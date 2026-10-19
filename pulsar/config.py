@@ -320,9 +320,7 @@ def _normalize_impute_inputs(
         col = str(raw_col)
         if isinstance(val, (list, tuple)):
             if not val:
-                raise ValueError(
-                    f"impute[{col!r}] candidate list must not be empty."
-                )
+                raise ValueError(f"impute[{col!r}] candidate list must not be empty.")
             specs = [v for v in val]
             primary[col] = specs[0]
             candidates[col] = specs
@@ -365,9 +363,7 @@ class PulsarConfig:
         self.n_reps = int(self.n_reps)
         self.n_imputations = int(self.n_imputations)
         if self.n_imputations < 1:
-            raise ValueError(
-                f"n_imputations must be >= 1, got {self.n_imputations}."
-            )
+            raise ValueError(f"n_imputations must be >= 1, got {self.n_imputations}.")
         self.drop_columns = [str(c) for c in self.drop_columns]
         self.impute, self.impute_candidates = _normalize_impute_inputs(
             self.impute, self.impute_candidates
@@ -401,9 +397,7 @@ def _select_column_variant_spec(
     if variant_index < len(specs):
         chosen = specs[variant_index]
     else:
-        stochastic_specs = [
-            s for s in specs if s.method in _STOCHASTIC_IMPUTE_METHODS
-        ]
+        stochastic_specs = [s for s in specs if s.method in _STOCHASTIC_IMPUTE_METHODS]
         if stochastic_specs:
             offset = variant_index - len(specs)
             chosen = stochastic_specs[offset % len(stochastic_specs)]
@@ -446,14 +440,10 @@ def expand_preprocessing_variants(cfg: PulsarConfig) -> list[PulsarConfig]:
         variant_impute: dict[str, ImputeSpec] = {}
         sig_items: list[tuple[str, str, int, Any, bool]] = []
         for col, specs in candidates_map.items():
-            chosen = _select_column_variant_spec(
-                col, specs, k, used_stochastic_seeds
-            )
+            chosen = _select_column_variant_spec(col, specs, k, used_stochastic_seeds)
             variant_impute[col] = chosen
             effective_seed = (
-                int(chosen.seed)
-                if chosen.method in _STOCHASTIC_IMPUTE_METHODS
-                else 0
+                int(chosen.seed) if chosen.method in _STOCHASTIC_IMPUTE_METHODS else 0
             )
             sig_items.append(
                 (

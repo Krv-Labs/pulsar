@@ -394,4 +394,3 @@ def test_preprocessing_plan_multi_imputation_edits_and_render(
         }
     )
     assert len(expand_preprocessing_variants(cfg)) == 3
-

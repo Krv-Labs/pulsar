@@ -125,9 +125,7 @@ def plan_to_preprocessing_dict(plan: PreprocessingPlan) -> dict[str, Any]:
                 for cand in entry.impute_candidates
             ]
         elif entry.impute is not None:
-            impute_dict[col] = _format_plan_impute_spec(
-                entry.impute, entry.indicator
-            )
+            impute_dict[col] = _format_plan_impute_spec(entry.impute, entry.indicator)
         if entry.encode is not None:
             encode_dict[col] = {"method": entry.encode}
 

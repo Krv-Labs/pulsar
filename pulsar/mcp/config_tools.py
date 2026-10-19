@@ -500,9 +500,7 @@ def apply_overrides(
         raw.setdefault("preprocessing", {})["n_imputations"] = int(
             overrides["n_imputations"]
         )
-        _track(
-            "preprocessing.n_imputations", old, int(overrides["n_imputations"])
-        )
+        _track("preprocessing.n_imputations", old, int(overrides["n_imputations"]))
     if "drop_columns" in overrides:
         old = raw.get("preprocessing", {}).get("drop_columns")
         raw.setdefault("preprocessing", {})["drop_columns"] = list(
@@ -771,9 +769,7 @@ def _validate_impute(impute: Any, issues: list[ValidationIssue]) -> None:
                 )
                 continue
             for idx, item in enumerate(spec):
-                _validate_single_impute_spec(
-                    str(col), item, f"{path}[{idx}]", issues
-                )
+                _validate_single_impute_spec(str(col), item, f"{path}[{idx}]", issues)
         else:
             _validate_single_impute_spec(str(col), spec, path, issues)
 
