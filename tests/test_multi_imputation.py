@@ -584,8 +584,8 @@ def test_explicit_candidate_indicators_and_entry_override(ensemble_plan):
 def test_multi_option_answers_reject_incompatible_shared_policies(
     ensemble_plan, conflict
 ):
-    second_edit = ensemble_plan.questions["ensemble"].options[1].edits[0]
-    second_edit[conflict] = {
+    first_edit = ensemble_plan.questions["ensemble"].options[0].edits[0]
+    first_edit[conflict] = {
         "role": "drop",
         "encode": "one_hot",
         "indicator": "group:x1",
@@ -602,3 +602,112 @@ def test_multi_option_answers_reject_incompatible_shared_policies(
                 }
             ],
         )
+
+
+def test_mcp_multi_imputation_real_data_penguins_end_to_end():
+    import asyncio
+    from pathlib import Path
+
+    import yaml
+    from pulsar.mcp.server import mcp
+
+    penguins_csv = Path(__file__).resolve().parents[1] / "demos" / "penguins" / "penguins.csv"
+
+    async def _call(tool_name: str, **kwargs):
+        res = await mcp.call_tool(tool_name, kwargs)
+        sc = res.structured_content
+        assert sc is not None and sc.get("status") != "error", f"{tool_name} failed: {sc}"
+        return sc
+
+    async def _workflow():
+        ing = await _call("ingest_dataset", path=str(penguins_csv))
+        ds_id = ing["dataset_id"]
+
+        plan = await _call(
+            "draft_preprocessing_plan",
+            dataset_id=ds_id,
+            target_columns=["species"],
+        )
+        plan_id = plan["plan_id"]
+
+        cfg_base = await _call("create_config", dataset_id=ds_id, plan_id=plan_id)
+        assert cfg_base["sweep_strategy"]["imputation_variants"] == 1
+        sweep_base = await _call(
+            "run_topological_sweep",
+            config_yaml=cfg_base["config_yaml"],
+            dataset_id=ds_id,
+        )
+
+        edited = await _call(
+            "edit_preprocessing_plan",
+            plan_id=plan_id,
+            answers=[{"question_id": "q1", "option_ids": ["unknown", "none"]}],
+            edits=[
+                {
+                    "column": "bill_length_mm",
+                    "impute": [
+                        {"method": "fill_median"},
+                        {"method": "fill_mean"},
+                        {"method": "sample_normal", "seed": 42},
+                    ],
+                },
+                {
+                    "column": "sex",
+                    "impute": [
+                        {"method": "fill_value", "value": "(blank)"},
+                        {"method": "sample_categorical", "seed": 17},
+                    ],
+                },
+            ],
+        )
+        assert edited["validation"]["valid"] is True
+        assert any(ch["field"] == "impute_candidates" for ch in edited["changes"])
+
+        cfg_ens = await _call("create_config", dataset_id=ds_id, plan_id=plan_id)
+        assert cfg_ens["sweep_strategy"]["imputation_variants"] == 3
+        parsed = yaml.safe_load(cfg_ens["config_yaml"])
+        assert len(parsed["preprocessing"]["impute"]["bill_length_mm"]) == 3
+        assert len(parsed["preprocessing"]["impute"]["flipper_length_mm"]) == 2
+
+        val_cfg = await _call("validate_config", config_yaml=cfg_ens["config_yaml"])
+        assert val_cfg["status"] == "ok" and val_cfg["issues"] == []
+
+        val_prep = await _call(
+            "validate_preprocessing_config",
+            config_yaml=cfg_ens["config_yaml"],
+            dataset_id=ds_id,
+        )
+        assert val_prep["valid"] is True and val_prep["nan_remaining"] == 0
+
+        ref_cfg = await _call(
+            "refine_config",
+            config_yaml=cfg_ens["config_yaml"],
+            overrides={"preprocessing": {"n_imputations": 4}},
+        )
+        assert (
+            yaml.safe_load(ref_cfg["config_yaml"])["preprocessing"]["n_imputations"]
+            == 4
+        )
+
+        sweep_ens = await _call(
+            "run_topological_sweep",
+            config_yaml=cfg_ens["config_yaml"],
+            dataset_id=ds_id,
+        )
+        ens_run_id = sweep_ens["run_id"]
+
+        diag = await _call("diagnose_cosmic_graph", run_id=ens_run_id)
+        assert diag["status"] == "ok"
+
+        dossier = await _call("generate_cluster_dossier", run_id=ens_run_id)
+        assert len(dossier.get("clusters", [])) > 0
+
+        comp = await _call(
+            "compare_sweeps",
+            run_a=sweep_base["run_id"],
+            run_b=ens_run_id,
+        )
+        assert comp["status"] == "ok"
+
+    asyncio.run(_workflow())
+

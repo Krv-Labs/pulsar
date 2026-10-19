@@ -449,7 +449,8 @@ def build_edit_plan_payload(
     effective_changes = [
         ch
         for ch in changes
-        if ch.get("field") in ("role", "impute", "indicator", "encode")
+        if ch.get("field")
+        in ("role", "impute", "impute_candidates", "indicator", "encode")
     ]
 
     summary_groups: dict[tuple[str, str, str], dict[str, Any]] = {}

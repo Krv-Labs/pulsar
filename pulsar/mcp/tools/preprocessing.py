@@ -516,7 +516,7 @@ def _count_dummy_columns(
 
 
 def _build_validation_payload(
-    data: Any, df_proc: Any, layout: Any, cfg: Any
+    data: Any, df_proc: Any, layout: Any, cfg: Any, *, nan_remaining: int | None = None
 ) -> dict[str, Any]:
     input_cols = set(data.columns)
     output_names = layout.feature_names
@@ -530,6 +530,9 @@ def _build_validation_payload(
     col_preview = list(output_names[:8])
     if len(output_names) > 8:
         col_preview.append(f"... +{len(output_names) - 8} more")
+    resolved_nans = (
+        int(df_proc.isna().sum().sum()) if nan_remaining is None else int(nan_remaining)
+    )
     return {
         "status": "ok",
         "valid": True,
@@ -540,8 +543,18 @@ def _build_validation_payload(
         "missingness_flag_count": missingness_flag_count,
         "high_cardinality_encoded_columns": high_cardinality_encoded,
         "feature_names_preview": col_preview,
-        "nan_remaining": int(df_proc.isna().sum().sum()),
+        "nan_remaining": resolved_nans,
     }
+
+
+def _dry_run_all_variants(data: Any, cfg: Any) -> tuple[Any, Any, int]:
+    variants = cfg.preprocessing_variants()
+    df_proc, layout = preprocess_dataframe(data, variants[0])
+    max_nans = int(df_proc.isna().sum().sum())
+    for variant in variants[1:]:
+        df_v, _ = preprocess_dataframe(data, variant)
+        max_nans = max(max_nans, int(df_v.isna().sum().sum()))
+    return df_proc, layout, max_nans
 
 
 @tool_meta(
@@ -596,8 +609,14 @@ async def validate_preprocessing_config(
             )
 
         cfg = load_config(config_dict)
-        df_proc, layout = await asyncio.to_thread(preprocess_dataframe, data, cfg)
-        return mcp_result(_build_validation_payload(data, df_proc, layout, cfg))
+        df_proc, layout, nan_remaining = await asyncio.to_thread(
+            _dry_run_all_variants, data, cfg
+        )
+        return mcp_result(
+            _build_validation_payload(
+                data, df_proc, layout, cfg, nan_remaining=nan_remaining
+            )
+        )
 
     except yaml.YAMLError as e:
         return mcp_error(

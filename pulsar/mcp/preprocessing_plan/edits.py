@@ -478,34 +478,44 @@ def _apply_single_edit(
 def _merge_answer_entries(col: str, entries: list[PlanEntry]) -> PlanEntry:
     """Combine compatible answer treatments without losing candidate indicators."""
     primary = entries[0]
-    for entry in entries[1:]:
-        same_group = entry.indicator == primary.indicator or not (
-            entry.indicator.startswith("group:")
-            or primary.indicator.startswith("group:")
-        )
-        if (
+    group_indicators = {
+        e.indicator for e in entries if e.indicator.startswith("group:")
+    }
+    has_own = any(e.indicator == "own" for e in entries)
+    if (
+        len(group_indicators) > 1
+        or (group_indicators and has_own)
+        or any(
             entry.role != primary.role
             or entry.encode != primary.encode
             or (entry.impute is None) != (primary.impute is None)
-            or not same_group
-        ):
-            raise PlanEditError(
-                "INVALID_ARGUMENT",
-                f"Selected options for column {col!r} have incompatible roles, encoding, or missingness groups.",
-                {"column": col},
-            )
+            for entry in entries[1:]
+        )
+    ):
+        raise PlanEditError(
+            "INVALID_ARGUMENT",
+            f"Selected options for column {col!r} have incompatible roles, encoding, or missingness groups.",
+            {"column": col},
+        )
     if primary.impute is None:
         return primary
+    group_ind = next(iter(group_indicators), None)
     candidates: list[dict[str, Any]] = []
     for entry in entries:
         for raw_spec in entry.impute_candidates or [entry.impute]:
             spec = dict(raw_spec)
-            spec.setdefault("indicator", entry.indicator == "own")
+            spec.setdefault(
+                "indicator", False if group_ind else (entry.indicator == "own")
+            )
+            if group_ind:
+                spec["indicator"] = False
             if spec not in candidates:
                 candidates.append(spec)
     primary.impute = candidates[0]
     primary.impute_candidates = candidates if len(candidates) > 1 else None
-    if not primary.indicator.startswith("group:"):
+    if group_ind:
+        primary.indicator = group_ind  # type: ignore[assignment]
+    else:
         primary.indicator = "own" if any(s["indicator"] for s in candidates) else "none"
     return primary
 
