@@ -6,12 +6,20 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use pulsar_pipeline::{fit, FitOptions, Fitted};
+use pulsar_store::{
+    summarize_history, DatasetId, JobHandle, JobKind, RunArtifacts, RunId, RunRecord, Store,
+    StoreError,
+};
 use serde_json::json;
 
 /// Topological data analysis for tabular data.
 #[derive(Parser)]
 #[command(name = "pulsar", version)]
 struct Cli {
+    /// Store directory for runs and datasets (default: $PULSAR_STORE_DIR or
+    /// the XDG data dir).
+    #[arg(long, global = true, value_name = "DIR")]
+    store: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -36,7 +44,14 @@ enum Command {
         /// RAYON_NUM_THREADS).
         #[arg(long)]
         threads: Option<usize>,
+        /// Persist the run (record, graph and affinity) in the store and
+        /// report its `run_id`.
+        #[arg(long)]
+        save: bool,
     },
+    /// Inspect persisted runs.
+    #[command(subcommand)]
+    Runs(RunsCommand),
     /// Print a JSON Schema.
     Schema {
         #[arg(value_enum)]
@@ -51,6 +66,24 @@ enum Command {
 enum SchemaKind {
     /// The params.yaml config format.
     Config,
+}
+
+#[derive(Subcommand)]
+enum RunsCommand {
+    /// List completed runs, oldest first.
+    List {
+        /// Only runs of this dataset_id.
+        #[arg(long)]
+        dataset: Option<String>,
+    },
+    /// Show one run: its job state and, once complete, its record.
+    Show { run_id: String },
+    /// Sweep-history observations over the completed runs.
+    History {
+        /// Only runs of this dataset_id.
+        #[arg(long)]
+        dataset: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -72,7 +105,23 @@ fn main() -> ExitCode {
             out,
             quiet,
             threads,
-        }) => run_fit(&config, data.as_deref(), out.as_deref(), quiet, threads),
+            save,
+        }) => {
+            let store = if save {
+                Some(cli.store.as_deref())
+            } else {
+                None
+            };
+            run_fit(
+                &config,
+                data.as_deref(),
+                out.as_deref(),
+                quiet,
+                threads,
+                store,
+            )
+        }
+        Some(Command::Runs(cmd)) => run_runs(cli.store.as_deref(), cmd),
         Some(Command::Schema {
             kind: SchemaKind::Config,
         }) => print_json(&pulsar_config::json_schema()),
@@ -100,14 +149,28 @@ fn main() -> ExitCode {
     }
 }
 
+fn open_store(dir: Option<&Path>) -> Result<Store, StoreError> {
+    match dir {
+        Some(dir) => Store::open_at(dir),
+        None => Store::open(),
+    }
+}
+
+fn store_fail(e: &StoreError) -> ExitCode {
+    fail(e.code(), &e.to_string(), None)
+}
+
 /// `pulsar fit`: exit 2 on a config error, 1 on a data or pipeline error
-/// (a JSON error envelope on stderr), 0 with the summary on stdout.
+/// (a JSON error envelope on stderr), 0 with the summary on stdout. With
+/// `store` set the run is persisted through the job model, so a failure is
+/// recorded against its `run_id` too.
 fn run_fit(
     config: &Path,
     data: Option<&Path>,
     out: Option<&Path>,
     quiet: bool,
     threads: Option<usize>,
+    store: Option<Option<&Path>>,
 ) -> ExitCode {
     if let Err(e) = pulsar_pipeline::configure_threads(threads) {
         return fail("THREAD_POOL", &e.to_string(), None);
@@ -135,6 +198,28 @@ fn run_fit(
         Err(e) => return fail(e.code(), &e.to_string(), Some(&data_path)),
     };
 
+    // Persisting: register the dataset and queue the job before fitting, so
+    // the run_id exists (and a failure is recorded) whatever happens next.
+    let mut job: Option<(Store, DatasetId, JobHandle)> = None;
+    if let Some(dir) = store {
+        let opened = match open_store(dir) {
+            Ok(s) => s,
+            Err(e) => return store_fail(&e),
+        };
+        let dataset = match opened.register_dataset(&data_path) {
+            Ok(d) => d,
+            Err(e) => return store_fail(&e),
+        };
+        let handle = match opened
+            .submit(JobKind::Sweep, Some(dataset.dataset_id.clone()))
+            .and_then(|h| h.start().map(|()| h))
+        {
+            Ok(h) => h,
+            Err(e) => return store_fail(&e),
+        };
+        job = Some((opened, dataset.dataset_id, handle));
+    }
+
     let bar = if quiet {
         ProgressBar::hidden()
     } else {
@@ -149,23 +234,105 @@ fn run_fit(
     let mut on_progress = |stage: &str, fraction: f64| {
         bar.set_message(stage.to_string());
         bar.set_position((fraction * 1000.0).round() as u64);
+        if let Some((_, _, handle)) = &job {
+            let _ = handle.progress(stage, fraction);
+        }
     };
     let fitted = match fit(&cfg, &table, FitOptions::default(), Some(&mut on_progress)) {
         Ok(f) => f,
         Err(e) => {
             bar.finish_and_clear();
+            if let Some((_, _, handle)) = &job {
+                let _ = handle.fail(e.code(), &e.to_string());
+            }
             return fail(e.code(), &e.to_string(), Some(&data_path));
         }
     };
     bar.finish_and_clear();
 
-    let summary = summarize(&fitted, &data_path);
+    let mut summary = summarize(&fitted, &data_path);
+    if let Some((store, dataset_id, handle)) = &job {
+        let record = RunRecord::from_fitted(
+            handle.id(),
+            &fitted,
+            Some(dataset_id.clone()),
+            Some(&data_path.to_string_lossy()),
+        );
+        if let Err(e) = handle.complete(&record, &RunArtifacts::from_fitted(&fitted)) {
+            let _ = handle.fail(e.code(), &e.to_string());
+            return store_fail(&e);
+        }
+        summary["run_id"] = json!(record.run_id);
+        summary["dataset_id"] = json!(dataset_id);
+        summary["store"] = json!(store.root());
+    }
     if let Some(dir) = out {
         if let Err(e) = write_outputs(dir, &fitted, &summary) {
             return fail("IO", &e.to_string(), Some(dir));
         }
     }
     print_json(&summary)
+}
+
+/// `pulsar runs ...`: exit 1 with a JSON error envelope on a store or
+/// handle error, 0 with JSON on stdout.
+fn run_runs(store_dir: Option<&Path>, cmd: RunsCommand) -> ExitCode {
+    let store = match open_store(store_dir) {
+        Ok(s) => s,
+        Err(e) => return store_fail(&e),
+    };
+    let parse_dataset = |raw: Option<String>| -> Result<Option<DatasetId>, StoreError> {
+        raw.map(|s| DatasetId::parse(&s)).transpose()
+    };
+    match cmd {
+        RunsCommand::List { dataset } => {
+            let dataset = match parse_dataset(dataset) {
+                Ok(d) => d,
+                Err(e) => return store_fail(&e),
+            };
+            match store.list_runs(dataset.as_ref()) {
+                Ok(listing) => print_json(&json!({
+                    "store": store.root(),
+                    "n_runs": listing.runs.len(),
+                    "skipped": listing.skipped,
+                    "runs": listing.runs.iter().map(|r| json!({
+                        "run_id": r.run_id,
+                        "dataset_id": r.dataset_id,
+                        "run_name": r.config.run_name,
+                        "created_at": r.created_at,
+                        "n_rows": r.n_rows,
+                        "construction_threshold": r.resolved_construction_threshold,
+                        "n_edges": r.metrics.n_edges,
+                        "component_count": r.metrics.component_count,
+                        "health": r.metrics.health_label(),
+                    })).collect::<Vec<_>>(),
+                })),
+                Err(e) => store_fail(&e),
+            }
+        }
+        RunsCommand::Show { run_id } => {
+            let run_id = match RunId::parse(&run_id) {
+                Ok(id) => id,
+                Err(e) => return store_fail(&e),
+            };
+            let job = match store.get_job(&run_id) {
+                Ok(job) => job,
+                Err(e) => return store_fail(&e),
+            };
+            let run = store.get_run(&run_id).ok();
+            print_json(&json!({ "store": store.root(), "job": job, "run": run }))
+        }
+        RunsCommand::History { dataset } => {
+            let dataset = match parse_dataset(dataset) {
+                Ok(d) => d,
+                Err(e) => return store_fail(&e),
+            };
+            match store.list_runs(dataset.as_ref()) {
+                Ok(listing) => print_json(&summarize_history(&listing.runs)),
+                Err(e) => store_fail(&e),
+            }
+        }
+    }
 }
 
 fn summarize(fitted: &Fitted, data_path: &Path) -> serde_json::Value {
