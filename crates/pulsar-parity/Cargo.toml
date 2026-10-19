@@ -19,3 +19,4 @@ pulsar-config = { path = "../pulsar-config" }
 pulsar-core = { path = "../pulsar-core" }
 pulsar-data = { path = "../pulsar-data" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
+pulsar-analysis = { path = "../pulsar-analysis" }
