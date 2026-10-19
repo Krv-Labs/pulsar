@@ -8,3 +8,17 @@ publish = false
 description = "Run registry, handles, and the job model for long-running work."
 
 [dependencies]
+# Arrow IPC sidecars for the O(edges) / O(rows) parts of a record (ADR 0001:
+# no .npy). arrow-ipc is already in the tree through parquet.
+arrow = { version = "57", default-features = false, features = ["ipc"] }
+pulsar-config = { path = "../pulsar-config" }
+pulsar-core = { path = "../pulsar-core" }
+pulsar-pipeline = { path = "../pulsar-pipeline" }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+pulsar-data = { path = "../pulsar-data" }

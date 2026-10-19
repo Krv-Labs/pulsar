@@ -119,6 +119,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-cast",
  "arrow-data",
+ "arrow-ipc",
  "arrow-ord",
  "arrow-row",
  "arrow-schema",
@@ -1229,6 +1230,7 @@ dependencies = [
  "pulsar-data",
  "pulsar-mcp",
  "pulsar-pipeline",
+ "pulsar-store",
  "serde",
  "serde_json",
 ]
@@ -1323,6 +1325,18 @@ dependencies = [
 [[package]]
 name = "pulsar-store"
 version = "0.5.0"
+dependencies = [
+ "arrow",
+ "pulsar-config",
+ "pulsar-core",
+ "pulsar-data",
+ "pulsar-pipeline",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
 
 [[package]]
 name = "pyo3"
