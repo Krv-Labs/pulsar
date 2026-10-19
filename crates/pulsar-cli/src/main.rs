@@ -52,6 +52,8 @@ enum Command {
     /// Inspect persisted runs.
     #[command(subcommand)]
     Runs(RunsCommand),
+    /// Serve the MCP server on stdio (for agent harnesses).
+    Mcp,
     /// Print a JSON Schema.
     Schema {
         #[arg(value_enum)]
@@ -122,6 +124,7 @@ fn main() -> ExitCode {
             )
         }
         Some(Command::Runs(cmd)) => run_runs(cli.store.as_deref(), cmd),
+        Some(Command::Mcp) => run_mcp(cli.store.as_deref()),
         Some(Command::Schema {
             kind: SchemaKind::Config,
         }) => print_json(&pulsar_config::json_schema()),
@@ -146,6 +149,27 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+/// `pulsar mcp`: serve on stdio until the client disconnects. Logs go to
+/// stderr; stdout is the protocol channel.
+fn run_mcp(store_dir: Option<&Path>) -> ExitCode {
+    let store = match open_store(store_dir) {
+        Ok(s) => s,
+        Err(e) => return store_fail(&e),
+    };
+    let state = match pulsar_mcp::ServerState::new(store, pulsar_mcp::ServerOptions::default()) {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => return store_fail(&e),
+    };
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => return fail("RUNTIME", &e.to_string(), None),
+    };
+    match runtime.block_on(pulsar_mcp::run_stdio(state)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail("MCP", &e.to_string(), None),
     }
 }
 

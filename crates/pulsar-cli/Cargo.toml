@@ -19,5 +19,6 @@ pulsar-data = { path = "../pulsar-data" }
 pulsar-mcp = { path = "../pulsar-mcp" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
 pulsar-store = { path = "../pulsar-store" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 serde = "1"
 serde_json = "1"
