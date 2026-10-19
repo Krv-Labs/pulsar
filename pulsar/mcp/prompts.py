@@ -28,11 +28,39 @@ Reveal the dataset's topology; do not force convenient clusters.
    `probe_columns(dataset_id, ['col_name'])` for deep per-column inspection
    (sample values, distributions). Call `characterize_dataset` once per dataset;
    do not repeat it casually on wide tables. Max 20 columns per probe call.
-3. Calibrate: `create_config(dataset_id)` is mandatory. It returns the
-   baseline config, processed-space distance percentiles, and a
-   `sweep_strategy` block. Treat this as a broad first pass, not a final
-   answer.
-4. Validate Config: `validate_config(config_yaml, dataset_id)`.
+3. Preprocess: `draft_preprocessing_plan(dataset_id, target_columns=..., entity_column=..., time_column=...)`
+   measures column evidence (shared missing masks, conditional columns, exact
+   duplicates/sums, date/text kinds, and `evidence.target_proxies` measuring
+   whether missingness markers or category dummies encode a target or boolean
+   event flag) and drafts a versioned plan (`plan_id`, `revision`) with a fresh
+   unique `plan_id` per draft, labeled defaults (`decided_by="default"`), and
+   open questions (`blank_meaning`, `code_columns`, `conditional_column`,
+   `date_columns`, `duplicate_signal`, `mixed_values`, `mostly_blank`, `outcome_columns`). The
+   plan is evidence + labeled defaults, not a verdict; `stakes`
+   (`neighbors_kept`, `feature_count_delta`) measure how much the map's k-NN
+   neighborhoods move between options, not a score to optimize.
+   - Read the questions, `evidence.target_proxies`, and `warnings` (such as
+     `TARGET_PROXY_COLUMNS` when `share_with_target == 1.0`) first. Record
+     choices you can infer from context or schema via
+     `edit_preprocessing_plan(plan_id, base_revision, answers=[...], edits=[...], source="agent")`.
+   - Ask the user ONLY questions whose answer cannot be inferred and whose
+     stakes are material. Never present the server's question text verbatim to a
+     non-technical user; translate it into their domain vocabulary.
+   - Example (clinician, `blank_meaning` on `n_inpatient_claims` with no 0s):
+     ask *"If a patient has no recorded hospital stays, does that mean they had
+     none, or that we don't know?"* → if they say "none", call
+     `edit_preprocessing_plan(plan_id, base_revision=1, answers=[{"question_id": "<question_id>", "option_id": "<option_id>"}], source="user")`
+     (use the `question_id` and `option_id` values the payload lists).
+4. Calibrate & Validate: `create_config(dataset_id, plan_id=plan_id)` consumes
+   the plan (emitting readable group markers like `n_inpatient_claims_and_2_more_was_missing`,
+   described in `marker_legend`) and returns the baseline config, processed-space
+   distance percentiles, and `sweep_strategy` (treat as a broad first pass, not a final
+   answer). Calling `create_config` without `plan_id` drafts baseline defaults
+   automatically (with a fresh `plan_id`) and emits `PREPROCESSING_QUESTIONS_OPEN`
+   when open questions remain or `PREPROCESSING_PLAN_NOT_USED` when the session
+   already holds an edited plan (`revision > 1`) for the dataset. Use
+   `validate_preprocessing_config` or `validate_config(config_yaml, dataset_id)`
+   when checking manual YAML edits.
 
 ## PHASE II: EXECUTE & VALIDATE
 5. Run: `run_topological_sweep`.

@@ -106,12 +106,55 @@ def _normalize_construction(value: Any) -> Literal["minhash", "exact"]:
 # ---------------------------------------------------------------------------
 
 
+def _validate_fill_value(value: Any) -> float | int | str:
+    if value is None:
+        raise ValueError("ImputeSpec with method 'fill_value' requires 'value'.")
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"ImputeSpec 'value' must be finite numeric or string, got bool {value!r}."
+        )
+    if isinstance(value, (int, float, np.number)):
+        try:
+            fval = float(value)
+        except OverflowError as exc:
+            raise ValueError(
+                f"ImputeSpec 'value' must be finite, got {value!r}."
+            ) from exc
+        if not math.isfinite(fval):
+            raise ValueError(f"ImputeSpec 'value' must be finite, got {value!r}.")
+        if isinstance(value, np.floating):
+            return float(value)
+        if isinstance(value, np.integer):
+            return int(value)
+        return value
+    if isinstance(value, np.str_):
+        return str(value)
+    if not isinstance(value, str):
+        raise ValueError(
+            f"ImputeSpec 'value' must be finite numeric or str, got {type(value).__name__}."
+        )
+    return value
+
+
 @dataclass
 class ImputeSpec:
-    method: (
-        str  # sample_normal | sample_categorical | fill_mean | fill_median | fill_mode
-    )
+    method: str  # sample_normal | sample_categorical | fill_mean | fill_median | fill_mode | fill_value
     seed: int = 42
+    value: float | int | str | None = None
+    indicator: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.indicator, (bool, np.bool_)):
+            raise ValueError(
+                f"ImputeSpec indicator must be true or false (bool), got {self.indicator!r}."
+            )
+        self.indicator = bool(self.indicator)
+        if self.method == "fill_value":
+            self.value = _validate_fill_value(self.value)
+        elif self.value is not None:
+            raise ValueError(
+                f"ImputeSpec 'value' is only valid with method 'fill_value', got method {self.method!r}."
+            )
 
 
 @dataclass
@@ -172,6 +215,93 @@ class CosmicGraphSpec:
     minhash_seed: int = 42
 
 
+def _validate_indicator_group_columns(
+    group_key: str, cols: Any, seen_columns: dict[str, str]
+) -> list[str]:
+    if not isinstance(cols, (list, tuple)):
+        raise ValueError(
+            f"missing_indicator_groups[{group_key!r}] must be a list of column names."
+        )
+    col_list: list[str] = []
+    for col in cols:
+        if not isinstance(col, str) or not col.strip():
+            raise ValueError(
+                f"missing_indicator_groups[{group_key!r}] column names must be non-empty strings."
+            )
+        col_str = str(col)
+        if col_str in seen_columns:
+            raise ValueError(
+                f"Column '{col_str}' appears in more than one missing_indicator_group "
+                f"({seen_columns[col_str]!r} and {group_key!r})."
+            )
+        seen_columns[col_str] = group_key
+        col_list.append(col_str)
+    return col_list
+
+
+def _validate_missing_indicator_groups(
+    groups: Any,
+) -> dict[str, list[str]]:
+    if groups is None:
+        return {}
+    if not isinstance(groups, dict):
+        raise ValueError(
+            "preprocessing.missing_indicator_groups must be a mapping of group_name -> list of column names."
+        )
+    normalized: dict[str, list[str]] = {}
+    seen_columns: dict[str, str] = {}
+    for group_name, cols in groups.items():
+        if not isinstance(group_name, str) or not group_name.strip():
+            raise ValueError(
+                "missing_indicator_groups group names must be non-empty strings."
+            )
+        group_key = str(group_name)
+        normalized[group_key] = _validate_indicator_group_columns(
+            group_key, cols, seen_columns
+        )
+    return normalized
+
+
+def _check_single_group_flag(
+    group_name: str,
+    per_col_flag_names: set[str],
+    configured_cols: set[str],
+    seen_group_flags: set[str],
+) -> None:
+    flag_name = f"{group_name}_was_missing"
+    if flag_name in per_col_flag_names:
+        raise ValueError(
+            f"missing indicator name collision: group {group_name!r} flag "
+            f"'{flag_name}' collides with per-column indicator."
+        )
+    if flag_name in configured_cols:
+        raise ValueError(
+            f"missing indicator name collision: group {group_name!r} flag "
+            f"'{flag_name}' collides with configured column '{flag_name}'."
+        )
+    if flag_name in seen_group_flags:
+        raise ValueError(
+            f"missing indicator name collision: duplicate group flag '{flag_name}'."
+        )
+    seen_group_flags.add(flag_name)
+
+
+def _check_config_group_flag_collisions(cfg: PulsarConfig) -> None:
+    grouped_cols = {c for cols in cfg.missing_indicator_groups.values() for c in cols}
+    drop_set = set(cfg.drop_columns)
+    per_col_flag_names = {
+        f"{col}_was_missing"
+        for col, spec in cfg.impute.items()
+        if spec.indicator and col not in grouped_cols and col not in drop_set
+    }
+    configured_cols = set(cfg.impute) | set(cfg.encode) | drop_set | grouped_cols
+    seen_group_flags: set[str] = set()
+    for group_name in cfg.missing_indicator_groups:
+        _check_single_group_flag(
+            group_name, per_col_flag_names, configured_cols, seen_group_flags
+        )
+
+
 @dataclass
 class PulsarConfig:
     data: str
@@ -184,8 +314,20 @@ class PulsarConfig:
     cosmic_graph: CosmicGraphSpec = field(default_factory=CosmicGraphSpec)
     n_reps: int = 4
     run_name: str = ""
+    missing_indicator_groups: dict[str, list[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.data = str(self.data)
+        self.run_name = str(self.run_name)
+        self.n_reps = int(self.n_reps)
+        self.drop_columns = [str(c) for c in self.drop_columns]
+        self.impute = {str(k): v for k, v in self.impute.items()}
+        self.encode = {str(k): v for k, v in self.encode.items()}
+        self.missing_indicator_groups = _validate_missing_indicator_groups(
+            self.missing_indicator_groups
+        )
+        _check_config_group_flag_collisions(self)
+
         default_projection = ProjectionSpec()
         if self.projection == default_projection and self.pca != PCASpec():
             self.projection = ProjectionSpec(
@@ -204,14 +346,21 @@ class PulsarConfig:
 def _parse_preprocessing(
     pre: dict,
 ) -> tuple[list[str], dict[str, ImputeSpec], dict[str, EncodeSpec]]:
-    drop_columns = pre.get("drop_columns", []) or []
+    drop_columns = [str(c) for c in (pre.get("drop_columns", []) or [])]
+    _validate_missing_indicator_groups(pre.get("missing_indicator_groups"))
     impute = {
-        col: ImputeSpec(method=spec["method"], seed=int(spec.get("seed", 42)))
+        str(col): ImputeSpec(
+            method=str(spec["method"]),
+            seed=int(spec.get("seed", 42)),
+            value=spec.get("value"),
+            indicator=True if spec.get("indicator") is None else spec["indicator"],
+        )
         for col, spec in (pre.get("impute") or {}).items()
     }
     encode = {
-        col: EncodeSpec(
-            method=spec["method"], max_categories=spec.get("max_categories")
+        str(col): EncodeSpec(
+            method=str(spec["method"]),
+            max_categories=_optional_int(spec.get("max_categories")),
         )
         for col, spec in (pre.get("encode") or {}).items()
     }
@@ -287,7 +436,11 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     run_name = run_section.get("name", "")
     data_path = run_section.get("data") or raw.get("data", "")
 
-    drop_columns, impute, encode = _parse_preprocessing(raw.get("preprocessing", {}))
+    pre_raw = raw.get("preprocessing", {}) or {}
+    drop_columns, impute, encode = _parse_preprocessing(pre_raw)
+    missing_indicator_groups = _validate_missing_indicator_groups(
+        pre_raw.get("missing_indicator_groups")
+    )
     projection, pca, ball_mapper = _parse_sweep(raw.get("sweep", {}))
     cosmic_graph = _parse_cosmic_graph(raw.get("cosmic_graph", {}))
     n_reps = int(raw.get("output", {}).get("n_reps", 4))
@@ -303,25 +456,57 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         cosmic_graph=cosmic_graph,
         n_reps=n_reps,
         run_name=run_name,
+        missing_indicator_groups=missing_indicator_groups,
     )
 
 
-def _format_preprocessing_yaml(cfg: PulsarConfig) -> tuple[str, str, str]:
-    drop_line = str(cfg.drop_columns) if cfg.drop_columns else "[]"
-    impute_lines = [
-        f"\n    {col}: {{method: {spec.method}, seed: {spec.seed}}}"
-        for col, spec in cfg.impute.items()
-    ]
-    impute_block = ("\n  impute:" + "".join(impute_lines)) if impute_lines else ""
+def _coerce_yaml_scalar(val: Any) -> Any:
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    if isinstance(val, (float, np.floating)):
+        return float(val)
+    return str(val)
 
-    encode_lines = []
-    for col, spec in cfg.encode.items():
-        parts = f"method: {spec.method}"
-        if spec.max_categories is not None:
-            parts += f", max_categories: {spec.max_categories}"
-        encode_lines.append(f"\n    {col}: {{{parts}}}")
-    encode_block = ("\n  encode:" + "".join(encode_lines)) if encode_lines else ""
-    return drop_line, impute_block, encode_block
+
+def _format_impute_entry(spec: ImputeSpec) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "method": str(spec.method),
+        "seed": int(spec.seed),
+    }
+    if spec.value is not None:
+        entry["value"] = _coerce_yaml_scalar(spec.value)
+    if not spec.indicator:
+        entry["indicator"] = False
+    return entry
+
+
+def _format_encode_entry(spec: EncodeSpec) -> dict[str, Any]:
+    entry: dict[str, Any] = {"method": str(spec.method)}
+    if spec.max_categories is not None:
+        entry["max_categories"] = int(spec.max_categories)
+    return entry
+
+
+def _format_preprocessing_yaml(cfg: PulsarConfig) -> dict[str, Any]:
+    pre: dict[str, Any] = {
+        "drop_columns": [str(c) for c in cfg.drop_columns],
+    }
+    if cfg.missing_indicator_groups:
+        pre["missing_indicator_groups"] = {
+            str(name): [str(c) for c in cols]
+            for name, cols in cfg.missing_indicator_groups.items()
+        }
+    if cfg.impute:
+        pre["impute"] = {
+            str(col): _format_impute_entry(spec) for col, spec in cfg.impute.items()
+        }
+    if cfg.encode:
+        pre["encode"] = {
+            str(col): _format_encode_entry(spec) for col, spec in cfg.encode.items()
+        }
+    return pre
 
 
 def _yaml_nullable(value: object) -> str:
@@ -334,60 +519,67 @@ def config_to_yaml(cfg: PulsarConfig) -> str:
     Inverse of ``load_config``; every field is written explicitly so the
     resulting YAML can recreate the exact same pipeline run.
     """
-    drop_line, impute_block, encode_block = _format_preprocessing_yaml(cfg)
-    construction_threshold = cfg.cosmic_graph.construction_threshold
-    threshold_str = (
-        f'"{construction_threshold}"'
-        if construction_threshold == "auto"
-        else str(construction_threshold)
-    )
-    sparsify_sketch_dim = _yaml_nullable(cfg.cosmic_graph.sparsify_sketch_dim)
-    sparsify_sample_count = _yaml_nullable(cfg.cosmic_graph.sparsify_sample_count)
+    epsilons = [float(e) for e in cfg.ball_mapper.epsilons]
+    if (
+        len(epsilons) >= 2
+        and np.linspace(epsilons[0], epsilons[-1], len(epsilons)).tolist() == epsilons
+    ):
+        epsilon_spec: dict[str, Any] = {
+            "range": {
+                "min": float(epsilons[0]),
+                "max": float(epsilons[-1]),
+                "steps": int(len(epsilons)),
+            }
+        }
+    else:
+        epsilon_spec = {"values": epsilons}
 
-    return f"""run:
-  name: {cfg.run_name or "experiment"}
-  data: {cfg.data}
-preprocessing:
-  drop_columns: {drop_line}{impute_block}{encode_block}
-sweep:
-  projection:
-    method: {cfg.projection.method}
-    dimensions:
-      values: {list(cfg.projection.dimensions)}
-    seed:
-      values: {list(cfg.projection.seeds)}
-    center: {str(cfg.projection.center).lower()}
-  # Legacy mirror of sweep.projection (dims/seeds) for backward compatibility.
-  # sweep.projection is the source of truth; the loader ignores sweep.pca when
-  # sweep.projection is present. Kept in sync here — do not hand-edit only one.
-  pca:
-    dimensions:
-      values: {list(cfg.projection.dimensions)}
-    seed:
-      values: {list(cfg.projection.seeds)}
-  ball_mapper:
-    epsilon:
-      range:
-        min: {min(cfg.ball_mapper.epsilons):.4f}
-        max: {max(cfg.ball_mapper.epsilons):.4f}
-        steps: {len(cfg.ball_mapper.epsilons)}
-cosmic_graph:
-  construction_threshold: {threshold_str}
-  # sparsify: opt-in spectral sparsifier. SLOW on large N (per-JL-sketch CG
-  # solves) and runs after the already-sparse graph is built — leave false
-  # unless you need a spectrum-preserving graph for downstream spectral analysis.
-  sparsify: {str(cfg.cosmic_graph.sparsify).lower()}
-  sparsify_epsilon: {cfg.cosmic_graph.sparsify_epsilon}
-  sparsify_seed: {cfg.cosmic_graph.sparsify_seed}
-  sparsify_sketch_dim: {sparsify_sketch_dim}
-  sparsify_sample_count: {sparsify_sample_count}
-  sparsify_pcg_tol: {cfg.cosmic_graph.sparsify_pcg_tol}
-  sparsify_max_iter: {cfg.cosmic_graph.sparsify_max_iter}
-  # construction: "minhash" (approximate, fast, constant-memory; default) or
-  # "exact" (bit-identical sparse pseudo-Laplacian backbone).
-  construction: {cfg.cosmic_graph.construction}
-  minhash_d: {cfg.cosmic_graph.minhash_d}
-  minhash_seed: {cfg.cosmic_graph.minhash_seed}
-output:
-  n_reps: {cfg.n_reps}
-"""
+    dims = [int(d) for d in cfg.projection.dimensions]
+    seeds = [int(s) for s in cfg.projection.seeds]
+    construction_threshold = cfg.cosmic_graph.construction_threshold
+    threshold_val: str | float = (
+        "auto" if construction_threshold == "auto" else float(construction_threshold)
+    )
+
+    doc: dict[str, Any] = {
+        "run": {
+            "name": str(cfg.run_name),
+            "data": str(cfg.data),
+        },
+        "preprocessing": _format_preprocessing_yaml(cfg),
+        "sweep": {
+            "projection": {
+                "method": str(cfg.projection.method),
+                "dimensions": {"values": list(dims)},
+                "seed": {"values": list(seeds)},
+                "center": bool(cfg.projection.center),
+            },
+            "pca": {
+                "dimensions": {"values": list(dims)},
+                "seed": {"values": list(seeds)},
+            },
+            "ball_mapper": {
+                "epsilon": epsilon_spec,
+            },
+        },
+        "cosmic_graph": {
+            "construction_threshold": threshold_val,
+            "neighborhood": str(cfg.cosmic_graph.neighborhood),
+            "sparsify": bool(cfg.cosmic_graph.sparsify),
+            "sparsify_epsilon": float(cfg.cosmic_graph.sparsify_epsilon),
+            "sparsify_seed": int(cfg.cosmic_graph.sparsify_seed),
+            "sparsify_sketch_dim": _optional_int(cfg.cosmic_graph.sparsify_sketch_dim),
+            "sparsify_sample_count": _optional_int(
+                cfg.cosmic_graph.sparsify_sample_count
+            ),
+            "sparsify_pcg_tol": float(cfg.cosmic_graph.sparsify_pcg_tol),
+            "sparsify_max_iter": int(cfg.cosmic_graph.sparsify_max_iter),
+            "construction": str(cfg.cosmic_graph.construction),
+            "minhash_d": int(cfg.cosmic_graph.minhash_d),
+            "minhash_seed": int(cfg.cosmic_graph.minhash_seed),
+        },
+        "output": {
+            "n_reps": int(cfg.n_reps),
+        },
+    }
+    return yaml.safe_dump(doc, sort_keys=False)

@@ -702,7 +702,7 @@ async def probe_columns(
     """Drill into specific columns: sample values, missingness, ranges and top values.
 
     Reads the raw dataset (not the fitted model). Use after characterize_dataset
-    or recommend_preprocessing flags columns to review; values are truncated and
+    or draft_preprocessing_plan flags columns to review; values are truncated and
     at most 20 columns per call.
     """
     if len(columns) > 20:

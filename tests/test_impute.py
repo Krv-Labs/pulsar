@@ -82,5 +82,46 @@ def test_sample_categorical_values_from_observed():
 
 def test_unknown_method_raises():
     arr = np.array([1.0, np.nan, 3.0])
-    with pytest.raises(ValueError, match="unknown imputation method"):
+    with pytest.raises(ValueError, match="unknown imputation method.*fill_value"):
         impute_column(arr, "bogus_method")
+
+
+def test_fill_value_replaces_nans():
+    arr = np.array([1.0, np.nan, 3.0, np.nan])
+    result = impute_column(arr, "fill_value", value=0.0)
+    np.testing.assert_array_equal(result, np.array([1.0, 0.0, 3.0, 0.0]))
+    # Input array is not mutated
+    assert np.isnan(arr[1]) and np.isnan(arr[3])
+
+
+def test_fill_value_all_nan():
+    arr = np.array([np.nan, np.nan, np.nan])
+    result = impute_column(arr, "fill_value", value=-999.0)
+    np.testing.assert_array_equal(result, np.array([-999.0, -999.0, -999.0]))
+
+
+def test_fill_value_no_nans_passthrough():
+    arr = np.array([1.0, 2.0, 3.0])
+    result = impute_column(arr, "fill_value", value=0.0)
+    np.testing.assert_array_equal(result, arr)
+
+
+def test_fill_value_missing_value_raises():
+    arr = np.array([1.0, np.nan])
+    with pytest.raises(ValueError, match="fill_value requires a 'value'"):
+        impute_column(arr, "fill_value")
+
+
+@pytest.mark.parametrize("bad_val", [np.nan, np.inf, -np.inf])
+def test_fill_value_non_finite_raises(bad_val):
+    arr = np.array([1.0, np.nan])
+    with pytest.raises(ValueError, match="fill_value requires a finite value"):
+        impute_column(arr, "fill_value", value=bad_val)
+
+
+def test_value_with_other_method_raises():
+    arr = np.array([1.0, np.nan, 3.0])
+    with pytest.raises(
+        ValueError, match="'value' is only valid with method 'fill_value'"
+    ):
+        impute_column(arr, "fill_mean", value=0.0)

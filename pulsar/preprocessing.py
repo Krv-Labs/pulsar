@@ -53,17 +53,27 @@ def impute_string_column(df: pd.DataFrame, col: str, spec: ImputeSpec) -> None:
     """Impute a string/object column in-place.
 
     The Rust ``impute_column`` only handles f64 arrays, so string/object
-    columns require a Python implementation.  Only ``fill_mode`` and
-    ``sample_categorical`` are meaningful for string data.
+    columns require a Python implementation.  Only ``fill_mode``,
+    ``sample_categorical``, and ``fill_value`` are meaningful for string data.
 
     Raises:
         ValueError: If ``spec.method`` is numeric-only
             (``fill_mean``, ``fill_median``, ``sample_normal``).
-        ValueError: If the column is entirely missing.
+        ValueError: If the column is entirely missing (except ``fill_value``).
     """
     missing_mask = df[col].isna()
     if not missing_mask.any():
         return
+
+    if spec.method == "fill_value":
+        if isinstance(df[col].dtype, pd.CategoricalDtype):
+            if spec.value not in df[col].cat.categories:
+                df[col] = df[col].cat.add_categories([spec.value])
+        elif not isinstance(spec.value, str) and not is_numeric_dtype(df[col]):
+            df[col] = df[col].astype(object)
+        df.loc[missing_mask, col] = spec.value
+        return
+
     observed = df.loc[~missing_mask, col]
     if observed.empty:
         raise ValueError(
@@ -87,13 +97,284 @@ def impute_string_column(df: pd.DataFrame, col: str, spec: ImputeSpec) -> None:
     else:
         raise ValueError(
             f"Column '{col}' is string/object dtype; method '{spec.method}' requires "
-            f"numeric data. Use 'fill_mode' or 'sample_categorical' for string columns."
+            f"numeric data. Use 'fill_mode', 'sample_categorical', or 'fill_value' for string columns."
         )
 
 
 # ---------------------------------------------------------------------------
 # Core preprocessing function
 # ---------------------------------------------------------------------------
+
+
+def _check_group_flag_name(
+    group_name: str,
+    flag_name: str,
+    input_col_names: set[str],
+    per_col_flag_names: set[str],
+    seen_group_flags: set[str],
+) -> None:
+    if flag_name in input_col_names:
+        raise ValueError(
+            f"missing indicator name collision: group {group_name!r} flag "
+            f"'{flag_name}' collides with existing input column '{flag_name}'."
+        )
+    if flag_name in per_col_flag_names:
+        raise ValueError(
+            f"missing indicator name collision: group {group_name!r} flag "
+            f"'{flag_name}' collides with per-column indicator '{flag_name}'."
+        )
+    if flag_name in seen_group_flags:
+        raise ValueError(
+            f"missing indicator name collision: duplicate group flag '{flag_name}'."
+        )
+    seen_group_flags.add(flag_name)
+
+
+def _per_col_indicator_names(
+    cfg: PulsarConfig, grouped_columns: set[str], drop_set: set[str]
+) -> set[str]:
+    names: set[str] = set()
+    for col, spec in cfg.impute.items():
+        if spec.indicator and col not in grouped_columns and col not in drop_set:
+            names.add(f"{col}_was_missing")
+    return names
+
+
+def _group_indicator_flags(
+    data: pd.DataFrame, cfg: PulsarConfig
+) -> tuple[set[str], dict[str, pd.Series]]:
+    drop_set = set(cfg.drop_columns)
+    grouped_columns = {
+        c for cols in cfg.missing_indicator_groups.values() for c in cols
+    }
+    per_col_flag_names = _per_col_indicator_names(cfg, grouped_columns, drop_set)
+    input_col_names = {str(c) for c in data.columns}
+    seen_group_flags: set[str] = set()
+    pre_drop_group_masks: dict[str, pd.Series] = {}
+    for group_name, group_cols in cfg.missing_indicator_groups.items():
+        flag_name = f"{group_name}_was_missing"
+        _check_group_flag_name(
+            group_name,
+            flag_name,
+            input_col_names,
+            per_col_flag_names,
+            seen_group_flags,
+        )
+        dropped_present = [c for c in group_cols if c in data.columns and c in drop_set]
+        if dropped_present:
+            pre_drop_group_masks[group_name] = data[dropped_present].isna().any(axis=1)
+    return grouped_columns, pre_drop_group_masks
+
+
+def _should_skip_bool_coercion(df: pd.DataFrame, col: str, cfg: PulsarConfig) -> bool:
+    if col in cfg.encode or is_numeric_dtype(df[col]):
+        return True
+    spec = cfg.impute.get(col)
+    if spec is None:
+        return False
+    if spec.method in {"fill_mode", "sample_categorical"}:
+        return True
+    return spec.method == "fill_value" and isinstance(spec.value, str)
+
+
+def _coerce_boolean_columns(df: pd.DataFrame, cfg: PulsarConfig) -> None:
+    for col in df.columns:
+        if _should_skip_bool_coercion(df, col, cfg):
+            continue
+        obs = df[col].dropna()
+        if len(obs) > 0 and all(isinstance(v, (bool, np.bool_)) for v in obs):
+            isna_mask = df[col].isna().to_numpy(dtype=bool)
+            raw = df[col].to_numpy()
+            out = np.empty(len(df), dtype=np.float64)
+            out[isna_mask] = np.nan
+            if not isna_mask.all():
+                out[~isna_mask] = np.asarray(raw[~isna_mask], dtype=np.float64)
+            df[col] = out
+
+
+def _needs_numeric_coercion(df: pd.DataFrame, col: str, spec: ImputeSpec) -> bool:
+    if col not in df.columns or is_numeric_dtype(df[col]):
+        return False
+    if spec.method in _NUMERIC_IMPUTE_METHODS:
+        return True
+    return (
+        spec.method == "fill_value"
+        and isinstance(spec.value, (int, float, np.number))
+        and not isinstance(spec.value, (bool, np.bool_))
+    )
+
+
+def _coerce_numeric_targets(df: pd.DataFrame, cfg: PulsarConfig) -> None:
+    _coerce_boolean_columns(df, cfg)
+    for col, spec in cfg.impute.items():
+        if not _needs_numeric_coercion(df, col, spec):
+            continue
+        original_notna = df[col].notna().sum()
+        coerced = pd.to_numeric(df[col], errors="coerce")
+        coerced_notna = coerced.notna().sum()
+        if original_notna > 0 and coerced_notna < original_notna * 0.5:
+            bad_mask = df[col].notna() & coerced.isna()
+            sample = df.loc[bad_mask, col].head(5).tolist()
+            raise ValueError(
+                f"Column '{col}' is configured for numeric imputation "
+                f"({spec.method}) but contains non-numeric values. "
+                f"Sample: {sample!r}. Clean the data or use a string "
+                f"imputation method."
+            )
+        df[col] = coerced.astype(np.float64)
+
+
+def _guard_all_missing(df: pd.DataFrame, cfg: PulsarConfig) -> None:
+    for col in list(cfg.impute) + list(cfg.encode):
+        if col not in df.columns:
+            continue
+        if col in cfg.impute and cfg.impute[col].method == "fill_value":
+            continue
+        if df[col].isna().all():
+            raise ValueError(
+                f"Column '{col}' is all-missing; cannot impute/encode "
+                f"without observed values."
+            )
+
+
+def _combine_group_mask(
+    df: pd.DataFrame,
+    group_cols: tuple[str, ...],
+    pre_mask: pd.Series | None,
+) -> pd.Series | None:
+    kept_present = [c for c in group_cols if c in df.columns]
+    if not kept_present:
+        return pre_mask
+    kept_mask = df[kept_present].isna().any(axis=1)
+    return kept_mask if pre_mask is None else (pre_mask | kept_mask)
+
+
+def _add_missing_flags(
+    df: pd.DataFrame,
+    cfg: PulsarConfig,
+    grouped_columns: set[str],
+    pre_drop_group_masks: dict[str, pd.Series],
+) -> None:
+    for group_name, group_cols in cfg.missing_indicator_groups.items():
+        combined_mask = _combine_group_mask(
+            df, group_cols, pre_drop_group_masks.get(group_name)
+        )
+        if combined_mask is not None:
+            df[f"{group_name}_was_missing"] = combined_mask.astype(np.float64)
+
+    for col, spec in cfg.impute.items():
+        if col in df.columns and spec.indicator and col not in grouped_columns:
+            df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
+
+
+def _impute_columns(df: pd.DataFrame, cfg: PulsarConfig) -> None:
+    for col, spec in cfg.impute.items():
+        if col not in df.columns:
+            continue
+        if not is_numeric_dtype(df[col]):
+            impute_string_column(df, col, spec)
+            continue
+        arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
+        if spec.method == "fill_value":
+            if isinstance(spec.value, (str, bool)) or not isinstance(
+                spec.value, (int, float, np.number)
+            ):
+                raise ValueError(
+                    f"fill_value for numeric column '{col}' must be numeric, "
+                    f"got {spec.value!r}."
+                )
+            df[col] = impute_column(
+                arr, "fill_value", spec.seed, value=float(spec.value)
+            )
+        else:
+            df[col] = impute_column(arr, spec.method, spec.seed)
+
+
+def _encode_columns(
+    df: pd.DataFrame,
+    cfg: PulsarConfig,
+    vocab: dict[str, list[Any]] | None,
+) -> pd.DataFrame:
+    for col, spec in cfg.encode.items():
+        if col not in df.columns:
+            continue
+        if spec.method != "one_hot":
+            raise ValueError(
+                f"Unsupported encode method '{spec.method}' for column '{col}'. "
+                f"Supported: 'one_hot'."
+            )
+        if vocab is not None and col in vocab:
+            n_cats = len(vocab[col])
+            df[col] = pd.Categorical(df[col], categories=vocab[col])
+        else:
+            n_cats = df[col].nunique(dropna=True)
+
+        if spec.max_categories is not None and n_cats > spec.max_categories:
+            raise ValueError(
+                f"Column '{col}' has {n_cats} categories, exceeding "
+                f"max_categories={spec.max_categories}. Reduce cardinality, "
+                f"drop the column, or increase max_categories."
+            )
+        if n_cats > 50 and spec.max_categories is None:
+            warnings.warn(
+                f"One-hot encoding column '{col}' with {n_cats} categories "
+                f"will add {n_cats} dimensions to the feature space, which "
+                f"may distort Euclidean distances after scaling.",
+                stacklevel=2,
+            )
+
+        df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
+    return df
+
+
+def _check_nan(df: pd.DataFrame) -> None:
+    nan_counts = df.isna().sum()
+    nan_cols = nan_counts[nan_counts > 0]
+    if not nan_cols.empty:
+        detail = ", ".join(f"'{c}' ({int(nan_cols[c])} rows)" for c in nan_cols.index)
+        raise ValueError(
+            f"NaN values remain after imputation in {len(nan_cols)} column(s): "
+            f"{detail}. Add imputation rules in preprocessing.impute, or drop "
+            f"them via drop_columns."
+        )
+
+
+def _check_numeric(df: pd.DataFrame) -> None:
+    non_numeric = [
+        (c, str(df[c].dtype)) for c in df.columns if not is_numeric_dtype(df[c])
+    ]
+    if non_numeric:
+        detail = ", ".join(f"'{c}' (dtype={dt})" for c, dt in non_numeric)
+        raise TypeError(
+            f"Non-numeric columns remain after preprocessing: {detail}. "
+            f"Encode them via preprocessing.encode in params.yaml, or drop "
+            f"them via drop_columns."
+        )
+
+
+def _check_layout(
+    layout: PreprocessLayout, expected_layout: PreprocessLayout | None
+) -> None:
+    if expected_layout is None:
+        return
+    if layout.feature_names != expected_layout.feature_names:
+        expected_set = set(expected_layout.feature_names)
+        actual_set = set(layout.feature_names)
+        missing = sorted(expected_set - actual_set)
+        extra = sorted(actual_set - expected_set)
+        parts = []
+        if missing:
+            parts.append(f"  Missing columns: {missing}")
+        if extra:
+            parts.append(f"  Extra columns: {extra}")
+        raise ValueError(
+            "Feature layout does not match the reference dataset.\n" + "\n".join(parts)
+        )
+    if layout.n_rows != expected_layout.n_rows:
+        raise ValueError(
+            f"Row count {layout.n_rows} does not match the reference "
+            f"dataset ({expected_layout.n_rows} rows)."
+        )
 
 
 def preprocess_dataframe(
@@ -105,8 +386,9 @@ def preprocess_dataframe(
 ) -> tuple[pd.DataFrame, PreprocessLayout]:
     """Preprocess a DataFrame according to ``cfg``.
 
-    Sequencing: drop → coerce → all-missing guard → impute flags →
-    impute → encode → NaN check → numeric check → layout check.
+    Sequencing: group indicators (pre-drop) → drop → coerce →
+    all-missing guard → impute flags → impute → encode → NaN check →
+    numeric check → layout check.
 
     Args:
         data: Raw input DataFrame (not mutated).
@@ -128,117 +410,19 @@ def preprocess_dataframe(
         TypeError: On non-numeric columns remaining after preprocessing.
     """
     n_rows_input = len(data)
+    grouped_columns, pre_drop_group_masks = _group_indicator_flags(data, cfg)
 
-    # 1. Drop unwanted columns
     drop = [c for c in cfg.drop_columns if c in data.columns]
-    df = data.drop(columns=drop)
+    df = data.drop(columns=drop).copy()
 
-    # 2. Coerce configured numeric-impute columns
-    for col, spec in cfg.impute.items():
-        if col not in df.columns:
-            continue
-        if spec.method not in _NUMERIC_IMPUTE_METHODS:
-            continue
-        if is_numeric_dtype(df[col]):
-            continue
-        # Attempt coercion
-        original_notna = df[col].notna().sum()
-        coerced = pd.to_numeric(df[col], errors="coerce")
-        coerced_notna = coerced.notna().sum()
-        if original_notna > 0 and coerced_notna < original_notna * 0.5:
-            # More than half of non-null values couldn't be parsed
-            bad_mask = df[col].notna() & coerced.isna()
-            sample = df.loc[bad_mask, col].head(5).tolist()
-            raise ValueError(
-                f"Column '{col}' is configured for numeric imputation "
-                f"({spec.method}) but contains non-numeric values. "
-                f"Sample: {sample!r}. Clean the data or use a string "
-                f"imputation method."
-            )
-        df[col] = coerced
+    _coerce_numeric_targets(df, cfg)
+    _guard_all_missing(df, cfg)
+    _add_missing_flags(df, cfg, grouped_columns, pre_drop_group_masks)
+    _impute_columns(df, cfg)
+    df = _encode_columns(df, cfg, vocab)
+    _check_nan(df)
+    _check_numeric(df)
 
-    # 3. All-missing guard for impute/encode targets
-    for col in list(cfg.impute) + list(cfg.encode):
-        if col not in df.columns:
-            continue
-        if df[col].isna().all():
-            raise ValueError(
-                f"Column '{col}' is all-missing; cannot impute/encode "
-                f"without observed values."
-            )
-
-    # 4. Imputation indicator flags
-    for col in cfg.impute:
-        if col in df.columns:
-            df[f"{col}_was_missing"] = df[col].isna().astype(np.float64)
-
-    # 5. Impute (Rust for numeric, Python for string)
-    for col, spec in cfg.impute.items():
-        if col not in df.columns:
-            continue
-        if is_numeric_dtype(df[col]):
-            arr = df[col].to_numpy(dtype=np.float64, na_value=np.nan)
-            df[col] = impute_column(arr, spec.method, spec.seed)
-        else:
-            impute_string_column(df, col, spec)
-
-    # 6. Encode categoricals
-    for col, spec in cfg.encode.items():
-        if col not in df.columns:
-            continue
-        if spec.method == "one_hot":
-            if vocab is not None and col in vocab:
-                n_cats = len(vocab[col])
-                df[col] = pd.Categorical(df[col], categories=vocab[col])
-            else:
-                n_cats = df[col].nunique(dropna=True)
-
-            # Cardinality check
-            if spec.max_categories is not None and n_cats > spec.max_categories:
-                raise ValueError(
-                    f"Column '{col}' has {n_cats} categories, exceeding "
-                    f"max_categories={spec.max_categories}. Reduce cardinality, "
-                    f"drop the column, or increase max_categories."
-                )
-            if n_cats > 50 and spec.max_categories is None:
-                warnings.warn(
-                    f"One-hot encoding column '{col}' with {n_cats} categories "
-                    f"will add {n_cats} dimensions to the feature space, which "
-                    f"may distort Euclidean distances after scaling.",
-                    stacklevel=2,
-                )
-
-            df = pd.get_dummies(df, columns=[col], prefix=col, dtype=np.float64)
-        else:
-            raise ValueError(
-                f"Unsupported encode method '{spec.method}' for column '{col}'. "
-                f"Supported: 'one_hot'."
-            )
-
-    # 7. NaN check (replaces silent dropna)
-    nan_counts = df.isna().sum()
-    nan_cols = nan_counts[nan_counts > 0]
-    if not nan_cols.empty:
-        detail = ", ".join(f"'{c}' ({int(nan_cols[c])} rows)" for c in nan_cols.index)
-        raise ValueError(
-            f"NaN values remain after imputation in {len(nan_cols)} column(s): "
-            f"{detail}. Add imputation rules in preprocessing.impute, or drop "
-            f"them via drop_columns."
-        )
-
-    # 8. Numeric type check
-    non_numeric = [
-        (c, str(df[c].dtype)) for c in df.columns if not is_numeric_dtype(df[c])
-    ]
-    if non_numeric:
-        detail = ", ".join(f"'{c}' (dtype={dt})" for c, dt in non_numeric)
-        raise TypeError(
-            f"Non-numeric columns remain after preprocessing: {detail}. "
-            f"Encode them via preprocessing.encode in params.yaml, or drop "
-            f"them via drop_columns."
-        )
-
-    # 9. Row count assertion (defense-in-depth)
     if len(df) != n_rows_input:
         raise RuntimeError(
             f"Preprocessing changed row count from {n_rows_input} to {len(df)}. "
@@ -246,37 +430,11 @@ def preprocess_dataframe(
         )
 
     df = df.reset_index(drop=True)
-
-    # 10. Build layout
-    built_vocab: dict[str, tuple[str, ...]] = {}
-    if vocab is not None:
-        built_vocab = {k: tuple(v) for k, v in vocab.items()}
+    built_vocab = {k: tuple(v) for k, v in vocab.items()} if vocab is not None else {}
     layout = PreprocessLayout(
         feature_names=tuple(df.columns.tolist()),
         vocab=built_vocab,
         n_rows=len(df),
     )
-
-    # 11. Layout enforcement
-    if expected_layout is not None:
-        if layout.feature_names != expected_layout.feature_names:
-            expected_set = set(expected_layout.feature_names)
-            actual_set = set(layout.feature_names)
-            missing = sorted(expected_set - actual_set)
-            extra = sorted(actual_set - expected_set)
-            parts = []
-            if missing:
-                parts.append(f"  Missing columns: {missing}")
-            if extra:
-                parts.append(f"  Extra columns: {extra}")
-            raise ValueError(
-                "Feature layout does not match the reference dataset.\n"
-                + "\n".join(parts)
-            )
-        if layout.n_rows != expected_layout.n_rows:
-            raise ValueError(
-                f"Row count {layout.n_rows} does not match the reference "
-                f"dataset ({expected_layout.n_rows} rows)."
-            )
-
+    _check_layout(layout, expected_layout)
     return df, layout

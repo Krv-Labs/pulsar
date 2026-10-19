@@ -49,7 +49,8 @@ from pulsar.mcp.tools.meta import (
     get_workflow_guide,
 )
 from pulsar.mcp.tools.preprocessing import (
-    recommend_preprocessing,
+    draft_preprocessing_plan,
+    edit_preprocessing_plan,
 )
 from pulsar.mcp.tools.reporting import (
     probe_columns,
@@ -104,6 +105,9 @@ def _normalize_config_data_path(config_yaml: str) -> str:
     for line in config_yaml.splitlines():
         if line.startswith("  data: "):
             lines.append("  data: <normalized>")
+        elif line.startswith("# preprocessing plan pp_") and " revision " in line:
+            _, rest = line.split(" revision ", 1)
+            lines.append(f"# preprocessing plan pp_<normalized> revision {rest}")
         else:
             lines.append(line)
     return "\n".join(lines)
@@ -692,7 +696,7 @@ def test_probe_columns_reports_missing_and_truncates_long_values(tmp_path):
     assert not markdown.lstrip().startswith("{")
 
 
-def test_recommend_preprocessing_defaults_to_markdown_and_samples_dirty_numeric(
+def test_draft_preprocessing_plan_defaults_to_markdown_and_handles_numeric_text(
     tmp_path,
 ):
     path = tmp_path / "dirty_numeric.csv"
@@ -706,11 +710,11 @@ def test_recommend_preprocessing_defaults_to_markdown_and_samples_dirty_numeric(
     dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
     markdown = text_of(
-        asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
+        asyncio.run(draft_preprocessing_plan(dataset_id=dataset["dataset_id"]))
     )
     payload = payload_of(
         asyncio.run(
-            recommend_preprocessing(
+            draft_preprocessing_plan(
                 dataset_id=dataset["dataset_id"],
                 response_format="json",
                 detail="full",
@@ -718,68 +722,78 @@ def test_recommend_preprocessing_defaults_to_markdown_and_samples_dirty_numeric(
         )
     )
 
-    assert "# Preprocessing Recommendation" in markdown
-    assert "## Dirty Numeric Detection" in markdown
+    assert "# Preprocessing Plan" in markdown
     assert not markdown.lstrip().startswith("{")
-    assert payload["dirty_numeric_detection"]["status"] == "enabled"
-    assert payload["dirty_numeric_detection"]["object_columns_sampled"] == 1
-    assert any(
-        warning["code"] == "DIRTY_NUMERIC_DETECTED" for warning in payload["warnings"]
-    )
-    assert "rationale" in payload
+    assert payload["detail"] == "full"
+    dirty_entry = payload["entries"]["dirty"]
+    assert dirty_entry["role"] == "feature"
+    assert dirty_entry["impute"] == {"method": "fill_median"}
+    assert dirty_entry["indicator"] == "own"
 
 
-def test_recommend_preprocessing_summary_caps_rationale_and_warns_expansion(tmp_path):
+def test_draft_preprocessing_plan_summary_and_edit_workflow(tmp_path):
     rows = 30
     data = {
         "x": list(range(rows)),
         "y": [value * 2 for value in range(rows)],
+        "cat_0": [f"v_{value % 3}" for value in range(rows)],
     }
-    for idx in range(3):
-        data[f"cat_{idx}"] = [f"v_{idx}_{value % 25}" for value in range(rows)]
-    path = tmp_path / "wide_preprocessing.csv"
+    path = tmp_path / "plan_workflow.csv"
     pd.DataFrame(data).to_csv(path, index=False)
     dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
     payload = payload_of(
         asyncio.run(
-            recommend_preprocessing(
+            draft_preprocessing_plan(
                 dataset_id=dataset["dataset_id"],
                 response_format="json",
-                rationale_limit=2,
+                detail="summary",
             )
         )
     )
 
     assert payload["detail"] == "summary"
-    assert len(payload["rationale_preview"]) == 2
-    assert payload["rationale_omitted"] > 0
-    assert "rationale" not in payload
-    assert payload["expansion_estimate"] > 50
-    assert any(
-        warning["code"] == "HIGH_DIMENSION_EXPANSION" for warning in payload["warnings"]
+    assert "entries" not in payload
+    assert "preprocessing_yaml" not in payload
+    assert payload["preprocessing_yaml_chars"] > 0
+    plan_id = payload["plan_id"]
+
+    edited = payload_of(
+        asyncio.run(
+            edit_preprocessing_plan(
+                plan_id=plan_id,
+                edits=[{"column": "y", "role": "drop"}],
+                response_format="json",
+            )
+        )
     )
+    assert edited["revision"] == 2
+    assert any(c["column"] == "y" for c in edited["changes"])
+    assert edited["change_summary"] == [
+        {"field": "role", "was": "feature", "now": "drop", "count": 1}
+    ]
+    assert "preprocessing_yaml" not in edited
+    assert edited["preprocessing_yaml_chars"] > 0
 
 
-def test_recommend_preprocessing_surfaces_high_missingness_decisions(tmp_path):
+def test_draft_preprocessing_plan_surfaces_blank_meaning_and_conditional_questions(
+    tmp_path,
+):
     rows = 20
     path = tmp_path / "high_missingness.csv"
     pd.DataFrame(
         {
             "clean": list(range(rows)),
-            "sparse_numeric": [None] * 17 + [1.0, 2.0, 3.0],
-            "review_numeric": [None] * 13 + [float(i) for i in range(7)],
-            "outcome_score": [None] * 17 + [0.0, 1.0, 1.0],
+            "event_flag": [0] * 15 + [1] * 5,
+            "days_after_event": [None] * 15 + [1.0, 2.0, 3.0, 4.0, 5.0],
+            "visit_count": [None] * 10 + [1, 2, 1, 3, 2, 4, 1, 2, 3, 1],
         }
     ).to_csv(path, index=False)
     dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    markdown = text_of(
-        asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
-    )
     payload = payload_of(
         asyncio.run(
-            recommend_preprocessing(
+            draft_preprocessing_plan(
                 dataset_id=dataset["dataset_id"],
                 response_format="json",
                 detail="full",
@@ -787,47 +801,30 @@ def test_recommend_preprocessing_surfaces_high_missingness_decisions(tmp_path):
         )
     )
 
+    topics = {q["topic"] for q in payload["questions"]}
+    assert "conditional_column" in topics
+    assert "blank_meaning" in topics
     block = yaml.safe_load(payload["preprocessing_yaml"])["preprocessing"]
-    assert "sparse_numeric" in block["drop_columns"]
-    assert "review_numeric" in block["impute"]
-    assert "outcome_score" in block["impute"]
-    assert payload["recommended_action"] == "probe_columns_first"
-    assert payload["next_tool_call"]["tool"] == "probe_columns"
-    assert {row["column"] for row in payload["high_missingness_columns_full"]} == {
-        "sparse_numeric",
-        "review_numeric",
-        "outcome_score",
-    }
-    protected = {
-        row["column"]: row["protected_name_hint"]
-        for row in payload["high_missingness_columns_full"]
-    }
-    assert protected["outcome_score"] is True
-    assert any(
-        warning["code"] == "HIGH_MISSINGNESS_COLUMNS" for warning in payload["warnings"]
-    )
-    assert "## High Missingness Review" in markdown
+    assert "days_after_event" in block["drop_columns"]
+    assert block["impute"]["visit_count"]["method"] == "fill_median"
 
 
-def test_recommend_preprocessing_surfaces_numeric_coded_categories(tmp_path):
+def test_draft_preprocessing_plan_surfaces_weak_hints(tmp_path):
     rows = 24
     path = tmp_path / "numeric_codes.csv"
     pd.DataFrame(
         {
             "age": [40 + i for i in range(rows)],
-            "has_diabetes": [0, 1] * (rows // 2),
-            "severity_stage": [0, 1, 2, 3] * (rows // 4),
+            "rare_flag": [1] + [0] * (rows - 1),
+            "code_id": [(i % 12) + 1 for i in range(rows)],
             "lab_value": [float(i) + 0.25 for i in range(rows)],
         }
     ).to_csv(path, index=False)
     dataset = payload_of(asyncio.run(ingest_dataset(str(path))))
 
-    markdown = text_of(
-        asyncio.run(recommend_preprocessing(dataset_id=dataset["dataset_id"]))
-    )
     payload = payload_of(
         asyncio.run(
-            recommend_preprocessing(
+            draft_preprocessing_plan(
                 dataset_id=dataset["dataset_id"],
                 response_format="json",
                 detail="full",
@@ -835,48 +832,28 @@ def test_recommend_preprocessing_surfaces_numeric_coded_categories(tmp_path):
         )
     )
 
-    block = yaml.safe_load(payload["preprocessing_yaml"])["preprocessing"]
-    candidates = {
-        row["column"]: row for row in payload["numeric_categorical_candidates_full"]
-    }
-    assert "has_diabetes" in candidates
-    assert "severity_stage" in candidates
-    assert "age" not in candidates
-    assert "lab_value" not in candidates
-    assert candidates["has_diabetes"]["supported_actions"] == [
-        "keep_numeric",
-        "one_hot_encode",
-        "drop",
-    ]
-    assert "StandardScaler" in candidates["has_diabetes"]["encoding_note"]
-    assert "has_diabetes" not in block["encode"]
-    assert payload["recommended_action"] == "accept"
-    assert payload["next_tool_call"]["tool"] == "create_config"
-    assert "value counts" in candidates["has_diabetes"]["evidence_available"]
-    assert any(
-        warning["code"] == "NUMERIC_CODED_CATEGORICAL_CANDIDATES"
-        and warning["severity"] == "info"
-        for warning in payload["warnings"]
-    )
-    assert "## Numeric-Coded Category Review" in markdown
-    assert "not a required next step" in markdown
+    rare_cols = [h["column"] for h in payload["evidence"]["rare_binary_leverage"]]
+    int_cols = [h["column"] for h in payload["evidence"]["integer_coded_preview"]]
+    assert "rare_flag" in rare_cols
+    assert "code_id" in int_cols
+    hint_cols = rare_cols + int_cols
 
     probe = payload_of(
         asyncio.run(
             probe_columns(
                 dataset["dataset_id"],
-                list(candidates),
+                hint_cols,
                 response_format="json",
             )
         )
     )
-    has_diabetes = next(
+    rare_profile = next(
         profile
         for profile in probe["column_profiles"]
-        if profile["name"] == "has_diabetes"
+        if profile["name"] == "rare_flag"
     )
-    assert has_diabetes["is_numeric"] is True
-    assert has_diabetes["top_values"] == [["0", 12], ["1", 12]]
+    assert rare_profile["is_numeric"] is True
+    assert rare_profile["top_values"] == [["0", 23], ["1", 1]]
 
 
 def test_unknown_handles_return_stable_codes():
