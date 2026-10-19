@@ -865,6 +865,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "kodama"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f868feceed4703c842925c14232667c5f29c8059d0354154b2d06ec3bf9daf82"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1216,8 +1222,16 @@ dependencies = [
 name = "pulsar-analysis"
 version = "0.5.0"
 dependencies = [
+ "kodama",
+ "nalgebra",
+ "ndarray",
  "pulsar-core",
  "pulsar-pipeline",
+ "rand",
+ "rand_distr",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1291,6 +1305,7 @@ name = "pulsar-parity"
 version = "0.5.0"
 dependencies = [
  "ndarray",
+ "pulsar-analysis",
  "pulsar-config",
  "pulsar-core",
  "pulsar-data",

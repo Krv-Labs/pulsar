@@ -6,10 +6,7 @@
 //! scikit-learn: fixtures for this stage are informational only.
 
 use ndarray::Array2;
-use pulsar_core::BallMapper;
-use rand::distributions::{Distribution, WeightedIndex};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use pulsar_core::{kmeans, BallMapper};
 
 /// Indices of up to `n_reps` ball maps, one per k-means cluster (the member
 /// closest to its centroid), in cluster order. Returns every index when
@@ -37,7 +34,10 @@ pub fn select_representatives(maps: &[BallMapper], n_reps: usize, seed: u64) -> 
         let std = var.sqrt() + 1e-10;
         features.column_mut(j).mapv_inplace(|x| (x - mean) / std);
     }
-    let labels = kmeans(&features, n_reps, seed, 10);
+    // Features are finite and 1 <= n_reps < n_maps, so this cannot fail.
+    let labels = kmeans(&features, n_reps, seed, 10)
+        .map(|r| r.labels)
+        .unwrap_or_default();
     let mut reps = Vec::with_capacity(n_reps);
     for k in 0..n_reps {
         let members: Vec<usize> = (0..n_maps).filter(|&i| labels[i] == k).collect();
@@ -67,89 +67,6 @@ pub fn select_representatives(maps: &[BallMapper], n_reps: usize, seed: u64) -> 
 
 fn dist2(x: &Array2<f64>, i: usize, c: &[f64; 3]) -> f64 {
     (0..3).map(|j| (x[[i, j]] - c[j]).powi(2)).sum()
-}
-
-/// Lloyd's algorithm with k-means++ seeding, best of `n_init` runs by
-/// inertia. Rows of `x` are points.
-fn kmeans(x: &Array2<f64>, k: usize, seed: u64, n_init: usize) -> Vec<usize> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut best: Option<(f64, Vec<usize>)> = None;
-    for _ in 0..n_init {
-        let run_seed: u64 = rng.gen();
-        let (inertia, labels) = kmeans_once(x, k, run_seed);
-        if best.as_ref().is_none_or(|(b, _)| inertia < *b) {
-            best = Some((inertia, labels));
-        }
-    }
-    best.map(|(_, l)| l).unwrap_or_default()
-}
-
-fn kmeans_once(x: &Array2<f64>, k: usize, seed: u64) -> (f64, Vec<usize>) {
-    let n = x.nrows();
-    let d = x.ncols();
-    let mut rng = StdRng::seed_from_u64(seed);
-    let row = |i: usize| x.row(i).to_vec();
-    let sq = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b).map(|(p, q)| (p - q).powi(2)).sum() };
-
-    // k-means++ seeding.
-    let mut centers: Vec<Vec<f64>> = vec![row(rng.gen_range(0..n))];
-    let mut d2: Vec<f64> = (0..n).map(|i| sq(&row(i), &centers[0])).collect();
-    while centers.len() < k {
-        let total: f64 = d2.iter().sum();
-        let next = if total > 0.0 {
-            WeightedIndex::new(&d2)
-                .map(|w| w.sample(&mut rng))
-                .unwrap_or_else(|_| rng.gen_range(0..n))
-        } else {
-            rng.gen_range(0..n)
-        };
-        centers.push(row(next));
-        let newest = &centers[centers.len() - 1];
-        for (i, slot) in d2.iter_mut().enumerate() {
-            let dd = sq(&row(i), newest);
-            if dd < *slot {
-                *slot = dd;
-            }
-        }
-    }
-
-    let mut labels = vec![0usize; n];
-    let mut inertia = 0.0;
-    for _ in 0..300 {
-        inertia = 0.0;
-        for (i, label) in labels.iter_mut().enumerate() {
-            let r = row(i);
-            let (best, dist) = centers
-                .iter()
-                .enumerate()
-                .map(|(c, ctr)| (c, sq(&r, ctr)))
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .expect("k >= 1");
-            *label = best;
-            inertia += dist;
-        }
-        let mut sums = vec![vec![0.0f64; d]; k];
-        let mut counts = vec![0usize; k];
-        for i in 0..n {
-            counts[labels[i]] += 1;
-            for j in 0..d {
-                sums[labels[i]][j] += x[[i, j]];
-            }
-        }
-        let mut shift = 0.0;
-        for c in 0..k {
-            if counts[c] == 0 {
-                continue;
-            }
-            let new: Vec<f64> = sums[c].iter().map(|s| s / counts[c] as f64).collect();
-            shift += sq(&new, &centers[c]);
-            centers[c] = new;
-        }
-        if shift <= 1e-8 {
-            break;
-        }
-    }
-    (inertia, labels)
 }
 
 #[cfg(test)]
