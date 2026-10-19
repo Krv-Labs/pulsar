@@ -9,7 +9,8 @@ Sweep parameters support three specification styles:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import itertools
 import math
 from typing import Any, Literal
 import numpy as np
@@ -286,20 +287,58 @@ def _check_single_group_flag(
     seen_group_flags.add(flag_name)
 
 
+_STOCHASTIC_IMPUTE_METHODS = frozenset({"sample_normal", "sample_categorical"})
+
+
 def _check_config_group_flag_collisions(cfg: PulsarConfig) -> None:
     grouped_cols = {c for cols in cfg.missing_indicator_groups.values() for c in cols}
     drop_set = set(cfg.drop_columns)
-    per_col_flag_names = {
-        f"{col}_was_missing"
-        for col, spec in cfg.impute.items()
-        if spec.indicator and col not in grouped_cols and col not in drop_set
-    }
+    per_col_flag_names: set[str] = set()
+    for col, spec in cfg.impute.items():
+        if col in grouped_cols or col in drop_set:
+            continue
+        all_specs = cfg.impute_candidates.get(col) or [spec]
+        if any(s.indicator for s in all_specs):
+            per_col_flag_names.add(f"{col}_was_missing")
     configured_cols = set(cfg.impute) | set(cfg.encode) | drop_set | grouped_cols
     seen_group_flags: set[str] = set()
     for group_name in cfg.missing_indicator_groups:
         _check_single_group_flag(
             group_name, per_col_flag_names, configured_cols, seen_group_flags
         )
+
+
+def _normalize_impute_inputs(
+    impute: dict[str, Any],
+    impute_candidates: dict[str, list[ImputeSpec]] | None,
+) -> tuple[dict[str, ImputeSpec], dict[str, list[ImputeSpec]]]:
+    primary: dict[str, ImputeSpec] = {}
+    candidates: dict[str, list[ImputeSpec]] = {}
+    raw_candidates = impute_candidates or {}
+
+    for raw_col, val in (impute or {}).items():
+        col = str(raw_col)
+        if isinstance(val, (list, tuple)):
+            if not val:
+                raise ValueError(f"impute[{col!r}] candidate list must not be empty.")
+            specs = [v for v in val]
+            primary[col] = specs[0]
+            candidates[col] = specs
+        else:
+            primary[col] = val
+            candidates[col] = [val]
+
+    for raw_col, spec_list in raw_candidates.items():
+        col = str(raw_col)
+        if not spec_list:
+            raise ValueError(
+                f"impute_candidates[{col!r}] candidate list must not be empty."
+            )
+        specs = list(spec_list)
+        candidates[col] = specs
+        primary[col] = specs[0]
+
+    return primary, candidates
 
 
 @dataclass
@@ -315,13 +354,20 @@ class PulsarConfig:
     n_reps: int = 4
     run_name: str = ""
     missing_indicator_groups: dict[str, list[str]] = field(default_factory=dict)
+    n_imputations: int = 1
+    impute_candidates: dict[str, list[ImputeSpec]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.data = str(self.data)
         self.run_name = str(self.run_name)
         self.n_reps = int(self.n_reps)
+        self.n_imputations = int(self.n_imputations)
+        if self.n_imputations < 1:
+            raise ValueError(f"n_imputations must be >= 1, got {self.n_imputations}.")
         self.drop_columns = [str(c) for c in self.drop_columns]
-        self.impute = {str(k): v for k, v in self.impute.items()}
+        self.impute, self.impute_candidates = _normalize_impute_inputs(
+            self.impute, self.impute_candidates
+        )
         self.encode = {str(k): v for k, v in self.encode.items()}
         self.missing_indicator_groups = _validate_missing_indicator_groups(
             self.missing_indicator_groups
@@ -337,25 +383,168 @@ class PulsarConfig:
                 center=True,
             )
 
+    def preprocessing_variants(self) -> list[PulsarConfig]:
+        """Expand this config into one PulsarConfig per imputation ensemble realization."""
+        return expand_preprocessing_variants(self)
+
+
+def _select_column_variant_spec(
+    col: str,
+    specs: list[ImputeSpec],
+    variant_index: int,
+    used_stochastic_seeds: dict[tuple[str, str, bool], set[int]],
+) -> ImputeSpec:
+    if variant_index < len(specs):
+        chosen = specs[variant_index]
+    else:
+        stochastic_specs = [s for s in specs if s.method in _STOCHASTIC_IMPUTE_METHODS]
+        if stochastic_specs:
+            offset = variant_index - len(specs)
+            chosen = stochastic_specs[offset % len(stochastic_specs)]
+        else:
+            chosen = specs[variant_index % len(specs)]
+
+    if chosen.method in _STOCHASTIC_IMPUTE_METHODS:
+        key = (col, chosen.method, chosen.indicator)
+        seen_seeds = used_stochastic_seeds.setdefault(key, set())
+        seed = int(chosen.seed)
+        while seed in seen_seeds:
+            seed += 1
+        seen_seeds.add(seed)
+        if seed != chosen.seed:
+            chosen = replace(chosen, seed=seed)
+    return chosen
+
+
+def expand_preprocessing_variants(cfg: PulsarConfig) -> list[PulsarConfig]:
+    """Expand multi-imputation candidates and ``n_imputations`` into concrete configs.
+
+    Each returned ``PulsarConfig`` has a single ``ImputeSpec`` per column in
+    ``variant.impute`` so ``preprocess_dataframe(data, variant)`` can execute it
+    directly. Duplicate deterministic combinations are deduplicated automatically.
+    """
+    candidates_map: dict[str, list[ImputeSpec]] = {
+        col: list(cfg.impute_candidates.get(col) or [spec])
+        for col, spec in cfg.impute.items()
+    }
+    max_candidates = max((len(v) for v in candidates_map.values()), default=1)
+    target_variants = max(int(cfg.n_imputations), max_candidates)
+    if target_variants <= 1 or not candidates_map:
+        return [cfg]
+
+    used_stochastic_seeds: dict[tuple[str, str, bool], set[int]] = {}
+    seen_signatures: set[tuple[tuple[str, str, int, Any, bool], ...]] = set()
+    variants: list[PulsarConfig] = []
+
+    for k in range(target_variants):
+        variant_impute: dict[str, ImputeSpec] = {}
+        sig_items: list[tuple[str, str, int, Any, bool]] = []
+        for col, specs in candidates_map.items():
+            chosen = _select_column_variant_spec(col, specs, k, used_stochastic_seeds)
+            variant_impute[col] = chosen
+            effective_seed = (
+                int(chosen.seed) if chosen.method in _STOCHASTIC_IMPUTE_METHODS else 0
+            )
+            sig_items.append(
+                (
+                    col,
+                    chosen.method,
+                    effective_seed,
+                    chosen.value,
+                    chosen.indicator,
+                )
+            )
+        signature = tuple(sig_items)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        variants.append(
+            replace(
+                cfg,
+                impute=variant_impute,
+                impute_candidates={c: [s] for c, s in variant_impute.items()},
+                n_imputations=1,
+            )
+        )
+
+    return variants or [cfg]
+
 
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
 
 
+def _parse_impute_spec_entry(spec: Any, col: str) -> list[ImputeSpec]:
+    if isinstance(spec, list):
+        if not spec:
+            raise ValueError(
+                f"preprocessing.impute[{col!r}] candidate list must not be empty."
+            )
+        expanded: list[ImputeSpec] = []
+        for item in spec:
+            expanded.extend(_parse_impute_spec_entry(item, col))
+        return expanded
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"preprocessing.impute[{col!r}] must be a mapping or list of mappings, "
+            f"got {type(spec).__name__}."
+        )
+    methods = [str(m) for m in _expand_param(spec["method"])]
+    seeds = [int(s) for s in _expand_param(spec.get("seed", 42))]
+    raw_ind = spec.get("indicator", True)
+    ind_values = (
+        [True]
+        if raw_ind is None
+        else [True if v is None else v for v in _expand_param(raw_ind)]
+    )
+    val = spec.get("value")
+    specs: list[ImputeSpec] = []
+    for method, seed, indicator in itertools.product(methods, seeds, ind_values):
+        specs.append(
+            ImputeSpec(
+                method=method,
+                seed=seed,
+                value=(
+                    None if method != "fill_value" and "fill_value" in methods else val
+                ),
+                indicator=indicator,
+            )
+        )
+    if not specs:
+        raise ValueError(
+            f"preprocessing.impute[{col!r}] expanded to zero candidate specs."
+        )
+    return specs
+
+
 def _parse_preprocessing(
     pre: dict,
-) -> tuple[list[str], dict[str, ImputeSpec], dict[str, EncodeSpec]]:
+) -> tuple[
+    list[str],
+    dict[str, ImputeSpec],
+    dict[str, list[ImputeSpec]],
+    dict[str, EncodeSpec],
+    int,
+]:
     drop_columns = [str(c) for c in (pre.get("drop_columns", []) or [])]
     _validate_missing_indicator_groups(pre.get("missing_indicator_groups"))
-    impute = {
-        str(col): ImputeSpec(
-            method=str(spec["method"]),
-            seed=int(spec.get("seed", 42)),
-            value=spec.get("value"),
-            indicator=True if spec.get("indicator") is None else spec["indicator"],
+    raw_n_imp = pre.get("n_imputations", 1)
+    if isinstance(raw_n_imp, bool) or raw_n_imp is None:
+        raise ValueError(
+            f"preprocessing.n_imputations must be an integer >= 1, got {raw_n_imp!r}."
         )
+    n_imputations = int(raw_n_imp)
+    if n_imputations < 1:
+        raise ValueError(
+            f"preprocessing.n_imputations must be >= 1, got {n_imputations}."
+        )
+    impute_candidates: dict[str, list[ImputeSpec]] = {
+        str(col): _parse_impute_spec_entry(spec, str(col))
         for col, spec in (pre.get("impute") or {}).items()
+    }
+    impute: dict[str, ImputeSpec] = {
+        col: specs[0] for col, specs in impute_candidates.items()
     }
     encode = {
         str(col): EncodeSpec(
@@ -364,7 +553,7 @@ def _parse_preprocessing(
         )
         for col, spec in (pre.get("encode") or {}).items()
     }
-    return drop_columns, impute, encode
+    return drop_columns, impute, impute_candidates, encode, n_imputations
 
 
 def _parse_sweep(
@@ -437,7 +626,13 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
     data_path = run_section.get("data") or raw.get("data", "")
 
     pre_raw = raw.get("preprocessing", {}) or {}
-    drop_columns, impute, encode = _parse_preprocessing(pre_raw)
+    (
+        drop_columns,
+        impute,
+        impute_candidates,
+        encode,
+        n_imputations,
+    ) = _parse_preprocessing(pre_raw)
     missing_indicator_groups = _validate_missing_indicator_groups(
         pre_raw.get("missing_indicator_groups")
     )
@@ -457,6 +652,8 @@ def load_config(path_or_dict: str | dict) -> PulsarConfig:
         n_reps=n_reps,
         run_name=run_name,
         missing_indicator_groups=missing_indicator_groups,
+        n_imputations=n_imputations,
+        impute_candidates=impute_candidates,
     )
 
 
@@ -493,15 +690,25 @@ def _format_preprocessing_yaml(cfg: PulsarConfig) -> dict[str, Any]:
     pre: dict[str, Any] = {
         "drop_columns": [str(c) for c in cfg.drop_columns],
     }
+    if cfg.n_imputations > 1:
+        pre["n_imputations"] = int(cfg.n_imputations)
     if cfg.missing_indicator_groups:
         pre["missing_indicator_groups"] = {
             str(name): [str(c) for c in cols]
             for name, cols in cfg.missing_indicator_groups.items()
         }
     if cfg.impute:
-        pre["impute"] = {
-            str(col): _format_impute_entry(spec) for col, spec in cfg.impute.items()
-        }
+        formatted_impute: dict[str, Any] = {}
+        for col, spec in cfg.impute.items():
+            col_str = str(col)
+            candidates = cfg.impute_candidates.get(col_str) or [spec]
+            if len(candidates) > 1:
+                formatted_impute[col_str] = [
+                    _format_impute_entry(s) for s in candidates
+                ]
+            else:
+                formatted_impute[col_str] = _format_impute_entry(candidates[0])
+        pre["impute"] = formatted_impute
     if cfg.encode:
         pre["encode"] = {
             str(col): _format_encode_entry(spec) for col, spec in cfg.encode.items()

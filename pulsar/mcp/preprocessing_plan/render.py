@@ -77,7 +77,10 @@ def build_marker_legend(
         if (
             entry.role == "feature"
             and entry.impute is not None
-            and entry.indicator == "own"
+            and any(
+                spec.get("indicator", entry.indicator == "own")
+                for spec in entry.impute_candidates or [entry.impute]
+            )
             and col not in grouped_cols
         ):
             legend.append(
@@ -90,6 +93,21 @@ def build_marker_legend(
     return legend
 
 
+def _format_plan_impute_spec(
+    raw_imp: dict[str, Any], indicator_mode: str
+) -> dict[str, Any]:
+    spec: dict[str, Any] = {"method": raw_imp["method"]}
+    if "value" in raw_imp and raw_imp["value"] is not None:
+        spec["value"] = raw_imp["value"]
+    if "seed" in raw_imp and raw_imp["seed"] is not None:
+        spec["seed"] = int(raw_imp["seed"])
+    if "indicator" in raw_imp:
+        spec["indicator"] = raw_imp["indicator"]
+    elif indicator_mode != "own":
+        spec["indicator"] = False
+    return spec
+
+
 def plan_to_preprocessing_dict(plan: PreprocessingPlan) -> dict[str, Any]:
     """Convert *plan* to the canonical ``preprocessing:`` dict consumed by ``PulsarConfig``."""
     drop_columns: list[str] = [
@@ -100,25 +118,27 @@ def plan_to_preprocessing_dict(plan: PreprocessingPlan) -> dict[str, Any]:
     for _gid, yaml_key, ref_cols in _collect_group_references(plan):
         missing_indicator_groups[yaml_key] = list(ref_cols)
 
-    impute_dict: dict[str, dict[str, Any]] = {}
+    impute_dict: dict[str, Any] = {}
     encode_dict: dict[str, dict[str, Any]] = {}
 
     for col, entry in plan.entries.items():
         if entry.role != "feature":
             continue
-        if entry.impute is not None:
-            spec: dict[str, Any] = {"method": entry.impute["method"]}
-            if "value" in entry.impute and entry.impute["value"] is not None:
-                spec["value"] = entry.impute["value"]
-            if entry.indicator != "own":
-                spec["indicator"] = False
-            impute_dict[col] = spec
+        if entry.impute_candidates and len(entry.impute_candidates) > 1:
+            impute_dict[col] = [
+                _format_plan_impute_spec(cand, entry.indicator)
+                for cand in entry.impute_candidates
+            ]
+        elif entry.impute is not None:
+            impute_dict[col] = _format_plan_impute_spec(entry.impute, entry.indicator)
         if entry.encode is not None:
             encode_dict[col] = {"method": entry.encode}
 
     pre: dict[str, Any] = {
         "drop_columns": drop_columns,
     }
+    if plan.n_imputations > 1:
+        pre["n_imputations"] = int(plan.n_imputations)
     if missing_indicator_groups:
         pre["missing_indicator_groups"] = missing_indicator_groups
     if impute_dict:

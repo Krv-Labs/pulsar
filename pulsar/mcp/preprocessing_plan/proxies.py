@@ -161,7 +161,10 @@ def dry_run_processed_space(
                 "preprocessing": pre_dict,
             }
         )
-        df_proc, layout = preprocess_dataframe(df, cfg)
+        variants = cfg.preprocessing_variants()
+        df_proc, layout = preprocess_dataframe(df, variants[0])
+        for variant in variants[1:]:
+            preprocess_dataframe(df, variant)
         output_names = layout.feature_names
         marker_count = sum(1 for c in output_names if str(c).endswith("_was_missing"))
         encode_prefixes = tuple(f"{col}_" for col in cfg.encode.keys())

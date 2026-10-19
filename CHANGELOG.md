@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-imputation ensembles: per-column candidates and method/seed/indicator
+  sweeps, repeated stochastic draws via `n_imputations`, and fused Cosmic Graphs.
+  MCP plans accept compatible multi-option answers and candidate edits; config
+  cost estimates include deduplicated realizations and embedding cache keys
+  include the ensemble policy.
 - **Evidence-first preprocessing plan (`pulsar-mcp`):** `draft_preprocessing_plan`
   measures the dataset (co-missingness blocks, blanks explained by another
   column, exact duplicates and sums, mixed numeric/text values, outcome-proxy

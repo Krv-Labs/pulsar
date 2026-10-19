@@ -253,7 +253,7 @@ Preprocessing helpers
 - **edit_preprocessing_plan**:
 
   - *Purpose*: Updates a stored plan at ``base_revision`` with question ``answers`` or direct column ``edits`` while tracking decision provenance (``source="agent"`` when inferred from context or schema; ``source="user"`` when relaying a human answer). Stale ``base_revision`` values fail with ``SESSION_REVISION_CONFLICT``; invalid dry-run schemas return ``validation: {valid: false, error: ...}`` so the agent can adjust before running a sweep.
-  - *Parameters*: ``plan_id``, ``base_revision``, ``answers=[{question_id, option_id}]``, ``edits=[{column, role?, impute_method?, impute_value?, indicator?, encode?}]``, ``source="agent" | "user"``, ``response_format="markdown" | "json"``.
+  - *Parameters*: ``plan_id``, ``base_revision``, ``answers=[{question_id, option_id}]`` (or ``option_ids: [id, ...]`` for an ensemble), ``edits=[{column, role?, impute?, impute_method?, impute_value?, indicator?, encode?}]``, ``source="agent" | "user"``, ``response_format="markdown" | "json"``. ``impute_method`` accepts a method list; ``impute`` accepts a spec or candidate list with ``method``, optional ``value``, ``seed``, and boolean ``indicator``. ``impute_value`` applies only to constant-fill candidates. Selected options must agree on role, encoding, and shared missingness groups; each keeps its own per-column indicator. An entry-level ``indicator`` edit overrides all candidates.
   - *Payload headline*: ``plan_id``, ``revision``, ``plan_fingerprint``, ``changes`` (capped diff of effective ``{column, field, was, now}`` rows), ``change_summary`` (grouped ``{field, was, now, count}`` transitions), ``counts``, ``processed_space``, ``evidence`` (``target_proxies``), ``warnings`` (``TARGET_PROXY_COLUMNS``), ``validation`` (``{valid, error}``), ``open_questions_preview``, ``preprocessing_yaml_chars``, and ``next_tools``.
 
 **Example question/answer flow**
@@ -282,6 +282,21 @@ In addition to ``fill_mean``, ``fill_median``, ``fill_mode``, ``sample_normal``,
 - ``impute.<column>.method: fill_value`` with ``value: <number | string>`` — replaces missing entries with a finite numeric constant (for numeric columns, e.g. ``{method: fill_value, value: 0}``) or a literal category label (for string/categorical columns before ``one_hot``, e.g. ``{method: fill_value, value: "(blank)"}``). Works even when a column has 100% missing values.
 - ``impute.<column>.indicator: true | false`` (default ``true``) — controls whether ``preprocess_dataframe`` emits a per-column ``<column>_was_missing`` binary indicator. Per-column indicators are emitted only when ``indicator: true`` and the column does not belong to any group in ``missing_indicator_groups``.
 - ``missing_indicator_groups: {<group_name>: [<col1>, <col2>, ...]}`` — emits a single shared ``<group_name>_was_missing`` (``0.0`` / ``1.0``) column indicating whether any listed column was missing in the input data. Evaluated *before* ``drop_columns`` so dropped columns (such as raw dates) can still contribute a presence/absence flag without duplicating identical per-column markers across a block.
+- ``impute.<column>`` may be a list of specs. Within a spec, ``method``, ``seed``, and ``indicator`` accept lists or sweep mappings such as ``{values: [...]}``; their Cartesian product forms that column's candidates. A shared ``value`` applies to ``fill_value`` when it appears in a method sweep.
+- ``n_imputations: <integer >= 1>`` (default ``1``) requests additional realizations. Expansion runs at least the longest candidate list, cycles candidates across columns together, and deduplicates deterministic combinations. Extra draws prefer stochastic methods (``sample_normal`` / ``sample_categorical``) and increment repeated seeds. This is not a Cartesian product across columns.
+
+Each realization is independently preprocessed, scaled, and projected; all resulting ball maps contribute to one fused Cosmic Graph. ``create_config`` reports the deduplicated count in ``sweep_strategy.imputation_variants`` and includes it in ``estimated_ball_maps``. Calibration and processed-space summaries describe the first realization. Change ``n_imputations`` through ``refine_config(overrides={"n_imputations": 3})`` or YAML; preprocessing and projection changes invalidate cached embeddings, while epsilon and threshold changes can reuse them.
+
+.. code-block:: yaml
+
+   preprocessing:
+     n_imputations: 3
+     impute:
+       amount:
+         - {method: fill_value, value: 0, indicator: false}
+         - {method: sample_normal, seed: 42, indicator: true}
+
+For grouped missingness, one shared group policy applies to the whole ensemble. Options that disagree about emitting a shared group marker cannot be combined with ``option_ids``; use direct candidate edits under a chosen group policy.
 
 .. code-block:: yaml
 

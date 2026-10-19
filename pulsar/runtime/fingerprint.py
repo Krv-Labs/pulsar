@@ -29,22 +29,30 @@ def projection_fingerprint(cfg, n_rows: int, dataframe=None) -> str:
         seeds = list(projection.seeds)
         center = projection.center
 
-    payload = json.dumps(
-        {
-            "data_path": cfg.data,
-            "mtime": mtime,
-            "drop_columns": sorted(getattr(cfg, "drop_columns", []) or []),
-            "impute": _normalize_mapping(getattr(cfg, "impute", {})),
-            "encode": _normalize_mapping(getattr(cfg, "encode", {})),
-            "method": method,
-            "dimensions": dimensions,
-            "seeds": seeds,
-            "center": center,
-            "n_rows": n_rows,
-            "input_schema": _schema_signature(dataframe),
-        },
-        sort_keys=True,
-    )
+    payload_dict = {
+        "data_path": cfg.data,
+        "mtime": mtime,
+        "drop_columns": sorted(getattr(cfg, "drop_columns", []) or []),
+        "impute": _normalize_mapping(getattr(cfg, "impute", {})),
+        "encode": _normalize_mapping(getattr(cfg, "encode", {})),
+        "method": method,
+        "dimensions": dimensions,
+        "seeds": seeds,
+        "center": center,
+        "n_rows": n_rows,
+        "input_schema": _schema_signature(dataframe),
+    }
+    n_imputations = int(getattr(cfg, "n_imputations", 1) or 1)
+    if n_imputations > 1:
+        payload_dict["n_imputations"] = n_imputations
+    impute_candidates = getattr(cfg, "impute_candidates", None) or {}
+    if impute_candidates:
+        payload_dict["impute_candidates"] = _normalize_mapping(impute_candidates)
+    missing_groups = getattr(cfg, "missing_indicator_groups", None) or {}
+    if missing_groups:
+        payload_dict["missing_indicator_groups"] = _normalize_mapping(missing_groups)
+
+    payload = json.dumps(payload_dict, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -58,6 +66,10 @@ def _normalize_mapping(mapping) -> dict:
     for key, value in sorted((mapping or {}).items()):
         if is_dataclass(value):
             normalized[key] = asdict(value)
+        elif isinstance(value, (list, tuple)):
+            normalized[key] = [
+                asdict(item) if is_dataclass(item) else item for item in value
+            ]
         else:
             normalized[key] = value
     return normalized

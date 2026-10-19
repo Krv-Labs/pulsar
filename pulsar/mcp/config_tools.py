@@ -12,6 +12,7 @@ from pulsar.config import (
     LEGACY_COSMIC_GRAPH_THRESHOLD_KEY,
     LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE,
     THRESHOLD_RANGE_MESSAGE,
+    _parse_impute_spec_entry,
     config_to_yaml,
     load_config,
     normalize_construction_threshold,
@@ -53,6 +54,7 @@ _ALLOWED_PREPROCESSING = {
     "impute",
     "encode",
     "missing_indicator_groups",
+    "n_imputations",
 }
 _ALLOWED_SWEEP = {"projection", "pca", "ball_mapper"}
 _ALLOWED_PCA = {"dimensions", "seed"}
@@ -225,6 +227,7 @@ _VALID_OVERRIDE_KEYS = frozenset(
         "epsilon_range",
         "construction_threshold",
         "n_reps",
+        "n_imputations",
         "drop_columns",
         "impute",
         "encode",
@@ -320,6 +323,7 @@ def apply_overrides(
         "sweep.epsilon_range": "epsilon_range",
         "cosmic_graph.construction_threshold": "construction_threshold",
         "output.n_reps": "n_reps",
+        "preprocessing.n_imputations": "n_imputations",
         "preprocessing.drop_columns": "drop_columns",
         "preprocessing.impute": "impute",
         "preprocessing.encode": "encode",
@@ -382,6 +386,7 @@ def apply_overrides(
         "epsilon_range": "sweep.ball_mapper.epsilon.range",
         "construction_threshold": "cosmic_graph.construction_threshold",
         "n_reps": "output.n_reps",
+        "n_imputations": "preprocessing.n_imputations",
         "drop_columns": "preprocessing.drop_columns",
         "impute": "preprocessing.impute",
         "encode": "preprocessing.encode",
@@ -491,6 +496,12 @@ def apply_overrides(
         old = raw.get("output", {}).get("n_reps")
         raw.setdefault("output", {})["n_reps"] = overrides["n_reps"]
         _track("output.n_reps", old, overrides["n_reps"])
+    if "n_imputations" in overrides:
+        old = raw.get("preprocessing", {}).get("n_imputations")
+        raw.setdefault("preprocessing", {})["n_imputations"] = int(
+            overrides["n_imputations"]
+        )
+        _track("preprocessing.n_imputations", old, int(overrides["n_imputations"]))
     if "drop_columns" in overrides:
         old = raw.get("preprocessing", {}).get("drop_columns")
         raw.setdefault("preprocessing", {})["drop_columns"] = list(
@@ -646,6 +657,22 @@ def _validate_preprocessing(pre: Any, issues: list[ValidationIssue]) -> None:
             )
         )
 
+    n_imputations = pre.get("n_imputations")
+    if n_imputations is not None:
+        if (
+            isinstance(n_imputations, bool)
+            or not isinstance(n_imputations, int)
+            or n_imputations < 1
+        ):
+            issues.append(
+                ValidationIssue(
+                    path="preprocessing.n_imputations",
+                    message="n_imputations must be an integer >= 1",
+                    expected="int >= 1",
+                    received=n_imputations,
+                )
+            )
+
     _validate_impute(pre.get("impute"), issues)
     _validate_encode(pre.get("encode"), issues)
     _validate_missing_groups_section(pre.get("missing_indicator_groups"), issues)
@@ -677,6 +704,48 @@ def _validate_missing_groups_section(
             )
 
 
+def _validate_single_impute_spec(
+    col: str, spec: Any, path: str, issues: list[ValidationIssue]
+) -> None:
+    if isinstance(spec, str):
+        alias = _IMPUTE_METHOD_ALIASES.get(spec, spec)
+        issues.append(
+            ValidationIssue(
+                path=path,
+                message="Impute entries must be mappings, not bare strings",
+                expected="{method: fill_median|fill_mode|fill_value|fill_mean|sample_normal|sample_categorical, value?: any, indicator?: bool, seed?: int}",
+                received=spec,
+                suggestion=f"Use {{{{method: {alias}}}}}",
+                example_fix=f"{col}: {{method: {alias}}}",
+            )
+        )
+        return
+    if not isinstance(spec, dict):
+        issues.append(
+            ValidationIssue(path=path, message="Impute spec must be a mapping")
+        )
+        return
+    try:
+        candidates = _parse_impute_spec_entry(spec, col)
+    except (TypeError, ValueError, KeyError, OverflowError) as exc:
+        issues.append(
+            ValidationIssue(
+                path=path,
+                message=str(exc),
+            )
+        )
+        return
+    for m in dict.fromkeys(candidate.method for candidate in candidates):
+        if m not in _SUPPORTED_IMPUTE_METHODS:
+            issues.append(
+                ValidationIssue(
+                    path=f"{path}.method",
+                    message=f"Unsupported impute method '{m}'",
+                    expected=f"One of {sorted(_SUPPORTED_IMPUTE_METHODS)}",
+                )
+            )
+
+
 def _validate_impute(impute: Any, issues: list[ValidationIssue]) -> None:
     if impute is None:
         return
@@ -689,33 +758,20 @@ def _validate_impute(impute: Any, issues: list[ValidationIssue]) -> None:
         return
     for col, spec in impute.items():
         path = f"preprocessing.impute.{col}"
-        if isinstance(spec, str):
-            alias = _IMPUTE_METHOD_ALIASES.get(spec, spec)
-            issues.append(
-                ValidationIssue(
-                    path=path,
-                    message="Impute entries must be mappings, not bare strings",
-                    expected="{method: fill_median|fill_mode|fill_value|fill_mean|sample_normal|sample_categorical, value?: any, indicator?: bool, seed?: int}",
-                    received=spec,
-                    suggestion=f"Use {{{{method: {alias}}}}}",
-                    example_fix=f"{col}: {{method: {alias}}}",
+        if isinstance(spec, list):
+            if not spec:
+                issues.append(
+                    ValidationIssue(
+                        path=path,
+                        message="Impute candidate list must not be empty",
+                        expected="non-empty list of impute spec mappings",
+                    )
                 )
-            )
-            continue
-        if not isinstance(spec, dict):
-            issues.append(
-                ValidationIssue(path=path, message="Impute spec must be a mapping")
-            )
-            continue
-        method = spec.get("method")
-        if method not in _SUPPORTED_IMPUTE_METHODS:
-            issues.append(
-                ValidationIssue(
-                    path=f"{path}.method",
-                    message=f"Unsupported impute method '{method}'",
-                    expected=f"One of {sorted(_SUPPORTED_IMPUTE_METHODS)}",
-                )
-            )
+                continue
+            for idx, item in enumerate(spec):
+                _validate_single_impute_spec(str(col), item, f"{path}[{idx}]", issues)
+        else:
+            _validate_single_impute_spec(str(col), spec, path, issues)
 
 
 def _validate_encode(encode: Any, issues: list[ValidationIssue]) -> None:

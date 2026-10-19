@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 import pytest
+import yaml
 
 from pulsar.mcp.toolmeta import default_tool_timeout
 from fastmcp import Client, FastMCP
@@ -372,6 +373,187 @@ def test_export_run_id_and_precondition_errors(tmp_path):
                     client, tool, {**args, "run_id": "run_gone"}, error="RUN_ID_UNKNOWN"
                 )
                 await _call(client, tool, args, error="MODEL_NOT_LOADED")
+
+    asyncio.run(_run())
+
+
+def test_imputation_ensemble_plan_config_sweep_and_cache_through_client(tmp_path):
+    async def _run():
+        csv = tmp_path / "ensemble.csv"
+        pd.DataFrame(
+            {
+                "visits": [1, 2, 4, None, 3, 2] * 10,
+                "score": [None if i % 5 == 0 else (i % 7) + 0.25 for i in range(60)],
+                "other": [(i % 11) * 0.1 for i in range(60)],
+            }
+        ).to_csv(csv, index=False)
+        async with Client(_server()) as client:
+            dataset_id = (
+                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ).structured_content["dataset_id"]
+            plan = (
+                await _call(
+                    client,
+                    "draft_preprocessing_plan",
+                    {
+                        "dataset_id": dataset_id,
+                        "stakes": False,
+                        "detail": "full",
+                    },
+                )
+            ).structured_content
+            question = next(
+                q
+                for q in plan["questions"]
+                if q["topic"] == "blank_meaning"
+                and q["applies_to_preview"] == ["visits"]
+            )
+            edited = (
+                await _call(
+                    client,
+                    "edit_preprocessing_plan",
+                    {
+                        "plan_id": plan["plan_id"],
+                        "base_revision": plan["revision"],
+                        "answers": [
+                            {
+                                "question_id": question["question_id"],
+                                "option_ids": ["none", "unknown"],
+                            }
+                        ],
+                        "edits": [
+                            {
+                                "column": "score",
+                                "impute_method": ["fill_mean", "sample_normal"],
+                                "indicator": "none",
+                            }
+                        ],
+                    },
+                )
+            ).structured_content
+            assert edited["validation"]["valid"] is True
+            created = (
+                await _call(
+                    client,
+                    "create_config",
+                    {
+                        "dataset_id": dataset_id,
+                        "plan_id": plan["plan_id"],
+                    },
+                )
+            ).structured_content
+            cfg = yaml.safe_load(created["config_yaml"])
+            candidates = cfg["preprocessing"]["impute"]["visits"]
+            assert {s["method"]: s.get("indicator", True) for s in candidates} == {
+                "fill_value": False,
+                "fill_median": True,
+            }
+            strategy = created["sweep_strategy"]
+            assert strategy["imputation_variants"] == 2
+            first = (
+                await _call(
+                    client,
+                    "run_topological_sweep",
+                    {
+                        "dataset_id": dataset_id,
+                        "detail": "full",
+                    },
+                )
+            ).structured_content
+            assert not first["projection_cached"]
+            assert first["metrics"]["n_ball_maps"] == strategy["estimated_ball_maps"]
+
+            # An epsilon-only retry reuses every realization's cached embeddings.
+            cfg["sweep"]["ball_mapper"]["epsilon"] = {"values": [0.5]}
+            cached = (
+                await _call(
+                    client,
+                    "run_topological_sweep",
+                    {
+                        "dataset_id": dataset_id,
+                        "config_yaml": yaml.safe_dump(cfg),
+                        "detail": "full",
+                    },
+                )
+            ).structured_content
+            assert cached["projection_cached"]
+            projection_count = len(strategy["projection_dimensions"]) * len(
+                strategy["projection_seeds"]
+            )
+            assert cached["metrics"]["n_ball_maps"] == 2 * projection_count
+
+            # Extra stochastic draws invalidate the cache and contribute new maps.
+            refined = (
+                await _call(
+                    client, "refine_config", {"overrides": {"n_imputations": 3}}
+                )
+            ).structured_content
+            assert (
+                yaml.safe_load(refined["config_yaml"])["preprocessing"]["n_imputations"]
+                == 3
+            )
+            expanded = (
+                await _call(
+                    client,
+                    "run_topological_sweep",
+                    {
+                        "dataset_id": dataset_id,
+                        "detail": "full",
+                    },
+                )
+            ).structured_content
+            assert not expanded["projection_cached"]
+            assert expanded["metrics"]["n_ball_maps"] == 3 * projection_count
+
+    asyncio.run(_run())
+
+
+def test_create_config_cost_deduplicates_deterministic_candidates_through_client(
+    tmp_path,
+):
+    async def _run():
+        csv = tmp_path / "deterministic.csv"
+        pd.DataFrame(
+            {"x": [1.5, None, 2.5, 3.5, 4.5] * 8, "y": list(range(40))}
+        ).to_csv(csv, index=False)
+        async with Client(_server()) as client:
+            dataset_id = (
+                await _call(client, "ingest_dataset", {"path": str(csv)})
+            ).structured_content["dataset_id"]
+            plan = (
+                await _call(
+                    client,
+                    "draft_preprocessing_plan",
+                    {"dataset_id": dataset_id, "stakes": False},
+                )
+            ).structured_content
+            await _call(
+                client,
+                "edit_preprocessing_plan",
+                {
+                    "plan_id": plan["plan_id"],
+                    "edits": [
+                        {"column": "x", "impute_method": ["fill_mean", "fill_mean"]}
+                    ],
+                },
+            )
+            created = (
+                await _call(
+                    client,
+                    "create_config",
+                    {"dataset_id": dataset_id, "plan_id": plan["plan_id"]},
+                )
+            ).structured_content
+            strategy = created["sweep_strategy"]
+            assert strategy["imputation_variants"] == 1
+            sweep = (
+                await _call(
+                    client,
+                    "run_topological_sweep",
+                    {"dataset_id": dataset_id, "detail": "full"},
+                )
+            ).structured_content
+            assert sweep["metrics"]["n_ball_maps"] == strategy["estimated_ball_maps"]
 
     asyncio.run(_run())
 

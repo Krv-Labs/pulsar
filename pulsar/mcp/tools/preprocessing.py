@@ -364,8 +364,9 @@ async def edit_preprocessing_plan(
         list[dict[str, Any]] | None,
         Field(
             description=(
-                "Question answers as [{'question_id': '<question_id>', 'option_id': '<option_id>'}]; "
-                "use the question_id and option_id values the payload lists."
+                "Answers as [{question_id, option_id}] using listed IDs; use "
+                "option_ids: [id, ...] to ensemble compatible imputation treatments, "
+                "preserving each option's indicator."
             )
         ),
     ] = None,
@@ -374,8 +375,9 @@ async def edit_preprocessing_plan(
         Field(
             description=(
                 "Direct column edits as [{'column': col, 'role'?: ..., "
-                "'impute_method'?: ..., 'impute_value'?: ..., 'indicator'?: ..., "
-                "'encode'?: ...}]."
+                "'impute_method'?: method or list, 'impute_value'?: ..., 'indicator'?: ..., "
+                "'encode'?: ...}]. 'impute' accepts a spec or candidate list with "
+                "method, value?, seed?, indicator?: bool."
             )
         ),
     ] = None,
@@ -403,7 +405,8 @@ async def edit_preprocessing_plan(
     Checks `base_revision` (`SESSION_REVISION_CONFLICT` on mismatch), records
     decision provenance (`source="agent"` or `"user"`), dry-runs preprocessing
     (`validation.valid=false` with error text on schema failure, without raising),
-    and stores the new revision in the session.
+    and stores the new revision. `option_ids` ensembles compatible treatments;
+    role, encoding, and missingness groups must agree across selected options.
     """
     if not plan_id:
         return mcp_error(
@@ -513,7 +516,7 @@ def _count_dummy_columns(
 
 
 def _build_validation_payload(
-    data: Any, df_proc: Any, layout: Any, cfg: Any
+    data: Any, df_proc: Any, layout: Any, cfg: Any, *, nan_remaining: int | None = None
 ) -> dict[str, Any]:
     input_cols = set(data.columns)
     output_names = layout.feature_names
@@ -527,6 +530,9 @@ def _build_validation_payload(
     col_preview = list(output_names[:8])
     if len(output_names) > 8:
         col_preview.append(f"... +{len(output_names) - 8} more")
+    resolved_nans = (
+        int(df_proc.isna().sum().sum()) if nan_remaining is None else int(nan_remaining)
+    )
     return {
         "status": "ok",
         "valid": True,
@@ -537,8 +543,18 @@ def _build_validation_payload(
         "missingness_flag_count": missingness_flag_count,
         "high_cardinality_encoded_columns": high_cardinality_encoded,
         "feature_names_preview": col_preview,
-        "nan_remaining": int(df_proc.isna().sum().sum()),
+        "nan_remaining": resolved_nans,
     }
+
+
+def _dry_run_all_variants(data: Any, cfg: Any) -> tuple[Any, Any, int]:
+    variants = cfg.preprocessing_variants()
+    df_proc, layout = preprocess_dataframe(data, variants[0])
+    max_nans = int(df_proc.isna().sum().sum())
+    for variant in variants[1:]:
+        df_v, _ = preprocess_dataframe(data, variant)
+        max_nans = max(max_nans, int(df_v.isna().sum().sum()))
+    return df_proc, layout, max_nans
 
 
 @tool_meta(
@@ -593,8 +609,14 @@ async def validate_preprocessing_config(
             )
 
         cfg = load_config(config_dict)
-        df_proc, layout = await asyncio.to_thread(preprocess_dataframe, data, cfg)
-        return mcp_result(_build_validation_payload(data, df_proc, layout, cfg))
+        df_proc, layout, nan_remaining = await asyncio.to_thread(
+            _dry_run_all_variants, data, cfg
+        )
+        return mcp_result(
+            _build_validation_payload(
+                data, df_proc, layout, cfg, nan_remaining=nan_remaining
+            )
+        )
 
     except yaml.YAMLError as e:
         return mcp_error(
