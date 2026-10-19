@@ -11,6 +11,7 @@ from fastmcp import Context
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
+from pulsar.config import load_config
 from pulsar.mcp.config_tools import (
     apply_overrides,
     render_validation_report,
@@ -234,6 +235,8 @@ async def create_config(
         # Build response with calibration and plan provenance
         calibration_space = "processed" if processed is not None else "raw"
         resolved_cfg = yaml.safe_load(config_yaml)
+        parsed_cfg = load_config(resolved_cfg)
+        n_variants = len(parsed_cfg.preprocessing_variants())
         projection = resolved_cfg.get("sweep", {}).get("projection", {})
         projection_dimensions = projection.get("dimensions", {}).get(
             "values"
@@ -287,9 +290,11 @@ async def create_config(
                 "projection_dimensions": projection_dimensions,
                 "projection_seeds": projection_seeds,
                 "epsilon_steps": epsilon_steps,
-                "estimated_ball_maps": len(projection_dimensions)
-                * max(len(projection_seeds), 1)
-                * max(int(epsilon_steps or 0), 1),
+                "imputation_variants": n_variants,
+                "estimated_ball_maps": n_variants
+                * len(parsed_cfg.projection.dimensions)
+                * len(parsed_cfg.projection.seeds)
+                * len(parsed_cfg.ball_mapper.epsilons),
                 "compatibility_note": (
                     "sweep.pca is a legacy mirror of sweep.projection for older "
                     "configs; sweep.projection is authoritative."

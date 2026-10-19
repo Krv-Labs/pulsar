@@ -51,11 +51,23 @@ Reveal the dataset's topology; do not force convenient clusters.
      none, or that we don't know?"* → if they say "none", call
      `edit_preprocessing_plan(plan_id, base_revision=1, answers=[{"question_id": "<question_id>", "option_id": "<option_id>"}], source="user")`
      (use the `question_id` and `option_id` values the payload lists).
+   - To explore several plausible imputations, answer with
+     `{"question_id": "<question_id>", "option_ids": ["<id1>", "<id2>"]}` or edit
+     a column with `impute_method: ["fill_median", "sample_normal"]` / an `impute`
+     candidate list (`method`, optional `value`, `seed`, boolean `indicator`).
+     Each option keeps its indicator; selected options must agree on role,
+     encoding, and shared missingness groups. A top-level indicator edit overrides
+     all candidates. Use `refine_config` with `n_imputations` for extra stochastic
+     draws. Deterministic duplicates are removed; candidate columns are cycled
+     together, not multiplied as a cross-column Cartesian grid. Every realization
+     is scaled/projected separately and its ball maps fuse into one Cosmic Graph.
 4. Calibrate & Validate: `create_config(dataset_id, plan_id=plan_id)` consumes
    the plan (emitting readable group markers like `n_inpatient_claims_and_2_more_was_missing`,
    described in `marker_legend`) and returns the baseline config, processed-space
    distance percentiles, and `sweep_strategy` (treat as a broad first pass, not a final
-   answer). Calling `create_config` without `plan_id` drafts baseline defaults
+   answer). `sweep_strategy.imputation_variants` and `estimated_ball_maps` include
+   the deduplicated ensemble cost; calibration describes the first realization.
+   Calling `create_config` without `plan_id` drafts baseline defaults
    automatically (with a fresh `plan_id`) and emits `PREPROCESSING_QUESTIONS_OPEN`
    when open questions remain or `PREPROCESSING_PLAN_NOT_USED` when the session
    already holds an edited plan (`revision > 1`) for the dataset. Use

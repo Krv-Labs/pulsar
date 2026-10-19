@@ -364,8 +364,9 @@ async def edit_preprocessing_plan(
         list[dict[str, Any]] | None,
         Field(
             description=(
-                "Question answers as [{'question_id': '<question_id>', 'option_id': '<option_id>'}]; "
-                "use the question_id and option_id values the payload lists."
+                "Answers as [{question_id, option_id}] using listed IDs; use "
+                "option_ids: [id, ...] to ensemble compatible imputation treatments, "
+                "preserving each option's indicator."
             )
         ),
     ] = None,
@@ -374,8 +375,9 @@ async def edit_preprocessing_plan(
         Field(
             description=(
                 "Direct column edits as [{'column': col, 'role'?: ..., "
-                "'impute_method'?: ..., 'impute_value'?: ..., 'indicator'?: ..., "
-                "'encode'?: ...}]."
+                "'impute_method'?: method or list, 'impute_value'?: ..., 'indicator'?: ..., "
+                "'encode'?: ...}]. 'impute' accepts a spec or candidate list with "
+                "method, value?, seed?, indicator?: bool."
             )
         ),
     ] = None,
@@ -403,7 +405,8 @@ async def edit_preprocessing_plan(
     Checks `base_revision` (`SESSION_REVISION_CONFLICT` on mismatch), records
     decision provenance (`source="agent"` or `"user"`), dry-runs preprocessing
     (`validation.valid=false` with error text on schema failure, without raising),
-    and stores the new revision in the session.
+    and stores the new revision. `option_ids` ensembles compatible treatments;
+    role, encoding, and missingness groups must agree across selected options.
     """
     if not plan_id:
         return mcp_error(

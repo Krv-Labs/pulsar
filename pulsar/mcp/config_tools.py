@@ -12,6 +12,7 @@ from pulsar.config import (
     LEGACY_COSMIC_GRAPH_THRESHOLD_KEY,
     LEGACY_COSMIC_GRAPH_THRESHOLD_MESSAGE,
     THRESHOLD_RANGE_MESSAGE,
+    _parse_impute_spec_entry,
     config_to_yaml,
     load_config,
     normalize_construction_threshold,
@@ -724,18 +725,17 @@ def _validate_single_impute_spec(
             ValidationIssue(path=path, message="Impute spec must be a mapping")
         )
         return
-    method = spec.get("method")
-    methods = method if isinstance(method, list) else [method]
-    if not methods:
+    try:
+        candidates = _parse_impute_spec_entry(spec, col)
+    except (TypeError, ValueError, KeyError, OverflowError) as exc:
         issues.append(
             ValidationIssue(
-                path=f"{path}.method",
-                message="Impute method list must not be empty",
-                expected=f"One or more of {sorted(_SUPPORTED_IMPUTE_METHODS)}",
+                path=path,
+                message=str(exc),
             )
         )
         return
-    for m in methods:
+    for m in dict.fromkeys(candidate.method for candidate in candidates):
         if m not in _SUPPORTED_IMPUTE_METHODS:
             issues.append(
                 ValidationIssue(

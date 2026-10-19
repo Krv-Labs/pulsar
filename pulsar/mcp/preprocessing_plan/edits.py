@@ -236,6 +236,14 @@ def _parse_impute_mapping(
                 {"column": col, "seed": raw_imp["seed"]},
             )
         imp_dict["seed"] = int(raw_imp["seed"])
+    if "indicator" in raw_imp:
+        if not isinstance(raw_imp["indicator"], bool):
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"Impute candidate indicator for column {col!r} must be a boolean.",
+                {"column": col, "indicator": raw_imp["indicator"]},
+            )
+        imp_dict["indicator"] = raw_imp["indicator"]
     return imp_dict
 
 
@@ -364,15 +372,16 @@ def _edit_impute(
             )
         if entry.impute is None:
             entry.impute = {"method": "fill_value", "value": val}
-        else:
-            entry.impute = dict(entry.impute)
-            entry.impute["value"] = val
-        if entry.impute_candidates:
-            for cand in entry.impute_candidates:
-                if cand.get("method") == "fill_value":
-                    cand["value"] = val
-            if entry.impute.get("method") == "fill_value":
-                entry.impute_candidates[0]["value"] = val
+        specs = entry.impute_candidates or [entry.impute]
+        constant_specs = [s for s in specs if s.get("method") == "fill_value"]
+        if not constant_specs:
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"impute_value is only valid with impute_method='fill_value' (column {col!r}).",
+                {"column": col},
+            )
+        for spec in constant_specs:
+            spec["value"] = val
 
     if (
         has_impute_edit
@@ -406,6 +415,8 @@ def _edit_indicator(
         entry.indicator = _validate_indicator(
             str(edit["indicator"]), col, ev, missing_groups
         )
+        for spec in entry.impute_candidates or ([entry.impute] if entry.impute else []):
+            spec.pop("indicator", None)
 
 
 def _apply_single_edit(
@@ -462,6 +473,41 @@ def _apply_single_edit(
 
     entry.decided_by = source
     entry.status = "resolved"
+
+
+def _merge_answer_entries(col: str, entries: list[PlanEntry]) -> PlanEntry:
+    """Combine compatible answer treatments without losing candidate indicators."""
+    primary = entries[0]
+    for entry in entries[1:]:
+        same_group = entry.indicator == primary.indicator or not (
+            entry.indicator.startswith("group:")
+            or primary.indicator.startswith("group:")
+        )
+        if (
+            entry.role != primary.role
+            or entry.encode != primary.encode
+            or (entry.impute is None) != (primary.impute is None)
+            or not same_group
+        ):
+            raise PlanEditError(
+                "INVALID_ARGUMENT",
+                f"Selected options for column {col!r} have incompatible roles, encoding, or missingness groups.",
+                {"column": col},
+            )
+    if primary.impute is None:
+        return primary
+    candidates: list[dict[str, Any]] = []
+    for entry in entries:
+        for raw_spec in entry.impute_candidates or [entry.impute]:
+            spec = dict(raw_spec)
+            spec.setdefault("indicator", entry.indicator == "own")
+            if spec not in candidates:
+                candidates.append(spec)
+    primary.impute = candidates[0]
+    primary.impute_candidates = candidates if len(candidates) > 1 else None
+    if not primary.indicator.startswith("group:"):
+        primary.indicator = "own" if any(s["indicator"] for s in candidates) else "none"
+    return primary
 
 
 def _apply_single_answer(
@@ -544,9 +590,13 @@ def _apply_single_answer(
             },
         )
 
-    candidates_by_col: dict[str, list[dict[str, Any]]] = {}
-    primary_impute_by_col: dict[str, dict[str, Any]] = {}
-    for opt_idx, matched_opt in enumerate(matched_opts):
+    answers_by_col: dict[str, list[PlanEntry]] = {}
+    multiple = len(matched_opts) > 1
+    for matched_opt in matched_opts:
+        # Every selected option starts from the same revision, so one option's
+        # edits cannot become another option's implicit defaults.
+        option_entries = dict(new_entries) if multiple else new_entries
+        edited_columns: set[str] = set()
         for edit_spec in matched_opt.edits:
             col_name = edit_spec.get("column") if isinstance(edit_spec, dict) else None
             if (
@@ -556,34 +606,27 @@ def _apply_single_answer(
                 in _PROTECTED_ROLES
             ):
                 continue
+            if (
+                multiple
+                and isinstance(col_name, str)
+                and col_name in new_entries
+                and col_name not in edited_columns
+            ):
+                option_entries[col_name] = copy.deepcopy(new_entries[col_name])
             _apply_single_edit(
-                new_entries,
+                option_entries,
                 edit_spec,
                 source=source,
                 missing_groups=missing_groups,
                 ev_by_col=ev_by_col,
             )
-            if (
-                isinstance(col_name, str)
-                and col_name in new_entries
-                and new_entries[col_name].impute is not None
-            ):
-                imp = dict(new_entries[col_name].impute)
-                if opt_idx == 0:
-                    primary_impute_by_col[col_name] = imp
-                cands = candidates_by_col.setdefault(col_name, [])
-                if imp not in cands:
-                    cands.append(imp)
+            edited_columns.add(col_name)
+        if multiple:
+            for col_name in edited_columns:
+                answers_by_col.setdefault(col_name, []).append(option_entries[col_name])
 
-    if len(matched_opts) > 1:
-        for col_name, cands in candidates_by_col.items():
-            if col_name in new_entries and new_entries[col_name].role == "feature":
-                new_entries[col_name].impute = primary_impute_by_col.get(
-                    col_name, cands[0]
-                )
-                new_entries[col_name].impute_candidates = (
-                    cands if len(cands) > 1 else None
-                )
+    for col_name, entries in answers_by_col.items():
+        new_entries[col_name] = _merge_answer_entries(col_name, entries)
 
     for col in q.applies_to:
         if (

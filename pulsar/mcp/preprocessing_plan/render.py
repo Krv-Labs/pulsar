@@ -77,7 +77,10 @@ def build_marker_legend(
         if (
             entry.role == "feature"
             and entry.impute is not None
-            and entry.indicator == "own"
+            and any(
+                spec.get("indicator", entry.indicator == "own")
+                for spec in entry.impute_candidates or [entry.impute]
+            )
             and col not in grouped_cols
         ):
             legend.append(
@@ -98,7 +101,9 @@ def _format_plan_impute_spec(
         spec["value"] = raw_imp["value"]
     if "seed" in raw_imp and raw_imp["seed"] is not None:
         spec["seed"] = int(raw_imp["seed"])
-    if indicator_mode != "own":
+    if "indicator" in raw_imp:
+        spec["indicator"] = raw_imp["indicator"]
+    elif indicator_mode != "own":
         spec["indicator"] = False
     return spec
 

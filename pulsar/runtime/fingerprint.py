@@ -46,7 +46,7 @@ def projection_fingerprint(cfg, n_rows: int, dataframe=None) -> str:
     if n_imputations > 1:
         payload_dict["n_imputations"] = n_imputations
     impute_candidates = getattr(cfg, "impute_candidates", None) or {}
-    if any(len(specs) > 1 for specs in impute_candidates.values()):
+    if impute_candidates:
         payload_dict["impute_candidates"] = _normalize_mapping(impute_candidates)
     missing_groups = getattr(cfg, "missing_indicator_groups", None) or {}
     if missing_groups:

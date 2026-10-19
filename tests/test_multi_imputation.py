@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from pulsar.config import (
     ImputeSpec,
@@ -13,6 +14,7 @@ from pulsar.config import (
 )
 from pulsar.mcp.config_tools import apply_overrides, validate_config_yaml
 from pulsar.mcp.preprocessing_plan import (
+    PlanEditError,
     PlanQuestion,
     QuestionOption,
     apply_answers_and_edits,
@@ -20,6 +22,7 @@ from pulsar.mcp.preprocessing_plan import (
     draft_plan,
     plan_to_preprocessing_dict,
 )
+from pulsar.mcp.preprocessing_plan.render import build_marker_legend
 from pulsar.pipeline import ThemaRS
 from pulsar.runtime.fingerprint import projection_fingerprint
 
@@ -394,3 +397,208 @@ def test_preprocessing_plan_multi_imputation_edits_and_render(
         }
     )
     assert len(expand_preprocessing_variants(cfg)) == 3
+
+
+@pytest.mark.parametrize("draws", [1, 3])
+def test_explicit_singleton_candidate_is_authoritative_and_cache_sensitive(draws):
+    def make_config(seed):
+        return PulsarConfig(
+            data="in_memory.csv",
+            drop_columns=[],
+            encode={},
+            impute={"x": ImputeSpec("fill_mean")},
+            impute_candidates={"x": [ImputeSpec("sample_normal", seed=seed)]},
+            n_imputations=draws,
+        )
+
+    cfg = make_config(7)
+    assert cfg.impute["x"] == ImputeSpec("sample_normal", seed=7)
+    variants = expand_preprocessing_variants(cfg)
+    assert [v.impute["x"].seed for v in variants] == list(range(7, 7 + draws))
+    restored = load_config(yaml.safe_load(config_to_yaml(cfg)))
+    assert restored.preprocessing_variants() == variants
+    assert projection_fingerprint(cfg, 10) == projection_fingerprint(restored, 10)
+    assert projection_fingerprint(cfg, 10) != projection_fingerprint(
+        make_config(99), 10
+    )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"method": {"values": ["fill_mean", "fill_median"]}},
+        {"method": ["fill_median", "fill_value"], "value": 0},
+        {
+            "method": "sample_normal",
+            "seed": {"range": {"min": 7, "max": 8, "steps": 2}},
+            "indicator": {"values": [False, True]},
+        },
+    ],
+)
+def test_mcp_and_loader_accept_the_same_imputation_sweeps(tmp_path, spec):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("x\n1\n2\n3\n")
+    raw = {"run": {"data": str(csv_path)}, "preprocessing": {"impute": {"x": spec}}}
+    expected = load_config(raw)
+    report = validate_config_yaml(yaml.safe_dump(raw))
+    assert report.ok, report.issues
+    restored = load_config(yaml.safe_load(report.normalized_yaml))
+    assert restored.preprocessing_variants() == expected.preprocessing_variants()
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"method": {"values": []}},
+        {"method": {"values": ["unsupported"]}},
+        {"method": {"unexpected": ["fill_mean"]}},
+        {"method": "fill_mean", "value": 0},
+        {"method": "sample_normal", "seed": {"range": {}}},
+        {"method": "fill_mean", "indicator": [False, "bad"]},
+    ],
+)
+def test_mcp_rejects_invalid_imputation_sweeps_with_structured_issues(tmp_path, spec):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("x\n1\n2\n3\n")
+    raw = {"run": {"data": str(csv_path)}, "preprocessing": {"impute": {"x": spec}}}
+    report = validate_config_yaml(yaml.safe_dump(raw))
+    assert not report.ok
+    assert report.agent_action
+    assert any(i.path.startswith("preprocessing.impute.x") for i in report.issues)
+
+
+@pytest.fixture
+def ensemble_plan(sample_df_with_missing):
+    plan = draft_plan(sample_df_with_missing, "ds_ensemble", stakes=False)
+    plan.questions["ensemble"] = PlanQuestion(
+        question_id="ensemble",
+        topic="blank_meaning",
+        text="Which treatments should be explored?",
+        applies_to=["x1"],
+        rows_affected=12,
+        options=[
+            QuestionOption(
+                option_id="zero",
+                label="Zero",
+                effect="Zero without marker",
+                edits=[
+                    {
+                        "column": "x1",
+                        "impute_method": "fill_value",
+                        "impute_value": 0,
+                        "indicator": "none",
+                    }
+                ],
+            ),
+            QuestionOption(
+                option_id="median",
+                label="Median",
+                effect="Median with marker",
+                edits=[
+                    {
+                        "column": "x1",
+                        "impute_method": "fill_median",
+                        "indicator": "own",
+                    }
+                ],
+            ),
+        ],
+        default_option_id="median",
+    )
+    return plan
+
+
+@pytest.mark.parametrize("option_ids", [["zero", "median"], ["median", "zero"]])
+def test_multi_option_answers_preserve_treatments_in_either_order(
+    ensemble_plan, option_ids
+):
+    updated = apply_answers_and_edits(
+        ensemble_plan, answers=[{"question_id": "ensemble", "option_ids": option_ids}]
+    )
+    specs = plan_to_preprocessing_dict(updated)["impute"]["x1"]
+    assert {s["method"]: s.get("indicator", True) for s in specs} == {
+        "fill_value": False,
+        "fill_median": True,
+    }
+    assert next(s for s in specs if s["method"] == "fill_value")["value"] == 0
+    assert any(
+        m["marker_column"] == "x1_was_missing" for m in build_marker_legend(updated)
+    )
+    assert ensemble_plan.entries["x1"].impute_candidates is None
+
+
+@pytest.mark.parametrize(
+    "methods", [["fill_median", "fill_value"], ["fill_value", "fill_median"]]
+)
+def test_mixed_method_edits_apply_value_only_to_constant_fill(ensemble_plan, methods):
+    updated = apply_answers_and_edits(
+        ensemble_plan,
+        edits=[{"column": "x1", "impute_method": methods, "impute_value": 0}],
+    )
+    specs = plan_to_preprocessing_dict(updated)["impute"]["x1"]
+    assert next(s for s in specs if s["method"] == "fill_value")["value"] == 0
+    assert "value" not in next(s for s in specs if s["method"] == "fill_median")
+
+
+def test_value_edit_without_constant_fill_still_fails(ensemble_plan):
+    with pytest.raises(
+        PlanEditError, match="only valid with impute_method='fill_value'"
+    ):
+        apply_answers_and_edits(
+            ensemble_plan,
+            edits=[
+                {
+                    "column": "x1",
+                    "impute_method": ["fill_mean", "fill_median"],
+                    "impute_value": 0,
+                }
+            ],
+        )
+
+
+def test_explicit_candidate_indicators_and_entry_override(ensemble_plan):
+    updated = apply_answers_and_edits(
+        ensemble_plan,
+        edits=[
+            {
+                "column": "x1",
+                "impute": [
+                    {"method": "fill_value", "value": 0, "indicator": False},
+                    {"method": "fill_median", "indicator": True},
+                ],
+            }
+        ],
+    )
+    assert [
+        s["indicator"] for s in plan_to_preprocessing_dict(updated)["impute"]["x1"]
+    ] == [False, True]
+    overridden = apply_answers_and_edits(
+        updated, edits=[{"column": "x1", "indicator": "none"}]
+    )
+    assert [
+        s["indicator"] for s in plan_to_preprocessing_dict(overridden)["impute"]["x1"]
+    ] == [False, False]
+
+
+@pytest.mark.parametrize("conflict", ["role", "encode", "indicator"])
+def test_multi_option_answers_reject_incompatible_shared_policies(
+    ensemble_plan, conflict
+):
+    second_edit = ensemble_plan.questions["ensemble"].options[1].edits[0]
+    second_edit[conflict] = {
+        "role": "drop",
+        "encode": "one_hot",
+        "indicator": "group:x1",
+    }[conflict]
+    with pytest.raises(
+        PlanEditError, match="incompatible roles, encoding, or missingness groups"
+    ):
+        apply_answers_and_edits(
+            ensemble_plan,
+            answers=[
+                {
+                    "question_id": "ensemble",
+                    "option_ids": ["zero", "median"],
+                }
+            ],
+        )

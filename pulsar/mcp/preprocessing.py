@@ -262,20 +262,7 @@ def _draft_evidence(
 
 
 def _entries_full(plan: PreprocessingPlan) -> dict[str, dict[str, Any]]:
-    return {
-        col: {
-            "column": entry.column,
-            "role": entry.role,
-            "impute": copy.deepcopy(entry.impute),
-            "indicator": entry.indicator,
-            "encode": entry.encode,
-            "decided_by": entry.decided_by,
-            "status": entry.status,
-            "reason": entry.reason,
-            "question_id": entry.question_id,
-        }
-        for col, entry in plan.entries.items()
-    }
+    return {col: copy.deepcopy(entry.to_dict()) for col, entry in plan.entries.items()}
 
 
 def build_draft_plan_payload(

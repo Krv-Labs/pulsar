@@ -336,7 +336,7 @@ def _normalize_impute_inputs(
             )
         specs = list(spec_list)
         candidates[col] = specs
-        primary.setdefault(col, specs[0])
+        primary[col] = specs[0]
 
     return primary, candidates
 
@@ -505,7 +505,9 @@ def _parse_impute_spec_entry(spec: Any, col: str) -> list[ImputeSpec]:
             ImputeSpec(
                 method=method,
                 seed=seed,
-                value=val if method == "fill_value" else spec.get("value"),
+                value=(
+                    None if method != "fill_value" and "fill_value" in methods else val
+                ),
                 indicator=indicator,
             )
         )
