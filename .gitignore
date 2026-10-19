@@ -28,6 +28,7 @@ uv.lock
 demos/mmlu/data/*
 !demos/mmlu/data/model_eval_results.csv
 !demos/penguins/penguins.csv
+!tests/fixtures/golden/**/*.csv
 demos/penguins/*.yaml
 demos/penguins/*.py
 
