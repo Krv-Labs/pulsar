@@ -930,9 +930,7 @@ def _cluster_payload_from_dossier(
         elif detail == "standard":
             entry["numeric_tier_counts"] = _tier_counts(profile.numeric_tiers)
             entry["categorical_tier_counts"] = _tier_counts(profile.categorical_tiers)
-            entry["numeric_features"] = profile.numeric_features[
-                :feature_preview_limit
-            ]
+            entry["numeric_features"] = profile.numeric_features[:feature_preview_limit]
             entry["categorical_features"] = profile.categorical_features[
                 :feature_preview_limit
             ]
