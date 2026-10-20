@@ -168,6 +168,10 @@ def build_evidence_payload(
         clusters_omitted = len(clusters) - max_clusters
         clusters = clusters[:max_clusters]
     evidence_metadata = dossier.global_stats.get("evidence_metadata", {})
+    graph_metrics = dict(dossier.global_stats.get("graph_metrics", {}) or {})
+    if detail != "full" and "component_sizes" in graph_metrics:
+        component_sizes = list(graph_metrics.pop("component_sizes") or [])
+        graph_metrics["component_sizes_summary"] = size_summary(component_sizes)
     payload: dict[str, Any] = {
         "status": "ok",
         "cluster_result": compact_cluster_result_payload(
@@ -175,12 +179,12 @@ def build_evidence_payload(
             include_full_sizes=detail == "full",
         ),
         "detail": dossier.global_stats.get("detail", "standard"),
-        "graph_metrics": dossier.global_stats.get("graph_metrics", {}),
+        "graph_metrics": graph_metrics,
         "clusters_returned": len(clusters),
         "clusters_omitted": clusters_omitted,
         "clusters": clusters,
     }
-    if detail == "summary":
+    if detail != "full":
         payload["evidence_metadata_summary"] = _evidence_metadata_summary(
             evidence_metadata
         )
@@ -923,6 +927,16 @@ def _cluster_payload_from_dossier(
             entry["numeric_tier_counts"] = _tier_counts(profile.numeric_tiers)
             entry["categorical_tier_counts"] = _tier_counts(profile.categorical_tiers)
             entry.update(_feature_preview_from_profile(profile, feature_preview_limit))
+        elif detail == "standard":
+            entry["numeric_tier_counts"] = _tier_counts(profile.numeric_tiers)
+            entry["categorical_tier_counts"] = _tier_counts(profile.categorical_tiers)
+            entry["numeric_features"] = profile.numeric_features[
+                :feature_preview_limit
+            ]
+            entry["categorical_features"] = profile.categorical_features[
+                :feature_preview_limit
+            ]
+            entry["central_rows"] = profile.central_rows
         else:
             entry["numeric_features"] = profile.numeric_features
             entry["categorical_features"] = profile.categorical_features

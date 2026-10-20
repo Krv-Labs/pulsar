@@ -618,9 +618,24 @@ pub fn curve_payload(
             Some(m) => linspace_indices(thresholds.len(), m),
             None => (0..thresholds.len()).collect(),
         };
+        let top_k = if max_points.is_none() { 3 } else { 10 };
         indices
             .into_iter()
-            .map(|i| json!(threshold_morphology_profile(&graph, thresholds[i], 10)))
+            .map(|i| {
+                let row = threshold_morphology_profile(&graph, thresholds[i], top_k);
+                if max_points.is_none() {
+                    json!({
+                        "threshold": round_to(row.threshold, 6),
+                        "component_count": row.component_count,
+                        "top_component_sizes": row.top_component_sizes,
+                        "giant_fraction": row.giant_fraction,
+                        "second_largest_ratio": row.second_largest_ratio,
+                        "singleton_fraction": row.singleton_fraction,
+                    })
+                } else {
+                    json!(row)
+                }
+            })
             .collect()
     };
     let candidate_rows = |candidates: &[Candidate]| -> Vec<Value> {

@@ -2752,8 +2752,18 @@ def _render_markdown_table(
     return output.getvalue()
 
 
-def dossier_to_markdown(dossier: TopologicalDossier) -> str:
+def dossier_to_markdown(
+    dossier: TopologicalDossier,
+    *,
+    max_clusters: int | None = None,
+    feature_preview_limit: int | None = None,
+) -> str:
     """Renders the dossier as a high-signal Markdown report for LLM consumption."""
+    profiles = list(dossier.clusters)
+    if max_clusters is not None:
+        profiles.sort(key=lambda p: p.size, reverse=True)
+        profiles = profiles[:max_clusters]
+    omitted_clusters = max(0, len(dossier.clusters) - len(profiles))
     total_rows = sum(
         len(p.numeric_features) + len(p.categorical_features) for p in dossier.clusters
     )
@@ -2794,7 +2804,7 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
         ]
     )
 
-    for p in dossier.clusters:
+    for p in profiles:
         size_bar = generate_proportion_bar(p.size, dossier.n_total, length=12)
         md.append(f"### {p.semantic_name}")
         md.append(f"- **Size**: {p.size} points ({p.size_pct:.1f}%) {size_bar}")
@@ -2804,7 +2814,12 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
             "| Feature | Distribution | Cluster Mean | Global Mean | Z-Score | Homogeneity |"
         )
         md.append("|---|:---|---|---|---|---|")
-        for f in p.numeric_features:
+        numeric_rows = (
+            p.numeric_features[:feature_preview_limit]
+            if feature_preview_limit is not None
+            else p.numeric_features
+        )
+        for f in numeric_rows:
             h_desc = (
                 "Tight"
                 if f["homogeneity"] < 0.5
@@ -2816,11 +2831,16 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
                 f"| {f['column']} | `{f.get('sparkline', '')}` | {f['mean']:.3f} | {f['global_mean']:.3f} | {f['z_score']:.2f} | {h_desc} ({f['homogeneity']:.2f}) |"
             )
 
-        if p.categorical_features:
+        categorical_rows = (
+            p.categorical_features[:feature_preview_limit]
+            if feature_preview_limit is not None
+            else p.categorical_features
+        )
+        if categorical_rows:
             md.append("\n#### Distinctive Categories (Concentration)")
             md.append("| Feature | Value | In-cluster prevalence | Global recall |")
             md.append("|---|---|---|---|")
-            for f in p.categorical_features:
+            for f in categorical_rows:
                 prevalence = f.get("in_cluster_prevalence", f.get("concentration", 0.0))
                 global_recall = f.get("global_recall", 0.0)
                 count = f.get("count", 0)
@@ -2836,6 +2856,12 @@ def dossier_to_markdown(dossier: TopologicalDossier) -> str:
             md.append(f"{i + 1}. {row_str}...")
 
         md.append("\n---\n")
+
+    if omitted_clusters > 0:
+        md.append(
+            f"_... and {omitted_clusters} smaller cluster(s) omitted "
+            "(increase `max_clusters` or use `get_cluster_profile` to inspect)._"
+        )
 
     return "\n".join(md)
 

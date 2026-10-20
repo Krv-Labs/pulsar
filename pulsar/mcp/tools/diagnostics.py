@@ -648,10 +648,23 @@ def _threshold_curve_payload(
             indices = sorted(
                 {int(i) for i in np.linspace(0, len(thresholds) - 1, num=max_points)}
             )
-        return [
-            threshold_morphology_profile(threshold_graph, thresholds[i], top_k=10)
-            for i in indices
-        ]
+        top_k = 3 if max_points is None else 10
+        rows = []
+        for i in indices:
+            row = threshold_morphology_profile(
+                threshold_graph, thresholds[i], top_k=top_k
+            )
+            if max_points is None:
+                row = {
+                    "threshold": round(float(row["threshold"]), 6),
+                    "component_count": row["component_count"],
+                    "top_component_sizes": row["top_component_sizes"],
+                    "giant_fraction": row["giant_fraction"],
+                    "second_largest_ratio": row["second_largest_ratio"],
+                    "singleton_fraction": row["singleton_fraction"],
+                }
+            rows.append(row)
+        return rows
 
     def _candidate_rows(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows = []
