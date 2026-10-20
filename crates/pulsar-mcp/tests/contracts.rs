@@ -689,3 +689,80 @@ async fn task_capable_clients_get_a_task_handle_for_the_sweep() {
     assert!(payload["run_id"].as_str().unwrap().starts_with("run_"));
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn multi_imputation_config_validates_and_sweeps() {
+    let root = TempRoot::new("multi-imputation");
+    let csv_path = root.path().join("missing.csv");
+    std::fs::write(
+        &csv_path,
+        "a,b,c\n1.0,2.0,3.0\n,2.5,3.5\n1.5,,4.0\n2.0,3.0,\n2.5,3.5,4.5\n3.0,4.0,5.0\n",
+    )
+    .unwrap();
+
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[("path", json!(csv_path.display().to_string()))]),
+    )
+    .await;
+    let dataset_id = ingested["dataset_id"].clone();
+
+    let yaml = r#"
+version: 1
+run:
+  name: multi_imp
+preprocessing:
+  n_imputations: 3
+  impute:
+    a:
+      method: [fill_mean, fill_median]
+    b:
+      - {method: fill_mean, indicator: false}
+      - {method: fill_value, value: 0.0, indicator: true}
+    c:
+      method: sample_normal
+      seed: 7
+sweep:
+  projection:
+    method: jl
+    dimensions: [2]
+    seed: [42]
+  ball_mapper:
+    epsilon: [0.5, 1.0]
+"#;
+
+    let validated = ok(
+        &client,
+        &tools,
+        "validate_config",
+        args(&[
+            ("config_yaml", json!(yaml)),
+            ("dataset_id", dataset_id.clone()),
+        ]),
+    )
+    .await;
+    assert_eq!(validated["status"], "ok");
+    let norm = validated["normalized_config_yaml"].as_str().unwrap();
+    assert!(norm.contains("n_imputations: 3"), "{norm}");
+
+    let sweep = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(yaml)),
+            ("dataset_id", dataset_id),
+            ("detail", json!("summary")),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert_eq!(sweep["status"], "ok");
+    // 3 imputation variants * 1 dim * 1 seed * 2 epsilons = 6 ball maps.
+    assert_eq!(sweep["key_metrics"]["n_ball_maps"], 6);
+    client.cancel().await.unwrap();
+}

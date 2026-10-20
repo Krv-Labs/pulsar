@@ -21,12 +21,124 @@ pub struct PulsarConfig {
     pub n_reps: u32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Preprocessing {
     pub drop_columns: Vec<String>,
     pub impute: IndexMap<String, Impute>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub impute_candidates: IndexMap<String, Vec<Impute>>,
     pub encode: IndexMap<String, Encode>,
     pub missing_indicator_groups: IndexMap<String, Vec<String>>,
+    pub n_imputations: u32,
+}
+
+impl Default for Preprocessing {
+    fn default() -> Self {
+        Self {
+            drop_columns: Vec::new(),
+            impute: IndexMap::new(),
+            impute_candidates: IndexMap::new(),
+            encode: IndexMap::new(),
+            missing_indicator_groups: IndexMap::new(),
+            n_imputations: 1,
+        }
+    }
+}
+
+impl Preprocessing {
+    /// Candidate specs for `col`, falling back to `impute[col]` when
+    /// `impute_candidates` has no entry.
+    pub fn candidates_for(&self, col: &str) -> Vec<Impute> {
+        if let Some(cands) = self.impute_candidates.get(col) {
+            if !cands.is_empty() {
+                return cands.clone();
+            }
+        }
+        self.impute.get(col).cloned().into_iter().collect()
+    }
+}
+
+impl PulsarConfig {
+    /// Expand multi-imputation candidates and `n_imputations` into concrete
+    /// single-imputation variant configs, deduplicating identical deterministic
+    /// combinations and auto-incrementing seeds for repeated stochastic draws.
+    pub fn preprocessing_variants(&self) -> Vec<PulsarConfig> {
+        let pre = &self.preprocessing;
+        let candidates_map: IndexMap<String, Vec<Impute>> = pre
+            .impute
+            .keys()
+            .map(|col| (col.clone(), pre.candidates_for(col)))
+            .collect();
+        let max_candidates = candidates_map.values().map(Vec::len).max().unwrap_or(1);
+        let target_variants = (pre.n_imputations.max(1) as usize).max(max_candidates);
+        if target_variants <= 1 || candidates_map.is_empty() {
+            return vec![self.clone()];
+        }
+
+        let mut used_stochastic_seeds: std::collections::HashMap<
+            (String, ImputeMethod, bool),
+            std::collections::HashSet<u64>,
+        > = std::collections::HashMap::new();
+        let mut seen_signatures: Vec<Vec<(String, Impute)>> = Vec::new();
+        let mut variants = Vec::new();
+
+        for k in 0..target_variants {
+            let mut variant_impute = IndexMap::new();
+            let mut variant_candidates = IndexMap::new();
+            let mut sig_items = Vec::with_capacity(candidates_map.len());
+
+            for (col, specs) in &candidates_map {
+                let mut chosen = if k < specs.len() {
+                    specs[k].clone()
+                } else {
+                    let stochastic: Vec<&Impute> =
+                        specs.iter().filter(|s| s.method.is_stochastic()).collect();
+                    if !stochastic.is_empty() {
+                        let offset = k - specs.len();
+                        stochastic[offset % stochastic.len()].clone()
+                    } else {
+                        specs[k % specs.len()].clone()
+                    }
+                };
+
+                if chosen.method.is_stochastic() {
+                    let key = (col.clone(), chosen.method, chosen.indicator);
+                    let seen_seeds = used_stochastic_seeds.entry(key).or_default();
+                    let mut seed = chosen.seed;
+                    while seen_seeds.contains(&seed) {
+                        seed += 1;
+                    }
+                    seen_seeds.insert(seed);
+                    chosen.seed = seed;
+                }
+
+                let mut sig_spec = chosen.clone();
+                if !sig_spec.method.is_stochastic() {
+                    sig_spec.seed = 0;
+                }
+                sig_items.push((col.clone(), sig_spec));
+                variant_candidates.insert(col.clone(), vec![chosen.clone()]);
+                variant_impute.insert(col.clone(), chosen);
+            }
+
+            if seen_signatures.contains(&sig_items) {
+                continue;
+            }
+            seen_signatures.push(sig_items);
+
+            let mut variant = self.clone();
+            variant.preprocessing.impute = variant_impute;
+            variant.preprocessing.impute_candidates = variant_candidates;
+            variant.preprocessing.n_imputations = 1;
+            variants.push(variant);
+        }
+
+        if variants.is_empty() {
+            vec![self.clone()]
+        } else {
+            variants
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -89,7 +201,7 @@ impl Serialize for Threshold {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ImputeMethod {
     SampleNormal,
@@ -110,6 +222,10 @@ impl ImputeMethod {
         "fill_mode",
         "fill_value",
     ];
+
+    pub fn is_stochastic(self) -> bool {
+        matches!(self, Self::SampleNormal | Self::SampleCategorical)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
