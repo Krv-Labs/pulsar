@@ -43,13 +43,16 @@ pub fn submit(state: &ServerState, req: &SweepRequest) -> Result<JobHandle, Tool
         .map_err(|e| ToolError::from_store("run_topological_sweep", e))
 }
 
-/// Run the fit for a queued job, persist the run and cache the model.
+/// Run the fit for a queued job and cache the live model.
+///
+/// Returns `(live, record, artifacts)` so the caller can build the tool
+/// response payload before marking the [`JobHandle`] complete.
 pub async fn run_sweep(
     state: Arc<ServerState>,
     req: SweepRequest,
-    job: JobHandle,
+    job: &JobHandle,
     progress: Option<ProgressTarget>,
-) -> Result<Arc<LiveRun>, ToolError> {
+) -> Result<(Arc<LiveRun>, RunRecord, RunArtifacts), ToolError> {
     const TOOL: &str = "run_topological_sweep";
     job.start().map_err(|e| ToolError::from_store(TOOL, e))?;
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, f64)>();
@@ -132,8 +135,6 @@ pub async fn run_sweep(
         data_path_text.as_deref(),
     );
     let artifacts = RunArtifacts::from_fitted(&fitted);
-    job.complete(&record, &artifacts)
-        .map_err(|e| ToolError::from_store(TOOL, e))?;
 
     let live = Arc::new(LiveRun {
         run_id: run_id.clone(),
@@ -151,5 +152,5 @@ pub async fn run_sweep(
             session.latest_dataset_id = Some(ds.clone());
         }
     }
-    Ok(live)
+    Ok((live, record, artifacts))
 }
