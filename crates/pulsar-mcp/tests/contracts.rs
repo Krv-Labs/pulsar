@@ -566,6 +566,7 @@ async fn async_sweeps_are_polled_through_the_job_model_and_survive_a_new_client(
         )
         .await;
         assert_eq!(waited["status"], "complete");
+        assert_eq!(waited["response_available"], true);
         assert_eq!(waited["sweep"]["run_id"], run_id);
         assert_eq!(waited["job"]["state"], "complete");
         assert_eq!(waited["job"]["progress"], 1.0);

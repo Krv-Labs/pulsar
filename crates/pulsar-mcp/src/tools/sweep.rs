@@ -423,20 +423,22 @@ async fn execute(
     } = prepared;
     let projection_cached = projection_cache_status["status"] == "hit";
     let cfg_for_save = save_config.then(|| request.cfg.clone());
-    let live = run_sweep(state.clone(), request, job, progress).await?;
+    let (live, record, artifacts) = run_sweep(state.clone(), request, &job, progress).await?;
 
     let saved_path = match cfg_for_save {
-        Some(cfg) => Some(save_config_file(&cfg, live.data_path.as_deref())?),
+        Some(cfg) => match save_config_file(&cfg, live.data_path.as_deref()) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                let _ = job.fail("CONFIG_SAVE_FAILED", "could not save config file");
+                return Err(err);
+            }
+        },
         None => None,
     };
-    let record = state
-        .store
-        .get_run(&live.run_id)
-        .map_err(|e| ToolError::from_store(SWEEP, e))?;
     let sweep_count = state
         .store
         .list_runs(record.dataset_id.as_ref())
-        .map(|l| l.runs.len())
+        .map(|l| l.runs.len() + 1)
         .unwrap_or(1);
     let response = build_response(
         &live,
@@ -449,6 +451,8 @@ async fn execute(
         saved_path.as_deref(),
         sweep_count,
     );
+    job.complete(&record, &artifacts)
+        .map_err(|e| ToolError::from_store(SWEEP, e))?;
     state
         .store
         .write_run_json(&live.run_id, RESPONSE_BLOB, &response)
@@ -852,6 +856,12 @@ pub async fn wait_job(state: &ServerState, p: WaitParams) -> Result<CallToolResu
         let (payload, job_state) = job_payload(state, &run_id)?;
         match job_state {
             JobState::Complete => {
+                if !payload["response_available"].as_bool().unwrap_or(false)
+                    && Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
                 let text = payload
                     .get("sweep")
                     .map(markdown::sweep)
