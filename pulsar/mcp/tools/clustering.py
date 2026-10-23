@@ -758,7 +758,13 @@ async def generate_cluster_dossier(
                 "Use targeted evidence tools for routine loops; detail='full' is the "
                 "lossless audit payload."
             )
-            text = header_note + dossier_to_markdown(dossier)
+            text = header_note + dossier_to_markdown(
+                dossier,
+                max_clusters=None if detail == "full" else max_clusters,
+                feature_preview_limit=(
+                    None if detail == "full" else feature_preview_limit
+                ),
+            )
         payload["run_id"] = resolved.run_id
         payload["clusters_run_id"] = session.clusters_run_id
         payload["construction_threshold"] = construction_threshold

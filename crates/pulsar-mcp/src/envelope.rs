@@ -177,7 +177,14 @@ impl ToolError {
 /// A successful result: `text` is the human view (defaults to the pretty
 /// JSON of `payload`); `payload` is the structured content.
 pub fn ok_result(payload: Value, text: Option<String>) -> CallToolResult {
-    let text = text.unwrap_or_else(|| serde_json::to_string_pretty(&payload).unwrap_or_default());
+    let text = text.unwrap_or_else(|| {
+        let pretty = serde_json::to_string_pretty(&payload).unwrap_or_default();
+        if pretty.len() > 20_000 {
+            serde_json::to_string(&payload).unwrap_or(pretty)
+        } else {
+            pretty
+        }
+    });
     let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
     result.structured_content = Some(payload);
     result

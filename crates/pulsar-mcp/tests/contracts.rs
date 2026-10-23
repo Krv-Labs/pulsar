@@ -409,6 +409,7 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
         args(&[
             ("detail", json!("full")),
             ("threshold_candidate_policy", json!("detail_seeking")),
+            ("response_format", json!("json")),
         ]),
     )
     .await;
@@ -416,6 +417,10 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
     assert_eq!(
         curve_full["thresholds"].as_array().unwrap().len(),
         curve_full["component_counts"].as_array().unwrap().len()
+    );
+    assert_eq!(
+        curve_full["threshold_profiles"].as_array().unwrap().len(),
+        curve_full["curve_point_count"].as_u64().unwrap() as usize
     );
 
     for detail in ["summary", "nodes", "edges", "full_nodes", "full"] {

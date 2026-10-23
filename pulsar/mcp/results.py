@@ -17,6 +17,8 @@ def mcp_result(payload: dict[str, Any], *, text: str | None = None) -> ToolResul
     """
     if text is None:
         text = json.dumps(payload, indent=2)
+        if len(text) > 20_000:
+            text = json.dumps(payload, separators=(",", ":"))
     return ToolResult(
         content=[TextContent(type="text", text=text)],
         structured_content=payload,

@@ -2489,3 +2489,67 @@ def test_run_topological_sweep_reports_projection_cache_hit_on_repeat(tmp_path):
     }
     assert second["pca_cached"] is second["projection_cached"]
     assert second["pca_cache_status"] == second["projection_cache_status"]
+
+
+def test_curve_full_and_dossier_standard_stay_within_response_budget(tmp_path):
+    """Regression test for #102 and #103: curve detail='full' and dossier detail='standard' stay < 100 KB."""
+    from pulsar.mcp.server import DEFAULT_MAX_RESPONSE_BYTES, _result_size_bytes
+
+    _sessions.clear()
+    rng = np.random.default_rng(7)
+    n_rows = 240
+    df = pd.DataFrame(
+        {
+            "f1": rng.normal(size=n_rows),
+            "f2": rng.normal(size=n_rows),
+            "f3": rng.normal(size=n_rows),
+            "f4": rng.normal(size=n_rows),
+            "cat_a": [f"group_{i % 20}" for i in range(n_rows)],
+            "cat_b": [f"topic_{i % 15}" for i in range(n_rows)],
+            "notes": [f"sample row description text {i} " * 4 for i in range(n_rows)],
+        }
+    )
+    csv_path = tmp_path / "fragmented.csv"
+    df.to_csv(csv_path, index=False)
+
+    dataset = payload_of(asyncio.run(ingest_dataset(str(csv_path))))
+    config_yaml = _extract_config_yaml(
+        asyncio.run(create_config(dataset["dataset_id"], "budget_check"))
+    )
+    asyncio.run(
+        run_topological_sweep(
+            config_yaml=config_yaml,
+            dataset_id=dataset["dataset_id"],
+            response_format="json",
+        )
+    )
+
+    curve_json = asyncio.run(
+        get_threshold_stability_curve(detail="full", response_format="json")
+    )
+    assert not curve_json.is_error
+    assert _result_size_bytes(curve_json) < DEFAULT_MAX_RESPONSE_BYTES
+    curve_payload = payload_of(curve_json)
+    assert (
+        len(curve_payload["threshold_profiles"]) == curve_payload["curve_point_count"]
+    )
+
+    dossier_std = asyncio.run(
+        generate_cluster_dossier(
+            method="components",
+            detail="standard",
+            max_clusters=5,
+            response_format="markdown",
+        )
+    )
+    assert not dossier_std.is_error
+    assert _result_size_bytes(dossier_std) < DEFAULT_MAX_RESPONSE_BYTES
+    dossier_payload = payload_of(dossier_std)
+    assert len(dossier_payload["clusters"]) <= 5
+    assert "signal_matrix_summary" in dossier_payload
+    assert "signal_matrix" not in dossier_payload
+    for cluster in dossier_payload["clusters"]:
+        assert "numeric_tier_counts" in cluster
+        assert "numeric_tiers" not in cluster
+    md_text = text_of(dossier_std)
+    assert md_text.count("\n### ") <= 5
