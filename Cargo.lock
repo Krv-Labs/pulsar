@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-analysis"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "kodama",
  "nalgebra",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "indicatif",
@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-config"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "indexmap",
  "schemars",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ahash",
  "kiddo",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-data"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "csv",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ndarray",
  "pulsar-analysis",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-parity"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ndarray",
  "pulsar-analysis",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "pulsar-pipeline"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ndarray",
  "pulsar-config",
@@ -1458,14 +1458,14 @@ dependencies = [
 
 [[package]]
 name = "pulsar-report"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "pulsar-analysis",
 ]
 
 [[package]]
 name = "pulsar-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "pulsar-config",
@@ -1969,7 +1969,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "thema-pulsar"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "numpy",
  "pulsar-core",
