@@ -25,14 +25,16 @@ pub fn projection_fingerprint(
     let mut drop_columns = cfg.preprocessing.drop_columns.clone();
     drop_columns.sort();
     let pre = &cfg.preprocessing;
-    let impute: BTreeMap<&String, Value> = pre
-        .impute
+    let impute_cols = pre.impute_columns();
+    let impute: BTreeMap<&String, Value> = impute_cols
         .iter()
-        .map(|(c, s)| (c, serde_json::to_value(s).unwrap_or(Value::Null)))
+        .filter_map(|&c| {
+            let primary = pre.candidates_for(c).into_iter().next()?;
+            Some((c, serde_json::to_value(primary).unwrap_or(Value::Null)))
+        })
         .collect();
-    let impute_candidates: BTreeMap<&String, Value> = pre
-        .impute
-        .keys()
+    let impute_candidates: BTreeMap<&String, Value> = impute_cols
+        .into_iter()
         .map(|c| {
             let cands = pre.candidates_for(c);
             (c, serde_json::to_value(&cands).unwrap_or(Value::Null))

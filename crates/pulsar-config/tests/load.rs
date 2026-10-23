@@ -439,6 +439,36 @@ preprocessing:
 
     // Lossless YAML round-trip preserves candidates and n_imputations.
     assert_eq!(from_yaml_str(&to_yaml(&cfg)).unwrap(), cfg);
+
+    // Programmatically constructed config with an explicit singleton candidate
+    // differing from `impute[col]` treats `impute_candidates` as authoritative.
+    let mut manual = from_yaml_str("preprocessing: {n_imputations: 3}").unwrap();
+    manual.preprocessing.impute.insert(
+        "x".into(),
+        pulsar_config::Impute {
+            method: ImputeMethod::FillMean,
+            seed: 42,
+            value: None,
+            indicator: true,
+        },
+    );
+    manual.preprocessing.impute_candidates.insert(
+        "x".into(),
+        vec![pulsar_config::Impute {
+            method: ImputeMethod::SampleNormal,
+            seed: 7,
+            value: None,
+            indicator: true,
+        }],
+    );
+    let manual_variants = manual.preprocessing_variants();
+    let seeds: Vec<u64> = manual_variants
+        .iter()
+        .map(|v| v.preprocessing.impute["x"].seed)
+        .collect();
+    assert_eq!(seeds, vec![7, 8, 9]);
+    let reloaded = from_yaml_str(&to_yaml(&manual)).unwrap();
+    assert_eq!(reloaded.preprocessing_variants(), manual_variants);
 }
 
 #[test]
@@ -456,12 +486,32 @@ preprocessing:
       - {method: fill_value}
     e:
       - {method: fill_mean, sed: 1}
+    f:
+      method: {values: [fill_mean], extra: 1}
+    g:
+      method: fill_mean
+      indicator: {values: [true], extra: 1}
+    h:
+      method: sample_normal
+      seed: {range: {min: 1, max: 3, steps: 2, step: 2}}
 "#,
     );
     assert_eq!(
         codes(&err),
         vec![
             ("/preprocessing/impute/e/0/sed", ErrorCode::UnknownKey),
+            (
+                "/preprocessing/impute/f/method/extra",
+                ErrorCode::UnknownKey
+            ),
+            (
+                "/preprocessing/impute/g/indicator/extra",
+                ErrorCode::UnknownKey
+            ),
+            (
+                "/preprocessing/impute/h/seed/range/step",
+                ErrorCode::UnknownKey
+            ),
             ("/preprocessing/n_imputations", ErrorCode::OutOfRange),
             ("/preprocessing/impute/a", ErrorCode::EmptyGrid),
             ("/preprocessing/impute/b/method", ErrorCode::EmptyGrid),

@@ -219,10 +219,20 @@ pub fn fit(
             tracker.complete("scale", None);
             let mut all_embeddings = projection_grid(&x_scaled, &variants[0].projection)?;
             drop(x_scaled);
-            for variant_cfg in &variants[1..] {
+            tracker.update(
+                "projection",
+                1.0 / n_variants as f64,
+                Some(&format!("projection variant 1/{n_variants}")),
+            );
+            for (idx, variant_cfg) in variants[1..].iter().enumerate() {
                 let pre_k = preprocess(table, &variant_cfg.preprocessing, None, None)?;
                 let (x_k_scaled, _) = StandardScalerInner::fit_transform(&pre_k.matrix);
                 all_embeddings.extend(projection_grid(&x_k_scaled, &variant_cfg.projection)?);
+                tracker.update(
+                    "projection",
+                    (idx + 2) as f64 / n_variants as f64,
+                    Some(&format!("projection variant {}/{n_variants}", idx + 2)),
+                );
             }
             all_embeddings
         }

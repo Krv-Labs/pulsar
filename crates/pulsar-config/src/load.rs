@@ -258,6 +258,26 @@ fn check_keys(
                 .collect();
             if let [only] = matching.as_slice() {
                 check_keys(value, only, root, at, errors);
+            } else if let Value::Object(obj) = value {
+                let matching_key: Vec<&Value> = matching
+                    .into_iter()
+                    .filter(|b| {
+                        b.get("properties")
+                            .and_then(Value::as_object)
+                            .is_some_and(|props| obj.keys().any(|k| props.contains_key(k)))
+                    })
+                    .collect();
+                if let [only] = matching_key.as_slice() {
+                    for (key, child) in obj.iter_mut() {
+                        if let Some(child_schema) = only
+                            .get("properties")
+                            .and_then(Value::as_object)
+                            .and_then(|p| p.get(key))
+                        {
+                            check_keys(child, child_schema, root, &at.key(key), errors);
+                        }
+                    }
+                }
             }
         }
         return;
@@ -356,6 +376,12 @@ fn type_error(err: serde_path_to_error::Error<serde_json::Error>) -> ConfigError
                  {values: [...]}, {range: {min, max, steps}}, or \
                  {distribution: {type: uniform, min, max}}."
                 .to_string(),
+            "method" => "Expected an imputation method string, a list of methods, or \
+                 {values: [...]}."
+                .to_string(),
+            "indicator" => {
+                "Expected a boolean, a list of booleans, or {values: [...]}.".to_string()
+            }
             "construction_threshold" => {
                 "Expected \"auto\" or a number between 0.0 and 1.0.".to_string()
             }
@@ -679,9 +705,9 @@ fn check_group_flag_collisions(pre: &Preprocessing, at: &Pointer, errors: &mut V
         .collect();
     let dropped: std::collections::HashSet<&str> =
         pre.drop_columns.iter().map(String::as_str).collect();
-    let per_column_flags: std::collections::HashSet<String> = pre
-        .impute
-        .keys()
+    let impute_cols = pre.impute_columns();
+    let per_column_flags: std::collections::HashSet<String> = impute_cols
+        .iter()
         .filter(|col| {
             !grouped.contains(col.as_str())
                 && !dropped.contains(col.as_str())
@@ -689,9 +715,8 @@ fn check_group_flag_collisions(pre: &Preprocessing, at: &Pointer, errors: &mut V
         })
         .map(|col| format!("{col}{MISSING_SUFFIX}"))
         .collect();
-    let configured: std::collections::HashSet<&str> = pre
-        .impute
-        .keys()
+    let configured: std::collections::HashSet<&str> = impute_cols
+        .into_iter()
         .chain(pre.encode.keys())
         .map(String::as_str)
         .chain(dropped.iter().copied())

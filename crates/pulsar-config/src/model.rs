@@ -56,6 +56,18 @@ impl Preprocessing {
         }
         self.impute.get(col).cloned().into_iter().collect()
     }
+
+    /// All columns with an imputation policy (`impute` union non-empty
+    /// `impute_candidates`), preserving insertion order.
+    pub fn impute_columns(&self) -> Vec<&String> {
+        let mut cols: Vec<&String> = self.impute.keys().collect();
+        for (col, cands) in &self.impute_candidates {
+            if !cands.is_empty() && !self.impute.contains_key(col) {
+                cols.push(col);
+            }
+        }
+        cols
+    }
 }
 
 impl PulsarConfig {
@@ -65,13 +77,13 @@ impl PulsarConfig {
     pub fn preprocessing_variants(&self) -> Vec<PulsarConfig> {
         let pre = &self.preprocessing;
         let candidates_map: IndexMap<String, Vec<Impute>> = pre
-            .impute
-            .keys()
+            .impute_columns()
+            .into_iter()
             .map(|col| (col.clone(), pre.candidates_for(col)))
             .collect();
         let max_candidates = candidates_map.values().map(Vec::len).max().unwrap_or(1);
         let target_variants = (pre.n_imputations.max(1) as usize).max(max_candidates);
-        if target_variants <= 1 || candidates_map.is_empty() {
+        if candidates_map.is_empty() {
             return vec![self.clone()];
         }
 

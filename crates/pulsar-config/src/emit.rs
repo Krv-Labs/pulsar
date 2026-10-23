@@ -48,16 +48,17 @@ pub fn to_file(cfg: &PulsarConfig) -> ConfigFile {
                 .collect(),
             n_imputations: (pre.n_imputations > 1).then_some(u64::from(pre.n_imputations)),
             impute: pre
-                .impute
-                .iter()
-                .map(|(col, spec)| {
+                .impute_columns()
+                .into_iter()
+                .filter_map(|col| {
                     let cands = pre.candidates_for(col);
+                    let first = cands.first()?;
                     let entry = if cands.len() > 1 {
                         ImputeEntryFile::Candidates(cands.iter().map(impute_to_file).collect())
                     } else {
-                        ImputeEntryFile::Single(impute_to_file(spec))
+                        ImputeEntryFile::Single(impute_to_file(first))
                     };
-                    (col.clone(), entry)
+                    Some((col.clone(), entry))
                 })
                 .collect(),
             encode: pre
