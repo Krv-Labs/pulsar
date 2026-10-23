@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-23
+
 ### Added
 
+- Rust multi-imputation sweep parity (#107): `preprocessing.n_imputations` and per-column impute candidates expand into the cosmic-graph sweep, with the same deduplicated realizations as the Python config.
 - **Pure-Rust product crates (`pulsar-config`, `pulsar-pipeline`, `pulsar-store`, `pulsar-analysis`, `pulsar-mcp`):**
   - `pulsar-config` (#61): `params.yaml` loader, JSON Schema generation, structured validation errors, and v0.5 preprocessing fields (`fill_value`, `indicator: false`, `missing_indicator_groups`).
   - `pulsar-pipeline` (#63): `ThemaRS` `fit` and `fit_multi` pipeline in Rust with CSV/Parquet ingestion and v0.5 preprocessing parity.

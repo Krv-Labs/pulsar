@@ -73,7 +73,16 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          # windows-2025 no longer preinstalls 3.10/3.11/3.13 in the toolcache.
+          # maturin -i python3.10 then falls back to bundled sysconfig and
+          # refuses to build without a real interpreter.
+          # Last entry is the one left on PATH. The smoke step installs the
+          # cp312 wheel with `python`, so 3.12 must stay last.
+          python-version: |
+            3.10
+            3.11
+            3.13
+            3.12
           architecture: x64
 
       - name: Setup Rust
