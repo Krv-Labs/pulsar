@@ -25,10 +25,20 @@ pub fn projection_fingerprint(
     let mut drop_columns = cfg.preprocessing.drop_columns.clone();
     drop_columns.sort();
     let pre = &cfg.preprocessing;
-    let impute: BTreeMap<&String, Value> = pre
-        .impute
+    let impute_cols = pre.impute_columns();
+    let impute: BTreeMap<&String, Value> = impute_cols
         .iter()
-        .map(|(c, s)| (c, serde_json::to_value(s).unwrap_or(Value::Null)))
+        .filter_map(|&c| {
+            let primary = pre.candidates_for(c).into_iter().next()?;
+            Some((c, serde_json::to_value(primary).unwrap_or(Value::Null)))
+        })
+        .collect();
+    let impute_candidates: BTreeMap<&String, Value> = impute_cols
+        .into_iter()
+        .map(|c| {
+            let cands = pre.candidates_for(c);
+            (c, serde_json::to_value(&cands).unwrap_or(Value::Null))
+        })
         .collect();
     let encode: BTreeMap<&String, Value> = pre
         .encode
@@ -50,10 +60,16 @@ pub fn projection_fingerprint(
     payload.insert("drop_columns", json!(drop_columns));
     payload.insert("encode", json!(encode));
     payload.insert("impute", json!(impute));
+    if !impute_candidates.is_empty() {
+        payload.insert("impute_candidates", json!(impute_candidates));
+    }
     payload.insert("input_schema", schema);
     payload.insert("method", json!(cfg.projection.method));
     payload.insert("missing_indicator_groups", json!(groups));
     payload.insert("mtime", json!(mtime));
+    if pre.n_imputations > 1 {
+        payload.insert("n_imputations", json!(pre.n_imputations));
+    }
     payload.insert("n_rows", json!(n_rows));
     payload.insert("seeds", json!(cfg.projection.seeds));
     let text = serde_json::to_string(&payload).expect("payload is plain JSON");
@@ -84,5 +100,26 @@ mod tests {
         assert_eq!(fa, projection_fingerprint(&b, 10, None));
         assert_ne!(fa, projection_fingerprint(&c, 10, None));
         assert_ne!(fa, projection_fingerprint(&a, 11, None));
+    }
+
+    #[test]
+    fn distinguishes_multi_imputation() {
+        let base =
+            pulsar_config::from_yaml_str("preprocessing: {impute: {x: {method: sample_normal}}}")
+                .unwrap();
+        let multi_n = pulsar_config::from_yaml_str(
+            "preprocessing: {n_imputations: 3, impute: {x: {method: sample_normal}}}",
+        )
+        .unwrap();
+        let multi_cand = pulsar_config::from_yaml_str(
+            "preprocessing: {impute: {x: {method: [fill_mean, fill_median]}}}",
+        )
+        .unwrap();
+        let fp_base = projection_fingerprint(&base, 10, None);
+        let fp_multi_n = projection_fingerprint(&multi_n, 10, None);
+        let fp_multi_cand = projection_fingerprint(&multi_cand, 10, None);
+        assert_ne!(fp_base, fp_multi_n);
+        assert_ne!(fp_base, fp_multi_cand);
+        assert_ne!(fp_multi_n, fp_multi_cand);
     }
 }

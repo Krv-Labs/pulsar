@@ -4,11 +4,20 @@ use serde_json::Number;
 
 use crate::expand::linspace;
 use crate::file::{
-    AutoLiteral, BallMapperFile, ColumnName, ConfigFile, CosmicGraphFile, EncodeFile, ImputeFile,
-    OutputFile, ParamSpec, PreprocessingFile, ProjectionFile, RangeSpec, RunFile, SweepFile,
-    ThresholdFile,
+    AutoLiteral, BallMapperFile, ColumnName, ConfigFile, CosmicGraphFile, EncodeFile,
+    ImputeEntryFile, ImputeFile, IndicatorSpec, MethodSpec, OutputFile, ParamSpec,
+    PreprocessingFile, ProjectionFile, RangeSpec, RunFile, SweepFile, ThresholdFile,
 };
-use crate::model::{PulsarConfig, Threshold};
+use crate::model::{Impute, PulsarConfig, Threshold};
+
+fn impute_to_file(spec: &Impute) -> ImputeFile {
+    ImputeFile {
+        method: MethodSpec::Single(spec.method),
+        seed: Some(ParamSpec::Scalar(spec.seed.into())),
+        value: spec.value.clone(),
+        indicator: (!spec.indicator).then_some(IndicatorSpec::Single(false)),
+    }
+}
 
 /// Serialize a resolved config back to the file format, every field explicit.
 pub fn to_file(cfg: &PulsarConfig) -> ConfigFile {
@@ -37,19 +46,19 @@ pub fn to_file(cfg: &PulsarConfig) -> ConfigFile {
                     )
                 })
                 .collect(),
+            n_imputations: (pre.n_imputations > 1).then_some(u64::from(pre.n_imputations)),
             impute: pre
-                .impute
-                .iter()
-                .map(|(col, spec)| {
-                    (
-                        col.clone(),
-                        ImputeFile {
-                            method: spec.method,
-                            seed: Some(spec.seed),
-                            value: spec.value.clone(),
-                            indicator: (!spec.indicator).then_some(false),
-                        },
-                    )
+                .impute_columns()
+                .into_iter()
+                .filter_map(|col| {
+                    let cands = pre.candidates_for(col);
+                    let first = cands.first()?;
+                    let entry = if cands.len() > 1 {
+                        ImputeEntryFile::Candidates(cands.iter().map(impute_to_file).collect())
+                    } else {
+                        ImputeEntryFile::Single(impute_to_file(first))
+                    };
+                    Some((col.clone(), entry))
                 })
                 .collect(),
             encode: pre

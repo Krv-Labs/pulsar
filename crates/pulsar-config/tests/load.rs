@@ -381,3 +381,161 @@ fn errors_serialize_as_structured_json() {
     assert_eq!(v[0]["path"], "/cosmic_graph/sparsfy");
     assert!(v[0]["allowed"].is_array());
 }
+
+#[test]
+fn multi_imputation_forms_and_variants() {
+    let cfg = from_yaml_str(
+        r#"
+preprocessing:
+  n_imputations: 3
+  impute:
+    a: {method: [fill_mean, fill_value], value: 0}
+    b:
+      - {method: fill_mean, indicator: false}
+      - {method: fill_median, indicator: true}
+    c: {method: sample_normal, seed: 10}
+"#,
+    )
+    .unwrap();
+    let pre = &cfg.preprocessing;
+    assert_eq!(pre.n_imputations, 3);
+    assert_eq!(pre.candidates_for("a").len(), 2);
+    assert_eq!(pre.candidates_for("a")[0].value, None);
+    assert_eq!(
+        pre.candidates_for("a")[1].value,
+        Some(FillValue::Integer(0))
+    );
+    assert_eq!(pre.candidates_for("b").len(), 2);
+    assert_eq!(pre.candidates_for("c").len(), 1);
+    assert_eq!(pre.impute["a"].method, ImputeMethod::FillMean);
+    assert_eq!(pre.impute["b"].method, ImputeMethod::FillMean);
+
+    // max(n_imputations=3, max_candidates=2) = 3 variants (c is stochastic, so all 3 are distinct).
+    let variants = cfg.preprocessing_variants();
+    assert_eq!(variants.len(), 3);
+    // In variant 0..3, c's seed increments 10, 11, 12 while a and b cycle through candidates.
+    assert_eq!(variants[0].preprocessing.impute["c"].seed, 10);
+    assert_eq!(variants[1].preprocessing.impute["c"].seed, 11);
+    assert_eq!(variants[2].preprocessing.impute["c"].seed, 12);
+    assert!(variants.iter().all(|v| {
+        v.preprocessing.n_imputations == 1
+            && v.preprocessing
+                .impute_candidates
+                .values()
+                .all(|c| c.len() == 1)
+    }));
+
+    // Deterministic-only combos do not multiply by n_imputations.
+    let det_cfg = from_yaml_str(
+        r#"
+preprocessing:
+  n_imputations: 5
+  impute:
+    a: {method: [fill_mean, fill_median]}
+"#,
+    )
+    .unwrap();
+    assert_eq!(det_cfg.preprocessing_variants().len(), 2);
+
+    // Lossless YAML round-trip preserves candidates and n_imputations.
+    assert_eq!(from_yaml_str(&to_yaml(&cfg)).unwrap(), cfg);
+
+    // Programmatically constructed config with an explicit singleton candidate
+    // differing from `impute[col]` treats `impute_candidates` as authoritative.
+    let mut manual = from_yaml_str("preprocessing: {n_imputations: 3}").unwrap();
+    manual.preprocessing.impute.insert(
+        "x".into(),
+        pulsar_config::Impute {
+            method: ImputeMethod::FillMean,
+            seed: 42,
+            value: None,
+            indicator: true,
+        },
+    );
+    manual.preprocessing.impute_candidates.insert(
+        "x".into(),
+        vec![pulsar_config::Impute {
+            method: ImputeMethod::SampleNormal,
+            seed: 7,
+            value: None,
+            indicator: true,
+        }],
+    );
+    let manual_variants = manual.preprocessing_variants();
+    let seeds: Vec<u64> = manual_variants
+        .iter()
+        .map(|v| v.preprocessing.impute["x"].seed)
+        .collect();
+    assert_eq!(seeds, vec![7, 8, 9]);
+    let reloaded = from_yaml_str(&to_yaml(&manual)).unwrap();
+    assert_eq!(reloaded.preprocessing_variants(), manual_variants);
+}
+
+#[test]
+fn multi_imputation_errors() {
+    let err = load_err(
+        r#"
+preprocessing:
+  n_imputations: 0
+  impute:
+    a: []
+    b: {method: []}
+    c: {method: [fill_mean, fill_median], value: 0}
+    d:
+      - {method: fill_mean}
+      - {method: fill_value}
+    e:
+      - {method: fill_mean, sed: 1}
+    f:
+      method: {values: [fill_mean], extra: 1}
+    g:
+      method: fill_mean
+      indicator: {values: [true], extra: 1}
+    h:
+      method: sample_normal
+      seed: {range: {min: 1, max: 3, steps: 2, step: 2}}
+"#,
+    );
+    assert_eq!(
+        codes(&err),
+        vec![
+            ("/preprocessing/impute/e/0/sed", ErrorCode::UnknownKey),
+            (
+                "/preprocessing/impute/f/method/extra",
+                ErrorCode::UnknownKey
+            ),
+            (
+                "/preprocessing/impute/g/indicator/extra",
+                ErrorCode::UnknownKey
+            ),
+            (
+                "/preprocessing/impute/h/seed/range/step",
+                ErrorCode::UnknownKey
+            ),
+            ("/preprocessing/n_imputations", ErrorCode::OutOfRange),
+            ("/preprocessing/impute/a", ErrorCode::EmptyGrid),
+            ("/preprocessing/impute/b/method", ErrorCode::EmptyGrid),
+            ("/preprocessing/impute/c/value", ErrorCode::InvalidValue),
+            ("/preprocessing/impute/d/1/value", ErrorCode::MissingField),
+        ]
+    );
+
+    // Group indicator collision checked across all candidates, not just primary.
+    let err = load_err(
+        r#"
+preprocessing:
+  missing_indicator_groups: {g: [x]}
+  impute:
+    g:
+      - {method: fill_mean, indicator: false}
+      - {method: fill_median, indicator: true}
+"#,
+    );
+    assert_eq!(
+        codes(&err),
+        vec![(
+            "/preprocessing/missing_indicator_groups/g",
+            ErrorCode::NameCollision
+        )]
+    );
+}

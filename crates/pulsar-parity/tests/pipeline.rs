@@ -248,6 +248,68 @@ fn cached_embeddings_reproduce_the_fit() {
 }
 
 #[test]
+fn multi_imputation_fit_and_cache_reuse() {
+    let (cfg, table) = inputs("blobs");
+    let single_cfg = exact(cfg);
+    let single = fit_case(&single_cfg, &table);
+
+    // blobs has no NaNs, so FillMean and FillMedian produce identical matrices
+    // while exercising two distinct imputation variants in `fit`.
+    let mut multi_cfg = single_cfg.clone();
+    multi_cfg.preprocessing.n_imputations = 2;
+    multi_cfg.preprocessing.impute_candidates.insert(
+        table.names[0].clone(),
+        vec![
+            pulsar_config::Impute {
+                method: pulsar_config::ImputeMethod::FillMean,
+                seed: 42,
+                value: None,
+                indicator: false,
+            },
+            pulsar_config::Impute {
+                method: pulsar_config::ImputeMethod::FillMedian,
+                seed: 42,
+                value: None,
+                indicator: false,
+            },
+        ],
+    );
+    let mut fractions: Vec<f64> = Vec::new();
+    let mut stages: Vec<String> = Vec::new();
+    let mut cb = |stage: &str, f: f64| {
+        stages.push(stage.to_string());
+        fractions.push(f);
+    };
+    let multi = fit(&multi_cfg, &table, FitOptions::default(), Some(&mut cb))
+        .expect("multi-imputation fit");
+
+    assert_eq!(multi.embeddings.len(), 2 * single.embeddings.len());
+    assert_eq!(multi.ball_maps.len(), 2 * single.ball_maps.len());
+    assert_eq!(multi.graph, single.graph);
+    assert!(fractions.windows(2).all(|w| w[0] <= w[1]), "{fractions:?}");
+    assert!(
+        stages.iter().any(|s| s == "projection variant 1/2"),
+        "{stages:?}"
+    );
+    assert!(
+        stages.iter().any(|s| s == "projection variant 2/2"),
+        "{stages:?}"
+    );
+
+    let cached = fit(
+        &multi_cfg,
+        &table,
+        FitOptions {
+            precomputed_embeddings: Some(multi.embeddings.clone()),
+            ..FitOptions::default()
+        },
+        None,
+    )
+    .expect("fit with cached multi-imputation embeddings");
+    assert_eq!(cached.graph, multi.graph);
+}
+
+#[test]
 fn progress_is_monotonic_and_ends_at_one() {
     let (cfg, table) = inputs("blobs");
     let mut fractions: Vec<f64> = Vec::new();

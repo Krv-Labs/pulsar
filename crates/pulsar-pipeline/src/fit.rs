@@ -171,10 +171,12 @@ pub fn fit(
 ) -> Result<Fitted, PipelineError> {
     let batch_size = check_batch_size(opts.ballmap_batch_size)?;
     let use_cached = opts.precomputed_embeddings.is_some();
+    let variants = cfg.preprocessing_variants();
+    let n_variants = variants.len().max(1);
     let projection_count = opts
         .precomputed_embeddings
         .as_ref()
-        .map_or_else(|| grid_size(&cfg.projection), Vec::len);
+        .map_or_else(|| grid_size(&cfg.projection) * n_variants, Vec::len);
     let batch_count = batch_count(projection_count, batch_size);
     let n_eps = cfg.ball_mapper.epsilons.len().max(1) as f64;
     let stages = vec![
@@ -197,15 +199,13 @@ pub fn fit(
     let mut tracker = ProgressTracker::new(&stages, progress);
     tracker.complete("load", None);
 
-    let pre = preprocess(table, &cfg.preprocessing, None, None)?;
+    let pre = preprocess(table, &variants[0].preprocessing, None, None)?;
     tracker.complete("preprocess", None);
     let n = pre.matrix.nrows();
 
-    let (x_scaled, _) = StandardScalerInner::fit_transform(&pre.matrix);
-    tracker.complete("scale", None);
-
     let embeddings = match opts.precomputed_embeddings {
         Some(e) => {
+            tracker.complete("scale", None);
             if let Some(bad) = e.iter().find(|m| m.nrows() != n) {
                 return Err(PipelineError::EmbeddingRows {
                     got: bad.nrows(),
@@ -214,9 +214,29 @@ pub fn fit(
             }
             e
         }
-        None => projection_grid(&x_scaled, &cfg.projection)?,
+        None => {
+            let (x_scaled, _) = StandardScalerInner::fit_transform(&pre.matrix);
+            tracker.complete("scale", None);
+            let mut all_embeddings = projection_grid(&x_scaled, &variants[0].projection)?;
+            drop(x_scaled);
+            tracker.update(
+                "projection",
+                1.0 / n_variants as f64,
+                Some(&format!("projection variant 1/{n_variants}")),
+            );
+            for (idx, variant_cfg) in variants[1..].iter().enumerate() {
+                let pre_k = preprocess(table, &variant_cfg.preprocessing, None, None)?;
+                let (x_k_scaled, _) = StandardScalerInner::fit_transform(&pre_k.matrix);
+                all_embeddings.extend(projection_grid(&x_k_scaled, &variant_cfg.projection)?);
+                tracker.update(
+                    "projection",
+                    (idx + 2) as f64 / n_variants as f64,
+                    Some(&format!("projection variant {}/{n_variants}", idx + 2)),
+                );
+            }
+            all_embeddings
+        }
     };
-    drop(x_scaled);
     tracker.complete(
         "projection",
         if use_cached {

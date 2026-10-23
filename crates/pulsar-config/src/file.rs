@@ -59,15 +59,18 @@ pub struct PreprocessingFile {
     /// Columns removed before anything else.
     #[serde(default)]
     pub drop_columns: Vec<ColumnName>,
+    /// Number of imputation draws in the ensemble (>= 1). Default: 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_imputations: Option<u64>,
     /// Shared missingness markers: `{group: [columns]}` adds one
     /// `<group>_was_missing` column per group (1 where any listed column was
     /// blank) instead of one marker per column. A column may be in at most
     /// one group.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub missing_indicator_groups: IndexMap<String, Vec<ColumnName>>,
-    /// Per-column imputation, keyed by column name.
+    /// Per-column imputation (single spec or candidate list), keyed by column name.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub impute: IndexMap<String, ImputeFile>,
+    pub impute: IndexMap<String, ImputeEntryFile>,
     /// Per-column categorical encoding, keyed by column name.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub encode: IndexMap<String, EncodeFile>,
@@ -91,21 +94,161 @@ impl ColumnName {
     }
 }
 
+/// A per-column imputation specification: either a single mapping or a list of
+/// candidate mappings for multi-imputation ensembles.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ImputeEntryFile {
+    Single(ImputeFile),
+    Candidates(Vec<ImputeFile>),
+}
+
+impl<'de> Deserialize<'de> for ImputeEntryFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntryVisitor;
+        impl<'de> serde::de::Visitor<'de> for EntryVisitor {
+            type Value = ImputeEntryFile;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an imputation spec mapping or a list of candidate mappings")
+            }
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                ImputeFile::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(ImputeEntryFile::Single)
+            }
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                Vec::<ImputeFile>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(ImputeEntryFile::Candidates)
+            }
+        }
+        deserializer.deserialize_any(EntryVisitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImputeFile {
-    pub method: ImputeMethod,
-    /// RNG seed for the sampling methods. Default: 42.
+    pub method: MethodSpec,
+    /// RNG seed (or sweep of seeds) for the sampling methods. Default: 42.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
+    pub seed: Option<ParamSpec>,
     /// The constant used by `fill_value` (required there, rejected
     /// elsewhere). A finite number or a string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<FillValue>,
-    /// Add a `<column>_was_missing` marker column. Default: true. Ignored
-    /// for columns covered by `missing_indicator_groups`.
+    /// Add a `<column>_was_missing` marker column (or sweep `[false, true]`).
+    /// Default: true. Ignored for columns covered by `missing_indicator_groups`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indicator: Option<bool>,
+    pub indicator: Option<IndicatorSpec>,
+}
+
+/// An imputation method or list of candidate methods.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum MethodSpec {
+    Single(ImputeMethod),
+    List(Vec<ImputeMethod>),
+    Values { values: Vec<ImputeMethod> },
+}
+
+impl<'de> Deserialize<'de> for MethodSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ValuesHelper {
+            values: Vec<ImputeMethod>,
+        }
+        struct MethodVisitor;
+        impl<'de> serde::de::Visitor<'de> for MethodVisitor {
+            type Value = MethodSpec;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an imputation method string, a list of methods, or {values: [...]}")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                use serde::de::IntoDeserializer;
+                ImputeMethod::deserialize(v.into_deserializer()).map(MethodSpec::Single)
+            }
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                Vec::<ImputeMethod>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(MethodSpec::List)
+            }
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                ValuesHelper::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(|h| MethodSpec::Values { values: h.values })
+            }
+        }
+        deserializer.deserialize_any(MethodVisitor)
+    }
+}
+
+/// A boolean missingness indicator flag or sweep of candidate flags.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum IndicatorSpec {
+    Single(bool),
+    List(Vec<bool>),
+    Values { values: Vec<bool> },
+}
+
+impl<'de> Deserialize<'de> for IndicatorSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ValuesHelper {
+            values: Vec<bool>,
+        }
+        struct IndicatorVisitor;
+        impl<'de> serde::de::Visitor<'de> for IndicatorVisitor {
+            type Value = IndicatorSpec;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a boolean, a list of booleans, or {values: [...]}")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(IndicatorSpec::Single(v))
+            }
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                Vec::<bool>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(IndicatorSpec::List)
+            }
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                ValuesHelper::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(|h| IndicatorSpec::Values { values: h.values })
+            }
+        }
+        deserializer.deserialize_any(IndicatorVisitor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

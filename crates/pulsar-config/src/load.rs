@@ -17,8 +17,8 @@ use serde_json::{Map, Value};
 use crate::error::{ConfigError, ConfigErrors, ErrorCode, Pointer};
 use crate::expand::{expand_integers, expand_positive_floats};
 use crate::file::{
-    ColumnName, ConfigFile, CosmicGraphFile, ImputeFile, ParamSpec, PreprocessingFile, SweepFile,
-    ThresholdFile,
+    ColumnName, ConfigFile, CosmicGraphFile, ImputeEntryFile, ImputeFile, IndicatorSpec,
+    MethodSpec, ParamSpec, PreprocessingFile, SweepFile, ThresholdFile,
 };
 use crate::model::{
     BallMapper, Construction, CosmicGraph, Encode, FillValue, Impute, ImputeMethod, Preprocessing,
@@ -239,10 +239,46 @@ fn check_keys(
     {
         let non_null: Vec<&Value> = branches
             .iter()
+            .map(|b| resolve_ref(b, root))
             .filter(|b| b.get("type").and_then(Value::as_str) != Some("null"))
             .collect();
         if let [only] = non_null.as_slice() {
             check_keys(value, only, root, at, errors);
+            return;
+        }
+        let target_type = match value {
+            Value::Object(_) => Some("object"),
+            Value::Array(_) => Some("array"),
+            _ => None,
+        };
+        if let Some(t) = target_type {
+            let matching: Vec<&Value> = non_null
+                .into_iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some(t))
+                .collect();
+            if let [only] = matching.as_slice() {
+                check_keys(value, only, root, at, errors);
+            } else if let Value::Object(obj) = value {
+                let matching_key: Vec<&Value> = matching
+                    .into_iter()
+                    .filter(|b| {
+                        b.get("properties")
+                            .and_then(Value::as_object)
+                            .is_some_and(|props| obj.keys().any(|k| props.contains_key(k)))
+                    })
+                    .collect();
+                if let [only] = matching_key.as_slice() {
+                    for (key, child) in obj.iter_mut() {
+                        if let Some(child_schema) = only
+                            .get("properties")
+                            .and_then(Value::as_object)
+                            .and_then(|p| p.get(key))
+                        {
+                            check_keys(child, child_schema, root, &at.key(key), errors);
+                        }
+                    }
+                }
+            }
         }
         return;
     }
@@ -340,6 +376,12 @@ fn type_error(err: serde_path_to_error::Error<serde_json::Error>) -> ConfigError
                  {values: [...]}, {range: {min, max, steps}}, or \
                  {distribution: {type: uniform, min, max}}."
                 .to_string(),
+            "method" => "Expected an imputation method string, a list of methods, or \
+                 {values: [...]}."
+                .to_string(),
+            "indicator" => {
+                "Expected a boolean, a list of booleans, or {values: [...]}.".to_string()
+            }
             "construction_threshold" => {
                 "Expected \"auto\" or a number between 0.0 and 1.0.".to_string()
             }
@@ -420,15 +462,32 @@ fn resolve_preprocessing(
         .map(ColumnName::into_string)
         .collect();
 
-    let impute: IndexMap<String, Impute> = pre
-        .impute
-        .into_iter()
-        .map(|(col, spec)| {
-            let spec_at = at.key("impute").key(&col);
-            let resolved = resolve_impute(spec, &spec_at, errors);
-            (col, resolved)
-        })
-        .collect();
+    let n_imputations_raw = pre.n_imputations.unwrap_or(1);
+    let n_imputations = match u32::try_from(n_imputations_raw) {
+        Ok(n) if n >= 1 => n,
+        _ => {
+            errors.push(ConfigError::new(
+                at.key("n_imputations"),
+                ErrorCode::OutOfRange,
+                format!(
+                    "preprocessing.n_imputations must be between 1 and {}, got {n_imputations_raw}.",
+                    u32::MAX
+                ),
+            ));
+            1
+        }
+    };
+
+    let mut impute = IndexMap::new();
+    let mut impute_candidates = IndexMap::new();
+    for (col, entry) in pre.impute {
+        let spec_at = at.key("impute").key(&col);
+        let candidates = resolve_impute_entry(entry, &spec_at, errors);
+        if let Some(primary) = candidates.first().cloned() {
+            impute.insert(col.clone(), primary);
+            impute_candidates.insert(col, candidates);
+        }
+    }
 
     let encode: IndexMap<String, Encode> = pre
         .encode
@@ -455,16 +514,83 @@ fn resolve_preprocessing(
     let resolved = Preprocessing {
         drop_columns,
         impute,
+        impute_candidates,
         encode,
         missing_indicator_groups: groups,
+        n_imputations,
     };
     check_group_flag_collisions(&resolved, &at, errors);
     resolved
 }
 
-fn resolve_impute(spec: ImputeFile, at: &Pointer, errors: &mut Vec<ConfigError>) -> Impute {
-    let value = match (spec.method, spec.value) {
-        (ImputeMethod::FillValue, None) => {
+fn resolve_impute_entry(
+    entry: ImputeEntryFile,
+    at: &Pointer,
+    errors: &mut Vec<ConfigError>,
+) -> Vec<Impute> {
+    match entry {
+        ImputeEntryFile::Single(spec) => resolve_impute(spec, at, errors),
+        ImputeEntryFile::Candidates(specs) => {
+            if specs.is_empty() {
+                errors.push(ConfigError::new(
+                    at.clone(),
+                    ErrorCode::EmptyGrid,
+                    "Imputation candidate list must not be empty.",
+                ));
+                return Vec::new();
+            }
+            let mut out = Vec::with_capacity(specs.len());
+            for (i, spec) in specs.into_iter().enumerate() {
+                out.extend(resolve_impute(spec, &at.index(i), errors));
+            }
+            out
+        }
+    }
+}
+
+fn resolve_impute(spec: ImputeFile, at: &Pointer, errors: &mut Vec<ConfigError>) -> Vec<Impute> {
+    let methods: Vec<ImputeMethod> = match spec.method {
+        MethodSpec::Single(m) => vec![m],
+        MethodSpec::List(v) | MethodSpec::Values { values: v } => {
+            if v.is_empty() {
+                errors.push(ConfigError::new(
+                    at.key("method"),
+                    ErrorCode::EmptyGrid,
+                    "Imputation method list must not be empty.",
+                ));
+            }
+            v
+        }
+    };
+
+    let seeds: Vec<u64> = match &spec.seed {
+        None => vec![42],
+        Some(seed_spec) => {
+            expand_integers(seed_spec, &at.key("seed"), 0, "seed").unwrap_or_else(|e| {
+                errors.push(e);
+                vec![42]
+            })
+        }
+    };
+
+    let indicators: Vec<bool> = match spec.indicator {
+        None => vec![true],
+        Some(IndicatorSpec::Single(b)) => vec![b],
+        Some(IndicatorSpec::List(v) | IndicatorSpec::Values { values: v }) => {
+            if v.is_empty() {
+                errors.push(ConfigError::new(
+                    at.key("indicator"),
+                    ErrorCode::EmptyGrid,
+                    "Imputation indicator list must not be empty.",
+                ));
+            }
+            v
+        }
+    };
+
+    let has_fill_value = methods.contains(&ImputeMethod::FillValue);
+    let validated_value = match (has_fill_value, spec.value) {
+        (true, None) => {
             errors.push(ConfigError::new(
                 at.key("value"),
                 ErrorCode::MissingField,
@@ -472,14 +598,15 @@ fn resolve_impute(spec: ImputeFile, at: &Pointer, errors: &mut Vec<ConfigError>)
             ));
             None
         }
-        (ImputeMethod::FillValue, Some(v)) => Some(v),
-        (method, Some(_)) => {
+        (true, Some(v)) => Some(v),
+        (false, Some(_)) => {
+            let first_method = methods.first().copied().unwrap_or(ImputeMethod::FillMean);
             errors.push(ConfigError::new(
                 at.key("value"),
                 ErrorCode::InvalidValue,
                 format!(
                     "'value' is only valid with method 'fill_value', got method {:?}.",
-                    serde_json::to_value(method)
+                    serde_json::to_value(first_method)
                         .ok()
                         .and_then(|v| v.as_str().map(str::to_owned))
                         .unwrap_or_default()
@@ -487,9 +614,9 @@ fn resolve_impute(spec: ImputeFile, at: &Pointer, errors: &mut Vec<ConfigError>)
             ));
             None
         }
-        (_, None) => None,
+        (false, None) => None,
     };
-    if let Some(FillValue::Float(f)) = value {
+    if let Some(FillValue::Float(f)) = validated_value {
         // Normalization already rejects non-finite YAML numbers; this guards
         // values built in code.
         if !f.is_finite() {
@@ -500,12 +627,26 @@ fn resolve_impute(spec: ImputeFile, at: &Pointer, errors: &mut Vec<ConfigError>)
             ));
         }
     }
-    Impute {
-        method: spec.method,
-        seed: spec.seed.unwrap_or(42),
-        value,
-        indicator: spec.indicator.unwrap_or(true),
+
+    let mut out = Vec::new();
+    for &method in &methods {
+        for &seed in &seeds {
+            for &indicator in &indicators {
+                let value = if method == ImputeMethod::FillValue {
+                    validated_value.clone()
+                } else {
+                    None
+                };
+                out.push(Impute {
+                    method,
+                    seed,
+                    value,
+                    indicator,
+                });
+            }
+        }
     }
+    out
 }
 
 fn resolve_indicator_groups(
@@ -564,17 +705,18 @@ fn check_group_flag_collisions(pre: &Preprocessing, at: &Pointer, errors: &mut V
         .collect();
     let dropped: std::collections::HashSet<&str> =
         pre.drop_columns.iter().map(String::as_str).collect();
-    let per_column_flags: std::collections::HashSet<String> = pre
-        .impute
+    let impute_cols = pre.impute_columns();
+    let per_column_flags: std::collections::HashSet<String> = impute_cols
         .iter()
-        .filter(|(col, spec)| {
-            spec.indicator && !grouped.contains(col.as_str()) && !dropped.contains(col.as_str())
+        .filter(|col| {
+            !grouped.contains(col.as_str())
+                && !dropped.contains(col.as_str())
+                && pre.candidates_for(col).iter().any(|s| s.indicator)
         })
-        .map(|(col, _)| format!("{col}{MISSING_SUFFIX}"))
+        .map(|col| format!("{col}{MISSING_SUFFIX}"))
         .collect();
-    let configured: std::collections::HashSet<&str> = pre
-        .impute
-        .keys()
+    let configured: std::collections::HashSet<&str> = impute_cols
+        .into_iter()
         .chain(pre.encode.keys())
         .map(String::as_str)
         .chain(dropped.iter().copied())
