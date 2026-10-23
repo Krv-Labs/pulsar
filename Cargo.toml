@@ -5,7 +5,7 @@ members = ["crates/*"]
 # Single source of truth for the version (scripts/check_versions.py and
 # pulsar/_version.py both read this table); member crates inherit it.
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 # Floor set by the lockfile (ordered-float 5.5 via kiddo); rmcp 3.5 needs
 # 1.88 and arrow/parquet 1.85. Checked in CI by the `msrv` job.
