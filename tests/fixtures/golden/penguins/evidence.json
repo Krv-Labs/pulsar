@@ -1,0 +1,356 @@
+{
+ "n_rows": 344,
+ "n_columns": 9,
+ "columns": [
+  {
+   "name": "rowid",
+   "kind": "numeric",
+   "n_rows": 344,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 344,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 1.0,
+   "observed_max": 344.0,
+   "integer_valued": true,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 1.7270230732830913,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "species",
+   "kind": "text",
+   "n_rows": 344,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 3,
+   "unique_ratio": 0.00872093023255814,
+   "is_constant": false,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": null,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "island",
+   "kind": "text",
+   "n_rows": 344,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 3,
+   "unique_ratio": 0.00872093023255814,
+   "is_constant": false,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": null,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "bill_length_mm",
+   "kind": "numeric",
+   "n_rows": 344,
+   "n_missing": 2,
+   "missing_fraction": 0.005813953488372093,
+   "n_unique": 164,
+   "unique_ratio": 0.47953216374269003,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 32.1,
+   "observed_max": 59.6,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.875867930937704,
+   "missing_group": "mg1",
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "bill_depth_mm",
+   "kind": "numeric",
+   "n_rows": 344,
+   "n_missing": 2,
+   "missing_fraction": 0.005813953488372093,
+   "n_unique": 80,
+   "unique_ratio": 0.23391812865497075,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 13.1,
+   "observed_max": 21.5,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.2053967072085756,
+   "missing_group": "mg1",
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "flipper_length_mm",
+   "kind": "numeric",
+   "n_rows": 344,
+   "n_missing": 2,
+   "missing_fraction": 0.005813953488372093,
+   "n_unique": 55,
+   "unique_ratio": 0.1608187134502924,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 172.0,
+   "observed_max": 231.0,
+   "integer_valued": true,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.142617629577683,
+   "missing_group": "mg1",
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "body_mass_g",
+   "kind": "numeric",
+   "n_rows": 344,
+   "n_missing": 2,
+   "missing_fraction": 0.005813953488372093,
+   "n_unique": 94,
+   "unique_ratio": 0.27485380116959063,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 2700.0,
+   "observed_max": 6300.0,
+   "integer_valued": true,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.6202482493633528,
+   "missing_group": "mg1",
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "sex",
+   "kind": "text",
+   "n_rows": 344,
+   "n_missing": 11,
+   "missing_fraction": 0.03197674418604651,
+   "n_unique": 2,
+   "unique_ratio": 0.006006006006006006,
+   "is_constant": false,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": 0.4954954954954955,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "year",
+   "kind": "numeric",
+   "n_rows": 344,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 3,
+   "unique_ratio": 0.00872093023255814,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 2007.0,
+   "observed_max": 2009.0,
+   "integer_valued": true,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 1.2593160815165076,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  }
+ ],
+ "missing_groups": [
+  {
+   "group_id": "mg1",
+   "columns": [
+    "bill_length_mm",
+    "bill_depth_mm",
+    "flipper_length_mm",
+    "body_mass_g"
+   ],
+   "n_missing": 2,
+   "zero_free_columns": [
+    "bill_length_mm",
+    "bill_depth_mm",
+    "flipper_length_mm",
+    "body_mass_g"
+   ]
+  }
+ ],
+ "mask_dependencies": [],
+ "relations": [
+  {
+   "kind": "strong_correlation",
+   "target": "body_mass_g",
+   "sources": [
+    "flipper_length_mm"
+   ],
+   "value": 0.8712017673060124,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "bill_length_mm",
+   "sources": [
+    "rowid"
+   ],
+   "value": 0.7660385694291247,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "flipper_length_mm",
+   "sources": [
+    "bill_length_mm"
+   ],
+   "value": 0.6561813407464288,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "body_mass_g",
+   "sources": [
+    "bill_length_mm"
+   ],
+   "value": 0.595109824437631,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "flipper_length_mm",
+   "sources": [
+    "bill_depth_mm"
+   ],
+   "value": 0.5838512164654128,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "body_mass_g",
+   "sources": [
+    "bill_depth_mm"
+   ],
+   "value": 0.47191562118606684,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "flipper_length_mm",
+   "sources": [
+    "rowid"
+   ],
+   "value": 0.45537196101362337,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "year",
+   "sources": [
+    "rowid"
+   ],
+   "value": 0.3391032896689348,
+   "rows_used": 344
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "body_mass_g",
+   "sources": [
+    "rowid"
+   ],
+   "value": 0.2754930457927937,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "bill_depth_mm",
+   "sources": [
+    "rowid"
+   ],
+   "value": 0.2595630585309729,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "bill_depth_mm",
+   "sources": [
+    "bill_length_mm"
+   ],
+   "value": 0.2350528703555329,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "year",
+   "sources": [
+    "flipper_length_mm"
+   ],
+   "value": 0.16967510658974222,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "year",
+   "sources": [
+    "bill_depth_mm"
+   ],
+   "value": 0.0603536422842167,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "year",
+   "sources": [
+    "bill_length_mm"
+   ],
+   "value": 0.054544582136275936,
+   "rows_used": 342
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "year",
+   "sources": [
+    "body_mass_g"
+   ],
+   "value": 0.042209391543355734,
+   "rows_used": 342
+  }
+ ],
+ "cost": {
+  "rows_sampled": 344,
+  "numeric_columns_considered": 6,
+  "steps_skipped": []
+ }
+}

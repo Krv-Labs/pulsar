@@ -21,6 +21,7 @@ pub mod clustering;
 pub mod components;
 pub mod diagnostics;
 pub mod error;
+pub mod evidence;
 pub mod hooks;
 pub mod minhash;
 pub mod payloads;
@@ -37,6 +38,11 @@ pub use diagnostics::{
     GraphAnalysis, GraphMetrics, GraphSummary,
 };
 pub use error::AnalysisError;
+pub use evidence::{
+    measure_preprocessing_evidence, neighborhood_overlap, ColumnEvidence, ColumnKind,
+    ColumnRelation, EvidenceError, EvidenceOptions, MaskDependency, MissingGroup,
+    PreprocessingEvidence, RelationKind,
+};
 pub use hooks::{label_points, membership_matrix, unclustered_points};
 pub use silhouette::{silhouette_samples, silhouette_score};
 pub use thresholds::{

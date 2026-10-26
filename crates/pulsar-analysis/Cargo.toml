@@ -13,6 +13,7 @@ kodama = "0.3"
 nalgebra = "0.33"
 ndarray = "0.16"
 pulsar-core = { path = "../pulsar-core" }
+pulsar-data = { path = "../pulsar-data" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
 rand = "0.8"
 rand_distr = "0.4"
