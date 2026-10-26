@@ -691,6 +691,61 @@ async fn task_capable_clients_get_a_task_handle_for_the_sweep() {
 }
 
 #[tokio::test]
+async fn projection_cache_serves_any_live_run_not_only_the_latest() {
+    let root = TempRoot::new("cache-aba");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[(
+            "path",
+            json!(golden("blobs", "input.csv").display().to_string()),
+        )]),
+    )
+    .await;
+    let dataset_id = ingested["dataset_id"].clone();
+
+    let config_a = blobs_yaml();
+    let config_b = config_a.replace("      - 7\n", "      - 13\n");
+    assert_ne!(config_a, config_b, "variant must change the seed grid");
+
+    let mut statuses = Vec::new();
+    for yaml in [&config_a, &config_b, &config_a] {
+        let sweep = ok(
+            &client,
+            &tools,
+            "run_topological_sweep",
+            args(&[
+                ("config_yaml", json!(yaml)),
+                ("dataset_id", dataset_id.clone()),
+                ("response_format", json!("json")),
+            ]),
+        )
+        .await;
+        statuses.push((
+            sweep["projection_cache_status"]["status"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            sweep["projection_cache_status"]["reason"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ));
+    }
+    assert_eq!(statuses[0], ("miss".into(), "no_cached_embeddings".into()));
+    assert_eq!(statuses[1], ("miss".into(), "fingerprint_mismatch".into()));
+    assert_eq!(
+        statuses[2],
+        ("hit".into(), "fingerprint_match".into()),
+        "A → B → A must reuse A's embeddings"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn multi_imputation_config_validates_and_sweeps() {
     let root = TempRoot::new("multi-imputation");
     let csv_path = root.path().join("missing.csv");
