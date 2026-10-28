@@ -15,8 +15,17 @@ Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt
 
 - Pure-Rust replacements for every Python MCP tool: the cluster read tools, the six longitudinal tools (`CosmicTrajectory`, `TemporalCosmicGraph`, panel pivot), `export_labeled_data` (pandas-identical CSV), `export_dataset_bundle`, `create_graph_artifact` (with `surface='artifact'` on diagnose/skeleton) and `export_html_report` (byte-identical HTML). Parity against frozen fixtures.
 
+### Fixed
+
+- Ball Mapper no longer panics on more than 32 identical points in the KD-tree path (projections of 1-16 dims); duplicate-heavy data, including pooled longitudinal panels, now sweeps.
+- PCA and JL reject NaN or infinite input with an error naming the cell instead of hanging in the SVD; preprocessing reports an infinite cell as `NON_FINITE_VALUE` before it reaches the scaler.
+- Non-positive or non-finite Ball Mapper epsilons set programmatically are rejected before any projection runs.
+- The pseudo-Laplacian and temporal accumulators validate member indices instead of panicking on out-of-range ones.
+- Panic envelopes state the defect and ask for a report.
+
 ### Changed
 
+- `create_config` no longer clamps the projection grid at 16 (the KD-tree/linear-scan switch changes speed, not membership); `sweep_strategy` reports the grid ceiling, its source, the variance there and the row count, and dominant-component resolution suggestions are bounded by the feature count.
 - Package license metadata now matches the BSD 3-Clause LICENSE file (the Cargo manifests said MIT).
 
 ### Removed

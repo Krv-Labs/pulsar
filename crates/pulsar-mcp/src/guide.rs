@@ -160,8 +160,11 @@ feedback.
   data; it collapses structure and injects spurious consensus edges.
 - **The epsilon gates**: keep epsilon inside the data's k-NN distance domain. Shattered
   graph: raise the upper bound. One dominant component: lower it or shift projections up.
-- Projections above 16 dimensions fall back from the KD-tree to a linear scan in Ball
-  Mapper; stay at or below 16 unless the user asks for more.
+- Projection dimension is a sweep axis: each dimension is a different lens. JL scales
+  every dimension to the same expected distances, so one epsilon list serves the grid.
+  JL draws its matrix row by row at the grid's largest dimension, so adding a dimension
+  changes the draws at every other dimension for the same seed. Above 16 dimensions Ball
+  Mapper swaps its KD-tree for a linear scan: same membership, different speed.
 
 ## NO HILL-CLIMBING OPTIMISATION
 The cosmic graph is a stable representation, not a score to maximise. Density, component

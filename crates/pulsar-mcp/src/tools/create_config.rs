@@ -7,7 +7,7 @@
 //! becomes the session's active config.
 
 use pulsar_analysis::characterization::characterize_dataset;
-use pulsar_analysis::config_build::build_initial_config_yaml;
+use pulsar_analysis::config_build::{build_initial_config_yaml, calibration_curve, grid_ceiling};
 use pulsar_analysis::plan::{
     calibrate_processed_space, draft_plan, plan_fingerprint, summarize_plan_counts, DraftOptions,
     PreprocessingPlan, QuestionStatus,
@@ -48,6 +48,38 @@ pub fn spec() -> ToolSpec {
         &["code", "message"],
         false,
     );
+    let sweep_strategy = s::object(
+        &[
+            ("projection_method", s::string()),
+            ("projection_dimensions", s::array(s::integer())),
+            ("projection_seeds", s::array(s::integer())),
+            ("epsilon_steps", s::integer()),
+            ("imputation_variants", s::integer()),
+            ("estimated_ball_maps", s::integer()),
+            ("n_rows", s::integer()),
+            ("grid_ceiling", s::integer()),
+            (
+                "grid_ceiling_source",
+                s::enumeration(&["variance_elbow", "probe_limit", "n_features", "fallback"]),
+            ),
+            ("variance_at_ceiling", s::nullable(s::number())),
+            ("cost_note", s::string()),
+        ],
+        &[
+            "projection_method",
+            "projection_dimensions",
+            "projection_seeds",
+            "epsilon_steps",
+            "imputation_variants",
+            "estimated_ball_maps",
+            "n_rows",
+            "grid_ceiling",
+            "grid_ceiling_source",
+            "variance_at_ceiling",
+            "cost_note",
+        ],
+        true,
+    );
     let provenance = s::object(
         &[
             ("plan_id", s::string()),
@@ -84,7 +116,7 @@ pub fn spec() -> ToolSpec {
                 ("calibration_space", s::enumeration(&["processed", "raw"])),
                 ("preprocessing_plan", provenance),
                 ("warnings", s::array(warning)),
-                ("sweep_strategy", s::open_object()),
+                ("sweep_strategy", sweep_strategy),
                 ("processed_feature_count", s::integer()),
                 ("raw_to_processed_expansion_ratio", s::number()),
                 ("knn_distance_percentiles", s::open_object()),
@@ -216,12 +248,21 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             )
         })?;
         let processed = calibrate_processed_space(&table, &plan);
-        let yaml = build_initial_config_yaml(&geo, &data_path, &run_name, processed.as_ref(), &plan);
-        Ok((plan, geo, processed, yaml))
+        let yaml = build_initial_config_yaml(
+            &geo,
+            &data_path,
+            &run_name,
+            processed.as_ref(),
+            &plan,
+            None,
+        );
+        Ok((plan, geo, processed, yaml, table.n_rows()))
     })
     .await
     .map_err(|e| failed("CONFIG_CREATION_FAILED", e.to_string(), "Retry; report the error if it recurs."))??;
-    let (plan, geo, processed, config_yaml) = built;
+    let (plan, geo, processed, config_yaml, n_rows) = built;
+    let (cumulative, n_features) = calibration_curve(&geo, processed.as_ref());
+    let ceiling = grid_ceiling(cumulative, n_features);
 
     // A freshly drafted plan is stored so `edit_preprocessing_plan` can refine it.
     let plan_handle = PlanId::parse(&plan.plan_id).map_err(|e| ToolError::from_store(NAME, e))?;
@@ -272,6 +313,11 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "epsilon_steps": config.ball_mapper.epsilons.len(),
             "imputation_variants": variants,
             "estimated_ball_maps": variants * dims.len() * seeds.len() * config.ball_mapper.epsilons.len(),
+            "n_rows": n_rows,
+            "grid_ceiling": ceiling.dim,
+            "grid_ceiling_source": ceiling.source.as_str(),
+            "variance_at_ceiling": ceiling.variance,
+            "cost_note": "Runtime grows with ball maps times rows and with the ball count per map (a smaller epsilon or a higher dimension gives more balls); the radius-query backend changes with dimension, ball membership does not.",
             "compatibility_note": (!dims.is_empty()).then_some(
                 "sweep.pca is a legacy mirror of sweep.projection for older configs; sweep.projection is authoritative."
             ),
@@ -324,7 +370,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 "p95": round_to(m.knn_p95, 4),
             });
             payload["calibration_note"] = json!(
-                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure (frontiers + elbow, capped at 16 for the KD-tree envelope); the default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
+                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow where cumulative variance first reaches 90%, bounded by the processed feature count. Variance is probed at 2, 3, 5, 10, 15 and 20 dimensions (within the feature and row counts); when no probe reaches 90%, the top of the grid is the largest probe. sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
             );
         }
         None => {

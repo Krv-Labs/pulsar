@@ -606,6 +606,7 @@ fn build_response(
     let threshold_graph = ThresholdGraph::from_edges(fitted.n, &affinity);
     let full_affinity_connected = fitted.n > 0 && threshold_graph.component_count_at(0.0) <= 1;
 
+    let n_features = fitted.layout.feature_names.len();
     let gate = match (&metrics, &fitted.stability) {
         (Some(m), Some(stability)) => {
             let plateaus: Vec<_> = stability.plateaus.iter().take(10).cloned().collect();
@@ -621,12 +622,17 @@ fn build_response(
                 m,
                 sweep_count,
                 &fitted.config.projection.dimensions,
+                n_features,
                 Some(&options.candidates),
             )
         }
-        (Some(m), None) => {
-            finalization_gate(m, sweep_count, &fitted.config.projection.dimensions, None)
-        }
+        (Some(m), None) => finalization_gate(
+            m,
+            sweep_count,
+            &fitted.config.projection.dimensions,
+            n_features,
+            None,
+        ),
         (None, _) => {
             json!({"status": "ok", "reason": "No dominant-component resolution gate triggered."})
         }

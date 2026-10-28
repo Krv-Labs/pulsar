@@ -17,6 +17,11 @@ use pulsar_data::read_csv_path;
 use pulsar_parity::golden_dir;
 use serde_json::Value;
 
+/// Python clamped the grid at 16; production Rust does not (see the
+/// divergences in `config_build`), so the frozen fixtures are reproduced with
+/// the clamp.
+const PYTHON_DIMENSION_CAP: Option<usize> = Some(16);
+
 fn fixture() -> Value {
     let path = golden_dir().join("plan/create_config.json");
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -131,7 +136,14 @@ fn every_table_gets_the_python_baseline_config() {
             );
         }
 
-        let yaml = build_initial_config_yaml(&geo, csv, "initial_sweep", processed.as_ref(), &plan);
+        let yaml = build_initial_config_yaml(
+            &geo,
+            csv,
+            "initial_sweep",
+            processed.as_ref(),
+            &plan,
+            PYTHON_DIMENSION_CAP,
+        );
         compare_yaml(csv, &yaml, want["config_yaml"].as_str().unwrap());
 
         let (n_features, cumulative) = match &processed {
@@ -141,7 +153,7 @@ fn every_table_gets_the_python_baseline_config() {
         let knee = variance_elbow_dimension(&cumulative, n_features);
         assert_eq!(knee as u64, want["knee"].as_u64().unwrap(), "{csv}: knee");
         assert_eq!(
-            initial_pca_grid(n_features, knee, &cumulative),
+            initial_pca_grid(n_features, knee, &cumulative, PYTHON_DIMENSION_CAP),
             usizes(&want["grid"]),
             "{csv}: grid"
         );
@@ -161,7 +173,7 @@ fn dimension_grids_match_python_on_edge_cases() {
         let knee = variance_elbow_dimension(&cumulative, n_features);
         assert_eq!(knee as u64, case["knee"].as_u64().unwrap(), "{case}");
         assert_eq!(
-            initial_pca_grid(n_features, knee, &cumulative),
+            initial_pca_grid(n_features, knee, &cumulative, PYTHON_DIMENSION_CAP),
             usizes(&case["grid"]),
             "{case}"
         );
