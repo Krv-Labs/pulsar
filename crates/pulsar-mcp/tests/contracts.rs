@@ -980,8 +980,10 @@ async fn sweeps_succeed_on_duplicate_heavy_data_at_kd_tree_dimensions() {
     client.cancel().await.unwrap();
 }
 
+/// An ordinary pipeline error raised inside the async worker (not a panic)
+/// reaches the caller through `wait_job` as a failed job with its own code.
 #[tokio::test]
-async fn a_failed_async_sweep_reports_failure_through_wait_job() {
+async fn wait_job_reports_a_worker_error_as_failed() {
     let root = TempRoot::new("async-fail");
     let csv_path = root.path().join("tiny.csv");
     std::fs::write(&csv_path, "a,b\n1,2\n2,3\n3,4\n4,5\n5,6\n6,7\n").unwrap();
@@ -1673,6 +1675,64 @@ async fn characterize_and_probe_read_raw_data_and_explain_failures() {
 // ---- create_config -------------------------------------------------------------
 
 #[tokio::test]
+async fn create_config_grid_can_exceed_twenty_dimensions_on_a_wide_table() {
+    // 30 columns of independent noise: variance spreads evenly, so 90% is not
+    // reached by 20 dimensions and the grid must look past 20 to find it.
+    let root = TempRoot::new("create-config-wide");
+    let csv_path = root.path().join("wide30.csv");
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut noise = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let header: Vec<String> = (0..30).map(|j| format!("f{j}")).collect();
+    let mut csv = header.join(",") + "\n";
+    for _ in 0..150 {
+        let row: Vec<String> = (0..30).map(|_| format!("{:.6}", noise())).collect();
+        csv += &(row.join(",") + "\n");
+    }
+    std::fs::write(&csv_path, csv).unwrap();
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[("path", json!(csv_path.display().to_string()))]),
+    )
+    .await;
+    let created = ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", ingested["dataset_id"].clone())]),
+    )
+    .await;
+    let strategy = &created["sweep_strategy"];
+    let grid_max = strategy["projection_dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_u64().unwrap())
+        .max()
+        .unwrap();
+    assert!(grid_max > 20, "{strategy}");
+    assert_eq!(
+        strategy["grid_ceiling"].as_u64(),
+        Some(grid_max),
+        "{strategy}"
+    );
+    assert!(
+        ["n_features", "variance_elbow"]
+            .contains(&strategy["grid_ceiling_source"].as_str().unwrap()),
+        "{strategy}"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active() {
     let root = TempRoot::new("create-config");
     let client = connect(root.path(), test_options(), ()).await;
@@ -1717,8 +1777,14 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
         grid.iter().max().copied()
     );
     assert!(
-        ["variance_elbow", "probe_limit", "n_features", "fallback"]
-            .contains(&strategy["grid_ceiling_source"].as_str().unwrap()),
+        [
+            "variance_elbow",
+            "probe_limit",
+            "n_features",
+            "row_limit",
+            "fallback"
+        ]
+        .contains(&strategy["grid_ceiling_source"].as_str().unwrap()),
         "{strategy}"
     );
     assert!(strategy["variance_at_ceiling"].is_null() || strategy["variance_at_ceiling"].is_f64());

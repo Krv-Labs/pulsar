@@ -227,10 +227,12 @@ impl std::fmt::Display for CalibrationFallback {
 /// the plan cannot be applied, too few features or rows remain, or the
 /// matrix cannot be profiled; the caller then falls back to raw-space
 /// geometry. Python lets a profiling failure escape as an error; a missing
-/// calibration is the more useful answer for an agent.
+/// calibration is the more useful answer for an agent. `probes` sets where
+/// the variance curve is measured.
 pub fn calibrate_processed_space(
     table: &Table,
     plan: &PreprocessingPlan,
+    probes: crate::characterization::PcaProbes<'_>,
 ) -> Result<crate::characterization::NumericProfile, CalibrationFallback> {
     let config = plan_config(plan, "calibrate").map_err(CalibrationFallback::PlanInvalid)?;
     let variants = config.preprocessing_variants();
@@ -261,7 +263,7 @@ pub fn calibrate_processed_space(
         let scale = if sd > 0.0 { sd } else { 1.0 };
         col.mapv_inplace(|v| (v - mean) / scale);
     }
-    crate::characterization::profile_numeric_matrix(x.view(), 1000, 42, None)
+    crate::characterization::profile_numeric_matrix(x.view(), 1000, 42, probes)
         .map_err(|e| CalibrationFallback::Profile(e.to_string()))
 }
 
@@ -335,6 +337,7 @@ pub fn dry_run_processed_space(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::characterization::PcaProbes;
     use crate::plan::{draft_plan, DraftOptions};
 
     fn table(columns: Vec<(&str, Column)>) -> Table {
@@ -352,18 +355,18 @@ mod tests {
             ("b", Column::Float(b.clone())),
         ]);
         let plan = draft_plan(&ok, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
-        assert!(calibrate_processed_space(&ok, &plan).is_ok());
+        assert!(calibrate_processed_space(&ok, &plan, PcaProbes::DataRelative).is_ok());
 
         let one = table(vec![("a", Column::Float(a.clone()))]);
         let plan = draft_plan(&one, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
-        let err = calibrate_processed_space(&one, &plan).unwrap_err();
+        let err = calibrate_processed_space(&one, &plan, PcaProbes::DataRelative).unwrap_err();
         assert_eq!(err, CalibrationFallback::TooFewFeatures { found: 1 });
 
         let mut spiked = b;
         spiked[3] = f64::INFINITY;
         let spiked = table(vec![("a", Column::Float(a)), ("b", Column::Float(spiked))]);
         let plan = draft_plan(&spiked, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
-        let err = calibrate_processed_space(&spiked, &plan).unwrap_err();
+        let err = calibrate_processed_space(&spiked, &plan, PcaProbes::DataRelative).unwrap_err();
         assert!(
             matches!(
                 err,

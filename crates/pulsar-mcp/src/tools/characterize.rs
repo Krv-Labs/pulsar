@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use pulsar_analysis::characterization::{
     characterization_payload_to_markdown, characterize_dataset, compact_characterization_payload,
     probe_columns_payload, probe_columns_payload_to_markdown, profile_column_details,
-    CharacterizationError, ColumnProfile,
+    CharacterizationError, ColumnProfile, PcaProbes,
 };
 use pulsar_data::{DataError, Table};
 use rmcp::model::CallToolResult;
@@ -181,11 +181,12 @@ pub async fn characterize(
     };
     state.session().latest_dataset_id = Some(dataset_id.clone());
     let table = load(CHARACTERIZE, &path).await?;
-    let profile =
-        tokio::task::spawn_blocking(move || characterize_dataset(&table, SUBSAMPLE, SEED))
-            .await
-            .map_err(|e| ToolError::worker_stopped(CHARACTERIZE, "CHARACTERIZATION_FAILED", &e))?
-            .map_err(|e| characterization_error(CHARACTERIZE, e))?;
+    let profile = tokio::task::spawn_blocking(move || {
+        characterize_dataset(&table, SUBSAMPLE, SEED, PcaProbes::DataRelative)
+    })
+    .await
+    .map_err(|e| ToolError::worker_stopped(CHARACTERIZE, "CHARACTERIZATION_FAILED", &e))?
+    .map_err(|e| characterization_error(CHARACTERIZE, e))?;
 
     let mut payload = compact_characterization_payload(&profile);
     payload["dataset_id"] = json!(dataset_id.to_string());

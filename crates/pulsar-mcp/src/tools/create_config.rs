@@ -6,7 +6,7 @@
 //! default plan that is stored so it can be edited afterwards. The YAML
 //! becomes the session's active config.
 
-use pulsar_analysis::characterization::characterize_dataset;
+use pulsar_analysis::characterization::{characterize_dataset, PcaProbes};
 use pulsar_analysis::config_build::{
     build_initial_config_yaml, calibration_curve, grid_ceiling, variance_elbow_dimension,
     CeilingSource, GridCeiling,
@@ -63,7 +63,13 @@ pub fn spec() -> ToolSpec {
             ("grid_ceiling", s::integer()),
             (
                 "grid_ceiling_source",
-                s::enumeration(&["variance_elbow", "probe_limit", "n_features", "fallback"]),
+                s::enumeration(&[
+                    "variance_elbow",
+                    "probe_limit",
+                    "n_features",
+                    "row_limit",
+                    "fallback",
+                ]),
             ),
             ("variance_at_ceiling", s::nullable(s::number())),
             ("cost_note", s::string()),
@@ -247,9 +253,9 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 })?
             }
         };
-        let geo =
-            characterize_dataset(&table, 1000, 42).map_err(|e| characterization_error(NAME, e))?;
-        let processed = calibrate_processed_space(&table, &plan);
+        let geo = characterize_dataset(&table, 1000, 42, PcaProbes::DataRelative)
+            .map_err(|e| characterization_error(NAME, e))?;
+        let processed = calibrate_processed_space(&table, &plan, PcaProbes::DataRelative);
         let yaml = build_initial_config_yaml(
             &geo,
             &data_path,
@@ -263,9 +269,10 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     .await
     .map_err(|e| ToolError::worker_stopped(NAME, "CONFIG_CREATION_FAILED", &e))??;
     let (plan, geo, processed, config_yaml, n_rows) = built;
-    let (cumulative, n_features) = calibration_curve(&geo, processed.as_ref().ok());
-    let ceiling = grid_ceiling(cumulative, n_features);
-    let ceiling_note = ceiling_description(&ceiling, cumulative, n_features);
+    let (cumulative, n_features, n_rows_profiled) =
+        calibration_curve(&geo, processed.as_ref().ok());
+    let ceiling = grid_ceiling(cumulative, n_features, n_rows_profiled);
+    let ceiling_note = ceiling_description(&ceiling, cumulative, n_features, n_rows_profiled);
 
     // A freshly drafted plan is stored so `edit_preprocessing_plan` can refine it.
     let plan_handle = PlanId::parse(&plan.plan_id).map_err(|e| ToolError::from_store(NAME, e))?;
@@ -320,7 +327,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "grid_ceiling": ceiling.dim,
             "grid_ceiling_source": ceiling.source.as_str(),
             "variance_at_ceiling": ceiling.variance,
-            "cost_note": "Runtime grows with ball maps times rows and with the ball count per map (a smaller epsilon or a higher dimension gives more balls); the radius-query backend changes with dimension, ball membership does not.",
+            "cost_note": "Runtime grows with ball maps \u{d7} rows \u{d7} balls per map; a smaller epsilon yields more balls. Above 16 dimensions the radius query switches from a KD-tree to a linear scan; that switch changes speed, not which points a ball contains.",
             "compatibility_note": (!dims.is_empty()).then_some(
                 "sweep.pca is a legacy mirror of sweep.projection for older configs; sweep.projection is authoritative."
             ),
@@ -373,7 +380,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 "p95": round_to(m.knn_p95, 4),
             });
             payload["calibration_note"] = json!(format!(
-                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow where cumulative variance first reaches 90%, bounded by the processed feature count. Variance is probed at those of 2, 3, 5, 10, 15 and 20 dimensions that fit within the feature and row counts. {ceiling_note} sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
+                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow where cumulative variance first reaches 90%, bounded by the processed feature count and by the number of profiled rows (PCA keeps at most as many components as rows). {ceiling_note} sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
             ));
         }
         Err(fallback) => {
@@ -399,6 +406,7 @@ fn ceiling_description(
     ceiling: &GridCeiling,
     cumulative: &[(usize, f64)],
     n_features: usize,
+    n_rows: usize,
 ) -> String {
     let dim = ceiling.dim;
     let probes = cumulative
@@ -420,13 +428,31 @@ fn ceiling_description(
                 "Cumulative variance had not reached 90% at the largest probed dimension ({dim}); the curve was probed at {probes} within {n_features} features.{unmeasured}"
             )
         }
-        CeilingSource::NFeatures => format!(
-            "The variance elbow ({}) lies above the feature count, so the grid tops out at the {n_features} available features.",
-            variance_elbow_dimension(cumulative, n_features)
+        CeilingSource::NFeatures => {
+            let knee = variance_elbow_dimension(cumulative, n_features);
+            if knee > n_features {
+                format!(
+                    "The variance elbow ({knee}) lies above the feature count, so the grid tops out at the {n_features} available features."
+                )
+            } else {
+                format!(
+                    "Cumulative variance did not reach 90% below the feature count; the curve was probed at {probes}, so the grid tops out at all {n_features} features."
+                )
+            }
+        }
+        CeilingSource::RowLimit => format!(
+            "Cumulative variance did not reach 90% below {dim} dimensions, the number of profiled rows; PCA keeps at most as many components as rows, so the curve (probed at {probes}) could not be measured further and the grid tops out at {dim} of the {n_features} features."
         ),
-        CeilingSource::Fallback => format!(
-            "No variance curve was measured; the top dimension ({dim}) comes from a feature-count heuristic over {n_features} features."
-        ),
+        CeilingSource::Fallback => {
+            let rows = if dim == n_rows && dim < n_features {
+                format!(", bounded by the {n_rows} profiled rows")
+            } else {
+                String::new()
+            };
+            format!(
+                "No variance curve was measured; the top dimension ({dim}) comes from a feature-count heuristic over {n_features} features{rows}."
+            )
+        }
     }
 }
 
@@ -443,11 +469,11 @@ mod tests {
 
     #[test]
     fn probe_limit_names_the_largest_probe_and_the_unmeasured_range() {
-        // Eight features: the probe set filters to 2, 3, 5.
+        // Eight features: Python's probe set filters to 2, 3, 5.
         let cumulative = [(2, 0.4), (3, 0.55), (5, 0.8)];
-        let ceiling = grid_ceiling(&cumulative, 8);
+        let ceiling = grid_ceiling(&cumulative, 8, 100);
         assert_eq!(ceiling.source, CeilingSource::ProbeLimit);
-        let text = ceiling_description(&ceiling, &cumulative, 8);
+        let text = ceiling_description(&ceiling, &cumulative, 8, 100);
         assert!(text.contains("largest probed dimension (5)"), "{text}");
         assert!(
             text.contains("probed at 2, 3, 5 within 8 features"),
@@ -455,5 +481,24 @@ mod tests {
         );
         assert!(text.contains("between 5 and 8 were not measured"), "{text}");
         assert!(!text.contains("20"), "{text}");
+    }
+
+    #[test]
+    fn feature_and_row_bounds_are_named() {
+        let full = [(2, 0.2), (20, 0.67), (30, 1.0)];
+        let ceiling = grid_ceiling(&full, 30, 200);
+        assert_eq!(ceiling.source, CeilingSource::NFeatures);
+        let text = ceiling_description(&ceiling, &full, 30, 200);
+        assert!(text.contains("all 30 features"), "{text}");
+        assert!(text.contains("probed at 2, 20, 30"), "{text}");
+
+        let short = [(2, 0.3), (20, 0.8), (25, 1.0)];
+        let ceiling = grid_ceiling(&short, 40, 25);
+        assert_eq!(ceiling.source, CeilingSource::RowLimit);
+        let text = ceiling_description(&ceiling, &short, 40, 25);
+        assert!(
+            text.contains("25 dimensions, the number of profiled rows"),
+            "{text}"
+        );
     }
 }

@@ -574,7 +574,11 @@ pub fn skeleton_payload(
 /// (`_suggest_resolution_pca_dims`). `ceiling` bounds the suggestions: the
 /// projection input's feature count, or the run's own largest dimension when
 /// that is unknown (`0`). Python clamped at 16 instead. A ceiling below 2
-/// leaves no valid projection dimension, so nothing is suggested.
+/// leaves no valid projection dimension, so nothing is suggested. Nothing is
+/// suggested either when two or more swept dimensions all lie above the
+/// ceiling: JL accepts a dimension above the feature count and
+/// `refine_config` passes the swept dimensions through, so a run can hold
+/// only such dimensions, and none of them is kept.
 pub fn suggest_resolution_dims(dims: &[usize], ceiling: usize) -> Vec<usize> {
     let mut dims: Vec<usize> = dims.iter().copied().filter(|&d| d > 1).collect();
     dims.sort_unstable();

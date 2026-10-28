@@ -13,7 +13,7 @@ use pulsar_core::{impute_column_inplace, StandardScalerInner};
 use pulsar_data::{Column, Key, Table};
 use serde_json::{json, Map, Value};
 
-use crate::characterization::profile_numeric_matrix;
+use crate::characterization::{profile_numeric_matrix, PcaProbes};
 use crate::evidence::kind::to_numeric;
 use crate::payloads::bounded_list;
 use crate::plan::py_repr_list;
@@ -695,14 +695,17 @@ fn calibrate_epsilon_to_panel(
         )
     })?;
     let (scaled, _) = StandardScalerInner::fit_transform(&pooled);
-    let profile = profile_numeric_matrix(scaled.view(), 1000, 42, None).map_err(|e| {
-        panel_error(
-            e.to_string(),
-            "PANEL_PROFILE_FAILED",
-            "The panel is too small to profile; add entities or time steps.",
-            json!({}),
-        )
-    })?;
+    // Only the k-NN percentiles are read here, so the smallest (Python's)
+    // probe set keeps the unused variance curve cheap.
+    let profile =
+        profile_numeric_matrix(scaled.view(), 1000, 42, PcaProbes::Python).map_err(|e| {
+            panel_error(
+                e.to_string(),
+                "PANEL_PROFILE_FAILED",
+                "The panel is too small to profile; add entities or time steps.",
+                json!({}),
+            )
+        })?;
     let (low, high) = (profile.knn_p5, profile.knn_p95);
     let requested = config.ball_mapper.epsilons.clone();
     let in_domain = requested.iter().filter(|&&e| low <= e && e <= high).count();

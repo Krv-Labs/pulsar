@@ -9,11 +9,17 @@
 //!
 //! Known divergences from Python:
 //! - Python clamped the dimension grid at 16 (the KD-tree envelope). The Rust
-//!   grid is bounded only by the feature count and the variance elbow, whose
-//!   probe set tops out at 20. `initial_pca_grid` and
-//!   `build_initial_config_yaml` take an optional `cap`: production passes
-//!   `None`, and the golden parity test passes `Some(16)` to reproduce the
-//!   frozen Python output.
+//!   grid is bounded only by the variance elbow, the feature count and the
+//!   profiled row count. `initial_pca_grid` and `build_initial_config_yaml`
+//!   take an optional `cap`: production passes `None`, and the golden parity
+//!   test passes `Some(16)` to reproduce the frozen Python output.
+//! - Python's variance curve was probed only up to 20 dimensions, so its
+//!   elbow never exceeded 20; see the divergence in `characterization`. The
+//!   functions here take whatever curve they are given.
+//! - Python did not bound the grid by the row count. With a measured curve
+//!   that changes nothing (every probe is within the profiled rows); it only
+//!   bites in the feature-count heuristic used when no curve exists, which
+//!   could otherwise ask PCA for more components than there are rows.
 
 use crate::characterization::{DatasetProfile, NumericProfile};
 use crate::plan::{plan_to_preprocessing_yaml, PreprocessingPlan};
@@ -44,12 +50,20 @@ pub fn variance_elbow_dimension(cumulative: &[(usize, f64)], n_features: usize) 
 /// Where the top of the dimension grid comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CeilingSource {
-    /// The first probed dimension reaching 90% cumulative variance.
+    /// A probed dimension below the largest probe reached 90% cumulative
+    /// variance (or, with a probe set that stops short of both bounds, the
+    /// largest probe did).
     VarianceElbow,
-    /// The largest probed dimension, which stayed below 90%.
+    /// The largest probed dimension, below both the feature and the row
+    /// count, stayed under 90%: the probe set ran out. Reachable only with a
+    /// probe set that stops short, such as Python's.
     ProbeLimit,
-    /// The feature count, below the elbow.
+    /// The feature count: 90% was not reached before it, or the elbow lies
+    /// above it.
     NFeatures,
+    /// The profiled row count, below the feature count: PCA cannot keep more
+    /// components than rows, so the curve could not be measured further.
+    RowLimit,
     /// No variance curve: the feature-count heuristic of
     /// [`variance_elbow_dimension`].
     Fallback,
@@ -61,6 +75,7 @@ impl CeilingSource {
             Self::VarianceElbow => "variance_elbow",
             Self::ProbeLimit => "probe_limit",
             Self::NFeatures => "n_features",
+            Self::RowLimit => "row_limit",
             Self::Fallback => "fallback",
         }
     }
@@ -75,23 +90,39 @@ pub struct GridCeiling {
     pub variance: Option<f64>,
 }
 
-/// The ceiling [`initial_pca_grid`] uses with `cap: None`.
-pub fn grid_ceiling(cumulative: &[(usize, f64)], n_features: usize) -> GridCeiling {
+/// The top of the grid: the elbow, bounded by the feature count, the
+/// profiled row count and the optional `cap`. Shared by [`grid_ceiling`] and
+/// [`initial_pca_grid`] so the reported ceiling is the grid's maximum.
+fn grid_top(knee: usize, n_features: usize, n_rows: usize, cap: Option<usize>) -> usize {
+    knee.min(n_features)
+        .min(n_rows)
+        .min(cap.unwrap_or(usize::MAX))
+}
+
+/// The ceiling [`initial_pca_grid`] uses with `cap: None`. `n_rows` is the
+/// number of rows the curve was profiled on.
+pub fn grid_ceiling(cumulative: &[(usize, f64)], n_features: usize, n_rows: usize) -> GridCeiling {
     let knee = variance_elbow_dimension(cumulative, n_features);
-    let dim = knee.min(n_features);
+    let dim = grid_top(knee, n_features, n_rows, None);
     let variance = cumulative
         .iter()
         .filter(|(d, _)| *d == dim)
         .map(|(_, v)| *v)
         .reduce(f64::max);
-    let source = if cumulative.is_empty() {
-        CeilingSource::Fallback
-    } else if dim < knee {
-        CeilingSource::NFeatures
-    } else if cumulative.iter().any(|(_, v)| *v >= 0.90) {
-        CeilingSource::VarianceElbow
-    } else {
-        CeilingSource::ProbeLimit
+    let largest_probe = cumulative.iter().map(|(d, _)| *d).max();
+    let reached = cumulative.iter().any(|(_, v)| *v >= 0.90);
+    // A probe at the largest measurable dimension holds all the variance, so
+    // "reached 90%" alone cannot tell an elbow from a bound: attribute by
+    // where the elbow landed.
+    let source = match largest_probe {
+        None => CeilingSource::Fallback,
+        Some(_) if dim < knee && dim == n_features => CeilingSource::NFeatures,
+        Some(_) if dim < knee => CeilingSource::RowLimit,
+        Some(last) if knee < last => CeilingSource::VarianceElbow,
+        Some(last) if last >= n_features => CeilingSource::NFeatures,
+        Some(last) if last >= n_rows => CeilingSource::RowLimit,
+        Some(_) if reached => CeilingSource::VarianceElbow,
+        Some(_) => CeilingSource::ProbeLimit,
     };
     GridCeiling {
         dim,
@@ -101,16 +132,18 @@ pub fn grid_ceiling(cumulative: &[(usize, f64)], n_features: usize) -> GridCeili
 }
 
 /// Multi-scale grid at the 50/70/85% variance frontiers plus the elbow,
-/// optionally clamped at `cap`.
+/// bounded by the feature count and by `n_rows` (PCA keeps at most as many
+/// components as rows), optionally clamped at `cap`.
 pub fn initial_pca_grid(
     n_features: usize,
+    n_rows: usize,
     knee: usize,
     cumulative: &[(usize, f64)],
     cap: Option<usize>,
 ) -> Vec<usize> {
     let mut points = cumulative.to_vec();
     points.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    let ceiling = knee.min(n_features).min(cap.unwrap_or(usize::MAX));
+    let ceiling = grid_top(knee, n_features, n_rows, cap);
     if ceiling == 0 {
         return vec![];
     }
@@ -163,15 +196,24 @@ pub fn epsilon_range(knn_mean: f64, p25: f64, p75: f64) -> (f64, f64) {
     }
 }
 
-/// The variance curve and feature count the grid is built from: the
-/// processed calibration when it succeeded, else the raw characterization.
+/// The variance curve, feature count and profiled row count the grid is
+/// built from: the processed calibration when it succeeded, else the raw
+/// characterization.
 pub fn calibration_curve<'a>(
     geo: &'a DatasetProfile,
     processed: Option<&'a NumericProfile>,
-) -> (&'a [(usize, f64)], usize) {
+) -> (&'a [(usize, f64)], usize, usize) {
     match processed {
-        Some(p) => (p.pca_cumulative_variance.as_slice(), p.n_features),
-        None => (geo.pca_cumulative_variance.as_slice(), geo.n_features),
+        Some(p) => (
+            p.pca_cumulative_variance.as_slice(),
+            p.n_features,
+            p.n_samples_profiled,
+        ),
+        None => (
+            geo.pca_cumulative_variance.as_slice(),
+            geo.n_features,
+            geo.n_samples_profiled,
+        ),
     }
 }
 
@@ -186,7 +228,7 @@ pub fn build_initial_config_yaml(
     plan: &PreprocessingPlan,
     cap: Option<usize>,
 ) -> String {
-    let (knn_mean, cumulative, p25, p75, n_features) = match processed {
+    let (knn_mean, cumulative, p25, p75, n_features, n_rows) = match processed {
         Some(p) => (
             if p.knn_k5_mean != 0.0 {
                 p.knn_k5_mean
@@ -197,6 +239,7 @@ pub fn build_initial_config_yaml(
             p.knn_p25,
             p.knn_p75,
             p.n_features,
+            p.n_samples_profiled,
         ),
         None => (
             if geo.knn_k5_mean != 0.0 {
@@ -208,10 +251,11 @@ pub fn build_initial_config_yaml(
             0.0,
             0.0,
             geo.n_features,
+            geo.n_samples_profiled,
         ),
     };
     let knee = variance_elbow_dimension(cumulative, n_features);
-    let dims = int_list(&initial_pca_grid(n_features, knee, cumulative, cap));
+    let dims = int_list(&initial_pca_grid(n_features, n_rows, knee, cumulative, cap));
     let (eps_min, eps_max) = epsilon_range(knn_mean, p25, p75);
     let preprocessing = plan_to_preprocessing_yaml(plan, true);
 
@@ -245,15 +289,33 @@ mod tests {
     fn grid_targets_variance_frontiers_and_honours_an_optional_cap() {
         let curve: Vec<(usize, f64)> = (1..=20).map(|d| (d, d as f64 / 20.0)).collect();
         // Frontiers 10, 14, 17 and a ceiling of 16.
-        assert_eq!(initial_pca_grid(20, 16, &curve, None), vec![10, 14, 16]);
+        assert_eq!(
+            initial_pca_grid(20, 1000, 16, &curve, None),
+            vec![10, 14, 16]
+        );
         // Frontiers 10, 14, 17 and the elbow 18 (0.90), clamped at 16 as Python did.
-        assert_eq!(initial_pca_grid(20, 18, &curve, Some(16)), vec![10, 14, 16]);
+        assert_eq!(
+            initial_pca_grid(20, 1000, 18, &curve, Some(16)),
+            vec![10, 14, 16]
+        );
         // Uncapped, an elbow of 20 tops the grid.
-        assert_eq!(initial_pca_grid(20, 20, &curve, None), vec![10, 14, 17, 20]);
-        assert_eq!(initial_pca_grid(20, 20, &curve, Some(16)), vec![10, 14, 16]);
-        assert_eq!(initial_pca_grid(0, 5, &curve, None), Vec::<usize>::new());
+        assert_eq!(
+            initial_pca_grid(20, 1000, 20, &curve, None),
+            vec![10, 14, 17, 20]
+        );
+        assert_eq!(
+            initial_pca_grid(20, 1000, 20, &curve, Some(16)),
+            vec![10, 14, 16]
+        );
+        assert_eq!(
+            initial_pca_grid(0, 1000, 5, &curve, None),
+            Vec::<usize>::new()
+        );
         // Two features: floor == ceiling == 2.
-        assert_eq!(initial_pca_grid(2, 2, &[(1, 0.9), (2, 1.0)], None), vec![2]);
+        assert_eq!(
+            initial_pca_grid(2, 1000, 2, &[(1, 0.9), (2, 1.0)], None),
+            vec![2]
+        );
     }
 
     #[test]
@@ -262,12 +324,15 @@ mod tests {
         let curve: Vec<(usize, f64)> = (1..=20).map(|d| (d, d as f64 / 23.0)).collect();
         let knee = variance_elbow_dimension(&curve, 40);
         assert_eq!(knee, 20);
-        assert_eq!(initial_pca_grid(40, knee, &curve, None), vec![12, 17, 20]);
         assert_eq!(
-            initial_pca_grid(40, knee, &curve, Some(16)),
+            initial_pca_grid(40, 1000, knee, &curve, None),
+            vec![12, 17, 20]
+        );
+        assert_eq!(
+            initial_pca_grid(40, 1000, knee, &curve, Some(16)),
             vec![8, 12, 16]
         );
-        let ceiling = grid_ceiling(&curve, 40);
+        let ceiling = grid_ceiling(&curve, 40, 1000);
         assert_eq!(ceiling.dim, 20);
         assert_eq!(ceiling.source, CeilingSource::ProbeLimit);
         assert_eq!(ceiling.variance, Some(20.0 / 23.0));
@@ -275,19 +340,42 @@ mod tests {
 
     #[test]
     fn grid_ceiling_names_its_source() {
-        let elbow = grid_ceiling(&[(2, 0.5), (3, 0.91), (5, 1.0)], 8);
+        let elbow = grid_ceiling(&[(2, 0.5), (3, 0.91), (5, 1.0)], 8, 1000);
         assert_eq!((elbow.dim, elbow.source), (3, CeilingSource::VarianceElbow));
         assert_eq!(elbow.variance, Some(0.91));
-        let fallback = grid_ceiling(&[], 9);
+        let fallback = grid_ceiling(&[], 9, 1000);
         assert_eq!(
             (fallback.dim, fallback.source),
             (5, CeilingSource::Fallback)
         );
         assert_eq!(fallback.variance, None);
         // Elbow at 10 but only 6 features.
-        let narrow = grid_ceiling(&[(2, 0.3), (10, 0.95)], 6);
+        let narrow = grid_ceiling(&[(2, 0.3), (10, 0.95)], 6, 1000);
         assert_eq!((narrow.dim, narrow.source), (6, CeilingSource::NFeatures));
         assert_eq!(narrow.variance, None);
+        // A curve probed up to the feature count: 90% only at the last probe.
+        let full = grid_ceiling(&[(20, 0.67), (30, 1.0)], 30, 200);
+        assert_eq!((full.dim, full.source), (30, CeilingSource::NFeatures));
+        assert_eq!(full.variance, Some(1.0));
+        // Only 25 rows for 40 features: the curve stops at the row count.
+        let short = grid_ceiling(&[(20, 0.8), (25, 1.0)], 40, 25);
+        assert_eq!((short.dim, short.source), (25, CeilingSource::RowLimit));
+        // A full curve reaching 90% before its last probe.
+        let early = grid_ceiling(&[(10, 0.85), (15, 0.92), (30, 1.0)], 30, 200);
+        assert_eq!(
+            (early.dim, early.source),
+            (15, CeilingSource::VarianceElbow)
+        );
+    }
+
+    #[test]
+    fn the_fallback_grid_is_bounded_by_the_row_count() {
+        // No curve: the heuristic gives 19 for 100 features, but 5 rows
+        // cannot support more than 5 components.
+        assert_eq!(initial_pca_grid(100, 1000, 19, &[], None), vec![9, 14, 19]);
+        assert_eq!(initial_pca_grid(100, 5, 19, &[], None), vec![3, 4, 5]);
+        let ceiling = grid_ceiling(&[], 100, 5);
+        assert_eq!((ceiling.dim, ceiling.source), (5, CeilingSource::Fallback));
     }
 
     #[test]
