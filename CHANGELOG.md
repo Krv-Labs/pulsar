@@ -27,6 +27,7 @@ Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt
 
 - `create_config` no longer clamps the projection grid at 16 (the KD-tree/linear-scan switch changes speed, not membership); `sweep_strategy` reports the grid ceiling, its source, the variance there and the row count, and dominant-component resolution suggestions are bounded by the feature count.
 - Package license metadata now matches the BSD 3-Clause LICENSE file (the Cargo manifests said MIT).
+- Rust API: `pseudo_laplacian_inner`, `accumulate_pseudo_laplacians`, `accumulate_pseudo_laplacians_sparse` and `accumulate_temporal_pseudo_laplacians_inner` now return `Result`; `initial_pca_grid` and `build_initial_config_yaml` take `cap: Option<usize>`; `suggest_resolution_dims` takes a ceiling and `finalization_gate` takes `n_features`; `pulsar_core::ensure_finite` is public.
 
 ### Removed
 

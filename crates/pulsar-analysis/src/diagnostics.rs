@@ -573,14 +573,16 @@ pub fn skeleton_payload(
 /// Projection dimensions to zoom into after a dominant-component gate
 /// (`_suggest_resolution_pca_dims`). `ceiling` bounds the suggestions: the
 /// projection input's feature count, or the run's own largest dimension when
-/// that is unknown (`0`). Python clamped at 16 instead.
+/// that is unknown (`0`). Python clamped at 16 instead. A ceiling below 2
+/// leaves no valid projection dimension, so nothing is suggested.
 pub fn suggest_resolution_dims(dims: &[usize], ceiling: usize) -> Vec<usize> {
     let mut dims: Vec<usize> = dims.iter().copied().filter(|&d| d > 1).collect();
     dims.sort_unstable();
     dims.dedup();
     let ceiling = match ceiling {
         0 => dims.last().copied().unwrap_or(usize::MAX),
-        c => c.max(2),
+        1 => return Vec::new(),
+        c => c,
     };
     if dims.is_empty() {
         let mut out: Vec<usize> = [5, 8, 12, 16].map(|d| d.min(ceiling)).to_vec();
@@ -602,6 +604,7 @@ pub fn suggest_resolution_dims(dims: &[usize], ceiling: usize) -> Vec<usize> {
     let low = dims[0];
     let high = dims[dims.len() - 1].min(ceiling);
     if high <= low {
+        dims.retain(|&d| d <= ceiling);
         return dims;
     }
     let mut step = round_int((high - low) as f64 / 5.0).max(1) as usize;
@@ -787,6 +790,12 @@ mod tests {
         );
         assert_eq!(suggest_resolution_dims(&[18], 19), vec![14, 16, 18, 19]);
         assert_eq!(suggest_resolution_dims(&[], 6), vec![5, 6]);
+        // Never above the feature count, and nothing when it is below 2.
+        assert!(suggest_resolution_dims(&[], 1).is_empty());
+        assert!(suggest_resolution_dims(&[2, 3], 1).is_empty());
+        assert_eq!(suggest_resolution_dims(&[5, 8], 4), Vec::<usize>::new());
+        assert_eq!(suggest_resolution_dims(&[3, 8], 3), vec![3]);
+        assert_eq!(suggest_resolution_dims(&[3], 2), vec![2]);
 
         let g = Graph {
             n: 40,

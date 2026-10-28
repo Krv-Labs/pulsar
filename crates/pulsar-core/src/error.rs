@@ -57,9 +57,7 @@ impl PulsarError {
 /// row-major order. Projections must check this up front: nalgebra's SVD
 /// never converges on non-finite input, and Ball Mapper turns every
 /// non-finite row into an empty ball.
-pub(crate) fn ensure_finite<S: Data<Elem = f64>>(
-    data: &ArrayBase<S, Ix2>,
-) -> Result<(), PulsarError> {
+pub fn ensure_finite<S: Data<Elem = f64>>(data: &ArrayBase<S, Ix2>) -> Result<(), PulsarError> {
     for ((row, col), &value) in data.indexed_iter() {
         if !value.is_finite() {
             return Err(PulsarError::InvalidParameter {

@@ -213,6 +213,11 @@ pub fn fit(
                     expected: n,
                 });
             }
+            // `fit_inner` trusts its input; cached embeddings never passed
+            // through a projection's own finiteness check.
+            for m in &e {
+                pulsar_core::ensure_finite(m)?;
+            }
             e
         }
         None => {
@@ -450,11 +455,11 @@ fn stability_weight(spec: &CosmicSpec) -> f64 {
     }
 }
 
-/// Ball Mapper needs a finite radius > 0. The config loader enforces this,
-/// but `PulsarConfig` fields are public, so programmatic configs are
-/// re-checked before any ball map is built.
+/// Ball Mapper needs at least one radius, each finite and > 0. The config
+/// loader enforces this, but `PulsarConfig` fields are public, so
+/// programmatic configs are re-checked before any ball map is built.
 pub(crate) fn check_epsilons(epsilons: &[f64]) -> Result<(), PipelineError> {
-    if epsilons.iter().all(|&eps| eps.is_finite() && eps > 0.0) {
+    if !epsilons.is_empty() && epsilons.iter().all(|&eps| eps.is_finite() && eps > 0.0) {
         Ok(())
     } else {
         Err(PipelineError::InvalidOption {

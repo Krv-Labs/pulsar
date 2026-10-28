@@ -36,7 +36,7 @@ use ndarray::{s, Array2, Array3, ArrayD, Axis, Ix3};
 use rayon::prelude::*;
 
 use crate::ballmapper::ball_mapper_grid;
-use crate::error::{ensure_members_in_range, PulsarError};
+use crate::error::{ensure_finite, ensure_members_in_range, PulsarError};
 use crate::pca::pca_grid;
 use crate::pseudolaplacian::dense_contribution;
 use crate::scale::StandardScalerInner;
@@ -237,6 +237,12 @@ impl TemporalCosmicGraph {
                     snap.nrows()
                 )));
             }
+            // Check the raw snapshot: after scaling, the reported cell would
+            // be in the derived matrix and a lone inf would read as NaN.
+            ensure_finite(snap).map_err(|e| match e {
+                PulsarError::InvalidParameter { msg } => invalid(format!("snapshot {t}: {msg}")),
+                other => other,
+            })?;
         }
         if let Some(&eps) = epsilons.iter().find(|e| !e.is_finite() || **e <= 0.0) {
             return Err(invalid(format!(
@@ -543,6 +549,22 @@ mod tests {
                     .contains("epsilon must be a finite positive number"),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn from_snapshots_rejects_non_finite_snapshot() {
+        let good = Array2::from_shape_fn((6, 2), |(i, j)| (i + 2 * j) as f64);
+        for cell in [f64::NAN, f64::INFINITY] {
+            let mut bad = good.clone();
+            bad[[3, 1]] = cell;
+            let err =
+                TemporalCosmicGraph::from_snapshots(&[good.clone(), bad], &[2], &[42], &[0.5], 0.0)
+                    .unwrap_err();
+            assert_eq!(err.code(), "INVALID_PARAMETER");
+            let msg = err.to_string();
+            assert!(msg.contains("snapshot 1"), "{msg}");
+            assert!(msg.contains("row 3, column 1"), "{msg}");
         }
     }
 }

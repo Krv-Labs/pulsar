@@ -71,10 +71,15 @@ fn non_positive_or_non_finite_epsilon_is_rejected() {
     let snapshots = [Array2::from_shape_fn((N_ROWS, 2), |(i, j)| {
         (i * (j + 1)) as f64
     })];
-    for eps in [0.0, -0.5, f64::NAN, f64::INFINITY] {
+    let grids: Vec<Vec<f64>> = [0.0, -0.5, f64::NAN, f64::INFINITY]
+        .into_iter()
+        .map(|eps| vec![0.5, eps])
+        .chain([vec![]])
+        .collect();
+    for eps in grids {
         let mut cfg = config(JL);
-        cfg.ball_mapper.epsilons = vec![0.5, eps];
-        assert_eq!(fit_code(&cfg, &table), "INVALID_OPTION", "eps {eps}");
+        cfg.ball_mapper.epsilons = eps.clone();
+        assert_eq!(fit_code(&cfg, &table), "INVALID_OPTION", "eps {eps:?}");
 
         let trajectory = CosmicTrajectory::from_snapshots(
             &snapshots,
@@ -91,7 +96,34 @@ fn non_positive_or_non_finite_epsilon_is_rejected() {
                     what: "ball_mapper.epsilons"
                 })
             ),
-            "eps {eps}"
+            "eps {eps:?}"
         );
     }
+}
+
+#[test]
+fn non_finite_precomputed_embedding_is_rejected() {
+    let table = table_with(3.0);
+    let good = Array2::from_shape_fn((N_ROWS, 2), |(i, j)| (i * (j + 1)) as f64);
+    for cell in [f64::NAN, f64::INFINITY] {
+        let mut bad = good.clone();
+        bad[[5, 1]] = cell;
+        let opts = FitOptions {
+            precomputed_embeddings: Some(vec![good.clone(), bad]),
+            ..FitOptions::default()
+        };
+        match fit(&config(JL), &table, opts, None) {
+            Ok(_) => panic!("fit accepted a non-finite embedding ({cell})"),
+            Err(e) => {
+                assert!(matches!(e, PipelineError::Core(_)), "{e:?}");
+                assert_eq!(e.code(), "INVALID_PARAMETER");
+                assert!(e.to_string().contains("row 5, column 1"), "{e}");
+            }
+        }
+    }
+    let opts = FitOptions {
+        precomputed_embeddings: Some(vec![good]),
+        ..FitOptions::default()
+    };
+    assert!(fit(&config(JL), &table, opts, None).is_ok());
 }

@@ -29,6 +29,9 @@ pub fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(us
     let d = points.ncols();
     let eps_sq = eps * eps;
     assert!(d > 0, "BallMapper input must have at least one column");
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
 
     // Step 1: greedy centre selection - O(n * k) where k = num centres
     let mut center_indices: Vec<usize> = Vec::new();
@@ -303,6 +306,29 @@ mod tests {
                 fit_inner(wide.view(), eps),
                 "eps {eps}"
             );
+        }
+    }
+
+    #[test]
+    fn fit_inner_empty_input_returns_no_balls() {
+        // Both membership paths: KD-tree (d = 2) and linear scan (d = 17).
+        for d in [2, 17] {
+            let points = Array2::<f64>::zeros((0, d));
+            let (nodes, edges) = fit_inner(points.view(), 0.5);
+            assert!(nodes.is_empty(), "d {d}");
+            assert!(edges.is_empty(), "d {d}");
+        }
+    }
+
+    #[test]
+    fn fit_inner_single_point_is_one_ball() {
+        for d in [2, 17] {
+            let points = Array2::from_elem((1, d), 0.25);
+            for eps in [0.0, 0.5] {
+                let (nodes, edges) = fit_inner(points.view(), eps);
+                assert_eq!(nodes, vec![vec![0]], "d {d} eps {eps}");
+                assert!(edges.is_empty(), "d {d} eps {eps}");
+            }
         }
     }
 }
