@@ -186,6 +186,7 @@ impl PCAInner {
                 got: format!("{} features", ncols),
             });
         }
+        ensure_finite(data)?;
         let mut centered = data.clone();
         for mut row in centered.rows_mut() {
             row -= &self.means;
@@ -277,6 +278,15 @@ mod tests {
     fn fit_rejects_infinite_input() {
         assert_rejects_cell_17_2(PCAInner::fit(&data_with(f64::INFINITY), 2, 42, 10, 2));
         assert_rejects_cell_17_2(PCAInner::fit(&data_with(f64::NEG_INFINITY), 2, 42, 10, 2));
+    }
+
+    #[test]
+    fn transform_rejects_non_finite_input() {
+        let pca = PCAInner::fit(&data_with(1.0), 2, 42, 10, 2).unwrap();
+        for value in [f64::NAN, f64::INFINITY] {
+            assert_rejects_cell_17_2(pca.transform(&data_with(value)));
+        }
+        assert!(pca.transform(&data_with(1.0)).is_ok());
     }
 
     #[test]

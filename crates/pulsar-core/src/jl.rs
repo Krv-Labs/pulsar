@@ -52,6 +52,7 @@ impl JLProjectionInner {
                 got: format!("{} features", data.ncols()),
             });
         }
+        ensure_finite(data)?;
         if self.center {
             let mut centered = data.clone();
             for mut row in centered.rows_mut() {
@@ -161,6 +162,17 @@ mod tests {
             }
             Err(other) => panic!("expected InvalidParameter, got {other:?}"),
             Ok(_) => panic!("expected an error for non-finite input"),
+        }
+    }
+
+    #[test]
+    fn transform_rejects_non_finite_input() {
+        for center in [true, false] {
+            let jl = JLProjectionInner::fit(&data_with(1.0), 2, 42, center).unwrap();
+            for value in [f64::NAN, f64::INFINITY] {
+                assert_rejects_cell_3_1(jl.transform(&data_with(value)));
+            }
+            assert!(jl.transform(&data_with(1.0)).is_ok());
         }
     }
 

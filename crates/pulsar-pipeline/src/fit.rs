@@ -5,9 +5,10 @@ use pulsar_config::{
     Construction, CosmicGraph as CosmicSpec, Projection, ProjectionMethod, PulsarConfig, Threshold,
 };
 use pulsar_core::{
-    accumulate_pseudo_laplacians_sparse, ball_mapper_grid, find_stable_thresholds_from_edges,
-    jl_grid, pca_grid, BallMapper, CosmicGraphInner, MinHashSignatures, SparsePseudoLaplacian,
-    StabilityResult, StandardScalerInner, DEFAULT_NUM_BINS,
+    accumulate_pseudo_laplacians_sparse, ball_mapper_grid, ensure_members_in_range,
+    find_stable_thresholds_from_edges, jl_grid, pca_grid, BallMapper, CosmicGraphInner,
+    MinHashSignatures, SparsePseudoLaplacian, StabilityResult, StandardScalerInner,
+    DEFAULT_NUM_BINS,
 };
 use pulsar_data::{preprocess, read_table, shared_vocab, Layout, Preprocessed, Table};
 
@@ -530,6 +531,9 @@ impl CosmicBuilder {
     pub(crate) fn accumulate(&mut self, maps: &[BallMapper]) -> Result<(), PipelineError> {
         match self {
             Self::MinHash(sig) => {
+                // MinHash drops an index past `n` without a trace; the exact
+                // path refuses it, so refuse it here too.
+                ensure_members_in_range(maps.iter().flat_map(|m| &m.nodes), sig.n())?;
                 let balls: Vec<&[usize]> = maps
                     .iter()
                     .flat_map(|m| m.nodes.iter().map(Vec::as_slice))
@@ -635,4 +639,32 @@ fn finalize(
         threshold,
         graph,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_constructions_refuse_an_out_of_range_member() {
+        let mut spec = pulsar_config::from_yaml_str("sweep: {ball_mapper: {epsilon: 0.5}}")
+            .unwrap()
+            .cosmic_graph;
+        let maps = [BallMapper {
+            eps: 0.5,
+            nodes: vec![vec![0, 1], vec![2, 4]],
+            edges: vec![],
+        }];
+        for construction in [Construction::Minhash, Construction::Exact] {
+            spec.construction = construction;
+            let err = CosmicBuilder::new(4, &spec).accumulate(&maps).unwrap_err();
+            assert_eq!(err.code(), "INVALID_PARAMETER", "{construction:?}");
+            assert!(
+                err.to_string()
+                    .contains("index 4 is out of range for n = 4"),
+                "{construction:?}: {err}"
+            );
+            assert!(CosmicBuilder::new(5, &spec).accumulate(&maps).is_ok());
+        }
+    }
 }

@@ -18,16 +18,16 @@ Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt
 ### Fixed
 
 - Ball Mapper no longer panics on more than 32 identical points in the KD-tree path (projections of 1-16 dims); duplicate-heavy data, including pooled longitudinal panels, now sweeps.
-- PCA and JL reject NaN or infinite input with an error naming the cell instead of hanging in the SVD; preprocessing reports an infinite cell as `NON_FINITE_VALUE` before it reaches the scaler.
+- PCA and JL reject NaN or infinite input (in `fit` and `transform`) with an error naming the cell instead of hanging in the SVD; preprocessing and `characterize_dataset` report an infinite cell as `NON_FINITE_VALUE`, and the longitudinal panel pivot as `PANEL_NON_FINITE_VALUE`, before it reaches the scaler.
 - Non-positive or non-finite Ball Mapper epsilons set programmatically are rejected before any projection runs.
-- The pseudo-Laplacian and temporal accumulators validate member indices instead of panicking on out-of-range ones.
+- The pseudo-Laplacian, temporal and MinHash accumulators validate member indices instead of panicking on or dropping out-of-range ones.
 - Panic envelopes state the defect and ask for a report.
 
 ### Changed
 
 - `create_config` no longer clamps the projection grid at 16 (the KD-tree/linear-scan switch changes speed, not membership); `sweep_strategy` reports the grid ceiling, its source, the variance there and the row count, and dominant-component resolution suggestions are bounded by the feature count.
 - Package license metadata now matches the BSD 3-Clause LICENSE file (the Cargo manifests said MIT).
-- Rust API: `pseudo_laplacian_inner`, `accumulate_pseudo_laplacians`, `accumulate_pseudo_laplacians_sparse` and `accumulate_temporal_pseudo_laplacians_inner` now return `Result`; `initial_pca_grid` and `build_initial_config_yaml` take `cap: Option<usize>`; `suggest_resolution_dims` takes a ceiling and `finalization_gate` takes `n_features`; `pulsar_core::ensure_finite` is public.
+- Rust API: `pseudo_laplacian_inner`, `accumulate_pseudo_laplacians`, `accumulate_pseudo_laplacians_sparse` and `accumulate_temporal_pseudo_laplacians_inner` now return `Result`; `initial_pca_grid` and `build_initial_config_yaml` take `cap: Option<usize>`; `suggest_resolution_dims` takes a ceiling and `finalization_gate` takes `n_features`; `pulsar_core::ensure_finite` and `ensure_members_in_range` are public; `calibrate_processed_space` returns `Result<_, CalibrationFallback>`.
 
 ### Removed
 

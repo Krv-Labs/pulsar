@@ -71,7 +71,7 @@ pub fn ensure_finite<S: Data<Elem = f64>>(data: &ArrayBase<S, Ix2>) -> Result<()
 }
 
 /// Reject any ball member index that does not address one of `n` points.
-pub(crate) fn ensure_members_in_range<'a>(
+pub fn ensure_members_in_range<'a>(
     balls: impl IntoIterator<Item = &'a Vec<usize>>,
     n: usize,
 ) -> Result<(), PulsarError> {

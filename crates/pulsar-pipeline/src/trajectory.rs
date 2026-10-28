@@ -19,7 +19,7 @@
 
 use ndarray::{concatenate, Array2, ArrayView2, Axis};
 use pulsar_config::PulsarConfig;
-use pulsar_core::{ball_mapper_grid, StandardScalerInner};
+use pulsar_core::{ball_mapper_grid, ensure_finite, PulsarError, StandardScalerInner};
 use pulsar_data::Key;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -175,11 +175,21 @@ impl CosmicTrajectory {
         scale: bool,
     ) -> Result<Self, PipelineError> {
         check_epsilons(&config.ball_mapper.epsilons)?;
-        if similarity_threshold < 0.0 {
+        if !similarity_threshold.is_finite() || similarity_threshold < 0.0 {
             return Err(input_error(format!(
                 "similarity_threshold must be >= 0, got {}",
                 pulsar_data::preprocess::py_float_repr(similarity_threshold)
             )));
+        }
+        // Check the raw snapshots: after pooling and scaling, a lone inf
+        // reads as NaN in a derived matrix at a row the caller never passed.
+        for (t, snap) in snapshots.iter().enumerate() {
+            ensure_finite(snap).map_err(|e| match e {
+                PulsarError::InvalidParameter { msg } => PulsarError::InvalidParameter {
+                    msg: format!("snapshot {t}: {msg}"),
+                },
+                other => other,
+            })?;
         }
         let (pooled, obs) = stack_panel(snapshots, entity_ids, timestamps)?;
         let pooled = if scale {

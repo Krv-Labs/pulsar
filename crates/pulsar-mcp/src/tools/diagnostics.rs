@@ -863,14 +863,7 @@ pub async fn curve(state: &ServerState, p: CurveParams) -> Result<CallToolResult
         ))
     })
     .await
-    .map_err(|e| {
-        ToolError::new(
-            CURVE,
-            "THRESHOLD_CURVE_FAILED",
-            e.to_string(),
-            "Retry the call.",
-        )
-    })??;
+    .map_err(|e| ToolError::worker_stopped(CURVE, "THRESHOLD_CURVE_FAILED", &e))??;
     payload["source"] = json!(if live && p.source == CurveSource::Live {
         "live"
     } else {

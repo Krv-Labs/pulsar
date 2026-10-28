@@ -52,7 +52,7 @@ async fn read_table(tool: &'static str, path: &str) -> Result<Table, ToolError> 
     let shown = path.display().to_string();
     tokio::task::spawn_blocking(move || pulsar_data::read_table(&path))
         .await
-        .map_err(|e| ToolError::new(tool, "INGEST_FAILED", e.to_string(), "Retry the call."))?
+        .map_err(|e| ToolError::worker_stopped(tool, "INGEST_FAILED", &e))?
         .map_err(|e| {
             ToolError::new(
                 tool,
@@ -62,15 +62,6 @@ async fn read_table(tool: &'static str, path: &str) -> Result<Table, ToolError> 
             )
             .detail("path", json!(shown))
         })
-}
-
-fn blocking_failed(tool: &'static str, code: &str, e: tokio::task::JoinError) -> ToolError {
-    ToolError::new(
-        tool,
-        code,
-        e.to_string(),
-        "An internal computation stopped unexpectedly: this is a defect and the message is the evidence. Report it with the message.",
-    )
 }
 
 fn plan_error(tool: &'static str, error: &PlanEditError, action: String) -> ToolError {
@@ -234,7 +225,7 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
             Ok((plan, payload))
         })
         .await
-        .map_err(|e| blocking_failed(DRAFT, "DRAFT_PLAN_FAILED", e))?
+        .map_err(|e| ToolError::worker_stopped(DRAFT, "DRAFT_PLAN_FAILED", &e))?
         .map_err(draft_error)?;
     let (plan, mut payload) = built;
 
@@ -411,7 +402,7 @@ pub async fn edit(state: &ServerState, p: EditParams) -> Result<CallToolResult, 
         },
     )
     .await
-    .map_err(|e| blocking_failed(EDIT, "EDIT_PLAN_FAILED", e))?
+    .map_err(|e| ToolError::worker_stopped(EDIT, "EDIT_PLAN_FAILED", &e))?
     .map_err(|e| plan_error(EDIT, &e, edit_error_action(&e)))?;
 
     state
@@ -610,6 +601,6 @@ pub async fn validate(state: &ServerState, p: ValidateParams) -> Result<CallTool
     let table = read_table(VALIDATE, &path).await?;
     let payload = tokio::task::spawn_blocking(move || validation_payload(&table, &config))
         .await
-        .map_err(|e| blocking_failed(VALIDATE, "VALIDATE_PREPROCESSING_FAILED", e))??;
+        .map_err(|e| ToolError::worker_stopped(VALIDATE, "VALIDATE_PREPROCESSING_FAILED", &e))??;
     Ok(ok_result(payload, None))
 }

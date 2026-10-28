@@ -487,7 +487,27 @@ pub fn pivot_panel(
         let (ei, ti) = (entity_index[e], time_index[t]);
         present[ei][ti] = true;
         for (f, c) in feat_cols.iter().enumerate() {
-            cube[ei][ti][f] = num_at(c, i);
+            let value = num_at(c, i);
+            // NaN is a missing cell handled by the policy below; an infinity
+            // would turn its whole column to NaN once the panel is scaled.
+            if value.is_infinite() {
+                return Err(panel_error(
+                    format!(
+                        "Feature column '{}' holds the non-finite value {value} for entity {e} at time {t} (row {i}).",
+                        features[f]
+                    ),
+                    "PANEL_NON_FINITE_VALUE",
+                    "Replace or remove infinite values in this column before building the panel; Pulsar does not choose a substitute.",
+                    json!({
+                        "column": features[f],
+                        "entity": e.to_string(),
+                        "time": t.to_string(),
+                        "row": i,
+                        "value": value.to_string(),
+                    }),
+                ));
+            }
+            cube[ei][ti][f] = value;
         }
     }
     let cells = (n_e * n_t) as f64;
@@ -824,6 +844,26 @@ mod tests {
         assert_eq!(err.details["tensor_bytes"], json!(800_000_000));
         assert_eq!(err.details["peak_required_mb"], json!(2288.82));
         assert!(guard_representation(&aligned(100, 4), "temporal").is_ok());
+    }
+
+    #[test]
+    fn an_infinite_cell_is_refused_with_its_entity_time_and_row() {
+        let table = Table::new(
+            vec!["e".into(), "t".into(), "x".into()],
+            vec![
+                Column::Int(vec![1, 1, 2, 2]),
+                Column::Int(vec![0, 1, 0, 1]),
+                Column::Float(vec![0.5, 1.0, f64::INFINITY, 2.0]),
+            ],
+        )
+        .unwrap();
+        let err = pivot_panel(&table, "e", "t", &[], "drop_entity").unwrap_err();
+        assert_eq!(err.error_code, "PANEL_NON_FINITE_VALUE");
+        assert!(err.reason.contains("'x'"), "{}", err.reason);
+        assert!(err.reason.contains("inf"), "{}", err.reason);
+        assert_eq!(err.details["entity"], json!("2"));
+        assert_eq!(err.details["time"], json!("0"));
+        assert_eq!(err.details["row"], json!(2));
     }
 
     #[test]

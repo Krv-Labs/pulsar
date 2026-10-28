@@ -122,7 +122,7 @@ fn every_table_gets_the_python_baseline_config() {
             ..DraftOptions::default()
         };
         let plan = draft_plan(&table, "ds_fixture", &opts).unwrap();
-        let processed = calibrate_processed_space(&table, &plan);
+        let processed = calibrate_processed_space(&table, &plan).ok();
         assert_eq!(
             processed.is_some(),
             want["calibrated"].as_bool().unwrap(),

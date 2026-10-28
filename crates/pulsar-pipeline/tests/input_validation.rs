@@ -127,3 +127,53 @@ fn non_finite_precomputed_embedding_is_rejected() {
     };
     assert!(fit(&config(JL), &table, opts, None).is_ok());
 }
+
+fn trajectory_snapshots() -> Vec<Array2<f64>> {
+    (0..2)
+        .map(|t| Array2::from_shape_fn((N_ROWS, 2), |(i, j)| (i * (j + 1) + t) as f64))
+        .collect()
+}
+
+#[test]
+fn infinite_snapshot_cell_is_reported_in_the_callers_matrix() {
+    let mut snapshots = trajectory_snapshots();
+    snapshots[1][[5, 1]] = f64::INFINITY;
+    for scale in [true, false] {
+        match CosmicTrajectory::from_snapshots(
+            &snapshots,
+            &config(JL),
+            &EntityIds::Positional,
+            None,
+            0.0,
+            scale,
+        ) {
+            Ok(_) => panic!("from_snapshots accepted an infinite cell (scale={scale})"),
+            Err(e) => {
+                assert_eq!(e.code(), "INVALID_PARAMETER");
+                let msg = e.to_string();
+                assert!(msg.contains("snapshot 1: input contains"), "{msg}");
+                assert!(msg.contains("(inf) at row 5, column 1"), "{msg}");
+            }
+        }
+    }
+}
+
+#[test]
+fn nan_similarity_threshold_is_rejected() {
+    let snapshots = trajectory_snapshots();
+    for threshold in [f64::NAN, f64::INFINITY, -0.25] {
+        let result = CosmicTrajectory::from_snapshots(
+            &snapshots,
+            &config(JL),
+            &EntityIds::Positional,
+            None,
+            threshold,
+            true,
+        );
+        assert!(
+            matches!(result, Err(PipelineError::TrajectoryInput(ref m)) if m.starts_with("similarity_threshold must be >= 0")),
+            "threshold {threshold}: {:?}",
+            result.err()
+        );
+    }
+}

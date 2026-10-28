@@ -630,8 +630,11 @@ pub async fn build(state: &ServerState, p: BuildParams) -> Result<CallToolResult
             "Call probe_columns or characterize_dataset to identify the entity and time columns, then retry.",
         ));
     }
-    if p.similarity_threshold < 0.0 {
-        return Err(invalid(BUILD, "similarity_threshold must be >= 0."));
+    if !p.similarity_threshold.is_finite() || p.similarity_threshold < 0.0 {
+        return Err(invalid(
+            BUILD,
+            "similarity_threshold must be a finite number >= 0.",
+        ));
     }
     let yaml = if p.config_yaml.is_empty() {
         state
@@ -672,14 +675,7 @@ pub async fn build(state: &ServerState, p: BuildParams) -> Result<CallToolResult
         (r, p)
     })
     .await
-    .map_err(|e| {
-        ToolError::new(
-            BUILD,
-            "LONGITUDINAL_BUILD_FAILED",
-            e.to_string(),
-            "The build worker stopped unexpectedly: this is a defect and the message is the evidence. Report it with the message.",
-        )
-    })?;
+    .map_err(|e| ToolError::worker_stopped(BUILD, "LONGITUDINAL_BUILD_FAILED", &e))?;
     let built = built?;
 
     let rep = p.representation.as_str();
@@ -1020,7 +1016,7 @@ pub async fn diagnose(state: &ServerState, p: DiagnoseParams) -> Result<CallTool
         surfaces
     })
     .await
-    .map_err(|e| internal(DIAGNOSE, e))?;
+    .map_err(|e| ToolError::worker_stopped(DIAGNOSE, "LONGITUDINAL_QUERY_FAILED", &e))?;
     if surfaces.is_empty() {
         let requested = match want {
             SurfaceParam::Auto => "auto",
@@ -1212,8 +1208,11 @@ pub async fn archetypes(
     state: &ServerState,
     p: ArchetypesParams,
 ) -> Result<CallToolResult, ToolError> {
-    if p.threshold < 0.0 {
-        return Err(invalid(ARCHETYPES, "threshold must be >= 0."));
+    if !p.threshold.is_finite() || p.threshold < 0.0 {
+        return Err(invalid(
+            ARCHETYPES,
+            "threshold must be a finite number >= 0.",
+        ));
     }
     if p.max_archetypes < 1 {
         return Err(invalid(ARCHETYPES, "max_archetypes must be >= 1."));
@@ -1231,7 +1230,7 @@ pub async fn archetypes(
         )
     })
     .await
-    .map_err(|e| internal(ARCHETYPES, e))?;
+    .map_err(|e| ToolError::worker_stopped(ARCHETYPES, "LONGITUDINAL_QUERY_FAILED", &e))?;
     payload["status"] = json!("ok");
     payload["detail"] = json!(p.detail.as_str());
     payload["longitudinal_id"] = json!(artifact.longitudinal_id);
@@ -1420,8 +1419,11 @@ pub async fn neighbors(
     if p.max_neighbors < 1 {
         return Err(invalid(NEIGHBORS, "max_neighbors must be >= 1."));
     }
-    if p.threshold < 0.0 {
-        return Err(invalid(NEIGHBORS, "threshold must be >= 0."));
+    if !p.threshold.is_finite() || p.threshold < 0.0 {
+        return Err(invalid(
+            NEIGHBORS,
+            "threshold must be a finite number >= 0.",
+        ));
     }
     let artifact = resolve(state, NEIGHBORS, &p.longitudinal_id)?;
     let ct = require_trajectory(NEIGHBORS, &artifact)?;
@@ -1507,7 +1509,7 @@ pub async fn neighbors(
         )
     })
     .await
-    .map_err(|e| internal(NEIGHBORS, e))?;
+    .map_err(|e| ToolError::worker_stopped(NEIGHBORS, "LONGITUDINAL_QUERY_FAILED", &e))?;
     payload["status"] = json!("ok");
     payload["longitudinal_id"] = json!(artifact.longitudinal_id);
     Ok(render(payload, p.response_format, neighbors_markdown))
@@ -1657,8 +1659,8 @@ pub fn classify_spec() -> ToolSpec {
 }
 
 pub async fn classify(state: &ServerState, p: ClassifyParams) -> Result<CallToolResult, ToolError> {
-    if p.threshold < 0.0 {
-        return Err(invalid(CLASSIFY, "threshold must be >= 0."));
+    if !p.threshold.is_finite() || p.threshold < 0.0 {
+        return Err(invalid(CLASSIFY, "threshold must be a finite number >= 0."));
     }
     let artifact = resolve(state, CLASSIFY, &p.longitudinal_id)?;
     require_trajectory(CLASSIFY, &artifact)?;
@@ -1672,7 +1674,7 @@ pub async fn classify(state: &ServerState, p: ClassifyParams) -> Result<CallTool
         )
     })
     .await
-    .map_err(|e| internal(CLASSIFY, e))?
+    .map_err(|e| ToolError::worker_stopped(CLASSIFY, "LONGITUDINAL_QUERY_FAILED", &e))?
     .map_err(|e| internal(CLASSIFY, e))?;
     let full = match payload
         .as_object_mut()
@@ -1927,8 +1929,7 @@ pub async fn sample(state: &ServerState, p: SampleParams) -> Result<CallToolResu
         out
     })
     .await
-    .map_err(|e| e.to_string())
-    .and_then(|r| r)
+    .map_err(|e| ToolError::worker_stopped(SAMPLE, "SAMPLE_FAILED", &e))?
     .map_err(|e| {
         ToolError::new(
             SAMPLE,

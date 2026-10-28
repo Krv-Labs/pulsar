@@ -326,7 +326,7 @@ async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolE
     let read_path = data_path.clone();
     let table = tokio::task::spawn_blocking(move || pulsar_data::read_table(&read_path))
         .await
-        .map_err(|e| ToolError::new(SWEEP, "INGEST_FAILED", e.to_string(), "Retry the sweep."))?
+        .map_err(|e| ToolError::worker_stopped(SWEEP, "INGEST_FAILED", &e))?
         .map_err(|e| {
             ToolError::new(
                 SWEEP,

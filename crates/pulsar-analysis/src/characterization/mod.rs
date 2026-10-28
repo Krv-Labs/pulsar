@@ -45,6 +45,12 @@ pub enum CharacterizationError {
     TooFewRows { found: usize },
     #[error("No numeric column has an observed value, so there is no geometry to measure.")]
     NoObservedValues,
+    #[error("Column {column:?} holds a non-finite value ({value}) at row {row}. Infinite values are not missing and are not imputed; they would turn the column's mean and z-scores into NaN.")]
+    NonFiniteValue {
+        column: String,
+        row: usize,
+        value: f64,
+    },
     #[error(transparent)]
     Core(#[from] pulsar_core::PulsarError),
 }
@@ -55,6 +61,7 @@ impl CharacterizationError {
             Self::TooFewNumericColumns { .. } => "TOO_FEW_NUMERIC_COLUMNS",
             Self::TooFewRows { .. } => "TOO_FEW_ROWS",
             Self::NoObservedValues => "NO_OBSERVED_VALUES",
+            Self::NonFiniteValue { .. } => "NON_FINITE_VALUE",
             Self::Core(_) => "CHARACTERIZATION_FAILED",
         }
     }
@@ -480,6 +487,23 @@ pub fn characterize_dataset(
             _ => unreachable!("filtered to numeric columns"),
         })
         .collect();
+    // NaN is missing and mean-imputed below; an infinity is not, and would
+    // poison the column's mean and standard deviation.
+    let names = table
+        .names
+        .iter()
+        .zip(&table.columns)
+        .filter(|(_, c)| matches!(c, Column::Float(_) | Column::Int(_)))
+        .map(|(name, _)| name);
+    for (name, col) in names.zip(&values) {
+        if let Some((row, &value)) = col.iter().enumerate().find(|(_, x)| x.is_infinite()) {
+            return Err(CharacterizationError::NonFiniteValue {
+                column: name.clone(),
+                row,
+                value,
+            });
+        }
+    }
     let missingness_pct = mean(
         &values
             .iter()
@@ -530,6 +554,36 @@ pub fn characterize_dataset(
 mod tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn an_infinite_cell_is_refused_before_imputation() {
+        let table = Table::new(
+            vec!["a".into(), "b".into()],
+            vec![
+                Column::Float((0..10).map(f64::from).collect()),
+                Column::Float(
+                    (0..10)
+                        .map(|i| {
+                            if i == 6 {
+                                f64::NEG_INFINITY
+                            } else {
+                                f64::from(i % 3)
+                            }
+                        })
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap();
+        let err = characterize_dataset(&table, 1000, 42).unwrap_err();
+        assert_eq!(err.code(), "NON_FINITE_VALUE");
+        assert!(
+            matches!(&err, CharacterizationError::NonFiniteValue { column, row: 6, value }
+                if column == "b" && *value == f64::NEG_INFINITY),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("(-inf) at row 6"), "{err}");
+    }
 
     #[test]
     fn percentile_matches_numpy_linear_interpolation() {

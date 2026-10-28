@@ -219,8 +219,7 @@ pub async fn labeled(state: &ServerState, p: LabeledParams) -> Result<CallToolRe
         pulsar_data::write_csv(&table, &output_path).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())
-    .and_then(|r| r)
+    .map_err(|e| ToolError::worker_stopped(LABELED, "EXPORT_WRITE_FAILED", &e))?
     .map_err(|e| {
         ToolError::new(
             LABELED,
@@ -510,8 +509,7 @@ pub async fn bundle(state: &ServerState, p: BundleParams) -> Result<CallToolResu
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())
-    .and_then(|r| r)
+    .map_err(|e| ToolError::worker_stopped(BUNDLE, "EXPORT_BUNDLE_FAILED", &e))?
     .map_err(|e| {
         ToolError::new(
             BUNDLE,

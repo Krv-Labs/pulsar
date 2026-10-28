@@ -7,7 +7,10 @@
 //! becomes the session's active config.
 
 use pulsar_analysis::characterization::characterize_dataset;
-use pulsar_analysis::config_build::{build_initial_config_yaml, calibration_curve, grid_ceiling};
+use pulsar_analysis::config_build::{
+    build_initial_config_yaml, calibration_curve, grid_ceiling, variance_elbow_dimension,
+    CeilingSource, GridCeiling,
+};
 use pulsar_analysis::plan::{
     calibrate_processed_space, draft_plan, plan_fingerprint, summarize_plan_counts, DraftOptions,
     PreprocessingPlan, QuestionStatus,
@@ -18,7 +21,7 @@ use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde_json::{json, Value};
 
-use super::characterize::{load, registered};
+use super::characterize::{characterization_error, load, registered};
 use super::config::{parse_config, resolve_dataset};
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
@@ -236,33 +239,33 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                     ..DraftOptions::default()
                 };
                 draft_plan(&table, &dataset, &opts).map_err(|e| {
-                    failed("CONFIG_CREATION_FAILED", e.to_string(), "Check the dataset is valid and the data is readable, then retry.")
+                    failed(
+                        "CONFIG_CREATION_FAILED",
+                        e.to_string(),
+                        "Check the dataset is valid and the data is readable, then retry.",
+                    )
                 })?
             }
         };
-        let geo = characterize_dataset(&table, 1000, 42).map_err(|e| {
-            failed(
-                e.code(),
-                e.to_string(),
-                "Geometry needs at least two numeric columns and two rows. Inspect the schema with probe_columns.",
-            )
-        })?;
+        let geo =
+            characterize_dataset(&table, 1000, 42).map_err(|e| characterization_error(NAME, e))?;
         let processed = calibrate_processed_space(&table, &plan);
         let yaml = build_initial_config_yaml(
             &geo,
             &data_path,
             &run_name,
-            processed.as_ref(),
+            processed.as_ref().ok(),
             &plan,
             None,
         );
         Ok((plan, geo, processed, yaml, table.n_rows()))
     })
     .await
-    .map_err(|e| failed("CONFIG_CREATION_FAILED", e.to_string(), "Retry; report the error if it recurs."))??;
+    .map_err(|e| ToolError::worker_stopped(NAME, "CONFIG_CREATION_FAILED", &e))??;
     let (plan, geo, processed, config_yaml, n_rows) = built;
-    let (cumulative, n_features) = calibration_curve(&geo, processed.as_ref());
+    let (cumulative, n_features) = calibration_curve(&geo, processed.as_ref().ok());
     let ceiling = grid_ceiling(cumulative, n_features);
+    let ceiling_note = ceiling_description(&ceiling, cumulative, n_features);
 
     // A freshly drafted plan is stored so `edit_preprocessing_plan` can refine it.
     let plan_handle = PlanId::parse(&plan.plan_id).map_err(|e| ToolError::from_store(NAME, e))?;
@@ -296,7 +299,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     let mut payload = json!({
         "status": "ok",
         "config_yaml": config_yaml,
-        "calibration_space": if processed.is_some() { "processed" } else { "raw" },
+        "calibration_space": if processed.is_ok() { "processed" } else { "raw" },
         "preprocessing_plan": {
             "plan_id": plan.plan_id,
             "revision": plan.revision,
@@ -356,7 +359,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         payload["warnings"] = Value::Array(warnings);
     }
     match &processed {
-        Some(m) => {
+        Ok(m) => {
             payload["processed_feature_count"] = json!(m.n_features);
             payload["raw_to_processed_expansion_ratio"] = json!(round_to(
                 m.n_features as f64 / geo.n_features.max(1) as f64,
@@ -369,14 +372,14 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 "p75": round_to(m.knn_p75, 4),
                 "p95": round_to(m.knn_p95, 4),
             });
-            payload["calibration_note"] = json!(
-                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow where cumulative variance first reaches 90%, bounded by the processed feature count. Variance is probed at 2, 3, 5, 10, 15 and 20 dimensions (within the feature and row counts); when no probe reaches 90%, the top of the grid is the largest probe. sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
-            );
+            payload["calibration_note"] = json!(format!(
+                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow where cumulative variance first reaches 90%, bounded by the processed feature count. Variance is probed at those of 2, 3, 5, 10, 15 and 20 dimensions that fit within the feature and row counts. {ceiling_note} sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
+            ));
         }
-        None => {
-            payload["calibration_note"] = json!(
-                "Processed-space calibration unavailable; epsilon and projection dimensions are calibrated against raw numeric columns only."
-            );
+        Err(fallback) => {
+            payload["calibration_note"] = json!(format!(
+                "Processed-space calibration fell back to raw numeric columns because {fallback}. Epsilon and projection dimensions in this config are therefore measured on the raw numeric columns, mean-imputed and z-scored, not on the plan's drop/impute/encode/scale output, and no knn_distance_percentiles are reported. {ceiling_note}"
+            ));
         }
     }
 
@@ -390,9 +393,67 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     Ok(ok_result(payload, None))
 }
 
+/// What set the top of the dimension grid, stated against the dimensions the
+/// variance curve actually measured.
+fn ceiling_description(
+    ceiling: &GridCeiling,
+    cumulative: &[(usize, f64)],
+    n_features: usize,
+) -> String {
+    let dim = ceiling.dim;
+    let probes = cumulative
+        .iter()
+        .map(|(d, _)| d.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match ceiling.source {
+        CeilingSource::VarianceElbow => format!(
+            "Cumulative variance first reached 90% at dimension {dim}; the curve was probed at {probes} within {n_features} features, so the grid tops out at {dim}."
+        ),
+        CeilingSource::ProbeLimit => {
+            let unmeasured = if dim < n_features {
+                format!(" Dimensions between {dim} and {n_features} were not measured.")
+            } else {
+                String::new()
+            };
+            format!(
+                "Cumulative variance had not reached 90% at the largest probed dimension ({dim}); the curve was probed at {probes} within {n_features} features.{unmeasured}"
+            )
+        }
+        CeilingSource::NFeatures => format!(
+            "The variance elbow ({}) lies above the feature count, so the grid tops out at the {n_features} available features.",
+            variance_elbow_dimension(cumulative, n_features)
+        ),
+        CeilingSource::Fallback => format!(
+            "No variance curve was measured; the top dimension ({dim}) comes from a feature-count heuristic over {n_features} features."
+        ),
+    }
+}
+
 /// Answers given by an agent or user on `plan`.
 fn counts_decisions(plan: &PreprocessingPlan) -> u64 {
     let counts = summarize_plan_counts(plan);
     counts["decided_by"]["agent"].as_u64().unwrap_or(0)
         + counts["decided_by"]["user"].as_u64().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_limit_names_the_largest_probe_and_the_unmeasured_range() {
+        // Eight features: the probe set filters to 2, 3, 5.
+        let cumulative = [(2, 0.4), (3, 0.55), (5, 0.8)];
+        let ceiling = grid_ceiling(&cumulative, 8);
+        assert_eq!(ceiling.source, CeilingSource::ProbeLimit);
+        let text = ceiling_description(&ceiling, &cumulative, 8);
+        assert!(text.contains("largest probed dimension (5)"), "{text}");
+        assert!(
+            text.contains("probed at 2, 3, 5 within 8 features"),
+            "{text}"
+        );
+        assert!(text.contains("between 5 and 8 were not measured"), "{text}");
+        assert!(!text.contains("20"), "{text}");
+    }
 }

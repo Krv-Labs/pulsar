@@ -162,8 +162,9 @@ feedback.
   graph: raise the upper bound. One dominant component: lower it or shift projections up.
 - Projection dimension is a sweep axis: each dimension is a different lens. JL scales
   every dimension to the same expected distances, so one epsilon list serves the grid.
-  JL draws its matrix row by row at the grid's largest dimension, so adding a dimension
-  changes the draws at every other dimension for the same seed. Above 16 dimensions Ball
+  JL draws its matrix row by row at the grid's largest dimension, so raising the grid's
+  largest dimension changes the draws at every other dimension for the same seed; adding
+  a dimension below it leaves existing embeddings unchanged. Above 16 dimensions Ball
   Mapper swaps its KD-tree for a linear scan: same membership, different speed.
 
 ## NO HILL-CLIMBING OPTIMISATION

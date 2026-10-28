@@ -607,11 +607,21 @@ pub fn suggest_resolution_dims(dims: &[usize], ceiling: usize) -> Vec<usize> {
         dims.retain(|&d| d <= ceiling);
         return dims;
     }
-    let mut step = round_int((high - low) as f64 / 5.0).max(1) as usize;
-    if high - low >= 6 {
+    let span = high - low;
+    let mut step = round_int(span as f64 / 5.0).max(1) as usize;
+    if span >= 6 {
         step = step.max(2);
     }
-    (low..=high).step_by(step).take(6).collect()
+    // Python stepped from `low` and kept the first six, which drops `high`
+    // whenever the step does not divide the span. The step only sets how many
+    // points to take; they are spread evenly so both ends are always kept.
+    // When the step divides the span this is Python's sequence.
+    let count = (span / step + 1).min(6);
+    let mut out: Vec<usize> = (0..count)
+        .map(|i| low + round_int((i * span) as f64 / (count - 1) as f64) as usize)
+        .collect();
+    out.dedup();
+    out
 }
 
 /// Whether clusters may be finalized on a dominant-component graph
@@ -773,17 +783,19 @@ mod tests {
         assert_eq!(suggest_resolution_dims(&[3], 30), vec![2, 3, 5]);
         assert_eq!(suggest_resolution_dims(&[2, 5, 8], 30), vec![2, 4, 6, 8]);
         assert_eq!(suggest_resolution_dims(&[16], 16), vec![12, 14, 16]);
+        // Python stepped from the low end and truncated, dropping the high
+        // end ([4, 6, 8, 10, 12, 14]); the suggestions now span both ends.
         assert_eq!(
             suggest_resolution_dims(&[4, 16], 0),
-            vec![4, 6, 8, 10, 12, 14]
+            vec![4, 6, 9, 11, 14, 16]
         );
         // Python clamped at 16; the ceiling is now the feature count or the
         // run's own largest dimension.
         assert_eq!(
             suggest_resolution_dims(&[2, 20], 30),
-            vec![2, 6, 10, 14, 18]
+            vec![2, 6, 11, 16, 20]
         );
-        assert_eq!(suggest_resolution_dims(&[2, 20], 0), vec![2, 6, 10, 14, 18]);
+        assert_eq!(suggest_resolution_dims(&[2, 20], 0), vec![2, 6, 11, 16, 20]);
         assert_eq!(
             suggest_resolution_dims(&[16, 20], 30),
             vec![16, 17, 18, 19, 20]
@@ -796,6 +808,14 @@ mod tests {
         assert_eq!(suggest_resolution_dims(&[5, 8], 4), Vec::<usize>::new());
         assert_eq!(suggest_resolution_dims(&[3, 8], 3), vec![3]);
         assert_eq!(suggest_resolution_dims(&[3], 2), vec![2]);
+        // At most six suggestions, always from the low end to the high end.
+        for (lo, hi) in [(2, 7), (2, 9), (3, 17), (2, 40), (5, 64), (2, 3)] {
+            let got = suggest_resolution_dims(&[lo, hi], 0);
+            assert!(got.len() <= 6, "[{lo}, {hi}] -> {got:?}");
+            assert_eq!(got.first(), Some(&lo), "[{lo}, {hi}] -> {got:?}");
+            assert_eq!(got.last(), Some(&hi), "[{lo}, {hi}] -> {got:?}");
+            assert!(got.windows(2).all(|w| w[0] < w[1]), "{got:?}");
+        }
 
         let g = Graph {
             n: 40,
