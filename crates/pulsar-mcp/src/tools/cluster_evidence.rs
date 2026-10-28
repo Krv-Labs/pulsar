@@ -511,14 +511,7 @@ pub async fn compare(state: &ServerState, p: CompareParams) -> Result<CallToolRe
     let results =
         tokio::task::spawn_blocking(move || compare_clusters(&live.table, &worker.labels, a, b))
             .await
-            .map_err(|e| {
-                ToolError::new(
-                    COMPARE,
-                    "COMPARE_FAILED",
-                    format!("the comparison worker stopped unexpectedly: {e}"),
-                    "Check cluster IDs with generate_cluster_dossier and retry.",
-                )
-            })?;
+            .map_err(|e| ToolError::worker_stopped(COMPARE, "COMPARE_FAILED", &e))?;
     if results.is_empty() {
         return Err(ToolError::new(
             COMPARE,

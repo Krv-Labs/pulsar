@@ -4,7 +4,7 @@ use rand::prelude::*;
 use rand_distr::StandardNormal;
 use rayon::prelude::*;
 
-use crate::error::PulsarError;
+use crate::error::{ensure_finite, PulsarError};
 
 /// Convert an ndarray `Array2<f64>` to a nalgebra `DMatrix<f64>`.
 fn ndarray_to_nalgebra(a: &Array2<f64>) -> DMatrix<f64> {
@@ -89,6 +89,8 @@ impl PCAInner {
                 msg: "input data has 0 features (columns)".to_string(),
             });
         }
+
+        ensure_finite(data)?;
 
         // Step 1: centre data
         let means = data
@@ -184,6 +186,7 @@ impl PCAInner {
                 got: format!("{} features", ncols),
             });
         }
+        ensure_finite(data)?;
         let mut centered = data.clone();
         for mut row in centered.rows_mut() {
             row -= &self.means;
@@ -224,6 +227,9 @@ pub fn pca_grid(
         });
     }
 
+    // Checked once here so a bad input fails before any per-seed work.
+    ensure_finite(data)?;
+
     let embeddings: Result<Vec<Vec<Array2<f64>>>, PulsarError> = seeds
         .par_iter()
         .map(|&seed| {
@@ -240,4 +246,51 @@ pub fn pca_grid(
         .collect();
 
     Ok(embeddings?.into_iter().flatten().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data_with(value: f64) -> Array2<f64> {
+        let mut data = Array2::from_shape_fn((50, 4), |(i, j)| (i * 4 + j) as f64);
+        data[[17, 2]] = value;
+        data
+    }
+
+    fn assert_rejects_cell_17_2(result: Result<impl Sized, PulsarError>) {
+        match result {
+            Err(PulsarError::InvalidParameter { msg }) => {
+                assert!(msg.contains("row 17, column 2"), "{msg}")
+            }
+            Err(other) => panic!("expected InvalidParameter, got {other:?}"),
+            Ok(_) => panic!("expected an error for non-finite input"),
+        }
+    }
+
+    // Without the up-front check these hang forever inside nalgebra's SVD.
+    #[test]
+    fn fit_rejects_nan_input() {
+        assert_rejects_cell_17_2(PCAInner::fit(&data_with(f64::NAN), 2, 42, 10, 2));
+    }
+
+    #[test]
+    fn fit_rejects_infinite_input() {
+        assert_rejects_cell_17_2(PCAInner::fit(&data_with(f64::INFINITY), 2, 42, 10, 2));
+        assert_rejects_cell_17_2(PCAInner::fit(&data_with(f64::NEG_INFINITY), 2, 42, 10, 2));
+    }
+
+    #[test]
+    fn transform_rejects_non_finite_input() {
+        let pca = PCAInner::fit(&data_with(1.0), 2, 42, 10, 2).unwrap();
+        for value in [f64::NAN, f64::INFINITY] {
+            assert_rejects_cell_17_2(pca.transform(&data_with(value)));
+        }
+        assert!(pca.transform(&data_with(1.0)).is_ok());
+    }
+
+    #[test]
+    fn pca_grid_rejects_nan_input() {
+        assert_rejects_cell_17_2(pca_grid(&data_with(f64::NAN), &[2, 3], &[42, 7], 10, 2));
+    }
 }

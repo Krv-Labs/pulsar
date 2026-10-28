@@ -32,7 +32,9 @@ pub use payload::{
     edit_plan_payload_to_markdown, Detail, Limits, EVENT_FLAG_HINT_DESCRIPTION, HOW_TO_USE,
 };
 pub use plan::{PreprocessingPlan, TargetProxy};
-pub use proxies::{calibrate_processed_space, dry_run_processed_space, DryRun, ProcessedSpace};
+pub use proxies::{
+    calibrate_processed_space, dry_run_processed_space, CalibrationFallback, DryRun, ProcessedSpace,
+};
 pub use questions::build_pending_questions;
 pub use render::{
     build_marker_legend, plan_fingerprint, plan_to_preprocessing_dict, plan_to_preprocessing_yaml,

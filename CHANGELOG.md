@@ -15,9 +15,21 @@ Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt
 
 - Pure-Rust replacements for every Python MCP tool: the cluster read tools, the six longitudinal tools (`CosmicTrajectory`, `TemporalCosmicGraph`, panel pivot), `export_labeled_data` (pandas-identical CSV), `export_dataset_bundle`, `create_graph_artifact` (with `surface='artifact'` on diagnose/skeleton) and `export_html_report` (byte-identical HTML). Parity against frozen fixtures.
 
+### Fixed
+
+- Ball Mapper no longer panics on more than 32 identical points in the KD-tree path (projections of 1-16 dims); duplicate-heavy data, including pooled longitudinal panels, now sweeps.
+- PCA rejects NaN or infinite input (in `fit` and `transform`) with an error naming the cell instead of hanging in the SVD. JL rejects it the same way instead of propagating NaN into the projection. Preprocessing and `characterize_dataset` report an infinite cell as `NON_FINITE_VALUE`, and the longitudinal panel pivot as `PANEL_NON_FINITE_VALUE`, before it reaches the scaler.
+- Non-positive or non-finite Ball Mapper epsilons set programmatically are rejected before any projection runs.
+- The pseudo-Laplacian, temporal and MinHash accumulators validate member indices instead of panicking on or dropping out-of-range ones.
+- Panic envelopes state the defect and ask for a report.
+
 ### Changed
 
+- `create_config` no longer clamps the projection grid at 16 (the KD-tree/linear-scan switch changes speed, not membership); `sweep_strategy` reports the grid ceiling, its source, the variance there and the row count, and dominant-component resolution suggestions are bounded by the feature count.
+- The PCA variance curve (`characterize_dataset`, `create_config` calibration) is probed up to the largest measurable dimension, `min(features, profiled rows)`, instead of only at 2, 3, 5, 10, 15 and 20: every dimension up to 12, otherwise 12 geometrically spaced probes, so the variance elbow and the dimension grid can exceed 20. `DatasetProfile` reports `n_features_profiled`; explicit probe dimensions outside the measurable range are rejected (`PROBE_OUT_OF_RANGE`). `grid_ceiling_source` gains `row_limit`, and the grid is bounded by the profiled row count.
+- The production variance curve is exact: it is read from the eigenvalues of the subsample's Gram matrix (at most profiled-rows squared), so probing every dimension costs one small eigendecomposition and a 1000x5000 table characterizes in about the time the old six-probe randomized estimate took. The Python-parity path keeps the randomized estimate.
 - Package license metadata now matches the BSD 3-Clause LICENSE file (the Cargo manifests said MIT).
+- Rust API: `pseudo_laplacian_inner`, `accumulate_pseudo_laplacians`, `accumulate_pseudo_laplacians_sparse` and `accumulate_temporal_pseudo_laplacians_inner` now return `Result`; `initial_pca_grid` and `build_initial_config_yaml` take `cap: Option<usize>`, and `initial_pca_grid` and `grid_ceiling` take the profiled row count; `characterize_dataset`, `profile_numeric_matrix` and `calibrate_processed_space` take a `PcaProbes` probe set; `DatasetProfile` carries `n_samples_profiled`; `suggest_resolution_dims` takes a ceiling and `finalization_gate` takes `n_features`; `pulsar_core::ensure_finite` and `ensure_members_in_range` are public; `calibrate_processed_space` returns `Result<_, CalibrationFallback>`.
 
 ### Removed
 

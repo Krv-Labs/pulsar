@@ -197,7 +197,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         Ok(dossier_to_html(&dossier, labels, Some(&graph), Some(&config_yaml)))
     })
     .await
-    .map_err(|e| failed(e.to_string()))??;
+    .map_err(|e| ToolError::worker_stopped(NAME, "EXPORT_REPORT_FAILED", &e))??;
     write_atomic(&path, &html).map_err(|e| failed(format!("{}: {e}", path.display())))?;
     let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
     let mut payload = json!({

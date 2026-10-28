@@ -919,6 +919,113 @@ sweep:
     client.cancel().await.unwrap();
 }
 
+/// 200 rows, 40 of them identical: the Ball Mapper KD path used to panic past 32 duplicates.
+fn duplicate_heavy_csv() -> String {
+    let mut out = String::from("a,b,c,d\n");
+    for i in 0..160 {
+        let x = f64::from(i);
+        out.push_str(&format!(
+            "{:.3},{:.3},{:.3},{:.3}\n",
+            (x * 0.37).sin() * 3.0,
+            (x * 0.11).cos() * 2.0 + x * 0.01,
+            (x * 0.73).sin(),
+            x * 0.02
+        ));
+    }
+    for _ in 0..40 {
+        out.push_str("1.000,1.000,1.000,1.000\n");
+    }
+    out
+}
+
+const DUPLICATE_YAML: &str = r#"
+version: 1
+run:
+  name: duplicates
+sweep:
+  projection:
+    method: jl
+    dimensions: [2, 3, 4]
+    seed: [42]
+  ball_mapper:
+    epsilon: [0.5, 1.0]
+"#;
+
+#[tokio::test]
+async fn sweeps_succeed_on_duplicate_heavy_data_at_kd_tree_dimensions() {
+    let root = TempRoot::new("duplicates");
+    let csv_path = root.path().join("dups.csv");
+    std::fs::write(&csv_path, duplicate_heavy_csv()).unwrap();
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[("path", json!(csv_path.display().to_string()))]),
+    )
+    .await;
+    let sweep = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(DUPLICATE_YAML)),
+            ("dataset_id", ingested["dataset_id"].clone()),
+        ]),
+    )
+    .await;
+    assert_eq!(sweep["status"], "ok");
+    assert_eq!(sweep["key_metrics"]["n_ball_maps"], 6);
+    client.cancel().await.unwrap();
+}
+
+/// An ordinary pipeline error raised inside the async worker (not a panic)
+/// reaches the caller through `wait_job` as a failed job with its own code.
+#[tokio::test]
+async fn wait_job_reports_a_worker_error_as_failed() {
+    let root = TempRoot::new("async-fail");
+    let csv_path = root.path().join("tiny.csv");
+    std::fs::write(&csv_path, "a,b\n1,2\n2,3\n3,4\n4,5\n5,6\n6,7\n").unwrap();
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[("path", json!(csv_path.display().to_string()))]),
+    )
+    .await;
+    // Dropping every column passes submit-time checks and fails inside the sweep worker.
+    let yaml = DUPLICATE_YAML.replace(
+        "name: duplicates",
+        "name: dup\npreprocessing:\n  drop_columns: [a, b]",
+    );
+    let submitted = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(yaml)),
+            ("dataset_id", ingested["dataset_id"].clone()),
+            ("execution", json!("async")),
+        ]),
+    )
+    .await;
+    assert_eq!(submitted["status"], "running");
+    let run_id = submitted["run_id"].clone();
+    let waited = err(
+        &client,
+        "wait_job",
+        args(&[("run_id", run_id), ("timeout_s", json!(60.0))]),
+    )
+    .await;
+    assert_eq!(waited["error_code"], "INVALID_PARAMETER");
+    assert_eq!(waited["details"]["job"]["state"], "failed");
+    assert!(waited["reason"].as_str().unwrap().contains("0 features"));
+    client.cancel().await.unwrap();
+}
+
 // ---- preprocessing-plan tools -------------------------------------------------
 
 fn plan_csv() -> String {
@@ -1568,6 +1675,65 @@ async fn characterize_and_probe_read_raw_data_and_explain_failures() {
 // ---- create_config -------------------------------------------------------------
 
 #[tokio::test]
+async fn create_config_grid_can_exceed_twenty_dimensions_on_a_wide_table() {
+    // 30 columns of independent noise: variance spreads evenly, so 90% is not
+    // reached by 20 dimensions and the grid must look past 20 to find it. The
+    // crossing (about 24) sits below the width, and the probes resolve it.
+    let root = TempRoot::new("create-config-wide");
+    let csv_path = root.path().join("wide30.csv");
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut noise = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let header: Vec<String> = (0..30).map(|j| format!("f{j}")).collect();
+    let mut csv = header.join(",") + "\n";
+    for _ in 0..150 {
+        let row: Vec<String> = (0..30).map(|_| format!("{:.6}", noise())).collect();
+        csv += &(row.join(",") + "\n");
+    }
+    std::fs::write(&csv_path, csv).unwrap();
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[("path", json!(csv_path.display().to_string()))]),
+    )
+    .await;
+    let created = ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", ingested["dataset_id"].clone())]),
+    )
+    .await;
+    let strategy = &created["sweep_strategy"];
+    let grid_max = strategy["projection_dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_u64().unwrap())
+        .max()
+        .unwrap();
+    assert!(grid_max > 20 && grid_max < 30, "{strategy}");
+    assert_eq!(
+        strategy["grid_ceiling"].as_u64(),
+        Some(grid_max),
+        "{strategy}"
+    );
+    assert_eq!(
+        strategy["grid_ceiling_source"].as_str(),
+        Some("variance_elbow"),
+        "{strategy}"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active() {
     let root = TempRoot::new("create-config");
     let client = connect(root.path(), test_options(), ()).await;
@@ -1600,6 +1766,31 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
         strategy["estimated_ball_maps"].as_u64().unwrap() as usize,
         strategy["imputation_variants"].as_u64().unwrap() as usize * dims * seeds * steps
     );
+    // The ceiling is the top of the grid, and its source is named.
+    let grid: Vec<u64> = strategy["projection_dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        strategy["grid_ceiling"].as_u64(),
+        grid.iter().max().copied()
+    );
+    assert!(
+        [
+            "variance_elbow",
+            "probe_limit",
+            "n_features",
+            "row_limit",
+            "fallback"
+        ]
+        .contains(&strategy["grid_ceiling_source"].as_str().unwrap()),
+        "{strategy}"
+    );
+    assert!(strategy["variance_at_ceiling"].is_null() || strategy["variance_at_ceiling"].is_f64());
+    assert!(strategy["n_rows"].as_u64().unwrap() > 0);
+    assert!(strategy["cost_note"].as_str().unwrap().contains("ball"));
     let p = &created["knn_distance_percentiles"];
     assert!(p["p5"].as_f64().unwrap() <= p["p95"].as_f64().unwrap());
     // Only registered tools are advertised.

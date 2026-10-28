@@ -7,12 +7,15 @@
 //! percentiles) within 1e-6, because scikit-learn's brute-force path computes
 //! distances from dot products (about 1e-8 apart from the exact Euclidean
 //! distances used here). Every table here is at most 1000 rows, so no row
-//! sample is drawn and numpy's generator is not involved.
+//! sample is drawn and numpy's generator is not involved. The variance
+//! curve is probed with Python's fixed probe set ([`PcaProbes::Python`]);
+//! production probes up to the feature count (see the divergences in
+//! `characterization`).
 
 use pulsar_analysis::characterization::{
     characterization_payload_to_markdown, characterize_dataset, compact_characterization_payload,
     probe_columns_payload, probe_columns_payload_to_markdown, profile_column_details,
-    ColumnProfile, DatasetProfile,
+    ColumnProfile, DatasetProfile, PcaProbes,
 };
 use pulsar_analysis::minhash::{massive_dataset_advisory, recommend_d, STANDARD_DEPTHS};
 use pulsar_data::read_csv_path;
@@ -32,7 +35,7 @@ fn lines(s: &str) -> Vec<String> {
 
 fn compare_table(csv: &str, want: &Value) {
     let table = read_csv_path(golden_dir().join(csv)).unwrap();
-    let result = characterize_dataset(&table, 1000, 42);
+    let result = characterize_dataset(&table, 1000, 42, PcaProbes::Python);
 
     if let Some(py_error) = want["error"].as_str() {
         assert_eq!(
@@ -165,6 +168,8 @@ fn a_massive_dataset_gets_the_minhash_advisory() {
         knn_k10_mean: 0.2,
         knn_k20_mean: 0.3,
         pca_cumulative_variance: vec![(1, 1.0)],
+        n_samples_profiled: 1000,
+        n_features_profiled: 1,
         column_profiles: profiles,
     };
     let payload = compact_characterization_payload(&geo);

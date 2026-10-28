@@ -326,7 +326,7 @@ async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolE
     let read_path = data_path.clone();
     let table = tokio::task::spawn_blocking(move || pulsar_data::read_table(&read_path))
         .await
-        .map_err(|e| ToolError::new(SWEEP, "INGEST_FAILED", e.to_string(), "Retry the sweep."))?
+        .map_err(|e| ToolError::worker_stopped(SWEEP, "INGEST_FAILED", &e))?
         .map_err(|e| {
             ToolError::new(
                 SWEEP,
@@ -606,6 +606,7 @@ fn build_response(
     let threshold_graph = ThresholdGraph::from_edges(fitted.n, &affinity);
     let full_affinity_connected = fitted.n > 0 && threshold_graph.component_count_at(0.0) <= 1;
 
+    let n_features = fitted.layout.feature_names.len();
     let gate = match (&metrics, &fitted.stability) {
         (Some(m), Some(stability)) => {
             let plateaus: Vec<_> = stability.plateaus.iter().take(10).cloned().collect();
@@ -621,12 +622,17 @@ fn build_response(
                 m,
                 sweep_count,
                 &fitted.config.projection.dimensions,
+                n_features,
                 Some(&options.candidates),
             )
         }
-        (Some(m), None) => {
-            finalization_gate(m, sweep_count, &fitted.config.projection.dimensions, None)
-        }
+        (Some(m), None) => finalization_gate(
+            m,
+            sweep_count,
+            &fitted.config.projection.dimensions,
+            n_features,
+            None,
+        ),
         (None, _) => {
             json!({"status": "ok", "reason": "No dominant-component resolution gate triggered."})
         }

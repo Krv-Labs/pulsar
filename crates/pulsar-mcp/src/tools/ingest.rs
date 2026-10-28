@@ -53,14 +53,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     let path = p.path.clone();
     let record = tokio::task::spawn_blocking(move || store.register_dataset(&path))
         .await
-        .map_err(|e| {
-            ToolError::new(
-                NAME,
-                "INGEST_FAILED",
-                e.to_string(),
-                "Retry ingest_dataset.",
-            )
-        })?;
+        .map_err(|e| ToolError::worker_stopped(NAME, "INGEST_FAILED", &e))?;
     let record = match record {
         Ok(r) => r,
         Err(pulsar_store::StoreError::DatasetNotFound { .. }) => {

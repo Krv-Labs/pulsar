@@ -293,8 +293,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         Ok::<_, String>((graph, metrics, elapsed))
     })
     .await
-    .map_err(|e| e.to_string())
-    .and_then(|r| r)
+    .map_err(|e| ToolError::worker_stopped(NAME, "GRAPH_ARTIFACT_FAILED", &e))?
     .map_err(|e| {
         ToolError::new(
             NAME,

@@ -180,22 +180,80 @@ pub(super) fn plan_config(
     .map_err(|e| e.to_string())
 }
 
+/// Why processed-space calibration fell back to raw numeric columns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CalibrationFallback {
+    /// The plan does not render to a valid preprocessing config.
+    PlanInvalid(String),
+    /// Preprocessing the table under the plan failed.
+    Preprocess { code: &'static str, message: String },
+    /// Preprocessing left fewer than two feature columns.
+    TooFewFeatures { found: usize },
+    /// Preprocessing left no rows.
+    NoRows,
+    /// The processed matrix still holds a non-finite value.
+    NonFinite,
+    /// The processed matrix could not be profiled.
+    Profile(String),
+}
+
+impl std::fmt::Display for CalibrationFallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PlanInvalid(reason) => {
+                write!(f, "the preprocessing plan does not render to a valid config ({reason})")
+            }
+            Self::Preprocess { code, message } => {
+                write!(f, "preprocessing under the plan failed with {code}: {message}")
+            }
+            Self::TooFewFeatures { found } => write!(
+                f,
+                "preprocessing under the plan left {found} feature column(s); geometry needs at least 2"
+            ),
+            Self::NoRows => write!(f, "preprocessing under the plan left no rows"),
+            Self::NonFinite => write!(
+                f,
+                "the processed matrix still holds a non-finite value"
+            ),
+            Self::Profile(reason) => {
+                write!(f, "the processed matrix could not be profiled ({reason})")
+            }
+        }
+    }
+}
+
 /// Run the plan's preprocessing (first imputation variant), z-score the
-/// result and profile it (`_calibrate_processed_space`). `None` when the plan
-/// cannot be applied, fewer than two features remain, or the matrix cannot be
-/// profiled; the caller then falls back to raw-space geometry. Python lets a
-/// profiling failure escape as an error; a missing calibration is the more
-/// useful answer for an agent.
+/// result and profile it (`_calibrate_processed_space`). An error names why
+/// the plan cannot be applied, too few features or rows remain, or the
+/// matrix cannot be profiled; the caller then falls back to raw-space
+/// geometry. Python lets a profiling failure escape as an error; a missing
+/// calibration is the more useful answer for an agent. `probes` sets where
+/// the variance curve is measured.
 pub fn calibrate_processed_space(
     table: &Table,
     plan: &PreprocessingPlan,
-) -> Option<crate::characterization::NumericProfile> {
-    let config = plan_config(plan, "calibrate").ok()?;
+    probes: crate::characterization::PcaProbes<'_>,
+) -> Result<crate::characterization::NumericProfile, CalibrationFallback> {
+    let config = plan_config(plan, "calibrate").map_err(CalibrationFallback::PlanInvalid)?;
     let variants = config.preprocessing_variants();
-    let processed = preprocess(table, &variants.first()?.preprocessing, None, None).ok()?;
+    let variant = variants.first().ok_or_else(|| {
+        CalibrationFallback::PlanInvalid("it yields no preprocessing variant".into())
+    })?;
+    let processed = preprocess(table, &variant.preprocessing, None, None).map_err(|e| {
+        CalibrationFallback::Preprocess {
+            code: e.code(),
+            message: e.to_string(),
+        }
+    })?;
     let (n, k) = processed.matrix.dim();
-    if k < 2 || n == 0 || processed.matrix.iter().any(|v| !v.is_finite()) {
-        return None;
+    if k < 2 {
+        return Err(CalibrationFallback::TooFewFeatures { found: k });
+    }
+    if n == 0 {
+        return Err(CalibrationFallback::NoRows);
+    }
+    if processed.matrix.iter().any(|v| !v.is_finite()) {
+        return Err(CalibrationFallback::NonFinite);
     }
     // StandardScaler: population standard deviation, zero variance left at 0.
     let mut x = processed.matrix;
@@ -205,7 +263,8 @@ pub fn calibrate_processed_space(
         let scale = if sd > 0.0 { sd } else { 1.0 };
         col.mapv_inplace(|v| (v - mean) / scale);
     }
-    crate::characterization::profile_numeric_matrix(x.view(), 1000, 42, None).ok()
+    crate::characterization::profile_numeric_matrix(x.view(), 1000, 42, probes)
+        .map_err(|e| CalibrationFallback::Profile(e.to_string()))
 }
 
 fn run(table: &Table, plan: &mut PreprocessingPlan) -> Result<ProcessedSpace, String> {
@@ -272,5 +331,56 @@ pub fn dry_run_processed_space(
                 },
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::characterization::PcaProbes;
+    use crate::plan::{draft_plan, DraftOptions};
+
+    fn table(columns: Vec<(&str, Column)>) -> Table {
+        let (names, cols) = columns.into_iter().map(|(n, c)| (n.to_owned(), c)).unzip();
+        Table::new(names, cols).unwrap()
+    }
+
+    #[test]
+    fn calibration_fallback_names_its_cause() {
+        let n = 30;
+        let a: Vec<f64> = (0..n).map(f64::from).collect();
+        let b: Vec<f64> = (0..n).map(|i| f64::from(i % 4)).collect();
+        let ok = table(vec![
+            ("a", Column::Float(a.clone())),
+            ("b", Column::Float(b.clone())),
+        ]);
+        let plan = draft_plan(&ok, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
+        assert!(calibrate_processed_space(&ok, &plan, PcaProbes::DataRelative).is_ok());
+
+        let one = table(vec![("a", Column::Float(a.clone()))]);
+        let plan = draft_plan(&one, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
+        let err = calibrate_processed_space(&one, &plan, PcaProbes::DataRelative).unwrap_err();
+        assert_eq!(err, CalibrationFallback::TooFewFeatures { found: 1 });
+
+        let mut spiked = b;
+        spiked[3] = f64::INFINITY;
+        let spiked = table(vec![("a", Column::Float(a)), ("b", Column::Float(spiked))]);
+        let plan = draft_plan(&spiked, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
+        let err = calibrate_processed_space(&spiked, &plan, PcaProbes::DataRelative).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CalibrationFallback::Preprocess {
+                    code: "NON_FINITE_VALUE",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string()
+                .starts_with("preprocessing under the plan failed with NON_FINITE_VALUE"),
+            "{err}"
+        );
     }
 }

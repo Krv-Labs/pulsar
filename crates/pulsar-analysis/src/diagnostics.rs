@@ -571,45 +571,72 @@ pub fn skeleton_payload(
 }
 
 /// Projection dimensions to zoom into after a dominant-component gate
-/// (`_suggest_resolution_pca_dims`).
-pub fn suggest_resolution_dims(dims: &[usize]) -> Vec<usize> {
+/// (`_suggest_resolution_pca_dims`). `ceiling` bounds the suggestions: the
+/// projection input's feature count, or the run's own largest dimension when
+/// that is unknown (`0`). Python clamped at 16 instead. A ceiling below 2
+/// leaves no valid projection dimension, so nothing is suggested. Nothing is
+/// suggested either when two or more swept dimensions all lie above the
+/// ceiling: JL accepts a dimension above the feature count and
+/// `refine_config` passes the swept dimensions through, so a run can hold
+/// only such dimensions, and none of them is kept.
+pub fn suggest_resolution_dims(dims: &[usize], ceiling: usize) -> Vec<usize> {
     let mut dims: Vec<usize> = dims.iter().copied().filter(|&d| d > 1).collect();
     dims.sort_unstable();
     dims.dedup();
+    let ceiling = match ceiling {
+        0 => dims.last().copied().unwrap_or(usize::MAX),
+        1 => return Vec::new(),
+        c => c,
+    };
     if dims.is_empty() {
-        return vec![5, 8, 12, 16];
+        let mut out: Vec<usize> = [5, 8, 12, 16].map(|d| d.min(ceiling)).to_vec();
+        out.dedup();
+        return out;
     }
     if dims.len() == 1 {
-        let center = dims[0].min(16);
+        let center = dims[0].min(ceiling);
         let mut out = vec![
             center.saturating_sub(4).max(2),
             center.saturating_sub(2).max(2),
             center,
-            (center + 2).min(16),
+            (center + 2).min(ceiling),
         ];
         out.sort_unstable();
         out.dedup();
         return out;
     }
     let low = dims[0];
-    let high = dims[dims.len() - 1].min(16);
+    let high = dims[dims.len() - 1].min(ceiling);
     if high <= low {
+        dims.retain(|&d| d <= ceiling);
         return dims;
     }
-    let mut step = round_int((high - low) as f64 / 5.0).max(1) as usize;
-    if high - low >= 6 {
+    let span = high - low;
+    let mut step = round_int(span as f64 / 5.0).max(1) as usize;
+    if span >= 6 {
         step = step.max(2);
     }
-    (low..=high).step_by(step).take(6).collect()
+    // Python stepped from `low` and kept the first six, which drops `high`
+    // whenever the step does not divide the span. The step only sets how many
+    // points to take; they are spread evenly so both ends are always kept.
+    // When the step divides the span this is Python's sequence.
+    let count = (span / step + 1).min(6);
+    let mut out: Vec<usize> = (0..count)
+        .map(|i| low + round_int((i * span) as f64 / (count - 1) as f64) as usize)
+        .collect();
+    out.dedup();
+    out
 }
 
 /// Whether clusters may be finalized on a dominant-component graph
 /// (`_finalization_gate`). `candidates` are the threshold candidates of the
-/// stability curve, if any.
+/// stability curve, if any. `n_features` is the projection input's feature
+/// count (`0` when unknown); it bounds the suggested dimensions.
 pub fn finalization_gate(
     metrics: &GraphMetrics,
     sweep_count: usize,
     projection_dims: &[usize],
+    n_features: usize,
     candidates: Option<&[Candidate]>,
 ) -> Value {
     let needs_resolution = metrics.giant_fraction > 0.95
@@ -641,7 +668,7 @@ pub fn finalization_gate(
             metrics.giant_fraction * 100.0
         ),
         "suggested_refinement": {
-            "projection_dimensions": suggest_resolution_dims(projection_dims),
+            "projection_dimensions": suggest_resolution_dims(projection_dims, n_features),
             "projection_seeds": [42, 7, 13],
             "epsilon_steps_min": 24,
             "strategy": "Zoom into the useful projection band with multiple seeds. Shift/lower epsilon if density remains high; avoid narrowing to a single projection dimension or single seed.",
@@ -755,30 +782,63 @@ mod tests {
 
     #[test]
     fn gate_and_resolution_dims_follow_python() {
-        assert_eq!(suggest_resolution_dims(&[]), vec![5, 8, 12, 16]);
-        assert_eq!(suggest_resolution_dims(&[3]), vec![2, 3, 5]);
-        assert_eq!(suggest_resolution_dims(&[2, 5, 8]), vec![2, 4, 6, 8]);
-        assert_eq!(suggest_resolution_dims(&[2, 20]), vec![2, 5, 8, 11, 14]);
-        assert_eq!(suggest_resolution_dims(&[16, 20]), vec![16, 20]);
+        // Grids up to 16 dims with at least 16 features match Python.
+        assert_eq!(suggest_resolution_dims(&[], 16), vec![5, 8, 12, 16]);
+        assert_eq!(suggest_resolution_dims(&[3], 30), vec![2, 3, 5]);
+        assert_eq!(suggest_resolution_dims(&[2, 5, 8], 30), vec![2, 4, 6, 8]);
+        assert_eq!(suggest_resolution_dims(&[16], 16), vec![12, 14, 16]);
+        // Python stepped from the low end and truncated, dropping the high
+        // end ([4, 6, 8, 10, 12, 14]); the suggestions now span both ends.
+        assert_eq!(
+            suggest_resolution_dims(&[4, 16], 0),
+            vec![4, 6, 9, 11, 14, 16]
+        );
+        // Python clamped at 16; the ceiling is now the feature count or the
+        // run's own largest dimension.
+        assert_eq!(
+            suggest_resolution_dims(&[2, 20], 30),
+            vec![2, 6, 11, 16, 20]
+        );
+        assert_eq!(suggest_resolution_dims(&[2, 20], 0), vec![2, 6, 11, 16, 20]);
+        assert_eq!(
+            suggest_resolution_dims(&[16, 20], 30),
+            vec![16, 17, 18, 19, 20]
+        );
+        assert_eq!(suggest_resolution_dims(&[18], 19), vec![14, 16, 18, 19]);
+        assert_eq!(suggest_resolution_dims(&[], 6), vec![5, 6]);
+        // Never above the feature count, and nothing when it is below 2.
+        assert!(suggest_resolution_dims(&[], 1).is_empty());
+        assert!(suggest_resolution_dims(&[2, 3], 1).is_empty());
+        assert_eq!(suggest_resolution_dims(&[5, 8], 4), Vec::<usize>::new());
+        assert_eq!(suggest_resolution_dims(&[3, 8], 3), vec![3]);
+        assert_eq!(suggest_resolution_dims(&[3], 2), vec![2]);
+        // At most six suggestions, always from the low end to the high end.
+        for (lo, hi) in [(2, 7), (2, 9), (3, 17), (2, 40), (5, 64), (2, 3)] {
+            let got = suggest_resolution_dims(&[lo, hi], 0);
+            assert!(got.len() <= 6, "[{lo}, {hi}] -> {got:?}");
+            assert_eq!(got.first(), Some(&lo), "[{lo}, {hi}] -> {got:?}");
+            assert_eq!(got.last(), Some(&hi), "[{lo}, {hi}] -> {got:?}");
+            assert!(got.windows(2).all(|w| w[0] < w[1]), "{got:?}");
+        }
 
         let g = Graph {
             n: 40,
             edges: (0..39).map(|i| (i, i + 1, 1.0)).collect(),
         };
         let m = GraphAnalysis::new(&g).unwrap().metrics(0.1, 10, None, None);
-        let gate = finalization_gate(&m, 1, &[2, 5], None);
+        let gate = finalization_gate(&m, 1, &[2, 5], 0, None);
         assert_eq!(gate["status"], "blocked");
         assert_eq!(gate["code"], "UNRESOLVED_DOMINANT_COMPONENT");
         assert!(gate["message"]
             .as_str()
             .unwrap()
             .starts_with("giant_fraction=100.0% after 1 sweep(s)."));
-        let ok = finalization_gate(&m, 3, &[2, 5], None);
+        let ok = finalization_gate(&m, 3, &[2, 5], 0, None);
         assert_eq!(
             ok["status"], "blocked",
             "density 0.05 but n_ball_maps 10 < 40"
         );
         let m2 = GraphAnalysis::new(&g).unwrap().metrics(0.1, 50, None, None);
-        assert_eq!(finalization_gate(&m2, 3, &[2], None)["status"], "ok");
+        assert_eq!(finalization_gate(&m2, 3, &[2], 0, None)["status"], "ok");
     }
 }

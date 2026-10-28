@@ -511,7 +511,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     // then dropped with its result, which discards it.
     let (computed, staged) = tokio::task::spawn_blocking(move || compute(job))
         .await
-        .map_err(|e| failed(format!("the dossier worker stopped unexpectedly: {e}")))??;
+        .map_err(|e| ToolError::worker_stopped(NAME, "DOSSIER_FAILED", &e))??;
     let record = publish(state, &run_id, &computed, staged)?;
 
     let header = two_lever_markdown_note(construction_threshold, interpretation_threshold)

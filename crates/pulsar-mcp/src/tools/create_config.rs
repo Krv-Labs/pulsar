@@ -6,8 +6,11 @@
 //! default plan that is stored so it can be edited afterwards. The YAML
 //! becomes the session's active config.
 
-use pulsar_analysis::characterization::characterize_dataset;
-use pulsar_analysis::config_build::build_initial_config_yaml;
+use pulsar_analysis::characterization::{characterize_dataset, PcaProbes};
+use pulsar_analysis::config_build::{
+    build_initial_config_yaml, calibration_curve, grid_ceiling, variance_elbow_dimension,
+    CeilingSource, GridCeiling,
+};
 use pulsar_analysis::plan::{
     calibrate_processed_space, draft_plan, plan_fingerprint, summarize_plan_counts, DraftOptions,
     PreprocessingPlan, QuestionStatus,
@@ -18,7 +21,7 @@ use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde_json::{json, Value};
 
-use super::characterize::{load, registered};
+use super::characterize::{characterization_error, load, registered};
 use super::config::{parse_config, resolve_dataset};
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
@@ -47,6 +50,44 @@ pub fn spec() -> ToolSpec {
         &[("code", s::string()), ("message", s::string())],
         &["code", "message"],
         false,
+    );
+    let sweep_strategy = s::object(
+        &[
+            ("projection_method", s::string()),
+            ("projection_dimensions", s::array(s::integer())),
+            ("projection_seeds", s::array(s::integer())),
+            ("epsilon_steps", s::integer()),
+            ("imputation_variants", s::integer()),
+            ("estimated_ball_maps", s::integer()),
+            ("n_rows", s::integer()),
+            ("grid_ceiling", s::integer()),
+            (
+                "grid_ceiling_source",
+                s::enumeration(&[
+                    "variance_elbow",
+                    "probe_limit",
+                    "n_features",
+                    "row_limit",
+                    "fallback",
+                ]),
+            ),
+            ("variance_at_ceiling", s::nullable(s::number())),
+            ("cost_note", s::string()),
+        ],
+        &[
+            "projection_method",
+            "projection_dimensions",
+            "projection_seeds",
+            "epsilon_steps",
+            "imputation_variants",
+            "estimated_ball_maps",
+            "n_rows",
+            "grid_ceiling",
+            "grid_ceiling_source",
+            "variance_at_ceiling",
+            "cost_note",
+        ],
+        true,
     );
     let provenance = s::object(
         &[
@@ -84,7 +125,7 @@ pub fn spec() -> ToolSpec {
                 ("calibration_space", s::enumeration(&["processed", "raw"])),
                 ("preprocessing_plan", provenance),
                 ("warnings", s::array(warning)),
-                ("sweep_strategy", s::open_object()),
+                ("sweep_strategy", sweep_strategy),
                 ("processed_feature_count", s::integer()),
                 ("raw_to_processed_expansion_ratio", s::number()),
                 ("knn_distance_percentiles", s::open_object()),
@@ -204,24 +245,34 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                     ..DraftOptions::default()
                 };
                 draft_plan(&table, &dataset, &opts).map_err(|e| {
-                    failed("CONFIG_CREATION_FAILED", e.to_string(), "Check the dataset is valid and the data is readable, then retry.")
+                    failed(
+                        "CONFIG_CREATION_FAILED",
+                        e.to_string(),
+                        "Check the dataset is valid and the data is readable, then retry.",
+                    )
                 })?
             }
         };
-        let geo = characterize_dataset(&table, 1000, 42).map_err(|e| {
-            failed(
-                e.code(),
-                e.to_string(),
-                "Geometry needs at least two numeric columns and two rows. Inspect the schema with probe_columns.",
-            )
-        })?;
-        let processed = calibrate_processed_space(&table, &plan);
-        let yaml = build_initial_config_yaml(&geo, &data_path, &run_name, processed.as_ref(), &plan);
-        Ok((plan, geo, processed, yaml))
+        let geo = characterize_dataset(&table, 1000, 42, PcaProbes::DataRelative)
+            .map_err(|e| characterization_error(NAME, e))?;
+        let processed = calibrate_processed_space(&table, &plan, PcaProbes::DataRelative);
+        let yaml = build_initial_config_yaml(
+            &geo,
+            &data_path,
+            &run_name,
+            processed.as_ref().ok(),
+            &plan,
+            None,
+        );
+        Ok((plan, geo, processed, yaml, table.n_rows()))
     })
     .await
-    .map_err(|e| failed("CONFIG_CREATION_FAILED", e.to_string(), "Retry; report the error if it recurs."))??;
-    let (plan, geo, processed, config_yaml) = built;
+    .map_err(|e| ToolError::worker_stopped(NAME, "CONFIG_CREATION_FAILED", &e))??;
+    let (plan, geo, processed, config_yaml, n_rows) = built;
+    let (cumulative, n_features, n_rows_profiled) =
+        calibration_curve(&geo, processed.as_ref().ok());
+    let ceiling = grid_ceiling(cumulative, n_features, n_rows_profiled);
+    let ceiling_note = ceiling_description(&ceiling, cumulative, n_features, n_rows_profiled);
 
     // A freshly drafted plan is stored so `edit_preprocessing_plan` can refine it.
     let plan_handle = PlanId::parse(&plan.plan_id).map_err(|e| ToolError::from_store(NAME, e))?;
@@ -255,7 +306,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     let mut payload = json!({
         "status": "ok",
         "config_yaml": config_yaml,
-        "calibration_space": if processed.is_some() { "processed" } else { "raw" },
+        "calibration_space": if processed.is_ok() { "processed" } else { "raw" },
         "preprocessing_plan": {
             "plan_id": plan.plan_id,
             "revision": plan.revision,
@@ -272,6 +323,11 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "epsilon_steps": config.ball_mapper.epsilons.len(),
             "imputation_variants": variants,
             "estimated_ball_maps": variants * dims.len() * seeds.len() * config.ball_mapper.epsilons.len(),
+            "n_rows": n_rows,
+            "grid_ceiling": ceiling.dim,
+            "grid_ceiling_source": ceiling.source.as_str(),
+            "variance_at_ceiling": ceiling.variance,
+            "cost_note": "Runtime grows with ball maps \u{d7} rows \u{d7} balls per map \u{d7} projection dimension (every distance is O(dimension)); a smaller epsilon yields more balls, and the grid is not clamped at 16; it is bounded only by the measured elbow, the feature count and the profiled rows, so a high variance elbow on a wide table means wide, slower maps. Above 16 dimensions the radius query switches from a KD-tree to a linear scan; that switch changes speed, not which points a ball contains.",
             "compatibility_note": (!dims.is_empty()).then_some(
                 "sweep.pca is a legacy mirror of sweep.projection for older configs; sweep.projection is authoritative."
             ),
@@ -310,7 +366,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         payload["warnings"] = Value::Array(warnings);
     }
     match &processed {
-        Some(m) => {
+        Ok(m) => {
             payload["processed_feature_count"] = json!(m.n_features);
             payload["raw_to_processed_expansion_ratio"] = json!(round_to(
                 m.n_features as f64 / geo.n_features.max(1) as f64,
@@ -323,14 +379,14 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 "p75": round_to(m.knn_p75, 4),
                 "p95": round_to(m.knn_p95, 4),
             });
-            payload["calibration_note"] = json!(
-                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure (frontiers + elbow, capped at 16 for the KD-tree envelope); the default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
-            );
+            payload["calibration_note"] = json!(format!(
+                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow (the first probed dimension at or above 90% cumulative variance), bounded by the processed feature count and by the number of profiled rows (PCA keeps at most as many components as rows). {ceiling_note} sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
+            ));
         }
-        None => {
-            payload["calibration_note"] = json!(
-                "Processed-space calibration unavailable; epsilon and projection dimensions are calibrated against raw numeric columns only."
-            );
+        Err(fallback) => {
+            payload["calibration_note"] = json!(format!(
+                "Processed-space calibration fell back to raw numeric columns because {fallback}. Epsilon and projection dimensions in this config are therefore measured on the raw numeric columns, mean-imputed and z-scored, not on the plan's drop/impute/encode/scale output, and no knn_distance_percentiles are reported. {ceiling_note}"
+            ));
         }
     }
 
@@ -344,9 +400,130 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     Ok(ok_result(payload, None))
 }
 
+/// What set the top of the dimension grid, stated against the dimensions the
+/// variance curve actually measured.
+fn ceiling_description(
+    ceiling: &GridCeiling,
+    cumulative: &[(usize, f64)],
+    n_features: usize,
+    n_rows: usize,
+) -> String {
+    let dim = ceiling.dim;
+    let probes = cumulative
+        .iter()
+        .map(|(d, _)| d.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match ceiling.source {
+        CeilingSource::VarianceElbow => format!(
+            "The first probed dimension at or above 90% cumulative variance is {dim}; the curve was probed at {probes} within {n_features} features, so the grid tops out at {dim}."
+        ),
+        CeilingSource::ProbeLimit => {
+            let unmeasured = if dim < n_features {
+                format!(" Dimensions between {dim} and {n_features} were not measured.")
+            } else {
+                String::new()
+            };
+            format!(
+                "Cumulative variance had not reached 90% at the largest probed dimension ({dim}); the curve was probed at {probes} within {n_features} features.{unmeasured}"
+            )
+        }
+        CeilingSource::NFeatures => {
+            let knee = variance_elbow_dimension(cumulative, n_features);
+            if knee > n_features {
+                format!(
+                    "The variance elbow ({knee}) lies above the feature count, so the grid tops out at the {n_features} available features."
+                )
+            } else {
+                format!(
+                    "No probed dimension below the feature count reached 90% cumulative variance; the curve was probed at {probes}, so the grid tops out at all {n_features} features."
+                )
+            }
+        }
+        CeilingSource::RowLimit => format!(
+            "No probed dimension below {dim}, the number of profiled rows, reached 90% cumulative variance; PCA keeps at most as many components as rows, so the curve (probed at {probes}) could not be measured further and the grid tops out at {dim} of the {n_features} features."
+        ),
+        CeilingSource::Fallback => {
+            let rows = if dim == n_rows && dim < n_features {
+                format!(", bounded by the {n_rows} profiled rows")
+            } else {
+                String::new()
+            };
+            format!(
+                "No variance curve was measured; the top dimension ({dim}) comes from a feature-count heuristic over {n_features} features{rows}."
+            )
+        }
+    }
+}
+
 /// Answers given by an agent or user on `plan`.
 fn counts_decisions(plan: &PreprocessingPlan) -> u64 {
     let counts = summarize_plan_counts(plan);
     counts["decided_by"]["agent"].as_u64().unwrap_or(0)
         + counts["decided_by"]["user"].as_u64().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_limit_names_the_largest_probe_and_the_unmeasured_range() {
+        // Eight features: Python's probe set filters to 2, 3, 5.
+        let cumulative = [(2, 0.4), (3, 0.55), (5, 0.8)];
+        let ceiling = grid_ceiling(&cumulative, 8, 100);
+        assert_eq!(ceiling.source, CeilingSource::ProbeLimit);
+        let text = ceiling_description(&ceiling, &cumulative, 8, 100);
+        assert!(text.contains("largest probed dimension (5)"), "{text}");
+        assert!(
+            text.contains("probed at 2, 3, 5 within 8 features"),
+            "{text}"
+        );
+        assert!(text.contains("between 5 and 8 were not measured"), "{text}");
+        assert!(!text.contains("20"), "{text}");
+    }
+
+    #[test]
+    fn the_elbow_is_named_as_a_probed_dimension() {
+        let curve = [
+            (2, 0.3),
+            (14, 0.8),
+            (18, 0.88),
+            (23, 0.89),
+            (26, 0.94),
+            (30, 1.0),
+        ];
+        let ceiling = grid_ceiling(&curve, 30, 150);
+        assert_eq!(
+            (ceiling.source, ceiling.dim),
+            (CeilingSource::VarianceElbow, 26)
+        );
+        let text = ceiling_description(&ceiling, &curve, 30, 150);
+        assert!(
+            text.starts_with(
+                "The first probed dimension at or above 90% cumulative variance is 26;"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("first reached"), "{text}");
+    }
+
+    #[test]
+    fn feature_and_row_bounds_are_named() {
+        let full = [(2, 0.2), (20, 0.67), (30, 1.0)];
+        let ceiling = grid_ceiling(&full, 30, 200);
+        assert_eq!(ceiling.source, CeilingSource::NFeatures);
+        let text = ceiling_description(&ceiling, &full, 30, 200);
+        assert!(text.contains("all 30 features"), "{text}");
+        assert!(text.contains("probed at 2, 20, 30"), "{text}");
+
+        let short = [(2, 0.3), (20, 0.8), (25, 1.0)];
+        let ceiling = grid_ceiling(&short, 40, 25);
+        assert_eq!(ceiling.source, CeilingSource::RowLimit);
+        let text = ceiling_description(&ceiling, &short, 40, 25);
+        assert!(
+            text.contains("No probed dimension below 25, the number of profiled rows"),
+            "{text}"
+        );
+    }
 }

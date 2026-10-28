@@ -36,9 +36,9 @@ use ndarray::{s, Array2, Array3, ArrayD, Axis, Ix3};
 use rayon::prelude::*;
 
 use crate::ballmapper::ball_mapper_grid;
-use crate::error::PulsarError;
+use crate::error::{ensure_finite, ensure_members_in_range, PulsarError};
 use crate::pca::pca_grid;
-use crate::pseudolaplacian::pseudo_laplacian_inner;
+use crate::pseudolaplacian::dense_contribution;
 use crate::scale::StandardScalerInner;
 
 /// `pca_grid` oversampling and power iterations used by `from_snapshots`
@@ -61,6 +61,9 @@ const PCA_POWER_ITER: usize = 2;
 /// A 3D array of shape `(n, n, T)` containing the accumulated pseudo-Laplacian
 /// for each time step.
 ///
+/// # Errors
+/// [`PulsarError::InvalidParameter`] if any member index is `>= n`.
+///
 /// # Example
 /// ```python
 /// # Run Pulsar pipeline at each time step
@@ -77,7 +80,13 @@ const PCA_POWER_ITER: usize = 2;
 pub fn accumulate_temporal_pseudo_laplacians_inner(
     ball_maps_per_time: &[Vec<&Vec<Vec<usize>>>],
     n: usize,
-) -> Array3<i64> {
+) -> Result<Array3<i64>, PulsarError> {
+    ensure_members_in_range(
+        ball_maps_per_time
+            .iter()
+            .flat_map(|maps| maps.iter().flat_map(|nodes| nodes.iter())),
+        n,
+    )?;
     let t_steps = ball_maps_per_time.len();
 
     // Process each time step in parallel
@@ -87,7 +96,7 @@ pub fn accumulate_temporal_pseudo_laplacians_inner(
             // Accumulate all ball maps at this time step
             ball_maps_at_t
                 .iter()
-                .map(|nodes| pseudo_laplacian_inner(nodes, n))
+                .map(|nodes| dense_contribution(nodes, n))
                 .fold(Array2::<i64>::zeros((n, n)), |mut acc, l| {
                     acc += &l;
                     acc
@@ -101,7 +110,7 @@ pub fn accumulate_temporal_pseudo_laplacians_inner(
         tensor.index_axis_mut(Axis(2), t).assign(&laplacian);
     }
 
-    tensor
+    Ok(tensor)
 }
 
 /// Normalize a 3D pseudo-Laplacian tensor into weighted adjacency matrices.
@@ -228,6 +237,18 @@ impl TemporalCosmicGraph {
                     snap.nrows()
                 )));
             }
+            // Check the raw snapshot: after scaling, the reported cell would
+            // be in the derived matrix and a lone inf would read as NaN.
+            ensure_finite(snap).map_err(|e| match e {
+                PulsarError::InvalidParameter { msg } => invalid(format!("snapshot {t}: {msg}")),
+                other => other,
+            })?;
+        }
+        if let Some(&eps) = epsilons.iter().find(|e| !e.is_finite() || **e <= 0.0) {
+            return Err(invalid(format!(
+                "epsilon must be a finite positive number, got {}",
+                py_float(eps)
+            )));
         }
         let ball_maps_per_time = snapshots
             .iter()
@@ -242,7 +263,7 @@ impl TemporalCosmicGraph {
             .iter()
             .map(|maps| maps.iter().map(|bm| &bm.nodes).collect())
             .collect();
-        let laplacian = accumulate_temporal_pseudo_laplacians_inner(&node_refs, n);
+        let laplacian = accumulate_temporal_pseudo_laplacians_inner(&node_refs, n)?;
         Ok(Self {
             tensor: normalize_temporal_laplacian(&laplacian),
             threshold,
@@ -392,7 +413,7 @@ mod tests {
         let nodes1 = vec![vec![0, 1], vec![1, 2]];
         let ball_maps_per_time = vec![vec![&nodes1]];
 
-        let tensor = accumulate_temporal_pseudo_laplacians_inner(&ball_maps_per_time, 3);
+        let tensor = accumulate_temporal_pseudo_laplacians_inner(&ball_maps_per_time, 3).unwrap();
 
         assert_eq!(tensor.dim(), (3, 3, 1));
         // Check diagonal (membership counts)
@@ -407,7 +428,7 @@ mod tests {
         let nodes2 = vec![vec![1, 2]];
         let ball_maps_per_time = vec![vec![&nodes1], vec![&nodes2]];
 
-        let tensor = accumulate_temporal_pseudo_laplacians_inner(&ball_maps_per_time, 3);
+        let tensor = accumulate_temporal_pseudo_laplacians_inner(&ball_maps_per_time, 3).unwrap();
 
         assert_eq!(tensor.dim(), (3, 3, 2));
 
@@ -502,5 +523,48 @@ mod tests {
             0.0
         )
         .is_err());
+    }
+
+    #[test]
+    fn temporal_accumulate_rejects_member_index_beyond_n() {
+        // Ten points, but the second time step's ball map covers 40 rows.
+        let ok = vec![vec![0, 1]];
+        let forty_rows: Vec<Vec<usize>> = vec![(0..5).collect(), (30..40).collect()];
+        let err = accumulate_temporal_pseudo_laplacians_inner(&[vec![&ok], vec![&forty_rows]], 10)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid parameter: ball member index 30 is out of range for n = 10 points"
+        );
+    }
+
+    #[test]
+    fn from_snapshots_rejects_non_positive_or_non_finite_epsilon() {
+        let snaps = [Array2::from_shape_fn((6, 2), |(i, j)| (i + 2 * j) as f64)];
+        for eps in [0.0, -0.5, f64::NAN, f64::INFINITY] {
+            let err = TemporalCosmicGraph::from_snapshots(&snaps, &[2], &[42], &[0.5, eps], 0.0)
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("epsilon must be a finite positive number"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_snapshots_rejects_non_finite_snapshot() {
+        let good = Array2::from_shape_fn((6, 2), |(i, j)| (i + 2 * j) as f64);
+        for cell in [f64::NAN, f64::INFINITY] {
+            let mut bad = good.clone();
+            bad[[3, 1]] = cell;
+            let err =
+                TemporalCosmicGraph::from_snapshots(&[good.clone(), bad], &[2], &[42], &[0.5], 0.0)
+                    .unwrap_err();
+            assert_eq!(err.code(), "INVALID_PARAMETER");
+            let msg = err.to_string();
+            assert!(msg.contains("snapshot 1"), "{msg}");
+            assert!(msg.contains("row 3, column 1"), "{msg}");
+        }
     }
 }
