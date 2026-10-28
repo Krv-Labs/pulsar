@@ -16,7 +16,7 @@ pulsar-core = { path = "../pulsar-core" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 thiserror = "2"
 

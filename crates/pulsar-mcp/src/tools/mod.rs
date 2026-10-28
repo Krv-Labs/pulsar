@@ -2,10 +2,20 @@
 //! for an agent that has never seen Pulsar, input schema from the parameter
 //! struct, output schema, annotations) and the dispatcher.
 
+pub mod artifact;
+pub mod characterize;
+pub mod cluster_evidence;
+pub mod clustering;
 pub mod config;
+pub mod create_config;
 pub mod diagnostics;
+pub mod export;
 pub mod ingest;
+pub mod longitudinal;
 pub mod meta;
+pub mod plan;
+pub mod refine_config;
+pub mod report;
 pub mod sweep;
 
 use std::sync::Arc;
@@ -53,7 +63,15 @@ pub struct CallContext {
 pub fn catalog() -> Vec<ToolSpec> {
     vec![
         ingest::spec(),
+        longitudinal::sample_spec(),
+        characterize::characterize_spec(),
+        characterize::probe_spec(),
+        create_config::spec(),
+        refine_config::spec(),
         config::spec(),
+        plan::draft_spec(),
+        plan::edit_spec(),
+        plan::validate_spec(),
         sweep::history_spec(),
         sweep::compare_spec(),
         sweep::sweep_spec(),
@@ -62,6 +80,20 @@ pub fn catalog() -> Vec<ToolSpec> {
         diagnostics::diagnose_spec(),
         diagnostics::curve_spec(),
         diagnostics::skeleton_spec(),
+        artifact::spec(),
+        clustering::spec(),
+        longitudinal::build_spec(),
+        longitudinal::diagnose_spec(),
+        longitudinal::archetypes_spec(),
+        longitudinal::neighbors_spec(),
+        longitudinal::classify_spec(),
+        cluster_evidence::profile_spec(),
+        cluster_evidence::signal_spec(),
+        cluster_evidence::matrix_spec(),
+        cluster_evidence::compare_spec(),
+        export::labeled_spec(),
+        export::bundle_spec(),
+        report::spec(),
         meta::guide_spec(),
         meta::runtime_spec(),
     ]
@@ -91,7 +123,23 @@ pub async fn dispatch(
 ) -> Result<CallToolResult, ToolError> {
     match name {
         ingest::NAME => ingest::call(&state, parse_params(ingest::NAME, args)?).await,
+        characterize::CHARACTERIZE => {
+            characterize::characterize(&state, parse_params(characterize::CHARACTERIZE, args)?)
+                .await
+        }
+        characterize::PROBE => {
+            characterize::probe(&state, parse_params(characterize::PROBE, args)?).await
+        }
+        create_config::NAME => {
+            create_config::call(&state, parse_params(create_config::NAME, args)?).await
+        }
+        refine_config::NAME => {
+            refine_config::call(&state, parse_params(refine_config::NAME, args)?).await
+        }
         config::NAME => config::call(&state, parse_params(config::NAME, args)?).await,
+        plan::DRAFT => plan::draft(&state, parse_params(plan::DRAFT, args)?).await,
+        plan::EDIT => plan::edit(&state, parse_params(plan::EDIT, args)?).await,
+        plan::VALIDATE => plan::validate(&state, parse_params(plan::VALIDATE, args)?).await,
         sweep::HISTORY => sweep::history(&state, parse_params(sweep::HISTORY, args)?).await,
         sweep::COMPARE => sweep::compare(&state, parse_params(sweep::COMPARE, args)?).await,
         sweep::SWEEP => sweep::run(state.clone(), parse_params(sweep::SWEEP, args)?, ctx).await,
@@ -106,6 +154,41 @@ pub async fn dispatch(
         diagnostics::SKELETON => {
             diagnostics::skeleton(&state, parse_params(diagnostics::SKELETON, args)?).await
         }
+        clustering::NAME => clustering::call(&state, parse_params(clustering::NAME, args)?).await,
+        artifact::NAME => artifact::call(&state, parse_params(artifact::NAME, args)?).await,
+        cluster_evidence::PROFILE => {
+            cluster_evidence::profile(&state, parse_params(cluster_evidence::PROFILE, args)?).await
+        }
+        cluster_evidence::SIGNAL => {
+            cluster_evidence::signal(&state, parse_params(cluster_evidence::SIGNAL, args)?).await
+        }
+        cluster_evidence::MATRIX => {
+            cluster_evidence::matrix(&state, parse_params(cluster_evidence::MATRIX, args)?).await
+        }
+        cluster_evidence::COMPARE => {
+            cluster_evidence::compare(&state, parse_params(cluster_evidence::COMPARE, args)?).await
+        }
+        longitudinal::BUILD => {
+            longitudinal::build(&state, parse_params(longitudinal::BUILD, args)?).await
+        }
+        longitudinal::DIAGNOSE => {
+            longitudinal::diagnose(&state, parse_params(longitudinal::DIAGNOSE, args)?).await
+        }
+        longitudinal::ARCHETYPES => {
+            longitudinal::archetypes(&state, parse_params(longitudinal::ARCHETYPES, args)?).await
+        }
+        longitudinal::NEIGHBORS => {
+            longitudinal::neighbors(&state, parse_params(longitudinal::NEIGHBORS, args)?).await
+        }
+        longitudinal::CLASSIFY => {
+            longitudinal::classify(&state, parse_params(longitudinal::CLASSIFY, args)?).await
+        }
+        longitudinal::SAMPLE => {
+            longitudinal::sample(&state, parse_params(longitudinal::SAMPLE, args)?).await
+        }
+        export::LABELED => export::labeled(&state, parse_params(export::LABELED, args)?).await,
+        export::BUNDLE => export::bundle(&state, parse_params(export::BUNDLE, args)?).await,
+        report::NAME => report::call(&state, parse_params(report::NAME, args)?).await,
         meta::GUIDE => meta::guide().await,
         meta::RUNTIME => meta::runtime(&state).await,
         other => Err(ToolError::new(

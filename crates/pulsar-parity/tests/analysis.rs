@@ -1,5 +1,5 @@
 //! Parity for the graph-analysis port (#64): threshold options, structural
-//! breakpoints and clustering must reproduce what `scripts/golden/generate.py`
+//! breakpoints and clustering must reproduce what `generate.py` (Python generator, see `tests/fixtures/golden/README.md`)
 //! froze from the Python `thresholds.py` and `cosmic_clusters`.
 //!
 //! The generator computed these on the `construction: exact` fit: the full

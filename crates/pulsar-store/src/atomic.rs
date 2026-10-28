@@ -38,23 +38,61 @@ fn create_private(path: &Path) -> std::io::Result<File> {
     opts.open(path)
 }
 
-/// Write `bytes` to `path` atomically. With `durable`, fsync before the
-/// rename so the record survives power loss, not only a process crash.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8], durable: bool) -> Result<(), StoreError> {
-    let tmp = temp_path(path);
-    let result = (|| {
-        let mut file = create_private(&tmp).map_err(io("create", &tmp))?;
-        file.write_all(bytes).map_err(io("write", &tmp))?;
-        if durable {
-            file.sync_all().map_err(io("fsync", &tmp))?;
-        }
-        drop(file);
-        fs::rename(&tmp, path).map_err(io("rename", path))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+/// A file fully written under its temp name but not yet renamed into place.
+/// [`StagedFile::commit`] is a single rename; dropping it uncommitted
+/// removes the temp file, so a cancelled publish leaves nothing behind.
+#[derive(Debug)]
+pub(crate) struct StagedFile {
+    tmp: PathBuf,
+    path: PathBuf,
+    committed: bool,
+}
+
+impl StagedFile {
+    /// The final path the file becomes visible at.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
-    result
+
+    pub(crate) fn commit(mut self) -> Result<(), StoreError> {
+        fs::rename(&self.tmp, &self.path).map_err(io("rename", &self.path))?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// Write `bytes` to a temp file next to `path` without publishing it. With
+/// `durable`, fsync so the record survives power loss once committed, not
+/// only a process crash.
+pub(crate) fn stage_atomic(
+    path: &Path,
+    bytes: &[u8],
+    durable: bool,
+) -> Result<StagedFile, StoreError> {
+    let staged = StagedFile {
+        tmp: temp_path(path),
+        path: path.to_path_buf(),
+        committed: false,
+    };
+    let mut file = create_private(&staged.tmp).map_err(io("create", &staged.tmp))?;
+    file.write_all(bytes).map_err(io("write", &staged.tmp))?;
+    if durable {
+        file.sync_all().map_err(io("fsync", &staged.tmp))?;
+    }
+    Ok(staged)
+}
+
+/// Write `bytes` to `path` atomically (stage, then commit).
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], durable: bool) -> Result<(), StoreError> {
+    stage_atomic(path, bytes, durable)?.commit()
 }
 
 pub(crate) fn write_json<T: Serialize>(
@@ -62,12 +100,20 @@ pub(crate) fn write_json<T: Serialize>(
     value: &T,
     durable: bool,
 ) -> Result<(), StoreError> {
+    stage_json(path, value, durable)?.commit()
+}
+
+pub(crate) fn stage_json<T: Serialize>(
+    path: &Path,
+    value: &T,
+    durable: bool,
+) -> Result<StagedFile, StoreError> {
     let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StoreError::CorruptRecord {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
     bytes.push(b'\n');
-    write_atomic(path, &bytes, durable)
+    stage_atomic(path, &bytes, durable)
 }
 
 /// Read a JSON record, checking its `schema` field. `Ok(None)` when the

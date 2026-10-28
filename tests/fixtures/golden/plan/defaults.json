@@ -1,0 +1,738 @@
+{
+ "plain": {
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "entries": {
+   "rid": {
+    "column": "rid",
+    "role": "id",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "unique text value per observed row (40 distinct values)",
+    "question_id": null
+   },
+   "age": {
+    "column": "age",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "4 blanks; no recorded 0; blank on the same rows as 1 other column (mg2)",
+    "question_id": null
+   },
+   "weight": {
+    "column": "weight",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "4 blanks; no recorded 0; blank on the same rows as 1 other column (mg2)",
+    "question_id": null
+   },
+   "flag": {
+    "column": "flag",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete boolean column (2 distinct values)",
+    "question_id": null
+   },
+   "dose": {
+    "column": "dose",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": null
+   },
+   "dose_txt": {
+    "column": "dose_txt",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": null
+   },
+   "code_mixed": {
+    "column": "code_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (6 rows; 1 blank); kept as 4 categories",
+    "question_id": null
+   },
+   "amount_mixed": {
+    "column": "amount_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (2 rows; 1 blank); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": null
+   },
+   "visit": {
+    "column": "visit",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (40 distinct values; 0 blanks)",
+    "question_id": null
+   },
+   "city": {
+    "column": "city",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "text column with 3 categories and 2 blanks; blanks become '(blank)' category",
+    "question_id": null
+   },
+   "city_full": {
+    "column": "city_full",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "20 distinct text categories (exceeds sqrt(40) = 6); would add 20 columns",
+    "question_id": null
+   },
+   "const": {
+    "column": "const",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "one distinct value; adds no distance information",
+    "question_id": null
+   },
+   "empty": {
+    "column": "empty",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "all 40 rows are blank",
+    "question_id": null
+   },
+   "count": {
+    "column": "count",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "3 blanks; no recorded 0",
+    "question_id": null
+   },
+   "clean": {
+    "column": "clean",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "numtxt_clean": {
+    "column": "numtxt_clean",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (0 blanks); coerced to numbers with median fill",
+    "question_id": null
+   },
+   "numtxt_blank": {
+    "column": "numtxt_blank",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (2 blanks); coerced to numbers with median fill",
+    "question_id": null
+   }
+  },
+  "date_cols": [
+   "visit"
+  ],
+  "mixed_value_cols": [
+   "code_mixed",
+   "amount_mixed"
+  ],
+  "conditional_by_partner": {
+   "flag": [
+    "dose",
+    "dose_txt"
+   ]
+  },
+  "rule7b_cols": [
+   "age",
+   "weight",
+   "count",
+   "numtxt_blank"
+  ],
+  "grouped_7b": {
+   "mg2": [
+    "age",
+    "weight"
+   ],
+   "singleton:count": [
+    "count"
+   ],
+   "singleton:numtxt_blank": [
+    "numtxt_blank"
+   ]
+  },
+  "missing_groups": {
+   "mg1": [
+    "dose",
+    "dose_txt"
+   ],
+   "mg2": [
+    "age",
+    "weight"
+   ]
+  }
+ },
+ "roles": {
+  "args": {
+   "targets": [
+    "flag",
+    "age"
+   ],
+   "entity": "rid",
+   "time": "visit"
+  },
+  "entries": {
+   "rid": {
+    "column": "rid",
+    "role": "entity",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as entity column",
+    "question_id": null
+   },
+   "age": {
+    "column": "age",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "weight": {
+    "column": "weight",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "4 blanks; no recorded 0; blank on the same rows as 1 other column (mg2)",
+    "question_id": null
+   },
+   "flag": {
+    "column": "flag",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "dose": {
+    "column": "dose",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": null
+   },
+   "dose_txt": {
+    "column": "dose_txt",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": null
+   },
+   "code_mixed": {
+    "column": "code_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (6 rows; 1 blank); kept as 4 categories",
+    "question_id": null
+   },
+   "amount_mixed": {
+    "column": "amount_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (2 rows; 1 blank); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": null
+   },
+   "visit": {
+    "column": "visit",
+    "role": "time",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as time column",
+    "question_id": null
+   },
+   "city": {
+    "column": "city",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "text column with 3 categories and 2 blanks; blanks become '(blank)' category",
+    "question_id": null
+   },
+   "city_full": {
+    "column": "city_full",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "20 distinct text categories (exceeds sqrt(40) = 6); would add 20 columns",
+    "question_id": null
+   },
+   "const": {
+    "column": "const",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "one distinct value; adds no distance information",
+    "question_id": null
+   },
+   "empty": {
+    "column": "empty",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "all 40 rows are blank",
+    "question_id": null
+   },
+   "count": {
+    "column": "count",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "3 blanks; no recorded 0",
+    "question_id": null
+   },
+   "clean": {
+    "column": "clean",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "numtxt_clean": {
+    "column": "numtxt_clean",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (0 blanks); coerced to numbers with median fill",
+    "question_id": null
+   },
+   "numtxt_blank": {
+    "column": "numtxt_blank",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (2 blanks); coerced to numbers with median fill",
+    "question_id": null
+   }
+  },
+  "date_cols": [],
+  "mixed_value_cols": [
+   "code_mixed",
+   "amount_mixed"
+  ],
+  "conditional_by_partner": {
+   "flag": [
+    "dose",
+    "dose_txt"
+   ]
+  },
+  "rule7b_cols": [
+   "weight",
+   "count",
+   "numtxt_blank"
+  ],
+  "grouped_7b": {
+   "mg2": [
+    "weight"
+   ],
+   "singleton:count": [
+    "count"
+   ],
+   "singleton:numtxt_blank": [
+    "numtxt_blank"
+   ]
+  },
+  "missing_groups": {
+   "mg1": [
+    "dose",
+    "dose_txt"
+   ],
+   "mg2": [
+    "age",
+    "weight"
+   ]
+  }
+ },
+ "penguins": {
+  "args": {
+   "targets": [
+    "species"
+   ],
+   "entity": "",
+   "time": ""
+  },
+  "entries": {
+   "rowid": {
+    "column": "rowid",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (344 distinct values)",
+    "question_id": null
+   },
+   "species": {
+    "column": "species",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "island": {
+    "column": "island",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete text column with 3 categories",
+    "question_id": null
+   },
+   "bill_length_mm": {
+    "column": "bill_length_mm",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": null
+   },
+   "bill_depth_mm": {
+    "column": "bill_depth_mm",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": null
+   },
+   "flipper_length_mm": {
+    "column": "flipper_length_mm",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": null
+   },
+   "body_mass_g": {
+    "column": "body_mass_g",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": null
+   },
+   "sex": {
+    "column": "sex",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "text column with 2 categories and 11 blanks; blanks become '(blank)' category",
+    "question_id": null
+   },
+   "year": {
+    "column": "year",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (3 distinct values)",
+    "question_id": null
+   }
+  },
+  "date_cols": [],
+  "mixed_value_cols": [],
+  "conditional_by_partner": {},
+  "rule7b_cols": [
+   "bill_length_mm",
+   "bill_depth_mm",
+   "flipper_length_mm",
+   "body_mass_g"
+  ],
+  "grouped_7b": {
+   "mg1": [
+    "bill_length_mm",
+    "bill_depth_mm",
+    "flipper_length_mm",
+    "body_mass_g"
+   ]
+  },
+  "missing_groups": {
+   "mg1": [
+    "bill_length_mm",
+    "bill_depth_mm",
+    "flipper_length_mm",
+    "body_mass_g"
+   ]
+  }
+ },
+ "errors": {
+  "entity": {
+   "code": "INVALID_ARGUMENT",
+   "message": "Unknown entity_column: 'nope'.",
+   "details": {
+    "entity_column": "nope",
+    "available_columns": [
+     "rid",
+     "age",
+     "weight",
+     "flag",
+     "dose",
+     "dose_txt",
+     "code_mixed",
+     "amount_mixed",
+     "visit",
+     "city",
+     "city_full",
+     "const",
+     "empty",
+     "count",
+     "clean",
+     "numtxt_clean",
+     "numtxt_blank"
+    ]
+   }
+  },
+  "time": {
+   "code": "INVALID_ARGUMENT",
+   "message": "Unknown time_column: 'when'.",
+   "details": {
+    "time_column": "when",
+    "available_columns": [
+     "rid",
+     "age",
+     "weight",
+     "flag",
+     "dose",
+     "dose_txt",
+     "code_mixed",
+     "amount_mixed",
+     "visit",
+     "city",
+     "city_full",
+     "const",
+     "empty",
+     "count",
+     "clean",
+     "numtxt_clean",
+     "numtxt_blank"
+    ]
+   }
+  },
+  "targets": {
+   "code": "INVALID_ARGUMENT",
+   "message": "Unknown target_columns: ['bad one', \"it's\"].",
+   "details": {
+    "unknown_target_columns": [
+     "bad one",
+     "it's"
+    ],
+    "available_columns": [
+     "rid",
+     "age",
+     "weight",
+     "flag",
+     "dose",
+     "dose_txt",
+     "code_mixed",
+     "amount_mixed",
+     "visit",
+     "city",
+     "city_full",
+     "const",
+     "empty",
+     "count",
+     "clean",
+     "numtxt_clean",
+     "numtxt_blank"
+    ]
+   }
+  }
+ }
+}

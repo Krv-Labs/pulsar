@@ -55,6 +55,15 @@ impl<T> ModelCache<T> {
         entries.drain(..overflow).collect()
     }
 
+    /// Most recently used entry matching `pred`; does not change the order.
+    pub fn find(&self, pred: impl Fn(&T) -> bool) -> Option<(RunId, Arc<T>)> {
+        self.lock()
+            .iter()
+            .rev()
+            .find(|(_, model)| pred(model))
+            .cloned()
+    }
+
     /// Fetch and mark as most recently used.
     pub fn get(&self, run_id: &RunId) -> Option<Arc<T>> {
         let mut entries = self.lock();
@@ -112,5 +121,16 @@ mod tests {
         assert!(cache.evict(&a).is_some());
         assert_eq!(cache.len(), 1);
         assert_eq!(ModelCache::<()>::new(0).capacity(), 1);
+    }
+
+    #[test]
+    fn find_does_not_reorder() {
+        let cache = ModelCache::<String>::new(3);
+        let (a, b) = (RunId::random(), RunId::random());
+        cache.put(a.clone(), Arc::new("a".into()));
+        cache.put(b.clone(), Arc::new("b".into()));
+        assert!(cache.find(|m| m == "x").is_none());
+        assert_eq!(cache.find(|m| m == "a").map(|(id, _)| id), Some(a.clone()));
+        assert_eq!(cache.run_ids(), vec![a, b]);
     }
 }

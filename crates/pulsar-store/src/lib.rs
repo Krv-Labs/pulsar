@@ -30,16 +30,18 @@ pub mod store;
 
 pub use cache::{ModelCache, ENV_CAPACITY};
 pub use error::StoreError;
-pub use handle::{ClusterAssignmentId, DatasetId, HandleKind, LongitudinalId, RunId, UploadId};
+pub use handle::{
+    ClusterAssignmentId, DatasetId, HandleKind, LongitudinalId, PlanId, RunId, UploadId,
+};
 pub use history::{summarize_history, ComponentProfile, FragmentationTrend, HistorySummary};
 pub use job::{JobError, JobHandle, JobKind, JobRecord, JobState, ABANDONED, INTERRUPTED};
-pub use paths::{default_root, ENV_ROOT};
+pub use paths::{default_root, APP_DIR, ENV_ROOT};
 pub use record::{
     ClusterAssignment, ClusterAssignmentRecord, ConfigSummary, DatasetRecord, DatasetSource,
-    LongitudinalRecord, PlateauSummary, Representation, RunArtifacts, RunMetrics, RunRecord,
-    StabilitySummary, ThresholdPolicy, UploadRecord, SCHEMA_VERSION,
+    LongitudinalRecord, PlanRecord, PlateauSummary, Representation, RunArtifacts, RunMetrics,
+    RunRecord, StabilitySummary, ThresholdPolicy, UploadRecord, SCHEMA_VERSION,
 };
-pub use store::{RunListing, Store, StoreOptions};
+pub use store::{RunListing, StagedClusterAssignment, Store, StoreOptions};
 
 #[cfg(test)]
 pub(crate) mod test_util {

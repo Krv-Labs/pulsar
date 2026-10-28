@@ -89,6 +89,52 @@
       "mode": "partition",
       "min_ari": 0.9,
       "note": "sklearn SpectralClustering is RNG-seeded (random_state=None)"
+    },
+    "resolve_clusters": {
+      "mode": "rtol",
+      "rtol": 1e-09
+    },
+    "resolve_clusters_spectral": {
+      "mode": "partition",
+      "min_ari": 1.0,
+      "note": "Rust labels the spectral embedding with k-means++, Python with sklearn discretize; the fixture graphs are well separated, so the partitions must agree"
+    },
+    "temporal": {
+      "mode": "rtol",
+      "rtol": 1e-12,
+      "note": "numpy reduces time lanes pairwise; Rust sums sequentially"
+    },
+    "trajectory": {
+      "mode": "rtol",
+      "rtol": 1e-12,
+      "note": "CO_SIMILAR weights; observations, balls, members, edge endpoints and component labels are exact"
+    },
+    "panel": {
+      "mode": "rtol",
+      "rtol": 1e-12,
+      "note": "imputed snapshot values; ids, times, reports, notes and error envelopes are exact"
+    },
+    "longitudinal_payloads": {
+      "mode": "exact",
+      "note": "payload values are rounded as in Python; ranked lists break ties by first appearance (numpy's order inside a tie was unspecified)"
+    },
+    "labeled_csv": {
+      "mode": "exact",
+      "note": "byte-identical to pandas read_csv + to_csv(index=False)"
+    },
+    "bundle": {
+      "mode": "rtol",
+      "rtol": 1e-06,
+      "note": "float32 columns; integer, string, bool columns, schemas and manifests exact except config_hash; spectral layout checked as Laplacian eigenvectors (unique only up to sign and eigenspace basis)"
+    },
+    "graph_artifact": {
+      "mode": "rtol",
+      "rtol": 1e-12,
+      "note": "sparsifier edges and metrics; endpoints, counts and labels exact"
+    },
+    "html_report": {
+      "mode": "exact",
+      "note": "byte-identical HTML for graphs under 500 nodes (networkx force layout)"
     }
   },
   "cases": {

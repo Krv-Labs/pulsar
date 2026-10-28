@@ -41,6 +41,17 @@ impl PyRandom {
         rng
     }
 
+    /// Equivalent to numpy's legacy `np.random.RandomState(seed)`: the
+    /// same generator seeded with `init_genrand` instead of `init_by_array`.
+    pub fn numpy_legacy(seed: u32) -> Self {
+        let mut rng = Self {
+            mt: [0; N],
+            index: N,
+        };
+        rng.init_genrand(seed);
+        rng
+    }
+
     fn init_genrand(&mut self, s: u32) {
         self.mt[0] = s;
         for i in 1..N {

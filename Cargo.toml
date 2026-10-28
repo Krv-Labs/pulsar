@@ -2,15 +2,16 @@
 resolver = "2"
 members = ["crates/*"]
 
-# Single source of truth for the version (scripts/check_versions.py and
-# pulsar/_version.py both read this table); member crates inherit it.
+# Single source of truth for the version: member crates inherit it, the npm
+# builder (npm/scripts/build-packages.mjs) reads it, and the release workflow
+# requires the `v*` tag to match it.
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 # Floor set by the lockfile (ordered-float 5.5 via kiddo); rmcp 3.5 needs
 # 1.88 and arrow/parquet 1.85. Checked in CI by the `msrv` job.
 rust-version = "1.90"
-license = "MIT"
+license = "BSD-3-Clause"
 
 [profile.release]
 lto = true

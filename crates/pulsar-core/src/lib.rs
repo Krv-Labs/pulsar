@@ -51,4 +51,6 @@ pub use pseudolaplacian::{
     SparsePseudoLaplacian,
 };
 pub use scale::StandardScalerInner;
-pub use temporal::{accumulate_temporal_pseudo_laplacians_inner, normalize_temporal_laplacian};
+pub use temporal::{
+    accumulate_temporal_pseudo_laplacians_inner, normalize_temporal_laplacian, TemporalCosmicGraph,
+};
