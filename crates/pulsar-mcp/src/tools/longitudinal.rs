@@ -677,7 +677,7 @@ pub async fn build(state: &ServerState, p: BuildParams) -> Result<CallToolResult
             BUILD,
             "LONGITUDINAL_BUILD_FAILED",
             e.to_string(),
-            "Retry build_longitudinal_graph.",
+            "The build worker stopped unexpectedly: this is a defect and the message is the evidence. Report it with the message.",
         )
     })?;
     let built = built?;

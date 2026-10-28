@@ -121,7 +121,7 @@ pub async fn run_sweep(
                 TOOL,
                 "FIT_PANICKED",
                 format!("the sweep worker stopped unexpectedly: {join}"),
-                "Report the error; retry with a smaller grid if it recurs.",
+                "An internal computation panicked: this is a defect and the message is the evidence. Report it with the message; the run is not recoverable by changing the config.",
             )
             .detail("run_id", serde_json::json!(run_id)));
         }

@@ -69,7 +69,7 @@ fn blocking_failed(tool: &'static str, code: &str, e: tokio::task::JoinError) ->
         tool,
         code,
         e.to_string(),
-        "Report the error; retry with a smaller dataset if it recurs.",
+        "An internal computation stopped unexpectedly: this is a defect and the message is the evidence. Report it with the message.",
     )
 }
 
