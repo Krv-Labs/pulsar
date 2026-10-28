@@ -12,7 +12,7 @@ struct ConfigCase {
     resolved: Value,
 }
 
-/// The same shape `scripts/golden/generate.py::_resolved_config` writes.
+/// The same shape `generate.py::_resolved_config` (Python generator, see `tests/fixtures/golden/README.md`) writes.
 fn resolved(cfg: &PulsarConfig) -> Value {
     let pre = &cfg.preprocessing;
     let cg = &cfg.cosmic_graph;

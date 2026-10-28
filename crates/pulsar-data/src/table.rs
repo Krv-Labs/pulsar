@@ -85,6 +85,30 @@ impl Table {
         self.columns.first().map_or(0, Column::len)
     }
 
+    /// A new table with the given rows, in the given order.
+    ///
+    /// Panics if an index is out of range; callers pass indices below
+    /// [`Table::n_rows`].
+    pub fn take_rows(&self, rows: &[usize]) -> Table {
+        fn pick<T: Clone>(v: &[T], rows: &[usize]) -> Vec<T> {
+            rows.iter().map(|&i| v[i].clone()).collect()
+        }
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| match c {
+                Column::Float(v) => Column::Float(pick(v, rows)),
+                Column::Int(v) => Column::Int(pick(v, rows)),
+                Column::Bool(v) => Column::Bool(pick(v, rows)),
+                Column::Text(v) => Column::Text(pick(v, rows)),
+            })
+            .collect();
+        Table {
+            names: self.names.clone(),
+            columns,
+        }
+    }
+
     pub fn n_cols(&self) -> usize {
         self.columns.len()
     }

@@ -350,26 +350,34 @@ async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolE
         .latest_run_id
         .as_ref()
         .and_then(|id| state.store.get_run(id).ok());
-    let cached = session
-        .latest_run_id
-        .as_ref()
-        .and_then(|id| state.cache.get(id));
-    let (precomputed, projection_cache_status) = match cached {
-        Some(live)
-            if live.projection_fingerprint == fingerprint && !live.fitted.embeddings.is_empty() =>
+    // Any live run with a matching fingerprint serves, not just the latest:
+    // returning to an earlier config (A → B → A) reuses its embeddings.
+    // The scan must not promote entries, or a miss reorders the LRU; only the
+    // hit is marked as used.
+    let hit = state
+        .cache
+        .find(|live| {
+            live.projection_fingerprint == fingerprint && !live.fitted.embeddings.is_empty()
+        })
+        .and_then(|(id, _)| state.cache.get(&id));
+    let (precomputed, projection_cache_status) = match hit {
+        Some(live) => (
+            Some(live.fitted.embeddings.clone()),
+            cache_status(projection_method, "hit", "fingerprint_match"),
+        ),
+        None if state
+            .cache
+            .find(|live| !live.fitted.embeddings.is_empty())
+            .is_none() =>
         {
             (
-                Some(live.fitted.embeddings.clone()),
-                cache_status(projection_method, "hit", "fingerprint_match"),
+                None,
+                cache_status(projection_method, "miss", "no_cached_embeddings"),
             )
         }
-        Some(_) => (
-            None,
-            cache_status(projection_method, "miss", "fingerprint_mismatch"),
-        ),
         None => (
             None,
-            cache_status(projection_method, "miss", "no_cached_embeddings"),
+            cache_status(projection_method, "miss", "fingerprint_mismatch"),
         ),
     };
 

@@ -148,6 +148,7 @@ pub async fn run_sweep(
     {
         let mut session = state.session();
         session.latest_run_id = Some(run_id);
+        session.clusters = None;
         if let Some(ds) = &live.dataset_id {
             session.latest_dataset_id = Some(ds.clone());
         }

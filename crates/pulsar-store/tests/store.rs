@@ -377,6 +377,71 @@ fn cluster_assignments_and_longitudinal_records_round_trip() {
     assert_eq!(back.panel["n_entities"], 3);
 }
 
+fn assignment_dir_entries(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join("cluster_assignments"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn staged_assignments_are_visible_only_after_commit() {
+    let root = TempRoot::new("staged");
+    let store = Store::open_at(root.path()).unwrap();
+    let labels = [0_i64, 1, 1, 2];
+    let input = ClusterAssignment {
+        run_id: None,
+        dataset_id: None,
+        method: "components".into(),
+        interpretation_edge_weight_threshold: 0.0,
+        threshold_source: "explicit".into(),
+        construction_threshold: 0.0,
+        labels: &labels,
+    };
+
+    let staged = store.stage_cluster_assignment(input.clone()).unwrap();
+    let id = staged.record().cluster_assignment_id.clone();
+    assert_eq!(
+        store.get_cluster_assignment(&id).unwrap_err().code(),
+        "CLUSTER_ASSIGNMENT_ID_UNKNOWN"
+    );
+    let pending = assignment_dir_entries(root.path());
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().all(|n| n.starts_with('.')), "{pending:?}");
+
+    let committed = staged.commit().unwrap();
+    assert_eq!(committed.cluster_ids, vec![0, 1, 2]);
+    assert_eq!(store.get_cluster_assignment(&id).unwrap(), committed);
+    assert_eq!(store.cluster_labels(&id).unwrap(), labels);
+    assert_eq!(
+        assignment_dir_entries(root.path()),
+        vec![format!("{id}.json"), format!("{id}.labels.arrow")]
+    );
+
+    // Dropping uncommitted is the discard: nothing is left behind.
+    let discarded = store.stage_cluster_assignment(input.clone()).unwrap();
+    let discarded_id = discarded.record().cluster_assignment_id.clone();
+    drop(discarded);
+    assert!(store.get_cluster_assignment(&discarded_id).is_err());
+    assert_eq!(assignment_dir_entries(root.path()).len(), 2);
+
+    // A crash between stage and commit leaves temp files that the next
+    // open sweeps once they are old enough.
+    std::mem::forget(store.stage_cluster_assignment(input).unwrap());
+    assert_eq!(assignment_dir_entries(root.path()).len(), 4);
+    Store::open_with(
+        root.path(),
+        StoreOptions {
+            orphan_max_age: Duration::ZERO,
+            ..StoreOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(assignment_dir_entries(root.path()).len(), 2);
+}
+
 #[test]
 fn history_reads_from_the_store_in_creation_order() {
     let root = TempRoot::new("history");

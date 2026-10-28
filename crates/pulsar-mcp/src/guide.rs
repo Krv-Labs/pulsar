@@ -16,13 +16,58 @@ Reveal the dataset's topology; do not force convenient clusters.
 
 ## PHASE I: INGEST & CALIBRATE
 1. Ingest: `ingest_dataset(path)` registers a host-visible CSV/Parquet file and returns a
-   `dataset_id`. Prefer `dataset_id` everywhere; no other tool reads raw paths.
-2. Calibrate: write the sweep config as raw YAML (see `pulsar schema config` for the format)
-   and check it with `validate_config(config_yaml, dataset_id)`. It returns the normalized
-   YAML and structured issues. The config is a broad first pass, not a final answer.
+   `dataset_id`. Prefer `dataset_id` everywhere; only `characterize_dataset` also accepts a raw
+   `csv_path`.
+1b. Look: `characterize_dataset(dataset_id)` returns row/feature counts, the PCA variance curve,
+   k-NN scale and a ranked column preview (measurements only, plus a `minhash_advisory` above
+   500,000 rows). `probe_columns(dataset_id, columns=[...])` drills into at most 20 named columns
+   (sample values, missingness, range, top values).
+2. Plan preprocessing: `draft_preprocessing_plan(dataset_id, target_columns=..., entity_column=...,
+   time_column=...)` measures column evidence (shared missing masks, conditional columns, exact
+   duplicates and sums, date/text kinds, and `evidence.target_proxies`, which measures whether
+   missingness markers or category dummies encode a target or boolean event flag) and drafts a
+   versioned plan (`plan_id`, `revision`) with labeled defaults (`decided_by="default"`) and open
+   questions (`blank_meaning`, `code_columns`, `conditional_column`, `date_columns`,
+   `duplicate_signal`, `mixed_values`, `mostly_blank`, `outcome_columns`). The plan is evidence plus
+   labeled defaults, not a verdict; `stakes` (`neighbors_kept`, `feature_count_delta`) measure how
+   much the map's k-NN neighborhoods move between options, not a score to optimize. Plans are
+   persisted, so a `plan_id` keeps working across server restarts.
+   - Read the questions, `evidence.target_proxies` and `warnings` (such as `TARGET_PROXY_COLUMNS`
+     when `share_with_target == 1.0`) first. Record choices you can infer from context or schema via
+     `edit_preprocessing_plan(plan_id, base_revision, answers=[...], edits=[...], source="agent")`.
+   - Ask the user ONLY questions whose answer cannot be inferred and whose stakes are material.
+     Never present the server's question text verbatim to a non-technical user; translate it into
+     their domain vocabulary. Example (clinician, `blank_meaning` on `n_inpatient_claims` with no
+     0s): ask "If a patient has no recorded hospital stays, does that mean they had none, or that we
+     don't know?"; if they say "none", call `edit_preprocessing_plan(plan_id, base_revision=1,
+     answers=[{"question_id": "<question_id>", "option_id": "<option_id>"}], source="user")` using
+     the ids the payload lists.
+   - To explore several plausible imputations, answer with `{"question_id": "<question_id>",
+     "option_ids": ["<id1>", "<id2>"]}` or edit a column with `impute_method: ["fill_median",
+     "sample_normal"]` / an `impute` candidate list (`method`, optional `value`, `seed`, boolean
+     `indicator`). Each option keeps its indicator; selected options must agree on role, encoding
+     and shared missingness groups. A top-level indicator edit overrides all candidates.
+   - A stale `base_revision` returns `SESSION_REVISION_CONFLICT` naming the current revision.
+   - To use the plan in a sweep, draft with `detail='full'` and copy `preprocessing_yaml` into the
+     `preprocessing:` block of your config. Check it with
+     `validate_preprocessing_config(config_yaml, dataset_id)`, which dry-runs only preprocessing.
+3. Calibrate: `create_config(dataset_id, plan_id=..., intent=...)` writes a broad baseline sweep
+   config. Epsilon and projection dimensions are calibrated in the processed feature space
+   under the plan (`plan_id`; without one a default plan is drafted and stored, and a warning
+   names any open questions or an edited plan it did not use). It returns the YAML, the plan
+   provenance, the estimated ball-map count and the k-NN percentiles that bound a sensible
+   epsilon, and stores the YAML as the session's active config. You can also write the config as
+   raw YAML (see `pulsar schema config`) and check it with `validate_config(config_yaml,
+   dataset_id)`, which returns the normalized YAML and structured issues. The config is a broad
+   first pass, not a final answer: between sweeps, `refine_config(overrides=...)` shifts or
+   concentrates the grid on the active config and returns a diff. Nested overrides set one leaf
+   (`{"sweep": {"ball_mapper": {"epsilon": {"range": {"max": 1.0}}}}}`), short keys such as
+   `projection_dimensions`, `projection_seeds`, `epsilon_values`, `n_reps` set a whole
+   parameter, and `{"remove_keys": ["preprocessing.encode.species"]}` deletes entries. A refined
+   config that would not validate is rejected and the active config is left unchanged.
 
 ## PHASE II: EXECUTE & VALIDATE
-3. Run: `run_topological_sweep(config_yaml, dataset_id)`. The response carries `run_id`, key
+4. Run: `run_topological_sweep(config_yaml, dataset_id)`. The response carries `run_id`, key
    metrics, the construction threshold, a threshold-stability summary and a finalization gate.
    - Default `execution='sync'` waits for the fit. On clients that support the MCP tasks
      extension the server returns a task handle instead and the client polls it transparently.
@@ -30,7 +75,7 @@ Reveal the dataset's topology; do not force convenient clusters.
      `wait_job(run_id)` (blocks up to `timeout_s`, then reports progress) or `get_job(run_id)`.
      The completed sweep response is persisted, so `wait_job` returns the same payload the
      synchronous call would have.
-4. Validate: `diagnose_cosmic_graph`. Read it as graph-state measurement, not a directive. Use
+5. Validate: `diagnose_cosmic_graph`. Read it as graph-state measurement, not a directive. Use
    `scale`, `component_morphology`, `sweep_support`, `observed_patterns` and `risk_factors`
    to judge the graph against the user's objective.
    - If `sweep_support.grid_adequacy_status` is `under_sampled` or `thin_grid`, treat
@@ -40,13 +85,55 @@ Reveal the dataset's topology; do not force convenient clusters.
    - SPARSIFICATION CONTEXT: `cosmic_graph.sparsify` builds a spectral sparsifier after the
      cosmic graph is constructed. It preserves spectral structure, not component topology;
      density and edge counts of sparsified runs are not comparable to others.
-5. Compare: `get_sweep_history` and `compare_sweeps` after each refinement.
+6. Compare: `get_sweep_history` and `compare_sweeps` after each refinement.
    `get_sweep_history(detail='summary')` distills patterns across persisted runs (which
    projection dimensions collapsed structure, where singletons spiked); you still own the
    next-config decision. Prefer 2-3 deliberate sweeps over one brittle perfect-looking run.
-6. Inspect payloads summary-first. `get_topological_skeleton(detail='nodes')` gives the
+7. Inspect payloads summary-first. `get_topological_skeleton(detail='nodes')` gives the
    compact hub/bridge summary; `detail='edges'` capped raw edges; `detail='full'` nodes,
    edges and the config YAML.
+
+## PHASE III: INTERPRET
+8. Cluster: `generate_cluster_dossier(detail='summary')` for routine exploration; treat
+   `detail='standard'` and `detail='full'` as late-stage dossier modes. It clusters the latest
+   run, persists a `cluster_assignment_id` (method, interpretation threshold, labels) and
+   publishes the labels into the session. If a stricter threshold candidate from
+   `get_threshold_stability_curve` is `report_ready` or `balanced`, first try
+   `method='components', interpretation_edge_weight_threshold=<candidate>` to read the natural
+   H0 components; use `method='spectral'` when stricter thresholds only shed singleton dust, or
+   for latent structure inside one continuous dominant component.
+   Any new `run_topological_sweep` discards the session's cluster labels: dossiers can only be
+   published for the latest run (`SESSION_REVISION_CONFLICT` otherwise).
+9. Contrast: read the published labels with `get_cluster_profile` (one cluster),
+   `get_feature_signal` (chosen features across clusters), `get_cluster_signal_matrix`
+   (all features at a glance) and `compare_clusters` (two clusters, per-feature tests). Identify
+   the 'Pivot Feature' that most cleanly separates a cluster from its topological neighbours;
+   do not name clusters in isolation. These tools read only the latest dossier: after a new
+   sweep they return `CLUSTERS_NOT_BUILT`, and `run_id` is a provenance check
+   (`CLUSTERS_STALE`), not a way to recover old labels.
+
+## LONGITUDINAL DATA (PANELS)
+Long-format data (one row per entity and time step) is the wrong input for the static sweep,
+which treats every row as an independent point. Ingest the long-format table, optionally
+`sample_longitudinal_entities` (a deterministic entity sample, registered as a new Parquet
+`dataset_id`), `create_config`, then `build_longitudinal_graph(dataset_id, entity_column,
+time_column, config_yaml)`. It returns a `longitudinal_id`; omit it on later calls to use the
+most recent panel. `representation='trajectory'` (default) builds a sparse graph over
+`(entity, t)` observations whose edges may cross time steps; `'temporal'` builds a dense
+`(n, n, T)` entity tensor bounded by `PULSAR_MCP_MAX_TENSOR_BYTES`, so check `build_cost`
+first; `'both'` builds each. The build refits the projection grid and may recalibrate epsilon
+to the panel's k-NN domain: read `config_adaptation`. `time_column` must already be discrete;
+`on_missing` is `drop_entity` (default; required for temporal), `forward_fill` or
+`allow_ragged` (trajectory only).
+Then `diagnose_longitudinal_graph` (measurements and the threshold ladder; for temporal, six
+aggregations side by side with `why`/`best_for`/`avoid_for`), `get_trajectory_archetypes`
+(identical cluster sequences), `get_cross_time_neighbors` (lookalikes at other times; `t` is
+an original time label, returned as `time_label`) and `classify_trajectories` (rule- or
+distance-based classes; `detail='full'` for every entity). Thresholds on these tools are
+interpretation filters, not the construction threshold, and cluster counts move steeply with
+them: read the ladder. The session keeps the four newest panels in memory; an older handle
+returns `LONGITUDINAL_NOT_LOADED` with what to rebuild. Longitudinal panels do not feed the
+cluster dossier chain and take no `run_id`.
 
 ## RESULTS AND ERRORS
 Every result has a text view and structured content. Errors set the MCP error flag and
@@ -94,6 +181,9 @@ Two independent levers act on the same weighted matrix at different stages.
   (finer splits, exploratory), `outlier_mining` (anomalies and singleton tails only).
 - **Interpretation threshold**: applied AFTER the graph is built when clustering or
   reporting slices the retained affinity. It never rebuilds the persisted cosmic graph.
+  In `generate_cluster_dossier`, `method='auto'` and `'components'` inherit the construction
+  threshold by default, so clustering reads the surface you diagnosed; explicit
+  `method='spectral'` defaults to 0.0, the full weighted affinity.
 
 ## COSMIC GRAPH CONSTRUCTION (MINHASH)
 Edge weights are MinHash estimates of the Jaccard similarity of two points' ball-sets over

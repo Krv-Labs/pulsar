@@ -1,0 +1,766 @@
+{
+ "base": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns: [id]\n  impute:\n    age:\n      method: fill_median\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 5, 8]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  pca:\n    dimensions:\n      values: [3, 5, 8]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+ "cases": {
+  "nested_range_max": {
+   "overrides": {
+    "sweep": {
+     "ball_mapper": {
+      "epsilon": {
+       "range": {
+        "max": 3.0
+       }
+      }
+     }
+    }
+   },
+   "applied": [
+    "sweep.ball_mapper.epsilon.range.max"
+   ],
+   "diff": [
+    {
+     "path": "sweep.ball_mapper.epsilon.range.max",
+     "old": 2.0,
+     "new": 3.0
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 3.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "nested_range_two_leaves": {
+   "overrides": {
+    "sweep": {
+     "ball_mapper": {
+      "epsilon": {
+       "range": {
+        "min": 0.25,
+        "steps": 12
+       }
+      }
+     }
+    }
+   },
+   "applied": [
+    "sweep.ball_mapper.epsilon.range.min",
+    "sweep.ball_mapper.epsilon.range.steps"
+   ],
+   "diff": [
+    {
+     "path": "sweep.ball_mapper.epsilon.range.min",
+     "old": 0.5,
+     "new": 0.25
+    },
+    {
+     "path": "sweep.ball_mapper.epsilon.range.steps",
+     "old": 10,
+     "new": 12
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.25\n        max: 2.0\n        steps: 12\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_projection_dimensions": {
+   "overrides": {
+    "projection_dimensions": [
+     2,
+     4,
+     8
+    ]
+   },
+   "applied": [
+    "sweep.projection.dimensions.values",
+    "projection_dimensions"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.dimensions.values",
+     "old": {
+      "values": [
+       3,
+       5,
+       8
+      ]
+     },
+     "new": [
+      2,
+      4,
+      8
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 2\n      - 4\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 2\n      - 4\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_pca_dims": {
+   "overrides": {
+    "pca_dims": [
+     2,
+     6
+    ]
+   },
+   "applied": [
+    "sweep.projection.dimensions.values"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.dimensions.values",
+     "old": {
+      "values": [
+       3,
+       5,
+       8
+      ]
+     },
+     "new": [
+      2,
+      6
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 2\n      - 6\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 2\n      - 6\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_both_dims": {
+   "overrides": {
+    "projection_dimensions": [
+     2,
+     4
+    ],
+    "pca_dims": [
+     3,
+     6
+    ]
+   },
+   "applied": [
+    "sweep.projection.dimensions.values",
+    "projection_dimensions",
+    "sweep.projection.dimensions.values"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.dimensions.values",
+     "old": {
+      "values": [
+       3,
+       5,
+       8
+      ]
+     },
+     "new": [
+      2,
+      4
+     ]
+    },
+    {
+     "path": "sweep.projection.dimensions.values",
+     "old": {
+      "values": [
+       2,
+       4
+      ]
+     },
+     "new": [
+      3,
+      6
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 6\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 6\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_seeds": {
+   "overrides": {
+    "projection_seeds": [
+     1,
+     2,
+     3
+    ]
+   },
+   "applied": [
+    "sweep.projection.seed.values",
+    "projection_seeds"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.seed.values",
+     "old": {
+      "values": [
+       42,
+       7,
+       13
+      ]
+     },
+     "new": [
+      1,
+      2,
+      3
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 1\n      - 2\n      - 3\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 1\n      - 2\n      - 3\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_pca_seeds": {
+   "overrides": {
+    "pca_seeds": [
+     5
+    ]
+   },
+   "applied": [
+    "sweep.projection.seed.values"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.seed.values",
+     "old": {
+      "values": [
+       42,
+       7,
+       13
+      ]
+     },
+     "new": [
+      5
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 5\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 5\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_epsilon_values": {
+   "overrides": {
+    "epsilon_values": [
+     0.5,
+     1.0,
+     1.5
+    ]
+   },
+   "applied": [
+    "sweep.ball_mapper.epsilon.values",
+    "epsilon_values"
+   ],
+   "diff": [
+    {
+     "path": "sweep.ball_mapper.epsilon.values",
+     "old": {
+      "range": {
+       "min": 0.5,
+       "max": 2.0,
+       "steps": 10
+      }
+     },
+     "new": [
+      0.5,
+      1.0,
+      1.5
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 1.5\n        steps: 3\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_threshold": {
+   "overrides": {
+    "construction_threshold": "auto"
+   },
+   "applied": [
+    "cosmic_graph.construction_threshold",
+    "construction_threshold"
+   ],
+   "diff": [
+    {
+     "path": "cosmic_graph.construction_threshold",
+     "old": "auto",
+     "new": "auto"
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_n_reps": {
+   "overrides": {
+    "n_reps": 2
+   },
+   "applied": [
+    "output.n_reps",
+    "n_reps"
+   ],
+   "diff": [
+    {
+     "path": "output.n_reps",
+     "old": 4,
+     "new": 2
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 2\n"
+  },
+  "short_n_imputations_string": {
+   "overrides": {
+    "n_imputations": "1"
+   },
+   "applied": [
+    "preprocessing.n_imputations",
+    "n_imputations"
+   ],
+   "diff": [
+    {
+     "path": "preprocessing.n_imputations",
+     "old": null,
+     "new": 1
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_run_name": {
+   "overrides": {
+    "run_name": "refined",
+    "dataset_path": "other.csv"
+   },
+   "applied": [
+    "run.name",
+    "run_name",
+    "run.data",
+    "dataset_path"
+   ],
+   "diff": [
+    {
+     "path": "run.name",
+     "old": "initial_sweep",
+     "new": "refined"
+    },
+    {
+     "path": "run.data",
+     "old": "data.csv",
+     "new": "other.csv"
+    }
+   ],
+   "config_yaml": "run:\n  name: refined\n  data: other.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "short_drop_columns": {
+   "overrides": {
+    "drop_columns": [
+     "id",
+     "age"
+    ]
+   },
+   "applied": [
+    "preprocessing.drop_columns",
+    "drop_columns"
+   ],
+   "diff": [
+    {
+     "path": "preprocessing.drop_columns",
+     "old": [
+      "id"
+     ],
+     "new": [
+      "id",
+      "age"
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  - age\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "sweep_prefixed_short_key": {
+   "overrides": {
+    "sweep": {
+     "projection_dimensions": [
+      4,
+      6
+     ]
+    }
+   },
+   "applied": [
+    "sweep.projection.dimensions.values",
+    "sweep.projection_dimensions"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.dimensions.values",
+     "old": {
+      "values": [
+       3,
+       5,
+       8
+      ]
+     },
+     "new": [
+      4,
+      6
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 4\n      - 6\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 4\n      - 6\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "preprocessing_prefixed_short_key": {
+   "overrides": {
+    "preprocessing": {
+     "drop_columns": [
+      "x"
+     ]
+    }
+   },
+   "applied": [
+    "preprocessing.drop_columns"
+   ],
+   "diff": [
+    {
+     "path": "preprocessing.drop_columns",
+     "old": [
+      "id"
+     ],
+     "new": [
+      "x"
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - x\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "dotted_canonical_and_short": {
+   "overrides": {
+    "projection_dimensions": [
+     2,
+     3
+    ],
+    "sweep": {
+     "projection": {
+      "dimensions": {
+       "values": [
+        9,
+        10
+       ]
+      }
+     }
+    }
+   },
+   "applied": [
+    "sweep.projection.dimensions.values",
+    "projection_dimensions",
+    "sweep.projection.dimensions.values"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.dimensions.values",
+     "old": [
+      3,
+      5,
+      8
+     ],
+     "new": [
+      9,
+      10
+     ]
+    },
+    {
+     "path": "sweep.projection.dimensions.values",
+     "old": {
+      "values": [
+       9,
+       10
+      ]
+     },
+     "new": [
+      2,
+      3
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 2\n      - 3\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 2\n      - 3\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "dotted_pca_mirror": {
+   "overrides": {
+    "sweep": {
+     "pca": {
+      "seed": {
+       "values": [
+        1,
+        2
+       ]
+      }
+     }
+    }
+   },
+   "applied": [
+    "sweep.pca.seed.values"
+   ],
+   "diff": [
+    {
+     "path": "sweep.pca.seed.values",
+     "old": [
+      42,
+      7,
+      13
+     ],
+     "new": [
+      1,
+      2
+     ]
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 1\n      - 2\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 1\n      - 2\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "dotted_new_leaf": {
+   "overrides": {
+    "cosmic_graph": {
+     "minhash_d": 128
+    }
+   },
+   "applied": [
+    "cosmic_graph.minhash_d"
+   ],
+   "diff": [
+    {
+     "path": "cosmic_graph.minhash_d",
+     "old": null,
+     "new": 128
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 128\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "dotted_method": {
+   "overrides": {
+    "sweep": {
+     "projection_method": "pca"
+    }
+   },
+   "applied": [
+    "sweep.projection.method",
+    "sweep.projection_method"
+   ],
+   "diff": [
+    {
+     "path": "sweep.projection.method",
+     "old": "jl",
+     "new": "pca"
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: pca\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "nested_impute_update": {
+   "overrides": {
+    "preprocessing": {
+     "impute": {
+      "bmi": {
+       "method": "fill_mean"
+      }
+     }
+    }
+   },
+   "applied": [
+    "preprocessing.impute.bmi.method"
+   ],
+   "diff": [
+    {
+     "path": "preprocessing.impute.bmi.method",
+     "old": null,
+     "new": "fill_mean"
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n    bmi:\n      method: fill_mean\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "remove_encode": {
+   "overrides": {
+    "remove_keys": [
+     "preprocessing.encode.species"
+    ]
+   },
+   "applied": [
+    "-preprocessing.encode.species"
+   ],
+   "diff": [
+    {
+     "path": "preprocessing.encode.species",
+     "old": {
+      "method": "one_hot"
+     },
+     "new": null,
+     "removed": true
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "remove_twice_and_missing": {
+   "overrides": {
+    "remove_keys": [
+     "preprocessing.encode.species",
+     "preprocessing.encode.species",
+     "run.nope.deep"
+    ]
+   },
+   "applied": [
+    "-preprocessing.encode.species"
+   ],
+   "diff": [
+    {
+     "path": "preprocessing.encode.species",
+     "old": {
+      "method": "one_hot"
+     },
+     "new": null,
+     "removed": true
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "remove_after_set": {
+   "overrides": {
+    "drop_columns": [
+     "a"
+    ],
+    "remove_keys": [
+     "preprocessing.impute.age"
+    ]
+   },
+   "applied": [
+    "preprocessing.drop_columns",
+    "drop_columns",
+    "-preprocessing.impute.age"
+   ],
+   "diff": [
+    {
+     "path": "preprocessing.drop_columns",
+     "old": [
+      "id"
+     ],
+     "new": [
+      "a"
+     ]
+    },
+    {
+     "path": "preprocessing.impute.age",
+     "old": {
+      "method": "fill_median"
+     },
+     "new": null,
+     "removed": true
+    }
+   ],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - a\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "combined": {
+   "overrides": {
+    "run_name": "combo",
+    "n_reps": 3,
+    "sweep": {
+     "ball_mapper": {
+      "epsilon": {
+       "range": {
+        "max": 2.5
+       }
+      }
+     }
+    },
+    "remove_keys": [
+     "preprocessing.encode.species"
+    ]
+   },
+   "applied": [
+    "sweep.ball_mapper.epsilon.range.max",
+    "run.name",
+    "run_name",
+    "output.n_reps",
+    "n_reps",
+    "-preprocessing.encode.species"
+   ],
+   "diff": [
+    {
+     "path": "sweep.ball_mapper.epsilon.range.max",
+     "old": 2.0,
+     "new": 2.5
+    },
+    {
+     "path": "run.name",
+     "old": "initial_sweep",
+     "new": "combo"
+    },
+    {
+     "path": "output.n_reps",
+     "old": 4,
+     "new": 3
+    },
+    {
+     "path": "preprocessing.encode.species",
+     "old": {
+      "method": "one_hot"
+     },
+     "new": null,
+     "removed": true
+    }
+   ],
+   "config_yaml": "run:\n  name: combo\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.5\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 3\n"
+  },
+  "empty_overrides": {
+   "overrides": {},
+   "applied": [],
+   "diff": [],
+   "config_yaml": "run:\n  name: initial_sweep\n  data: data.csv\npreprocessing:\n  drop_columns:\n  - id\n  impute:\n    age:\n      method: fill_median\n      seed: 42\n  encode:\n    species:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n    center: true\n  pca:\n    dimensions:\n      values:\n      - 3\n      - 5\n      - 8\n    seed:\n      values:\n      - 42\n      - 7\n      - 13\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5\n        max: 2.0\n        steps: 10\ncosmic_graph:\n  construction_threshold: auto\n  neighborhood: node\n  sparsify: false\n  sparsify_epsilon: 1.0\n  sparsify_seed: 42\n  sparsify_sketch_dim: null\n  sparsify_sample_count: null\n  sparsify_pcg_tol: 1.0e-06\n  sparsify_max_iter: 1000\n  construction: minhash\n  minhash_d: 256\n  minhash_seed: 42\noutput:\n  n_reps: 4\n"
+  },
+  "unknown_key": {
+   "overrides": {
+    "bogus": 1
+   },
+   "error": "Unknown override key(s): ['bogus']. Valid keys: ['construction_threshold', 'dataset_path', 'drop_columns', 'encode', 'epsilon_range', 'epsilon_values', 'impute', 'missing_indicator_groups', 'n_imputations', 'n_reps', 'pca_dims', 'pca_seeds', 'projection_dimensions', 'projection_method', 'projection_seeds', 'raw', 'run_name'], or use dotted YAML paths under ['cosmic_graph', 'output', 'preprocessing', 'run', 'sweep'].",
+   "error_type": "ValueError"
+  },
+  "unknown_keys_sorted": {
+   "overrides": {
+    "zeta": 1,
+    "alpha": 2
+   },
+   "error": "Unknown override key(s): ['alpha', 'zeta']. Valid keys: ['construction_threshold', 'dataset_path', 'drop_columns', 'encode', 'epsilon_range', 'epsilon_values', 'impute', 'missing_indicator_groups', 'n_imputations', 'n_reps', 'pca_dims', 'pca_seeds', 'projection_dimensions', 'projection_method', 'projection_seeds', 'raw', 'run_name'], or use dotted YAML paths under ['cosmic_graph', 'output', 'preprocessing', 'run', 'sweep'].",
+   "error_type": "ValueError"
+  },
+  "unknown_root": {
+   "overrides": {
+    "nope": {
+     "x": 1
+    }
+   },
+   "error": "Unknown dotted override root(s): ['nope']. Valid roots: ['cosmic_graph', 'output', 'preprocessing', 'run', 'sweep']",
+   "error_type": "ValueError"
+  },
+  "unknown_roots_sorted": {
+   "overrides": {
+    "zzz": {
+     "a": 1
+    },
+    "aaa": {
+     "b": 2
+    }
+   },
+   "error": "Unknown dotted override root(s): ['aaa', 'zzz']. Valid roots: ['cosmic_graph', 'output', 'preprocessing', 'run', 'sweep']",
+   "error_type": "ValueError"
+  },
+  "remove_not_a_list": {
+   "overrides": {
+    "remove_keys": "preprocessing.encode"
+   },
+   "error": "remove_keys must be a list of dotted config paths, e.g. ['preprocessing.encode.species'].",
+   "error_type": "ValueError"
+  },
+  "remove_unknown_root": {
+   "overrides": {
+    "remove_keys": [
+     "zzz.a",
+     "aaa"
+    ]
+   },
+   "error": "Unknown remove_keys root(s): ['aaa', 'zzz']. Valid roots: ['cosmic_graph', 'output', 'preprocessing', 'run', 'sweep'].",
+   "error_type": "ValueError"
+  },
+  "object_under_short_key": {
+   "overrides": {
+    "epsilon_range": {
+     "min": 1.0,
+     "max": 2.0
+    }
+   },
+   "error": "Unknown dotted override root(s): ['epsilon_range']. Valid roots: ['cosmic_graph', 'output', 'preprocessing', 'run', 'sweep']",
+   "error_type": "ValueError"
+  },
+  "invalid_method": {
+   "overrides": {
+    "projection_method": "bogus"
+   },
+   "error": "sweep.projection.method must be 'jl' or 'pca'",
+   "error_type": "ValueError"
+  },
+  "invalid_threshold": {
+   "overrides": {
+    "construction_threshold": "nonsense"
+   },
+   "error": "could not convert string to float: 'nonsense'",
+   "error_type": "ValueError"
+  }
+ }
+}

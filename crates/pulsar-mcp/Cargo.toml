@@ -14,6 +14,7 @@ pulsar-config = { path = "../pulsar-config" }
 pulsar-core = { path = "../pulsar-core" }
 pulsar-data = { path = "../pulsar-data" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
+pulsar-report = { path = "../pulsar-report" }
 pulsar-store = { path = "../pulsar-store" }
 # Official MCP SDK, pinned to 3.5 per ADR 0001. `client` is for the in-process
 # contract tests and future CLI smoke tests.

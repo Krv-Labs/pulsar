@@ -1,4 +1,6 @@
-//! The `pulsar` binary. The full command set lands with #73.
+//! The `pulsar` binary.
+
+mod install_cmd;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -14,7 +16,7 @@ use serde_json::json;
 
 /// Topological data analysis for tabular data.
 #[derive(Parser)]
-#[command(name = "pulsar", version)]
+#[command(name = env!("CARGO_BIN_NAME"), version)]
 struct Cli {
     /// Store directory for runs and datasets (default: $PULSAR_STORE_DIR or
     /// the XDG data dir).
@@ -54,6 +56,55 @@ enum Command {
     Runs(RunsCommand),
     /// Serve the MCP server on stdio (for agent harnesses).
     Mcp,
+    /// Register the MCP server in agent configs (Claude Code, Claude
+    /// Desktop, Codex, Gemini, Copilot, Cursor, VS Code, Antigravity).
+    /// With no agent named, registers in every one detected on this machine.
+    Install {
+        /// Agents to configure (see `pulsar status` for the ids).
+        harnesses: Vec<String>,
+        /// Configure every supported agent, detected or not.
+        #[arg(long)]
+        all: bool,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// How agents launch the server: `binary` (this executable's
+        /// absolute path) or `npx` (`npx -y @krv-labs/pulsar mcp`). Default:
+        /// `npx` when run from a node_modules cache, else `binary`.
+        #[arg(long)]
+        mode: Option<String>,
+        /// With `--mode npx`, pin the package to this binary's version.
+        #[arg(long)]
+        pin_version: bool,
+        /// With `--mode binary`, record this executable instead of the one
+        /// running now (e.g. the stable shim of a global npm install).
+        #[arg(long)]
+        command: Option<PathBuf>,
+    },
+    /// Remove the MCP server registration from agent configs. Only entries
+    /// Pulsar wrote are touched; files it created are removed again.
+    Uninstall {
+        /// Agents to remove from.
+        harnesses: Vec<String>,
+        /// Remove from every supported agent.
+        #[arg(long)]
+        all: bool,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask for confirmation.
+        #[arg(short, long)]
+        yes: bool,
+        /// Also delete the `.pulsar.backup` files install left behind.
+        #[arg(long)]
+        purge_backups: bool,
+    },
+    /// Show which agents have Pulsar registered and whether each is healthy.
+    Status {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a JSON Schema.
     Schema {
         #[arg(value_enum)]
@@ -125,6 +176,35 @@ fn main() -> ExitCode {
         }
         Some(Command::Runs(cmd)) => run_runs(cli.store.as_deref(), cmd),
         Some(Command::Mcp) => run_mcp(cli.store.as_deref()),
+        Some(Command::Install {
+            harnesses,
+            all,
+            dry_run,
+            mode,
+            pin_version,
+            command,
+        }) => install_cmd::run_install(install_cmd::InstallArgs {
+            harnesses,
+            all,
+            dry_run,
+            mode,
+            pin_version,
+            command,
+        }),
+        Some(Command::Uninstall {
+            harnesses,
+            all,
+            dry_run,
+            yes,
+            purge_backups,
+        }) => install_cmd::run_uninstall(install_cmd::UninstallArgs {
+            harnesses,
+            all,
+            dry_run,
+            yes,
+            purge_backups,
+        }),
+        Some(Command::Status { json }) => install_cmd::run_status(json),
         Some(Command::Schema {
             kind: SchemaKind::Config,
         }) => print_json(&pulsar_config::json_schema()),

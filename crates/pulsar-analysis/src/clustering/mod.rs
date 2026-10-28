@@ -2,6 +2,7 @@
 
 pub mod agglomerative;
 pub mod lobpcg;
+pub mod resolve;
 pub mod spectral;
 
 use pulsar_pipeline::Graph;

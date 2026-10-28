@@ -1,6 +1,8 @@
 //! `diagnose_cosmic_graph`, `get_threshold_stability_curve`,
 //! `get_topological_skeleton` (`pulsar/mcp/tools/diagnostics.py`).
 
+use std::sync::Arc;
+
 use pulsar_analysis::pyround::round_to;
 use pulsar_analysis::thresholds::{
     component_mass_profile, mass_profile_hint, significant_component_sizes,
@@ -19,7 +21,8 @@ use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
 use crate::markdown;
 use crate::schema::{self as s, input_schema};
-use crate::state::{RunView, ServerState};
+use crate::state::{GraphArtifact, RunView, ServerState};
+use pulsar_store::RunId;
 
 pub const DIAGNOSE: &str = "diagnose_cosmic_graph";
 pub const CURVE: &str = "get_threshold_stability_curve";
@@ -33,21 +36,12 @@ pub enum Surface {
     Artifact,
 }
 
-fn artifact_unavailable(tool: &'static str) -> ToolError {
-    ToolError::new(
-        tool,
-        "ARTIFACT_SURFACE_UNAVAILABLE",
-        "surface='artifact' needs create_graph_artifact, which this server does not provide yet.",
-        "Use surface='constructed' (the run's persisted cosmic graph).",
-    )
-}
-
 // ---------------------------------------------------------------- diagnose
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiagnoseParams {
-    /// 'constructed' (default): the fitted cosmic graph at its construction threshold. 'artifact' is reserved for graph artifacts (not available yet).
+    /// 'constructed' (default): the fitted cosmic graph at its construction threshold. 'artifact': a create_graph_artifact graph; artifact_id is then required.
     pub surface: Surface,
     /// Artifact handle; only used when surface='artifact'.
     pub artifact_id: String,
@@ -168,6 +162,19 @@ pub fn diagnose_spec() -> ToolSpec {
                     s::array(s::object(&[("code", s::string()), ("severity", s::string())], &["code"], true)),
                 ),
                 ("minhash_profile", s::open_object()),
+                (
+                    "artifact_staleness",
+                    s::object(
+                        &[
+                            ("stale", s::boolean()),
+                            ("artifact_run_id", s::nullable(s::string())),
+                            ("latest_run_id", s::nullable(s::string())),
+                            ("warning", s::nullable(s::string())),
+                        ],
+                        &["stale"],
+                        true,
+                    ),
+                ),
             ],
             &[
                 "status",
@@ -309,24 +316,20 @@ fn run_metrics(tool: &'static str, view: &RunView) -> Result<GraphMetrics, ToolE
     ))
 }
 
-pub async fn diagnose(state: &ServerState, p: DiagnoseParams) -> Result<CallToolResult, ToolError> {
-    if p.surface == Surface::Artifact {
-        return Err(artifact_unavailable(DIAGNOSE));
-    }
-    let view = state.resolve_run(DIAGNOSE, &p.run_id)?;
-    let m = run_metrics(DIAGNOSE, &view)?;
-    let morph = component_morphology(&m, p.detail);
+/// The diagnosis payload of one graph's metrics.
+fn diagnosis_payload(
+    m: &GraphMetrics,
+    detail: Detail,
+    source: &str,
+    run_id: Value,
+    graph_surface: Value,
+) -> Value {
     let mut payload = json!({
         "status": "ok",
-        "detail": p.detail.as_str(),
-        "source": if view.live.is_some() { "live" } else { "persisted" },
-        "run_id": view.record.run_id,
-        "graph_surface": {
-            "kind": "constructed_cosmic_graph",
-            "construction_threshold": m.resolved_construction_threshold,
-            "threshold_role": "construction",
-            "preserves_current_fit": true,
-        },
+        "detail": detail.as_str(),
+        "source": source,
+        "run_id": run_id,
+        "graph_surface": graph_surface,
         "scale": {
             "n_nodes": m.n_nodes,
             "n_edges": m.n_edges,
@@ -334,7 +337,7 @@ pub async fn diagnose(state: &ServerState, p: DiagnoseParams) -> Result<CallTool
             "avg_degree": m.avg_degree,
             "nonzero_fraction_full_weighted": m.nonzero_fraction,
         },
-        "component_morphology": morph,
+        "component_morphology": component_morphology(m, detail),
         "weight_distribution": {
             "p25": m.weight_p25,
             "p50": m.weight_p50,
@@ -347,12 +350,96 @@ pub async fn diagnose(state: &ServerState, p: DiagnoseParams) -> Result<CallTool
             "grid_adequacy_status": m.grid_adequacy_status,
             "grid_adequacy_note": m.grid_adequacy_note,
         },
-        "observed_patterns": observed_patterns(&m, &payload_morph(&m, p.detail)),
-        "risk_factors": risk_factors(&m),
+        "observed_patterns": observed_patterns(m, &payload_morph(m, detail)),
+        "risk_factors": risk_factors(m),
     });
     if let Some(profile) = &m.minhash_profile {
         payload["minhash_profile"] = json!(profile);
     }
+    payload
+}
+
+/// The artifact named by `artifact_id` (required with `surface='artifact'`).
+pub(crate) fn resolve_artifact(
+    state: &ServerState,
+    tool: &'static str,
+    artifact_id: &str,
+) -> Result<Arc<GraphArtifact>, ToolError> {
+    if artifact_id.is_empty() {
+        return Err(ToolError::new(
+            tool,
+            "ARTIFACT_ID_REQUIRED",
+            "artifact_id is required when surface='artifact'.",
+            "Pass the artifact_id returned by create_graph_artifact, or use surface='constructed'.",
+        ));
+    }
+    state
+        .session()
+        .graph_artifacts
+        .iter()
+        .find(|a| a.artifact_id == artifact_id)
+        .cloned()
+        .ok_or_else(|| {
+            ToolError::new(
+                tool,
+                "ARTIFACT_ID_UNKNOWN",
+                format!("Unknown artifact_id '{artifact_id}'."),
+                "Create or retrieve a valid artifact_id before retrying this tool.",
+            )
+            .detail("artifact_id", json!(artifact_id))
+        })
+}
+
+/// Whether the artifact was built from a run other than the session's latest.
+pub(crate) fn artifact_staleness(artifact: &GraphArtifact, latest: Option<&RunId>) -> Value {
+    let stale = latest.is_some_and(|l| *l != artifact.run_id);
+    json!({
+        "stale": stale,
+        "artifact_run_id": artifact.run_id,
+        "latest_run_id": latest,
+        "warning": stale.then_some("Artifact was built from a superseded run; inspect for audit only or rebuild from the latest run."),
+    })
+}
+
+pub async fn diagnose(state: &ServerState, p: DiagnoseParams) -> Result<CallToolResult, ToolError> {
+    let payload = if p.surface == Surface::Artifact {
+        let artifact = resolve_artifact(state, DIAGNOSE, &p.artifact_id)?;
+        let latest = state.session().latest_run_id.clone();
+        let mut payload = diagnosis_payload(
+            &artifact.metrics,
+            p.detail,
+            "artifact",
+            json!(artifact.run_id),
+            json!({
+                "kind": artifact.kind,
+                "artifact_id": artifact.artifact_id,
+                "construction_threshold": artifact.metrics.resolved_construction_threshold,
+                "threshold_role": "artifact_construction",
+                "preserves_current_fit": false,
+            }),
+        );
+        payload["artifact_staleness"] = artifact_staleness(&artifact, latest.as_ref());
+        payload
+    } else {
+        let view = state.resolve_run(DIAGNOSE, &p.run_id)?;
+        let m = run_metrics(DIAGNOSE, &view)?;
+        diagnosis_payload(
+            &m,
+            p.detail,
+            if view.live.is_some() {
+                "live"
+            } else {
+                "persisted"
+            },
+            json!(view.record.run_id),
+            json!({
+                "kind": "constructed_cosmic_graph",
+                "construction_threshold": m.resolved_construction_threshold,
+                "threshold_role": "construction",
+                "preserves_current_fit": true,
+            }),
+        )
+    };
     let text = match p.response_format {
         Format::Markdown => Some(markdown::diagnosis(&payload)),
         Format::Json => None,
@@ -827,7 +914,7 @@ impl SkeletonDetail {
 pub struct SkeletonParams {
     /// Run to read, from run_topological_sweep. Omit for the latest run. Reads the persisted run, so any stored run works on any transport.
     pub run_id: String,
-    /// 'constructed' (default): the run's persisted cosmic graph. 'artifact' is reserved for graph artifacts (not available yet).
+    /// 'constructed' (default): the run's persisted cosmic graph. 'artifact': a create_graph_artifact graph; artifact_id is then required.
     pub surface: Surface,
     /// Artifact handle; only used when surface='artifact'.
     pub artifact_id: String,
@@ -866,6 +953,21 @@ pub fn skeleton_spec() -> ToolSpec {
                 ("config_yaml", s::string()),
                 ("resolved_construction_threshold", s::nullable(s::number())),
                 ("graph_surface", s::string()),
+                ("artifact_id", s::string()),
+                ("artifact_kind", s::string()),
+                (
+                    "artifact_staleness",
+                    s::object(
+                        &[
+                            ("stale", s::boolean()),
+                            ("artifact_run_id", s::nullable(s::string())),
+                            ("latest_run_id", s::nullable(s::string())),
+                            ("warning", s::nullable(s::string())),
+                        ],
+                        &["stale"],
+                        true,
+                    ),
+                ),
                 ("graph", s::open_object()),
                 ("available_followup_tools", s::array(s::string())),
             ],
@@ -893,7 +995,22 @@ pub async fn skeleton(state: &ServerState, p: SkeletonParams) -> Result<CallTool
         ));
     }
     if p.surface == Surface::Artifact {
-        return Err(artifact_unavailable(SKELETON));
+        let artifact = resolve_artifact(state, SKELETON, &p.artifact_id)?;
+        let latest = state.session().latest_run_id.clone();
+        let summary = GraphAnalysis::new(&artifact.graph)
+            .map_err(|e| ToolError::from_analysis(SKELETON, e))?
+            .summary(0.0);
+        let payload = json!({
+            "run_id": artifact.run_id,
+            "artifact_id": artifact.artifact_id,
+            "artifact_kind": artifact.kind,
+            "config_yaml_omitted": true,
+            "graph_surface": format!("graph artifact {} ({})", artifact.artifact_id, artifact.kind),
+            "artifact_staleness": artifact_staleness(&artifact, latest.as_ref()),
+            "graph": skeleton_payload(&summary, p.detail.as_str(), p.max_edges, p.max_nodes),
+            "available_followup_tools": ["diagnose_cosmic_graph", "compare_sweeps"],
+        });
+        return Ok(ok_result(payload, None));
     }
     let view = state.resolve_run(SKELETON, &p.run_id)?;
     let graph = view

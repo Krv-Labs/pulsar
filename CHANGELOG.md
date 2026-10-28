@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-28
+
+Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt binary per platform (eight platform packages plus the launcher: macOS arm64/x64, Linux arm64/x64 on glibc and musl, Windows x64/arm64). `npx -y @krv-labs/pulsar install` registers the MCP server with detected agents and upgrades the entries the Python installer wrote. `thema-pulsar` on PyPI stays at 0.6 with no further releases (ADR 0002). The entries further down (0.6.0 and earlier) describe the Python package this replaces.
+
+### Added
+
+- Pure-Rust replacements for every Python MCP tool: the cluster read tools, the six longitudinal tools (`CosmicTrajectory`, `TemporalCosmicGraph`, panel pivot), `export_labeled_data` (pandas-identical CSV), `export_dataset_bundle`, `create_graph_artifact` (with `surface='artifact'` on diagnose/skeleton) and `export_html_report` (byte-identical HTML). Parity against frozen fixtures.
+
+### Changed
+
+- Package license metadata now matches the BSD 3-Clause LICENSE file (the Cargo manifests said MIT).
+
+### Removed
+
+- The Python implementation and its PyPI release workflow, its fixture generators and every other Python file. The chunked-upload tools (`begin_dataset_upload`, `append_dataset_chunk`, `finalize_dataset_upload`) are not ported: pass a host-visible path to `ingest_dataset`.
+- `pulsar-core`'s `python` feature and the optional PyO3 dependency.
+
+---
+
+# Python package history (superseded)
+
+The entries below describe the Python `pulsar` package, whose behaviour the Rust line was ported from and proven against.
+
 ## [0.6.0] - 2026-10-23
 
 ### Added

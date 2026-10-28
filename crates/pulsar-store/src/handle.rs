@@ -15,6 +15,7 @@ pub enum HandleKind {
     ClusterAssignment,
     Longitudinal,
     Upload,
+    Plan,
 }
 
 impl HandleKind {
@@ -25,6 +26,7 @@ impl HandleKind {
             Self::ClusterAssignment => "ca",
             Self::Longitudinal => "lg",
             Self::Upload => "upload",
+            Self::Plan => "pp",
         }
     }
 
@@ -36,6 +38,7 @@ impl HandleKind {
             Self::ClusterAssignment => "cluster_assignment_id",
             Self::Longitudinal => "longitudinal_id",
             Self::Upload => "upload_id",
+            Self::Plan => "plan_id",
         }
     }
 
@@ -47,6 +50,7 @@ impl HandleKind {
             Self::ClusterAssignment => "CLUSTER_ASSIGNMENT_ID_UNKNOWN",
             Self::Longitudinal => "LONGITUDINAL_ID_UNKNOWN",
             Self::Upload => "UPLOAD_ID_UNKNOWN",
+            Self::Plan => "PLAN_ID_UNKNOWN",
         }
     }
 }
@@ -163,6 +167,10 @@ handle!(
 handle!(
     /// An in-progress chunked upload.
     UploadId => HandleKind::Upload
+);
+handle!(
+    /// A preprocessing plan (a revisioned set of per-column decisions).
+    PlanId => HandleKind::Plan
 );
 
 impl DatasetId {

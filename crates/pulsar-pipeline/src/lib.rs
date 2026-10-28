@@ -19,6 +19,7 @@ pub mod graph;
 pub mod progress;
 pub mod representatives;
 pub mod threads;
+pub mod trajectory;
 
 pub use error::PipelineError;
 pub use fingerprint::projection_fingerprint;
@@ -27,3 +28,4 @@ pub use graph::{Csr, Graph};
 pub use progress::{ProgressFn, ProgressTracker};
 pub use representatives::select_representatives;
 pub use threads::{configure_threads, current_threads};
+pub use trajectory::{Ball, CosmicTrajectory, EntityIds, Observation};

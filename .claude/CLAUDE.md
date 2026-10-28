@@ -1,196 +1,90 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) in this repository.
 
 ## Project Overview
 
-Pulsar is a **Rust-backed Python library** implementing the **Thema pipeline** for topological data analysis (TDA) of tabular datasets across domains and sizes. Performance-critical algorithms are in Rust (via PyO3/maturin); Python orchestrates the pipeline.
+Pulsar is a **pure-Rust** topology workbench for tabular data, served to
+agents over **MCP** and shipped on npm as **`@krv-labs/pulsar`** (public,
+npmjs.com). It implements the Thema pipeline:
+
+```
+CSV/Parquet → Impute → Scale → Projection grid (PCA/JL) → Ball Mapper grid → Pseudo-Laplacian → Cosmic Graph
+```
+
+There is no Python anywhere in the repository, build, CI or distribution
+(ADR 0002). The Python implementation was the porting reference until the port
+was complete, then removed; `tests/fixtures/golden/README.md` records where the
+frozen fixtures came from (tag `python-reference`, generators in git history).
+
+## Product name
+
+`pulsar` is the binary, the MCP server key the installer writes, the store
+directory and the backup suffix (`*.pulsar.backup`); `@krv-labs/pulsar` (+
+`pulsar-<platform>`) on npm. It lives in: the `pulsar-cli` `[[bin]]` name,
+`pulsar_install::NAME` and `launch::PACKAGE`, `fsops::BACKUP_SUFFIX`,
+`pulsar_store::APP_DIR`, the MCP `serverInfo` name, `NAME` in
+`npm/scripts/build-packages.mjs` (stamped into the launcher), `NAME` in
+`.github/workflows/release.yml`, `scripts/install.sh` and `scripts/test-install.sh`.
 
 ## Commands
 
 ```bash
-# Install dependencies and build the Rust extension
-uv sync
-uv run maturin develop --release   # optimized build
-uv run maturin develop             # debug build (faster to compile)
-
-# Tests
-uv run pytest tests/ -v
-uv run pytest tests/test_pca.py    # single test file
-uv run pytest tests/correctness/   # numerical validation tests
-
-# Lint / Format
-uv run ruff check .
-uv run ruff format .
-
-# Documentation
-cd docs && make html               # build Sphinx docs
-
-# Demos
-uv run python demos/energy/coal.py                           # US Coal Plants (downloads dataset automatically)
-uv run python demos/ehr/physionet.py --synthetic             # EHR demo with synthetic data
-uv run python demos/ehr/physionet.py --data path/to/eicu.csv # EHR demo with real eICU data
-uv run python demos/ehr/ecg_arrhythmia.py                    # ECG arrhythmia classification demo
+cargo build --release -p pulsar-cli     # target/release/pulsar
+cargo test --workspace                  # unit, integration, golden-fixture parity
+cargo test -p pulsar-parity             # parity against frozen Python fixtures
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+node npm/scripts/smoke.mjs              # pack + clean install + MCP handshake (needs a release build)
 ```
 
-## Architecture
+## Crates (`crates/`)
 
-### Pipeline Stages
+- `pulsar-core`: numeric engine (impute, scale, PCA/JL, Ball Mapper, pseudo-Laplacian, cosmic graph, H0 `ph.rs`, temporal). `PulsarError` via `thiserror`.
+- `pulsar-config`: `params.yaml` loader (`values`, `range`, `distribution`), JSON Schema, structured errors.
+- `pulsar-data`: CSV/Parquet ingest (pandas-compatible typing), preprocessing executor.
+- `pulsar-pipeline`: `fit` / `fit_multi`, projection fingerprint, progress schedule.
+- `pulsar-store`: XDG store (`PULSAR_STORE_DIR`), typed handles, job model, `ModelCache`, Arrow IPC sidecars.
+- `pulsar-analysis`: thresholds, clustering, diagnostics, `evidence/` and `plan/` (preprocessing plan port).
+- `pulsar-mcp`: the `rmcp` server (typed tools, error envelope, async sweep jobs, tasks).
+- `pulsar-cli`: the `pulsar` binary. `pulsar-parity`: golden-fixture harness.
+- `npm/`: launcher + platform-package builder (`npm/scripts/build-packages.mjs`). Release = `v*` tag; see `.github/workflows/release.yml`.
 
-```
-CSV/Parquet → Impute → Scale → PCA Grid → Ball Mapper Grid → Pseudo-Laplacian → Cosmic Graph
-```
+## Parity rules
 
-The entry point is `ThemaRS("params.yaml").fit()` (in `pulsar/pipeline.py`). It chains Rust components and returns a `networkx.Graph` at `.cosmic_graph`.
-
-### Advanced Orchestration
-
-- **`fit_multi(datasets: list[pd.DataFrame])`**: Fuses multiple representations (e.g., different embedding models) of the same points. All resulting ball maps are accumulated into a single "Galactic" Pseudo-Laplacian.
-- **Threshold Stability**: If `construction_threshold: "auto"`, Pulsar uses approximate H₀ persistent homology (`crates/pulsar-core/src/ph.rs`) to find stable plateaus in the component-vs-threshold curve.
-- **Representative Selection**: `model.select_representatives(n_reps)` clusters the thousands of generated ball maps (using node/edge/epsilon features) to find a diverse subset of the most descriptive maps.
-
-### Layer Separation
-
-**Rust (`crates/pulsar-core/src` + `crates/pulsar-python/src`)** — all computation (`pulsar-core` pure-Rust engine; `pulsar-python` PyO3/numpy bindings):
-- `impute.rs` — missing value imputation; supports `sample_normal`, `sample_categorical`, `fill_mean`, `fill_median`, `fill_mode`, `fill_value`.
-- `scale.rs` — `StandardScaler` (z-score).
-- `pca.rs` — Randomized PCA (Halko et al. 2011) using parallel SVD via `rayon`.
-- `ballmapper.rs` — Ball Mapper: greedy center selection + point membership.
-- `pseudolaplacian.rs` — accumulates Laplacian matrices across all ball maps.
-- `cosmic.rs` — `CosmicGraph`: normalized adjacency from accumulated Laplacian.
-- `ph.rs` — approximate H₀ persistent homology for automatic threshold selection.
-- `temporal.rs` — 3D pseudo-Laplacian accumulation `(n, n, T)` across time steps.
-- `error.rs` (`crates/pulsar-core/src/error.rs`) — shared `PulsarError` type via `thiserror`.
-- `lib.rs` — crate root (`crates/pulsar-core/src/lib.rs`) and `pulsar._pulsar` PyO3 module definition (`crates/pulsar-python/src/lib.rs`).
-
-**Python (`pulsar/`)** — orchestration and post-processing:
-- `pipeline.py` — `ThemaRS` class; drives grid sweeps and handles imputation flags (`_was_missing`).
-- `config.py` — `PulsarConfig`; YAML loader supporting `values`, `range`, and `distribution`.
-- `temporal.py` — `TemporalCosmicGraph`; provides aggregation methods: `persistence`, `mean`, `recency`, `volatility`, `trend`, `change_point`.
-- `hooks.py` — Maps graph nodes back to data: `label_points`, `membership_matrix`, `cosmic_clusters`, `graph_to_dataframe`.
-
-## Configuration (params.yaml)
-
-```yaml
-run:
-  name: my_experiment
-  data: path/to/data.csv
-preprocessing:
-  drop_columns: [id]
-  impute:
-    age: {method: sample_normal, seed: 42}
-    prior_stays: {method: fill_value, value: 0, indicator: false}
-sweep:
-  pca:
-    dimensions: {values: [2, 3, 5]}
-    seed: {values: [42, 7, 13]}
-  ball_mapper:
-    epsilon: {range: {min: 0.1, max: 1.5, steps: 8}}
-cosmic_graph:
-  construction_threshold: "auto"   # uses persistent homology stability analysis
-output:
-  n_reps: 4
-```
+- `tests/fixtures/golden/` is the frozen reference (`manifest.json` declares tolerances). **Never regenerate or edit a fixture to silence a failure**: a parity failure is a bug or an undocumented divergence.
+- The Python reference is gone, so there are no new fixtures. New behaviour gets Rust known-answer tests and edge-case tests that assert the exact error message.
+- Document divergences from the Python reference in the module header (see `pulsar-analysis/src/evidence/mod.rs`).
+- Do not add Python files (scripts, notebooks, fixture helpers) to this repository.
 
 ## Technical Standards
 
-- **Memory**: Avoid $O(n^2)$ memory in Rust. Large matrices should be handled via `ndarray` and parallelized with `rayon`.
-- **Types**: Use `f64` for all numerical Rust code. In Python, use `np.float64` for compatibility.
-- **Safety**: Rust code must be `panic`-free for Python; use `PulsarError` and `PyResult`.
-- **Tests**: Every new Rust function should have a corresponding Python test in `tests/` and, if numerical, a validation test in `tests/correctness/`.
-
-## Rust Pitfalls (Known Footguns)
-
-- **ndarray ↔ nalgebra layout mismatch**: ndarray is row-major; nalgebra is column-major. Never use `DMatrix::from_iterator` with `ndarray::iter()` — it silently transposes. Use `DMatrix::from_row_slice` with contiguous row-major data instead.
-- **No `.unwrap()` on `partial_cmp` for `f64`**: NaN makes `partial_cmp` return `None`. Either guard against NaN upstream and use `.expect()` with a rationale, or return a `PulsarError`.
-- **Validate all inputs at the boundary**: Every `#[pyfunction]` and `#[pymethods]` entry point must validate dimensions, shapes, and edge cases (0 rows, 0 cols, n < 2 for statistics, parameter bounds) *before* any computation. A panic in Rust kills the Python process.
-
-## Testing Standards
-
-- **Correctness tests must compare against a reference** (e.g., sklearn, scipy, known analytic solution). A test that only checks shapes, signs, or ordering can pass despite silently wrong numerical results.
-- **Include at least one "known-answer" test** per numerical function: construct input where the correct output is analytically obvious (e.g., PCA on axis-aligned variance should recover that axis).
-- **Edge-case tests are mandatory**: 0 rows, 1 row, 0 columns, NaN input, dimension exceeding feature count. These must assert the correct error is raised, not just that *some* error occurs — match on the error message.
-
-## Performance Review Standards
-
-Before optimizing, profile and **prove** the bottleneck. Common false leads in this codebase:
-
-- **Wrong target**: k-NN preprocessing, graph component computation, and scale/impute are NOT bottlenecks — Rust handles them efficiently. Do not move them.
-- **Real targets**: Python loops over graph edges (`cosmic_to_networkx`), redundant PCA recomputation across retries, and unnecessary O(n²) allocations in Python post-processing.
-- **Vectorize at Python/Rust boundaries**: Replace Python for-loops over arrays returned from Rust with `np.where`, `np.fromiter`, or `nx.from_numpy_array`. Example — weight assignment in `cosmic_to_networkx`:
-  ```python
-  # WRONG (O(E) Python loop):
-  for u, v in G.edges():
-      G[u][v]["weight"] = wadj[u, v]
-  # CORRECT (vectorized):
-  return nx.from_numpy_array(np.where(adj > 0, wadj, 0.0))
-  ```
-  Note: `wadj * adj` is semantically wrong here — if `adj[i,j] == 0` but `wadj[i,j] > 0`, you get spurious edges. Use `np.where`.
-
-- **Cache expensive invariant computations**: PCA embeddings are invariant to epsilon changes. Cache them with a fingerprint (SHA256 of `{data_path, dimensions, seeds, n_rows}`) and reuse across retries. See `pulsar/mcp/server.py::_pca_fingerprint`.
+- **Memory**: avoid O(n²) in Rust. Use `ndarray`, parallelize with `rayon`.
+- **Types**: `f64` for numerics.
+- **Safety**: library code is panic-free; return `PulsarError` / typed errors. Validate every input at the boundary (0 rows, 0 cols, n < 2, parameter bounds) before computing.
+- **ndarray ↔ nalgebra**: row-major vs column-major. Never `DMatrix::from_iterator` over `ndarray::iter()`; use `from_row_slice`.
+- **No `.unwrap()` on `partial_cmp` for `f64`**: use `total_cmp` or guard NaN upstream with a documented `expect`.
+- **Profile before optimizing.** Real targets are redundant projection recomputation and O(n²) allocations; k-NN preprocessing, components, scale and impute are not bottlenecks. Reuse embeddings by fingerprint (`projection_fingerprint`).
+- Randomized SVD is approximate (Halko et al.); do not treat variance ratios as ground truth.
+- `construction_threshold: "auto"` (H0 stability) is the safe generic default; do not default to a fixed value for unknown-domain data.
 
 ## MCP Surface Standards
 
-The MCP server is a general-purpose topology workbench, not an EHR-only or domain-specific assistant. It must work on datasets from any domain and at any scale the runtime can support. The agent and user are the domain experts; Pulsar provides calibrated topology, statistical evidence, provenance, and risk context without inventing domain meaning.
+The server is a general-purpose topology workbench, not domain-specific. The agent and user are the domain experts; Pulsar provides calibrated topology, evidence and provenance.
 
-- **Expose measurements, not conclusions**: Tool outputs should describe geometry, preprocessing effects, graph state, threshold surfaces, cluster evidence, risk factors, and candidate lenses. Do not bake medical/business/scientific interpretations into generic tools. Domain naming belongs in agent synthesis and explicit user-facing report inputs such as `cluster_names`.
-- **Keep prompts opt-in and compact**: `FastMCP(instructions=...)` stays a terse tool map. The longer workflow belongs in `pulsar/mcp/prompts.py::WORKFLOW_PROMPT` and is returned by `get_workflow_guide`. Update prompt guidance when contracts change, but avoid duplicating bulky domain teaching in every session.
-- **Default to summary-first payloads**: Summary modes must be native compact payloads, not full objects trimmed after construction. Never put raw O(rows), O(columns), O(edges), O(thresholds), or O(clusters) lists in default responses. Use previews, `bounded_list`, `size_summary`, omitted counts, truncation flags, and explicit `detail="full"` or targeted tools for audit/deep reads.
-- **Compress into decision-shaped slices**: Good summaries preserve the useful shape of a large object from several angles. `get_threshold_stability_curve` is the model: it condenses a full H0 threshold curve into a headline comparison, an evenly spaced morphology sample, top candidate lenses with `why` / `best_for` / `avoid_for`, filtered structural breakpoints, omitted counts, and compatible next tools. Prefer these dense, labeled snippets over either raw arrays or vague prose summaries.
-- **Make outputs rich but bounded**: Include the context an agent needs to decide the next step: dataset shape, raw-vs-processed calibration, k-NN/epsilon domain, projected feature count, estimated ball maps, grid adequacy, threshold provenance, graph surface, component morphology, weight distribution, finalization gates, and recommended next tools. Prefer a compact decision packet over a raw dump.
-- **Preserve agent autonomy**: `create_config` returns a broad baseline, not the answer. `diagnose_cosmic_graph` is measurement, not a directive. Threshold policies are interpretation lenses, not scores to maximize. Avoid wording that encourages metric hill-climbing, single-run perfection, or automatic rejection of valid one-component / giant-plus-tail topologies.
-- **Use drill-down tools intentionally**: The normal loop is `get_workflow_guide` -> `characterize_dataset` -> `draft_preprocessing_plan` -> `create_config` -> `run_topological_sweep` -> `diagnose_cosmic_graph` -> `generate_cluster_dossier(detail="summary")`, followed by narrow calls such as `edit_preprocessing_plan`, `probe_columns`, `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix`, `get_threshold_stability_curve`, or `get_topological_skeleton` only when the current question needs them.
-- **Label graph surfaces precisely**: Always distinguish construction threshold vs. interpretation threshold, persisted constructed graph vs. full weighted affinity, live model vs. persisted run, and constructed graph vs. sparsified artifact. If a payload mixes these surfaces, include explicit labels and threshold fields near the top.
-- **Scale costs must be visible**: Any expensive or potentially large operation should expose enough cost context for the agent to choose deliberately: estimated ball maps, runtime/memory tier, preview limits, returned/omitted counts, and whether a graph artifact is an estimate or a built object. Heavy modes and exports should be opt-in.
-- **Errors should unblock agents**: MCP errors should use structured envelopes with an error code, the failed tool, relevant handle/path context, and a concrete `agent_action`. Do not return opaque stack traces or benign-looking defaults when a statistical test, config validation, stale handle, or sandbox path failed.
-- **Tests and docs move with the surface**: When changing MCP contracts, update the corresponding tool docstrings, `WORKFLOW_PROMPT`, `docs/source/userGuides/mcp.rst`, payload helpers, and the focused `tests/test_mcp_surface_*.py` tests. A tool behavior change is incomplete if the prompt still teaches the old detail mode, threshold meaning, or next-tool path.
+- **Measurements, not conclusions.** No domain interpretation in generic tools; domain naming belongs in agent synthesis or explicit inputs such as `cluster_names`.
+- **Summary-first, bounded payloads.** Never put raw O(rows/columns/edges/thresholds/clusters) lists in default responses: previews, omitted counts, truncation flags, `detail="full"` for audits. `PULSAR_MCP_MAX_RESPONSE_BYTES` (default 100 KB) is a backstop, not a design target. `get_threshold_stability_curve` is the model of a decision-shaped summary.
+- **Rich but bounded decision packets.** Include shape, calibration, cost (estimated ball maps, memory tier), provenance, gates and compatible `next_tools`.
+- **Preserve agent autonomy.** Baselines are not answers; diagnostics are measurements; threshold policies are lenses, not scores to maximize. Do not reject valid one-component or giant-plus-tail topologies.
+- **Label graph surfaces precisely:** construction vs interpretation threshold, constructed graph vs full weighted affinity, live model vs persisted run.
+- **Scale costs are visible; heavy modes are opt-in.**
+- **Errors unblock agents:** `ToolError` envelope with `error_code`, tool, handle/path context and a concrete `agent_action`; never opaque traces or benign defaults.
+- **Tool contract:** typed params with per-field descriptions written for an agent that has never seen Pulsar; output schema matching the success payload exactly; annotations (`read_only`, `idempotent`, `open_world = false`); structured content plus text. Catalog stays under `CATALOG_BUDGET_CHARS`; raise it deliberately.
+- **Handles:** `run_id` etc. resolve through `pulsar-store`, so they work across transports and restarts. Read-only means neither session state nor the registry is mutated.
+- **Tests and docs move with the surface:** contract tests in `crates/pulsar-mcp/tests/contracts.rs` (in-memory client, schema validation), `guide.rs` workflow text, and `docs/design/next-mcp-roadmap.md` when direction changes.
 
-### MCP Tool Contract (FastMCP 4.1, MCP 2026-07-28)
+## Rust conventions
 
-- **Adding a tool**: append it to `ALL_TOOLS_LIST`, decorate with `@tool_meta(read_only=..., idempotent=..., output_schema=...)` from `pulsar/mcp/toolmeta.py`, annotate `-> ToolResult`. `register_server_tools` raises at import if `tool_meta` is missing. Long tools set `timeout=default_tool_timeout()`.
-- **Parameters**: every parameter is `Annotated[T, Field(description=...)]`, written for an agent that has never seen Pulsar (what it is, where it comes from, what omitting it does). Docstring: one-sentence purpose plus a short body under ~600 chars; long guidance goes to `WORKFLOW_PROMPT`.
-- **Returns**: `mcp_result(payload, text=markdown_or_None)`; never a bare `str`. Output schemas use the `toolmeta` builders (`obj`, `arr`, `STR`, `INT`, `NUM`, `BOOL`, `ANY`, `nullable`, `enum`) and must match the success payload exactly: FastMCP validates it, but only through the server, so every variant needs an in-memory `Client` test. Error results are not validated.
-- **Errors**: `mcp_error(...)` with `error_code` and a concrete `agent_action`; it sets the MCP error flag and keeps the JSON envelope as text and structured content. Use `path_access_error` / `unknown_handle_error` for those cases. Raise only for genuinely unexpected internal failures. Codes in use include `RUN_ID_UNKNOWN`, `MODEL_NOT_LOADED`, `CLUSTERS_STALE`, `SESSION_REVISION_CONFLICT`, `INVALID_ARGUMENT`, `CONFIG_YAML_INVALID`, `RUN_NOT_LIVE`.
-- **Run handles**: `run_topological_sweep` returns `run_id`. Tools that read the fitted model accept `run_id: str = ""` and resolve it with `resolve_run`, mapping `LookupError` to `unknown_handle_error`. Tools that publish session state (dossier, graph artifact) accept only the latest run. Longitudinal tools take `longitudinal_id`, never `run_id`. The process-wide cache keeps `PULSAR_MCP_MODEL_CACHE_SIZE` runs.
-- **Read-only** means neither session state nor the on-disk registry is mutated. `open_world_hint` is always False.
-- **Summary-first**: any new O(entities / edges / clusters) payload ships a capped preview plus an omitted count by default and the full object only under `detail="full"`.
-- **Contract test**: `tests/test_mcp_contracts.py` enforces annotations, output schemas, per-parameter descriptions, deterministic `tools/list`, the catalog character budget, and two end-to-end loops through the in-memory client. New tools must pass it; raise the budget deliberately, never by accident.
-
-## Async / MCP Patterns
-
-When integrating `async def` MCP tools with blocking Python code:
-
-- **Never call blocking fit() directly in `async def`** — it starves the event loop for 2–30s. Use `asyncio.to_thread()`.
-- **Never use `asyncio.get_event_loop()`** (deprecated in 3.10+). Use `asyncio.get_running_loop()` inside `async def`.
-- **Calling async from sync thread**: Use `asyncio.run_coroutine_threadsafe(coro, loop)` where `loop` is captured *before* entering the thread.
-- **FastMCP progress**: `ctx.report_progress(progress, total, message)` is the correct API (FastMCP 3.2.0+). It silently no-ops if the client sends no progress token — safe to call unconditionally.
-
-```python
-# Canonical MCP + asyncio pattern for blocking fit():
-loop = asyncio.get_running_loop()
-
-def progress_callback(stage: str, fraction: float) -> None:
-    asyncio.run_coroutine_threadsafe(
-        ctx.report_progress(progress=fraction, total=1.0, message=stage), loop,
-    )
-
-await asyncio.to_thread(model.fit, progress_callback=progress_callback)
-```
-
-## Progress Callback Pattern
-
-`ThemaRS.fit()` and `fit_multi()` accept `progress_callback: Callable[[str, float], None] | None`. Convention:
-
-- Callback signature: `(stage_name: str, cumulative_fraction: float) -> None`
-- Fractions are cumulative [0, 1], monotonically increasing, ending at exactly 1.0
-- Stage weights live in `_STAGE_WEIGHTS` list of tuples (module-level, ordered). `_build_cumulative_fractions()` converts to a schedule with the final entry pinned to 1.0.
-- Cursor-based `_notify()`: each call advances a cursor through the pre-built schedule. Use `_notify("label override")` to change the display name without affecting the fraction (e.g., `_notify("pca (cached)")`).
-- Callback exceptions propagate with their original type — no wrapping.
-- For notebooks: use `pulsar.progress.fit_with_progress(model, data)` or `fit_multi_with_progress(model, datasets)` — renders a transient rich progress bar.
-
-## Key Architectural Decisions
-
-- **`CosmicGraph.from_pseudo_laplacian` requires `int64`**: The pseudo-Laplacian accumulator expects integer counts. If constructing test inputs in Python, use `np.ascontiguousarray(L, dtype=np.int64)`.
-- **`construction_threshold: "auto"` is the safe generic default for exploratory MCP runs**: Do not default to `"0.0"` or a fixed value for high-dimensional or unknown-domain data — it often produces a maximally connected, structureless graph. The H₀ persistent homology stability analysis exists precisely to choose a data-relative construction surface.
-- **Randomized SVD introduces small variance approximation error**: PCA via Halko et al. 2011 gives approximate, not exact, singular values. Document this in characterization code; do not treat approximate variance ratios as ground truth.
-- **MCP session state lives in `_PulsarSession`**: Embeddings, fingerprint, and model are stored per-session. Read/write session state in the `async` context (before/after `to_thread`), not inside the thread.
+- Never block the async runtime: run `fit` and other blocking work via `tokio::task::spawn_blocking`.
+- Progress callbacks: `(stage, cumulative_fraction)`, monotonically increasing, ending at exactly 1.0.
+- Keep error `code()`s stable; they are part of the agent-facing contract.

@@ -20,7 +20,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pulsar_pipeline::Graph;
@@ -28,17 +28,18 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::atomic::{
-    list_json_stems, list_subdirs, now_seconds, read_record, sweep_orphans, write_json,
+    list_json_stems, list_subdirs, now_seconds, read_record, stage_json, sweep_orphans, write_json,
+    StagedFile,
 };
 use crate::error::{io, StoreError};
 use crate::handle::{
-    ClusterAssignmentId, DatasetId, HandleKind, LongitudinalId, RunId, UploadId, HEX_LEN,
+    ClusterAssignmentId, DatasetId, HandleKind, LongitudinalId, PlanId, RunId, UploadId, HEX_LEN,
 };
 use crate::job::{JobHandle, JobKind, JobRecord, INTERRUPTED};
 use crate::paths::{default_root, Dirs};
 use crate::record::{
     ClusterAssignment, ClusterAssignmentRecord, DatasetRecord, DatasetSource, LongitudinalRecord,
-    Representation, RunArtifacts, RunRecord, UploadRecord, SCHEMA_VERSION,
+    PlanRecord, Representation, RunArtifacts, RunRecord, UploadRecord, SCHEMA_VERSION,
 };
 use crate::sidecar;
 
@@ -67,6 +68,9 @@ impl Default for StoreOptions {
 struct Inner {
     dirs: Dirs,
     options: StoreOptions,
+    /// Orders plan writers within this process; [`Store::plan_guard`] adds
+    /// a file lock for writers in other processes.
+    plan_lock: Mutex<()>,
 }
 
 /// A handle on one store root. Cheap to clone; safe to share across threads.
@@ -91,6 +95,36 @@ pub struct RunListing {
     /// Run directories without a readable current-schema record (jobs still
     /// running or failed, or records from another Pulsar version).
     pub skipped: usize,
+}
+
+/// A cluster assignment written and fsynced under temp names, not yet
+/// readable by id. [`commit`](Self::commit) publishes it; dropping it
+/// uncommitted discards it, so a publish refused or cancelled after staging
+/// persists nothing.
+#[derive(Debug)]
+#[must_use = "a staged assignment is discarded unless committed"]
+pub struct StagedClusterAssignment {
+    record: ClusterAssignmentRecord,
+    labels: StagedFile,
+    meta: StagedFile,
+}
+
+impl StagedClusterAssignment {
+    pub fn record(&self) -> &ClusterAssignmentRecord {
+        &self.record
+    }
+
+    /// Make the assignment visible. Labels land first; the metadata rename
+    /// is the single step that makes it readable.
+    pub fn commit(self) -> Result<ClusterAssignmentRecord, StoreError> {
+        let labels_path = self.labels.path().to_path_buf();
+        self.labels.commit()?;
+        if let Err(e) = self.meta.commit() {
+            let _ = fs::remove_file(&labels_path);
+            return Err(e);
+        }
+        Ok(self.record)
+    }
 }
 
 fn digest12(hasher: Sha256) -> String {
@@ -138,7 +172,11 @@ impl Store {
         }
         sweep_orphans(&dirs.all(), options.orphan_max_age);
         Ok(Self {
-            inner: Arc::new(Inner { dirs, options }),
+            inner: Arc::new(Inner {
+                dirs,
+                options,
+                plan_lock: Mutex::new(()),
+            }),
         })
     }
 
@@ -205,6 +243,7 @@ impl Store {
         let source_tag = match source {
             DatasetSource::Path => "path",
             DatasetSource::Upload => "upload",
+            DatasetSource::EntitySample => "entity_sample",
         };
         let mut hasher = Sha256::new();
         hasher.update(source_tag.as_bytes());
@@ -556,12 +595,23 @@ impl Store {
             .join(format!("{id}.labels.arrow"))
     }
 
-    /// Persist a label vector. If `run_id` is given it must name a completed
-    /// run with as many rows as there are labels.
+    /// Persist a label vector (stage, then commit). If `run_id` is given it
+    /// must name a completed run with as many rows as there are labels.
     pub fn save_cluster_assignment(
         &self,
         input: ClusterAssignment<'_>,
     ) -> Result<ClusterAssignmentRecord, StoreError> {
+        self.stage_cluster_assignment(input)?.commit()
+    }
+
+    /// Write and fsync an assignment without making it visible. This is the
+    /// O(rows) part, so run it off the async runtime; the
+    /// [`StagedClusterAssignment::commit`] that publishes it is two renames.
+    /// Validation is the same as [`Store::save_cluster_assignment`].
+    pub fn stage_cluster_assignment(
+        &self,
+        input: ClusterAssignment<'_>,
+    ) -> Result<StagedClusterAssignment, StoreError> {
         if let Some(run_id) = &input.run_id {
             let run = self.get_run(run_id)?;
             if run.n_rows != input.labels.len() {
@@ -588,16 +638,20 @@ impl Store {
             cluster_ids,
             created_at: now_seconds(),
         };
-        sidecar::write_labels(
+        let labels = sidecar::stage_labels(
             &self.assignment_labels(&record.cluster_assignment_id),
             input.labels,
         )?;
-        write_json(
+        let meta = stage_json(
             &self.assignment_meta(&record.cluster_assignment_id),
             &record,
             true,
         )?;
-        Ok(record)
+        Ok(StagedClusterAssignment {
+            record,
+            labels,
+            meta,
+        })
     }
 
     pub fn get_cluster_assignment(
@@ -647,6 +701,107 @@ impl Store {
     pub fn get_longitudinal(&self, id: &LongitudinalId) -> Result<LongitudinalRecord, StoreError> {
         read_record(&self.longitudinal_path(id))?
             .ok_or_else(|| unknown(HandleKind::Longitudinal, id.as_str()))
+    }
+
+    // ------------------------------------------------------------------- plans
+
+    fn plan_path(&self, id: &PlanId) -> PathBuf {
+        self.dirs().plans.join(format!("{id}.json"))
+    }
+
+    /// Serializes plan read-modify-write so a revision check and the write
+    /// that follows it cannot interleave with another writer: the mutex
+    /// orders threads of this process, the exclusive lock on `plans/.lock`
+    /// orders the other processes sharing the store. Both release on drop.
+    fn plan_guard(&self) -> Result<(fs::File, std::sync::MutexGuard<'_, ()>), StoreError> {
+        let guard = self
+            .inner
+            .plan_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let path = self.dirs().plans.join(".lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(io("open", &path))?;
+        file.lock().map_err(io("lock", &path))?;
+        Ok((file, guard))
+    }
+
+    /// Create a plan record. An existing plan is never replaced
+    /// ([`StoreError::PlanExists`]); later changes go through
+    /// [`Store::update_plan`], which checks the revision.
+    pub fn save_plan(
+        &self,
+        id: &PlanId,
+        dataset_id: &str,
+        revision: u32,
+        plan: serde_json::Value,
+    ) -> Result<PlanRecord, StoreError> {
+        let _guard = self.plan_guard()?;
+        let path = self.plan_path(id);
+        if path.try_exists().map_err(io("stat", &path))? {
+            return Err(StoreError::PlanExists {
+                plan_id: id.to_string(),
+            });
+        }
+        let now = now_seconds();
+        let record = PlanRecord {
+            schema: SCHEMA_VERSION,
+            plan_id: id.clone(),
+            dataset_id: dataset_id.to_owned(),
+            revision,
+            plan,
+            created_at: now,
+            updated_at: now,
+        };
+        write_json(&path, &record, true)?;
+        Ok(record)
+    }
+
+    pub fn get_plan(&self, id: &PlanId) -> Result<PlanRecord, StoreError> {
+        read_record(&self.plan_path(id))?.ok_or_else(|| unknown(HandleKind::Plan, id.as_str()))
+    }
+
+    /// Replace a plan only if it is still at `expected_revision`; otherwise
+    /// [`StoreError::RevisionConflict`] names the revision it is at now.
+    pub fn update_plan(
+        &self,
+        id: &PlanId,
+        expected_revision: u32,
+        new_revision: u32,
+        plan: serde_json::Value,
+    ) -> Result<PlanRecord, StoreError> {
+        let _guard = self.plan_guard()?;
+        let mut record = self.get_plan(id)?;
+        if record.revision != expected_revision {
+            return Err(StoreError::RevisionConflict {
+                plan_id: id.to_string(),
+                current: record.revision,
+                expected: expected_revision,
+            });
+        }
+        record.revision = new_revision;
+        record.plan = plan;
+        record.updated_at = now_seconds();
+        write_json(&self.plan_path(id), &record, true)?;
+        Ok(record)
+    }
+
+    /// Plans for `dataset_id` (or all), least recently updated first, so the
+    /// last one is the plan most recently worked on. Unreadable records are
+    /// skipped.
+    pub fn list_plans(&self, dataset_id: Option<&str>) -> Result<Vec<PlanRecord>, StoreError> {
+        let mut plans: Vec<PlanRecord> = list_json_stems(&self.dirs().plans)?
+            .iter()
+            .filter_map(|stem| PlanId::parse(stem).ok())
+            .filter_map(|id| self.get_plan(&id).ok())
+            .filter(|p| dataset_id.is_none_or(|d| p.dataset_id == d))
+            .collect();
+        plans.sort_by(|a, b| a.updated_at.total_cmp(&b.updated_at));
+        Ok(plans)
     }
 }
 

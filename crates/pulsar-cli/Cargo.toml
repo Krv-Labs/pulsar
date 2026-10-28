@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 pulsar-config = { path = "../pulsar-config" }
 pulsar-data = { path = "../pulsar-data" }
+pulsar-install = { path = "../pulsar-install" }
 pulsar-mcp = { path = "../pulsar-mcp" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
 pulsar-store = { path = "../pulsar-store" }

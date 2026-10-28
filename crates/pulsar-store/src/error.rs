@@ -68,6 +68,14 @@ pub enum StoreError {
         state: JobState,
         action: &'static str,
     },
+    #[error("plan {plan_id} is at revision {current}, but revision {expected} was expected")]
+    RevisionConflict {
+        plan_id: String,
+        current: u32,
+        expected: u32,
+    },
+    #[error("plan {plan_id} already exists")]
+    PlanExists { plan_id: String },
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 }
@@ -87,6 +95,8 @@ impl StoreError {
             Self::DatasetChanged { .. } => "DATASET_CHANGED",
             Self::DatasetNotFound { .. } => "DATASET_NOT_FOUND",
             Self::JobState { .. } => "JOB_STATE",
+            Self::RevisionConflict { .. } => "SESSION_REVISION_CONFLICT",
+            Self::PlanExists { .. } => "PLAN_ID_EXISTS",
             Self::InvalidArgument(_) => "INVALID_ARGUMENT",
         }
     }
@@ -110,7 +120,17 @@ impl StoreError {
                         .into()
                 }
                 HandleKind::Upload => "The upload_id is not in the store. Start a new upload.".into(),
+                HandleKind::Plan => {
+                    "The plan_id is not in the store. Draft a plan again with draft_preprocessing_plan."
+                        .into()
+                }
             },
+            Self::RevisionConflict { current, .. } => format!(
+                "Inspect the current plan or retry with base_revision={current}."
+            ),
+            Self::PlanExists { .. } => {
+                "Draft a new plan, or change this one with edit_preprocessing_plan.".into()
+            }
             Self::RunNotComplete { state, .. } => match state {
                 JobState::Queued | JobState::Running => {
                     "The run has not finished. Poll the job until it is complete, then retry."
