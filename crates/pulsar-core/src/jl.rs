@@ -3,7 +3,7 @@ use rand::prelude::*;
 use rand_distr::StandardNormal;
 use rayon::prelude::*;
 
-use crate::error::PulsarError;
+use crate::error::{ensure_finite, PulsarError};
 
 /// Johnson-Lindenstrauss Gaussian random projection.
 pub struct JLProjectionInner {
@@ -30,6 +30,7 @@ impl JLProjectionInner {
                 msg: "input data has 0 features (columns)".to_string(),
             });
         }
+        ensure_finite(data)?;
         let means = if center {
             data.mean_axis(Axis(0))
                 .expect("non-empty axis guaranteed above")
@@ -103,6 +104,7 @@ pub fn jl_grid<S: Data<Elem = f64>>(
             msg: "input data has 0 features (columns)".to_string(),
         });
     }
+    ensure_finite(data)?;
 
     // Centering is invariant to seed and dimension, so do it once up front
     // rather than cloning + re-centering inside every grid cell.
@@ -140,4 +142,35 @@ pub fn jl_grid<S: Data<Elem = f64>>(
         .collect();
 
     Ok(embeddings.into_iter().flatten().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data_with(value: f64) -> Array2<f64> {
+        let mut data = Array2::from_shape_fn((50, 4), |(i, j)| (i * 4 + j) as f64);
+        data[[3, 1]] = value;
+        data
+    }
+
+    fn assert_rejects_cell_3_1(result: Result<impl Sized, PulsarError>) {
+        match result {
+            Err(PulsarError::InvalidParameter { msg }) => {
+                assert!(msg.contains("row 3, column 1"), "{msg}")
+            }
+            Err(other) => panic!("expected InvalidParameter, got {other:?}"),
+            Ok(_) => panic!("expected an error for non-finite input"),
+        }
+    }
+
+    #[test]
+    fn jl_rejects_non_finite_input() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let data = data_with(value);
+            assert_rejects_cell_3_1(jl_grid(&data, &[2], &[42], true));
+            assert_rejects_cell_3_1(jl_grid(&data.view(), &[2], &[42], false));
+            assert_rejects_cell_3_1(JLProjectionInner::fit(&data, 2, 42, true));
+        }
+    }
 }

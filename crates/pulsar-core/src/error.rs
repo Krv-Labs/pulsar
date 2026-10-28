@@ -1,3 +1,4 @@
+use ndarray::{ArrayBase, Data, Ix2};
 use thiserror::Error;
 
 /// All errors that can originate from the Pulsar numeric core. Each variant
@@ -49,5 +50,37 @@ impl PulsarError {
             PulsarError::InvalidParameter { .. } => "INVALID_PARAMETER",
             PulsarError::SvdFailed => "SVD_FAILED",
         }
+    }
+}
+
+/// Reject a matrix holding NaN or ±inf, naming the first offending cell in
+/// row-major order. Projections must check this up front: nalgebra's SVD
+/// never converges on non-finite input, and Ball Mapper turns every
+/// non-finite row into an empty ball.
+pub(crate) fn ensure_finite<S: Data<Elem = f64>>(
+    data: &ArrayBase<S, Ix2>,
+) -> Result<(), PulsarError> {
+    for ((row, col), &value) in data.indexed_iter() {
+        if !value.is_finite() {
+            return Err(PulsarError::InvalidParameter {
+                msg: format!(
+                    "input contains a non-finite value ({value}) at row {row}, column {col}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject any ball member index that does not address one of `n` points.
+pub(crate) fn ensure_members_in_range<'a>(
+    balls: impl IntoIterator<Item = &'a Vec<usize>>,
+    n: usize,
+) -> Result<(), PulsarError> {
+    match balls.into_iter().flatten().find(|&&i| i >= n) {
+        Some(&index) => Err(PulsarError::InvalidParameter {
+            msg: format!("ball member index {index} is out of range for n = {n} points"),
+        }),
+        None => Ok(()),
     }
 }

@@ -25,7 +25,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::PipelineError;
-use crate::fit::{projection_grid, CosmicBuilder};
+use crate::fit::{check_epsilons, projection_grid, CosmicBuilder};
 use crate::graph::Graph;
 
 /// One node: entity `entity_id` observed at time step `t`.
@@ -174,6 +174,7 @@ impl CosmicTrajectory {
         similarity_threshold: f64,
         scale: bool,
     ) -> Result<Self, PipelineError> {
+        check_epsilons(&config.ball_mapper.epsilons)?;
         if similarity_threshold < 0.0 {
             return Err(input_error(format!(
                 "similarity_threshold must be >= 0, got {}",

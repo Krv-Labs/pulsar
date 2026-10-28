@@ -170,6 +170,7 @@ pub fn fit(
     progress: Option<&mut ProgressFn<'_>>,
 ) -> Result<Fitted, PipelineError> {
     let batch_size = check_batch_size(opts.ballmap_batch_size)?;
+    check_epsilons(&cfg.ball_mapper.epsilons)?;
     let use_cached = opts.precomputed_embeddings.is_some();
     let variants = cfg.preprocessing_variants();
     let n_variants = variants.len().max(1);
@@ -299,6 +300,7 @@ pub fn fit_multi(
         return Err(PipelineError::EmptyDatasets);
     }
     let batch_size = check_batch_size(opts.ballmap_batch_size)?;
+    check_epsilons(&cfg.ball_mapper.epsilons)?;
     let count = tables.len();
     let projection_count = grid_size(&cfg.projection);
     let batch_count = batch_count(projection_count, batch_size);
@@ -448,6 +450,19 @@ fn stability_weight(spec: &CosmicSpec) -> f64 {
     }
 }
 
+/// Ball Mapper needs a finite radius > 0. The config loader enforces this,
+/// but `PulsarConfig` fields are public, so programmatic configs are
+/// re-checked before any ball map is built.
+pub(crate) fn check_epsilons(epsilons: &[f64]) -> Result<(), PipelineError> {
+    if epsilons.iter().all(|&eps| eps.is_finite() && eps > 0.0) {
+        Ok(())
+    } else {
+        Err(PipelineError::InvalidOption {
+            what: "ball_mapper.epsilons",
+        })
+    }
+}
+
 /// Ball Mapper over `embeddings` in batches, folded into `builder`.
 fn sweep(
     embeddings: &[Array2<f64>],
@@ -518,7 +533,7 @@ impl CosmicBuilder {
             }
             Self::Exact { n, acc } => {
                 let per_map: Vec<&[Vec<usize>]> = maps.iter().map(|m| m.nodes.as_slice()).collect();
-                let block = accumulate_pseudo_laplacians_sparse(&per_map, *n);
+                let block = accumulate_pseudo_laplacians_sparse(&per_map, *n)?;
                 match acc {
                     None => *acc = Some(block),
                     Some(existing) => existing.merge_in_place(&block)?,

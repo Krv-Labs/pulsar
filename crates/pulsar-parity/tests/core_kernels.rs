@@ -210,7 +210,8 @@ fn exact_cosmic_graph_matches_golden() {
         let maps: Vec<BallMap> = load(case, "ball_maps");
         let want: Cosmic = load(case, "cosmic_exact");
         let per_map: Vec<&[Vec<usize>]> = maps.iter().map(|m| m.nodes.as_slice()).collect();
-        let lap = accumulate_pseudo_laplacians_sparse(&per_map, want.n);
+        let lap = accumulate_pseudo_laplacians_sparse(&per_map, want.n)
+            .expect("golden ball maps index points below n");
         let cosmic =
             CosmicGraphInner::from_pseudo_laplacian_sparse(lap.n, &lap.diag, &lap.offdiag, 0.0);
         assert_edges_close(

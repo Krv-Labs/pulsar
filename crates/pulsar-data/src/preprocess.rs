@@ -325,6 +325,20 @@ pub fn preprocess(
         return Err(DataError::NanRemaining { columns: nan_cols });
     }
 
+    // 8b. Infinite values survive imputation (they are not missing) and would
+    // make the scaler emit NaN for the whole column, so name the first cell.
+    for (name, col) in frame.names.iter().zip(&frame.cols) {
+        if let Work::Num { values, .. } = col {
+            if let Some((row, &value)) = values.iter().enumerate().find(|(_, x)| x.is_infinite()) {
+                return Err(DataError::NonFiniteValue {
+                    column: name.clone(),
+                    row,
+                    value,
+                });
+            }
+        }
+    }
+
     // 9. Everything must be numeric.
     let text_cols: Vec<String> = frame
         .names
@@ -742,6 +756,9 @@ mod tests {
         assert_eq!(e.code(), "ALL_MISSING");
         let e = run("a\n1\nNA\n", "run: {name: t}\n").unwrap_err();
         assert_eq!(e.code(), "NAN_REMAINING");
+        let e = run("a\n1\ninf\n", "run: {name: t}\n").unwrap_err();
+        assert_eq!(e.code(), "NON_FINITE_VALUE");
+        assert!(e.to_string().contains("row 1"), "{e}");
         let e = run("a\nx\ny\n", "run: {name: t}\n").unwrap_err();
         assert_eq!(e.code(), "NON_NUMERIC_REMAINING");
         let e = run(
