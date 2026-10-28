@@ -20,6 +20,10 @@
 //!   that changes nothing (every probe is within the profiled rows); it only
 //!   bites in the feature-count heuristic used when no curve exists, which
 //!   could otherwise ask PCA for more components than there are rows.
+//! - Python bounded the raw-fallback grid by every numeric column. The Rust
+//!   bound is the columns the curve was measured on (numeric columns with no
+//!   observed value are dropped by imputation); the two differ only when such
+//!   a column exists.
 
 use crate::characterization::{DatasetProfile, NumericProfile};
 use crate::plan::{plan_to_preprocessing_yaml, PreprocessingPlan};
@@ -198,7 +202,8 @@ pub fn epsilon_range(knn_mean: f64, p25: f64, p75: f64) -> (f64, f64) {
 
 /// The variance curve, feature count and profiled row count the grid is
 /// built from: the processed calibration when it succeeded, else the raw
-/// characterization.
+/// characterization. The feature count is the one the curve was measured on,
+/// so in the raw case it excludes numeric columns with no observed value.
 pub fn calibration_curve<'a>(
     geo: &'a DatasetProfile,
     processed: Option<&'a NumericProfile>,
@@ -211,7 +216,7 @@ pub fn calibration_curve<'a>(
         ),
         None => (
             geo.pca_cumulative_variance.as_slice(),
-            geo.n_features,
+            geo.n_features_profiled,
             geo.n_samples_profiled,
         ),
     }
@@ -250,7 +255,7 @@ pub fn build_initial_config_yaml(
             geo.pca_cumulative_variance.as_slice(),
             0.0,
             0.0,
-            geo.n_features,
+            geo.n_features_profiled,
             geo.n_samples_profiled,
         ),
     };

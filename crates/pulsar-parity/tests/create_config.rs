@@ -166,7 +166,7 @@ fn every_table_gets_the_python_baseline_config() {
                 p.pca_cumulative_variance.clone(),
             ),
             None => (
-                geo.n_features,
+                geo.n_features_profiled,
                 geo.n_samples_profiled,
                 geo.pca_cumulative_variance.clone(),
             ),

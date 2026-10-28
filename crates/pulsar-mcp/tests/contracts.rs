@@ -1677,7 +1677,8 @@ async fn characterize_and_probe_read_raw_data_and_explain_failures() {
 #[tokio::test]
 async fn create_config_grid_can_exceed_twenty_dimensions_on_a_wide_table() {
     // 30 columns of independent noise: variance spreads evenly, so 90% is not
-    // reached by 20 dimensions and the grid must look past 20 to find it.
+    // reached by 20 dimensions and the grid must look past 20 to find it. The
+    // crossing (about 24) sits below the width, and the probes resolve it.
     let root = TempRoot::new("create-config-wide");
     let csv_path = root.path().join("wide30.csv");
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -1718,15 +1719,15 @@ async fn create_config_grid_can_exceed_twenty_dimensions_on_a_wide_table() {
         .map(|d| d.as_u64().unwrap())
         .max()
         .unwrap();
-    assert!(grid_max > 20, "{strategy}");
+    assert!(grid_max > 20 && grid_max < 30, "{strategy}");
     assert_eq!(
         strategy["grid_ceiling"].as_u64(),
         Some(grid_max),
         "{strategy}"
     );
-    assert!(
-        ["n_features", "variance_elbow"]
-            .contains(&strategy["grid_ceiling_source"].as_str().unwrap()),
+    assert_eq!(
+        strategy["grid_ceiling_source"].as_str(),
+        Some("variance_elbow"),
         "{strategy}"
     );
     client.cancel().await.unwrap();

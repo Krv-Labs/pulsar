@@ -20,8 +20,8 @@
 //!   dimensions (those within the feature and row counts), so the variance
 //!   elbow, and the dimension grid built from it, could never exceed 20 and
 //!   a narrow table was never measured at its own width. Production Rust
-//!   probes a data-relative set ([`PcaProbes::DataRelative`]) that always
-//!   reaches the largest measurable dimension. `characterize_dataset` and
+//!   probes a data-relative set ([`PcaProbes::DataRelative`]): twelve
+//!   dimensions spread from 2 to the largest measurable one. `characterize_dataset` and
 //!   `profile_numeric_matrix` take the probe set as a parameter; the golden
 //!   parity tests pass [`PcaProbes::Python`] to reproduce the frozen output.
 //! - Python's curve was a randomized-SVD estimate (Halko et al., 10
@@ -61,6 +61,8 @@ pub enum CharacterizationError {
     TooFewRows { found: usize },
     #[error("No numeric column has an observed value, so there is no geometry to measure.")]
     NoObservedValues,
+    #[error("Probe dimension {dim} is outside 1..={max_dim}; PCA keeps at most min(features, profiled rows) = {max_dim} components here.")]
+    ProbeOutOfRange { dim: usize, max_dim: usize },
     #[error("Column {column:?} holds a non-finite value ({value}) at row {row}. Infinite values are not missing and are not imputed; they would turn the column's mean and z-scores into NaN.")]
     NonFiniteValue {
         column: String,
@@ -77,6 +79,7 @@ impl CharacterizationError {
             Self::TooFewNumericColumns { .. } => "TOO_FEW_NUMERIC_COLUMNS",
             Self::TooFewRows { .. } => "TOO_FEW_ROWS",
             Self::NoObservedValues => "NO_OBSERVED_VALUES",
+            Self::ProbeOutOfRange { .. } => "PROBE_OUT_OF_RANGE",
             Self::NonFiniteValue { .. } => "NON_FINITE_VALUE",
             Self::Core(_) => "CHARACTERIZATION_FAILED",
         }
@@ -109,21 +112,24 @@ pub enum PcaProbes<'a> {
     /// Python's fixed set: 2, 3, 5, 10, 15 and 20, those within `max_dim`.
     /// Kept for golden parity; it cannot see past 20 dimensions.
     Python,
-    /// Every dimension up to 12 when `max_dim` is that small; otherwise
-    /// Python's set below 20, up to five geometrically spaced dimensions
-    /// above 20, and `max_dim` itself. At most 12 probes.
+    /// Twelve probes from 2 to `max_dim`: every dimension when `max_dim` is
+    /// 12 or less; otherwise twelve geometrically spaced integers (ratio
+    /// `(max_dim / 2)^(1/11)`, rounded), with any duplicates that rounding
+    /// leaves at the low end replaced by the midpoint of the widest
+    /// remaining gap (the highest gap on a tie). Geometric spacing leaves
+    /// its widest gaps at the top, which is where a flat spectrum crosses
+    /// 90%. For example 30 gives 2, 3, 4, 5, 7, 9, 11, 14, 18, 23, 26, 30.
     DataRelative,
-    /// Exactly these dimensions (each must be within `max_dim`).
+    /// Exactly these dimensions, each between 1 and `max_dim`;
+    /// [`profile_numeric_matrix`] refuses any other.
     Exact(&'a [usize]),
 }
 
 const PYTHON_PROBES: [usize; 6] = [2, 3, 5, 10, 15, 20];
-/// Below this width every dimension is probed.
-const DENSE_PROBE_LIMIT: usize = 12;
-/// Spacing of the probes above 20 when few are needed.
-const PROBE_RATIO: f64 = 1.5;
-/// Probes above 20, `max_dim` included.
-const MAX_WIDE_PROBES: usize = 6;
+/// The number of data-relative probes. The exact curve costs one
+/// eigendecomposition however many dimensions are read from it, so the
+/// budget only bounds the payload.
+const DATA_RELATIVE_PROBES: usize = 12;
 
 impl PcaProbes<'_> {
     /// The probed dimensions, ascending, for a matrix whose largest
@@ -148,23 +154,32 @@ impl PcaProbes<'_> {
 }
 
 fn data_relative_probes(max_dim: usize) -> Vec<usize> {
-    if max_dim <= DENSE_PROBE_LIMIT {
+    if max_dim <= DATA_RELATIVE_PROBES {
         return (2.min(max_dim)..=max_dim).collect();
     }
-    let base = PYTHON_PROBES[PYTHON_PROBES.len() - 1];
-    let mut dims: Vec<usize> = PYTHON_PROBES.into_iter().filter(|&d| d < max_dim).collect();
-    if max_dim > base {
-        // Geometric steps from 20 to `max_dim`: ratio 1.5 while that needs
-        // few steps, a wider ratio beyond, so the count stays bounded.
-        let span = max_dim as f64 / base as f64;
-        let steps = ((span.ln() / PROBE_RATIO.ln()).ceil() as usize).clamp(1, MAX_WIDE_PROBES);
-        let ratio = span.powf(1.0 / steps as f64);
-        dims.extend((1..steps).map(|i| (base as f64 * ratio.powi(i as i32)).round() as usize));
-    }
-    dims.push(max_dim);
-    dims.retain(|&d| d <= max_dim);
+    let steps = (DATA_RELATIVE_PROBES - 1) as i32;
+    let ratio = (max_dim as f64 / 2.0).powf(1.0 / f64::from(steps));
+    let mut dims: Vec<usize> = (1..steps)
+        .map(|i| ((2.0 * ratio.powi(i)).round() as usize).clamp(2, max_dim))
+        .collect();
+    // The ends are set exactly rather than trusted to the rounding.
+    dims.extend([2, max_dim]);
     dims.sort_unstable();
     dims.dedup();
+    // `max_dim` > 12 leaves at least 12 integers in 2..=max_dim, so while
+    // fewer are probed some gap spans two or more.
+    while dims.len() < DATA_RELATIVE_PROBES {
+        let Some((at, gap)) = dims
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .enumerate()
+            .max_by_key(|&(at, gap)| (gap, at))
+            .filter(|&(_, gap)| gap > 1)
+        else {
+            break;
+        };
+        dims.insert(at + 1, dims[at] + gap / 2);
+    }
     dims
 }
 
@@ -195,9 +210,13 @@ pub struct DatasetProfile {
     pub knn_k10_mean: f64,
     pub knn_k20_mean: f64,
     pub pca_cumulative_variance: Vec<(usize, f64)>,
-    /// Rows the geometry was measured on (at most `subsample`); with the
-    /// feature count it bounds the dimensions the variance curve can reach.
+    /// Rows the geometry was measured on (at most `subsample`); with
+    /// `n_features_profiled` it bounds the dimensions the variance curve can
+    /// reach.
     pub n_samples_profiled: usize,
+    /// Numeric columns the geometry was measured on: `n_features` less the
+    /// columns with no observed value, which imputation drops.
+    pub n_features_profiled: usize,
     pub column_profiles: Vec<ColumnProfile>,
 }
 
@@ -298,6 +317,21 @@ pub fn profile_numeric_matrix(
     if n_sub < MIN_ROWS {
         return Err(CharacterizationError::TooFewRows { found: n_sub });
     }
+    let n_features = x_sub.ncols();
+    // Every probe set refuses an empty matrix the way Python's PCA did.
+    if n_features == 0 {
+        return Err(pulsar_core::PulsarError::InvalidParameter {
+            msg: "input data has 0 features (columns)".to_string(),
+        }
+        .into());
+    }
+    // PCA cannot keep more components than there are rows or columns.
+    let max_dim = n_features.min(n_sub);
+    if let PcaProbes::Exact(dims) = probes {
+        if let Some(&dim) = dims.iter().find(|&&d| d == 0 || d > max_dim) {
+            return Err(CharacterizationError::ProbeOutOfRange { dim, max_dim });
+        }
+    }
 
     let k_max = 21.min(n_sub - 1);
     let distances = knn_distances(x_sub.view(), k_max);
@@ -324,9 +358,6 @@ pub fn profile_numeric_matrix(
         (0.0, 0.0, 0.0, 0.0, 0.0)
     };
 
-    let n_features = x_sub.ncols();
-    // PCA cannot keep more components than there are rows or columns.
-    let max_dim = n_features.min(n_sub);
     let dims = probes.dims(max_dim);
     let pca_cumulative_variance = match probes {
         PcaProbes::Python => randomized_cumulative_variance(&x_sub, &dims, seed)?,
@@ -708,6 +739,7 @@ pub fn characterize_dataset(
         knn_k20_mean: geo.knn_k20_mean,
         pca_cumulative_variance: geo.pca_cumulative_variance,
         n_samples_profiled: geo.n_samples_profiled,
+        n_features_profiled: geo.n_features,
         column_profiles,
     })
 }
@@ -815,20 +847,119 @@ mod tests {
             let z: f64 = rand::Rng::sample(&mut rng, rand_distr::StandardNormal);
             z * 0.85f64.powi(j as i32)
         });
-        let exact = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::DataRelative).unwrap();
-        let randomized = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::Python).unwrap();
-        let curve = &exact.pca_cumulative_variance;
-        assert_monotone(curve);
-        assert_eq!(curve.last(), Some(&(40, 1.0)));
-        for &(dim, estimate) in &randomized.pca_cumulative_variance {
-            let (_, value) = curve.iter().find(|&&(d, _)| d == dim).copied().unwrap();
+        let full = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::DataRelative).unwrap();
+        assert_monotone(&full.pca_cumulative_variance);
+        assert_eq!(full.pca_cumulative_variance.last(), Some(&(40, 1.0)));
+        // Both curves are rounded to 4 digits, so one unit in the last place
+        // is the tightest agreement either can show.
+        let (exact, randomized) = exact_and_randomized(x.view());
+        for ((dim, value), (_, estimate)) in exact.into_iter().zip(randomized) {
             assert!(
-                (value - estimate).abs() < 5e-3,
+                (value - estimate).abs() <= 1e-4 + 1e-12,
                 "dim {dim}: {value} vs {estimate}"
             );
-            // No k-dimensional projection holds more than the top k
-            // components (beyond the 4-digit rounding).
-            assert!(estimate <= value + 1e-4, "dim {dim}: {value} vs {estimate}");
+        }
+    }
+
+    type Curve = Vec<(usize, f64)>;
+
+    /// The exact and randomized curves at Python's probes, which every
+    /// matrix here is wide and tall enough to reach.
+    fn exact_and_randomized(x: ArrayView2<f64>) -> (Curve, Curve) {
+        let dims = PcaProbes::Python.dims(x.ncols().min(x.nrows()));
+        let exact = profile_numeric_matrix(x, 1000, 42, PcaProbes::Exact(&dims)).unwrap();
+        let randomized = profile_numeric_matrix(x, 1000, 42, PcaProbes::Python).unwrap();
+        assert_eq!(
+            exact
+                .pca_cumulative_variance
+                .iter()
+                .map(|&(d, _)| d)
+                .collect::<Vec<_>>(),
+            randomized
+                .pca_cumulative_variance
+                .iter()
+                .map(|&(d, _)| d)
+                .collect::<Vec<_>>()
+        );
+        (
+            exact.pca_cumulative_variance,
+            randomized.pca_cumulative_variance,
+        )
+    }
+
+    #[test]
+    fn exact_curve_centres_before_measuring() {
+        // A +1000 offset on every column: without centring the mean would be
+        // one huge direction holding nearly all the "variance", and the curve
+        // would read about 1.0 from dimension 2 (the centred columns, scales
+        // 0.8^j, put about 0.6 of the variance in two components).
+        let mut rng = StdRng::seed_from_u64(5);
+        let x = Array2::from_shape_fn((100, 8), |(_, j)| {
+            let z: f64 = rand::Rng::sample(&mut rng, rand_distr::StandardNormal);
+            1000.0 + z * 0.8f64.powi(j as i32)
+        });
+        let (exact, randomized) = exact_and_randomized(x.view());
+        assert!(exact[0].1 < 0.7, "{exact:?}");
+        for ((dim, value), (_, estimate)) in exact.into_iter().zip(randomized) {
+            assert!(
+                (value - estimate).abs() <= 1e-4 + 1e-12,
+                "dim {dim}: {value} vs {estimate}"
+            );
+        }
+        // A population (n) or sample (n - 1) denominator cancels in the
+        // ratio; the full-rank prefix pins the total.
+        let p = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::Exact(&[8])).unwrap();
+        assert_eq!(p.pca_cumulative_variance, vec![(8, 1.0)]);
+    }
+
+    #[test]
+    fn the_randomized_estimate_undershoots_a_flat_spectrum() {
+        // 80 columns of uniform noise: no gap in the spectrum for the
+        // sketch to lock onto, so the randomized prefixes miss variance the
+        // exact top components hold.
+        let mut rng = StdRng::seed_from_u64(9);
+        let x = Array2::from_shape_fn((400, 80), |_| rand::Rng::gen_range(&mut rng, -1.0..1.0));
+        let (exact, randomized) = exact_and_randomized(x.view());
+        for ((dim, value), (_, estimate)) in exact.into_iter().zip(randomized) {
+            assert!(estimate < value, "dim {dim}: {value} vs {estimate}");
+        }
+    }
+
+    #[test]
+    fn gram_of_rows_matches_a_plain_product_across_row_blocks() {
+        // 150 rows: three output blocks of 64, 64 and 22 rows.
+        let mut rng = StdRng::seed_from_u64(13);
+        let a = Array2::from_shape_fn((150, 7), |_| rand::Rng::gen_range(&mut rng, -1.0..1.0));
+        let gram = gram_of_rows(a.view());
+        let want = a.dot(&a.t());
+        for ((i, j), w) in want.indexed_iter() {
+            assert!((gram[(i, j)] - w).abs() < 1e-12, "({i}, {j})");
+        }
+    }
+
+    #[test]
+    fn exact_curve_holds_across_several_gram_blocks() {
+        // A gently decaying spectrum on both Gram sides with more than one
+        // 64-row block: 300 x 200 forms the 200-wide `XᵀX`, 150 x 300 the
+        // 150-wide `XXᵀ`.
+        let mut rng = StdRng::seed_from_u64(17);
+        for (rows, cols) in [(300, 200), (150, 300)] {
+            let x = Array2::from_shape_fn((rows, cols), |(_, j)| {
+                let z: f64 = rand::Rng::sample(&mut rng, rand_distr::StandardNormal);
+                z * 0.97f64.powi(j as i32)
+            });
+            let full = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::DataRelative).unwrap();
+            let curve = &full.pca_cumulative_variance;
+            assert_monotone(curve);
+            let max_dim = cols.min(rows);
+            assert_eq!(curve.last(), Some(&(max_dim, 1.0)), "{rows}x{cols}");
+            let (exact, randomized) = exact_and_randomized(x.view());
+            for ((dim, value), (_, estimate)) in exact.into_iter().zip(randomized) {
+                assert!(
+                    estimate <= value + 1e-4 && value - estimate < 2e-2,
+                    "{rows}x{cols} dim {dim}: {value} vs {estimate}"
+                );
+            }
         }
     }
 
@@ -907,18 +1038,25 @@ mod tests {
         assert_eq!(probes(2), vec![2]);
         assert_eq!(probes(8), vec![2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(probes(12), (2..=12).collect::<Vec<_>>());
-        assert_eq!(probes(13), vec![2, 3, 5, 10, 13]);
-        assert_eq!(probes(20), vec![2, 3, 5, 10, 15, 20]);
-        assert_eq!(probes(30), vec![2, 3, 5, 10, 15, 20, 30]);
-        assert_eq!(probes(58), vec![2, 3, 5, 10, 15, 20, 29, 41, 58]);
+        // Rounding repeats 2 and 3; the two widest gaps (9-11, 11-13) are
+        // filled, which here probes every dimension.
+        assert_eq!(probes(13), (2..=13).collect::<Vec<_>>());
+        // Duplicates refill the top gap: 15-19 gains 17, 23-30 gains 26.
+        assert_eq!(probes(19), vec![2, 3, 4, 5, 6, 7, 8, 10, 13, 15, 17, 19]);
+        assert_eq!(probes(30), vec![2, 3, 4, 5, 7, 9, 11, 14, 18, 23, 26, 30]);
         assert_eq!(
             probes(200),
-            vec![2, 3, 5, 10, 15, 20, 29, 43, 63, 93, 136, 200]
+            vec![2, 3, 5, 7, 11, 16, 25, 37, 57, 87, 132, 200]
         );
-        for max_dim in 1..=5000 {
+        assert_eq!(
+            probes(1000),
+            vec![2, 4, 6, 11, 19, 34, 59, 104, 184, 323, 568, 1000]
+        );
+        for max_dim in 2..=5000 {
             let d = probes(max_dim);
+            assert_eq!(d.first(), Some(&2), "{max_dim}");
             assert_eq!(d.last(), Some(&max_dim), "{max_dim}");
-            assert!(d.len() <= 12, "{max_dim}: {d:?}");
+            assert_eq!(d.len(), max_dim.min(13) - 1, "{max_dim}: {d:?}");
             assert!(d.windows(2).all(|w| w[0] < w[1]), "{max_dim}: {d:?}");
         }
         // Python's set stops at 20 whatever the width.
@@ -926,41 +1064,109 @@ mod tests {
         assert_eq!(PcaProbes::Python.dims(8), vec![2, 3, 5]);
     }
 
-    #[test]
-    fn a_wide_table_is_measured_up_to_its_feature_count() {
-        // 30 columns of independent noise: variance spreads evenly, so 20
-        // components hold about two thirds of it and 90% needs nearly all 30.
-        let names: Vec<String> = (0..30).map(|j| format!("f{j}")).collect();
-        let mut rng = StdRng::seed_from_u64(7);
-        let columns = (0..30)
+    fn noise_table(rows: usize, cols: usize, seed: u64) -> Table {
+        let names: Vec<String> = (0..cols).map(|j| format!("f{j}")).collect();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let columns = (0..cols)
             .map(|_| {
                 Column::Float(
-                    (0..200)
+                    (0..rows)
                         .map(|_| rand::Rng::gen_range(&mut rng, -1.0..1.0))
                         .collect(),
                 )
             })
             .collect();
-        let table = Table::new(names, columns).unwrap();
-        let geo = characterize_dataset(&table, 1000, 42, PcaProbes::DataRelative).unwrap();
-        let curve = &geo.pca_cumulative_variance;
-        assert_eq!(curve.last().map(|&(d, _)| d), Some(30), "{curve:?}");
-        let at_20 = curve.iter().find(|&&(d, _)| d == 20).unwrap().1;
-        assert!(at_20 < 0.9, "{curve:?}");
-        let ceiling =
-            crate::config_build::grid_ceiling(curve, geo.n_features, geo.n_samples_profiled);
-        assert!(ceiling.dim > 20, "{ceiling:?}");
-        assert!(
-            matches!(
+        Table::new(names, columns).unwrap()
+    }
+
+    #[test]
+    fn a_flat_spectrum_finds_its_elbow_below_the_feature_count() {
+        // Independent uniform noise: variance spreads nearly evenly, so 90%
+        // is crossed a few dimensions short of the width (about 24 of 30
+        // and 16 of 19 at 150 rows). The probes must land between that
+        // crossing and the width for the elbow, not the width, to set the top.
+        for (cols, above) in [(30, 20), (19, 13)] {
+            let table = noise_table(150, cols, 7);
+            let geo = characterize_dataset(&table, 1000, 42, PcaProbes::DataRelative).unwrap();
+            let curve = &geo.pca_cumulative_variance;
+            assert_eq!(curve.len(), 12, "{curve:?}");
+            assert_eq!(curve.last().map(|&(d, _)| d), Some(cols), "{curve:?}");
+            let ceiling = crate::config_build::grid_ceiling(
+                curve,
+                geo.n_features_profiled,
+                geo.n_samples_profiled,
+            );
+            assert_eq!(
                 ceiling.source,
-                crate::config_build::CeilingSource::NFeatures
-                    | crate::config_build::CeilingSource::VarianceElbow
-            ),
-            "{ceiling:?}"
-        );
-        // Python's probes stop at 20 on the same table.
-        let py = characterize_dataset(&table, 1000, 42, PcaProbes::Python).unwrap();
+                crate::config_build::CeilingSource::VarianceElbow,
+                "{cols}: {ceiling:?} {curve:?}"
+            );
+            assert!(
+                above < ceiling.dim && ceiling.dim < cols,
+                "{ceiling:?} {curve:?}"
+            );
+        }
+        // Python's probes stop at 20 on the 30-column table.
+        let py =
+            characterize_dataset(&noise_table(150, 30, 7), 1000, 42, PcaProbes::Python).unwrap();
         assert_eq!(py.pca_cumulative_variance.last().map(|&(d, _)| d), Some(20));
+    }
+
+    #[test]
+    fn an_all_missing_column_is_not_a_profiled_feature() {
+        let mut table = noise_table(40, 3, 1);
+        table.names.push("empty".into());
+        table.columns.push(Column::Float(vec![f64::NAN; 40]));
+        let geo = characterize_dataset(&table, 1000, 42, PcaProbes::DataRelative).unwrap();
+        assert_eq!((geo.n_features, geo.n_features_profiled), (4, 3));
+        assert_eq!(geo.pca_cumulative_variance.last(), Some(&(3, 1.0)));
+        let (_, n_features, _) = crate::config_build::calibration_curve(&geo, None);
+        assert_eq!(n_features, 3);
+    }
+
+    #[test]
+    fn probe_sets_are_validated_at_the_boundary() {
+        // No columns: every probe set refuses it with Python's PCA error.
+        let empty = Array2::<f64>::zeros((5, 0));
+        let messages: Vec<String> = [
+            PcaProbes::Python,
+            PcaProbes::DataRelative,
+            PcaProbes::Exact(&[1]),
+        ]
+        .into_iter()
+        .map(|probes| {
+            let err = profile_numeric_matrix(empty.view(), 1000, 42, probes).unwrap_err();
+            assert_eq!(err.code(), "CHARACTERIZATION_FAILED", "{probes:?}");
+            err.to_string()
+        })
+        .collect();
+        assert!(
+            messages[0].contains("input data has 0 features (columns)"),
+            "{messages:?}"
+        );
+        assert!(messages.iter().all(|m| *m == messages[0]), "{messages:?}");
+
+        // Exact dimensions must lie in 1..=min(features, profiled rows).
+        let x = Array2::from_shape_fn((20, 3), |(i, j)| ((i * 3 + j) * 7 % 11) as f64);
+        for (dims, bad) in [(&[3, 10][..], 10), (&[0, 2][..], 0)] {
+            let err =
+                profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::Exact(dims)).unwrap_err();
+            assert!(
+                matches!(err, CharacterizationError::ProbeOutOfRange { dim, max_dim: 3 } if dim == bad),
+                "{err:?}"
+            );
+            assert_eq!(err.code(), "PROBE_OUT_OF_RANGE");
+            assert_eq!(
+                err.to_string(),
+                format!("Probe dimension {bad} is outside 1..=3; PCA keeps at most min(features, profiled rows) = 3 components here.")
+            );
+        }
+        // Three rows bound four features at 3 components.
+        let short = Array2::from_shape_fn((3, 4), |(i, j)| ((i * 4 + j) * 5 % 7) as f64);
+        assert!(matches!(
+            profile_numeric_matrix(short.view(), 1000, 42, PcaProbes::Exact(&[4])),
+            Err(CharacterizationError::ProbeOutOfRange { dim: 4, max_dim: 3 })
+        ));
     }
 
     #[test]

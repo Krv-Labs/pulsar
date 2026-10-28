@@ -169,6 +169,7 @@ fn a_massive_dataset_gets_the_minhash_advisory() {
         knn_k20_mean: 0.3,
         pca_cumulative_variance: vec![(1, 1.0)],
         n_samples_profiled: 1000,
+        n_features_profiled: 1,
         column_profiles: profiles,
     };
     let payload = compact_characterization_payload(&geo);

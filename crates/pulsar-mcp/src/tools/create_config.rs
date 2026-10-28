@@ -327,7 +327,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "grid_ceiling": ceiling.dim,
             "grid_ceiling_source": ceiling.source.as_str(),
             "variance_at_ceiling": ceiling.variance,
-            "cost_note": "Runtime grows with ball maps \u{d7} rows \u{d7} balls per map; a smaller epsilon yields more balls. Above 16 dimensions the radius query switches from a KD-tree to a linear scan; that switch changes speed, not which points a ball contains.",
+            "cost_note": "Runtime grows with ball maps \u{d7} rows \u{d7} balls per map \u{d7} projection dimension (every distance is O(dimension)); a smaller epsilon yields more balls, and the grid is not clamped at 16; it is bounded only by the measured elbow, the feature count and the profiled rows, so a high variance elbow on a wide table means wide, slower maps. Above 16 dimensions the radius query switches from a KD-tree to a linear scan; that switch changes speed, not which points a ball contains.",
             "compatibility_note": (!dims.is_empty()).then_some(
                 "sweep.pca is a legacy mirror of sweep.projection for older configs; sweep.projection is authoritative."
             ),
@@ -380,7 +380,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 "p95": round_to(m.knn_p95, 4),
             });
             payload["calibration_note"] = json!(format!(
-                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow where cumulative variance first reaches 90%, bounded by the processed feature count and by the number of profiled rows (PCA keeps at most as many components as rows). {ceiling_note} sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
+                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow (the first probed dimension at or above 90% cumulative variance), bounded by the processed feature count and by the number of profiled rows (PCA keeps at most as many components as rows). {ceiling_note} sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
             ));
         }
         Err(fallback) => {
@@ -416,7 +416,7 @@ fn ceiling_description(
         .join(", ");
     match ceiling.source {
         CeilingSource::VarianceElbow => format!(
-            "Cumulative variance first reached 90% at dimension {dim}; the curve was probed at {probes} within {n_features} features, so the grid tops out at {dim}."
+            "The first probed dimension at or above 90% cumulative variance is {dim}; the curve was probed at {probes} within {n_features} features, so the grid tops out at {dim}."
         ),
         CeilingSource::ProbeLimit => {
             let unmeasured = if dim < n_features {
@@ -436,12 +436,12 @@ fn ceiling_description(
                 )
             } else {
                 format!(
-                    "Cumulative variance did not reach 90% below the feature count; the curve was probed at {probes}, so the grid tops out at all {n_features} features."
+                    "No probed dimension below the feature count reached 90% cumulative variance; the curve was probed at {probes}, so the grid tops out at all {n_features} features."
                 )
             }
         }
         CeilingSource::RowLimit => format!(
-            "Cumulative variance did not reach 90% below {dim} dimensions, the number of profiled rows; PCA keeps at most as many components as rows, so the curve (probed at {probes}) could not be measured further and the grid tops out at {dim} of the {n_features} features."
+            "No probed dimension below {dim}, the number of profiled rows, reached 90% cumulative variance; PCA keeps at most as many components as rows, so the curve (probed at {probes}) could not be measured further and the grid tops out at {dim} of the {n_features} features."
         ),
         CeilingSource::Fallback => {
             let rows = if dim == n_rows && dim < n_features {
@@ -484,6 +484,31 @@ mod tests {
     }
 
     #[test]
+    fn the_elbow_is_named_as_a_probed_dimension() {
+        let curve = [
+            (2, 0.3),
+            (14, 0.8),
+            (18, 0.88),
+            (23, 0.89),
+            (26, 0.94),
+            (30, 1.0),
+        ];
+        let ceiling = grid_ceiling(&curve, 30, 150);
+        assert_eq!(
+            (ceiling.source, ceiling.dim),
+            (CeilingSource::VarianceElbow, 26)
+        );
+        let text = ceiling_description(&ceiling, &curve, 30, 150);
+        assert!(
+            text.starts_with(
+                "The first probed dimension at or above 90% cumulative variance is 26;"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("first reached"), "{text}");
+    }
+
+    #[test]
     fn feature_and_row_bounds_are_named() {
         let full = [(2, 0.2), (20, 0.67), (30, 1.0)];
         let ceiling = grid_ceiling(&full, 30, 200);
@@ -497,7 +522,7 @@ mod tests {
         assert_eq!(ceiling.source, CeilingSource::RowLimit);
         let text = ceiling_description(&ceiling, &short, 40, 25);
         assert!(
-            text.contains("25 dimensions, the number of profiled rows"),
+            text.contains("No probed dimension below 25, the number of profiled rows"),
             "{text}"
         );
     }
