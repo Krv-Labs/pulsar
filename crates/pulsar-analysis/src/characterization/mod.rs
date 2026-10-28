@@ -24,9 +24,12 @@
 //!   reaches the largest measurable dimension. `characterize_dataset` and
 //!   `profile_numeric_matrix` take the probe set as a parameter; the golden
 //!   parity tests pass [`PcaProbes::Python`] to reproduce the frozen output.
-//!   Because the one randomized SVD is fitted at the largest probe, the
-//!   variance at small probes also shifts slightly in production (it is read
-//!   from a wider, often exact, decomposition).
+//! - Python's curve was a randomized-SVD estimate (Halko et al., 10
+//!   oversamples, 2 power iterations), which can only undershoot, most on
+//!   flat spectra. Production Rust reads the exact curve from the
+//!   eigenvalues of the centred subsample's Gram matrix, one decomposition
+//!   for every probe; only [`PcaProbes::Python`] keeps the randomized
+//!   estimate, for parity.
 
 mod payload;
 
@@ -324,21 +327,11 @@ pub fn profile_numeric_matrix(
     let n_features = x_sub.ncols();
     // PCA cannot keep more components than there are rows or columns.
     let max_dim = n_features.min(n_sub);
-    // `pca_grid` fits one randomized SVD at the largest probe and slices it,
-    // so more probes cost bookkeeping, not extra SVDs. The one SVD does grow
-    // with the largest probe: reaching `max_dim` on a wide table means a
-    // sketch as wide as the feature count, comparable to the k-NN pass above.
     let dims = probes.dims(max_dim);
-    let embeddings = pulsar_core::pca_grid(&x_sub, &dims, &[seed], 10, 2)?;
-    let total_variance: f64 = (0..n_features).map(|j| variance_of(x_sub.column(j))).sum();
-    let pca_cumulative_variance = dims
-        .iter()
-        .zip(&embeddings)
-        .map(|(&dim, emb)| {
-            let ev: f64 = (0..emb.ncols()).map(|j| variance_of(emb.column(j))).sum();
-            (dim, round_to((ev / total_variance.max(1e-12)).min(1.0), 4))
-        })
-        .collect();
+    let pca_cumulative_variance = match probes {
+        PcaProbes::Python => randomized_cumulative_variance(&x_sub, &dims, seed)?,
+        PcaProbes::DataRelative | PcaProbes::Exact(_) => exact_cumulative_variance(&x_sub, &dims)?,
+    };
 
     Ok(NumericProfile {
         knn_k5_mean: k5,
@@ -353,6 +346,98 @@ pub fn profile_numeric_matrix(
         n_features,
         n_samples_profiled: n_sub,
     })
+}
+
+/// Python's estimate: one randomized SVD (`pca_grid`) fitted at the largest
+/// probe, with each prefix's projected variance over the total variance.
+fn randomized_cumulative_variance(
+    x: &Array2<f64>,
+    dims: &[usize],
+    seed: u64,
+) -> Result<Vec<(usize, f64)>, CharacterizationError> {
+    let embeddings = pulsar_core::pca_grid(x, dims, &[seed], 10, 2)?;
+    let total_variance: f64 = (0..x.ncols()).map(|j| variance_of(x.column(j))).sum();
+    Ok(dims
+        .iter()
+        .zip(&embeddings)
+        .map(|(&dim, emb)| {
+            let ev: f64 = (0..emb.ncols()).map(|j| variance_of(emb.column(j))).sum();
+            (dim, round_to((ev / total_variance.max(1e-12)).min(1.0), 4))
+        })
+        .collect())
+}
+
+/// The exact curve: the eigenvalues of the centred matrix's Gram matrix are
+/// its squared singular values, so one symmetric eigendecomposition gives the
+/// variance held by every prefix of components at once, whatever `dims` asks.
+///
+/// The Gram is formed on the smaller side (`XᵀX` when there are fewer
+/// features than rows, `XXᵀ` otherwise; both share the nonzero spectrum), so
+/// memory is `min(rows, features)²` and a wide table never costs `features²`.
+fn exact_cumulative_variance(
+    x: &Array2<f64>,
+    dims: &[usize],
+) -> Result<Vec<(usize, f64)>, CharacterizationError> {
+    pulsar_core::error::ensure_finite(x)?;
+    if x.is_empty() {
+        return Ok(dims.iter().map(|&dim| (dim, 0.0)).collect());
+    }
+    let n = x.nrows() as f64;
+    let mut centred = x.to_owned();
+    if let Some(means) = x.mean_axis(ndarray::Axis(0)) {
+        centred -= &means;
+    }
+    let gram = if x.ncols() < x.nrows() {
+        gram_of_rows(centred.t().as_standard_layout().view())
+    } else {
+        gram_of_rows(centred.view())
+    };
+    let mut eigenvalues: Vec<f64> = gram
+        .symmetric_eigenvalues()
+        .iter()
+        // Rounding leaves the null space slightly negative; variance is not.
+        .map(|&v| v.max(0.0))
+        .collect();
+    eigenvalues.sort_by(|a, b| b.total_cmp(a));
+    let held: Vec<f64> = std::iter::once(0.0)
+        .chain(eigenvalues.iter().scan(0.0, |sum, &v| {
+            *sum += v;
+            Some(*sum)
+        }))
+        .collect();
+    // The trace is the total: it equals `n` times the summed column
+    // variances, and makes the full-rank prefix exactly 1.
+    let total_variance = held[held.len() - 1] / n;
+    Ok(dims
+        .iter()
+        .map(|&dim| {
+            let ev = held[dim.min(eigenvalues.len())] / n;
+            (dim, round_to((ev / total_variance.max(1e-12)).min(1.0), 4))
+        })
+        .collect())
+}
+
+/// `A·Aᵀ` with rayon over blocks of output rows, each block one GEMM.
+fn gram_of_rows(a: ArrayView2<f64>) -> nalgebra::DMatrix<f64> {
+    const ROW_BLOCK: usize = 64;
+    let m = a.nrows();
+    let mut buf = vec![0.0; m * m];
+    buf.par_chunks_mut(ROW_BLOCK * m)
+        .enumerate()
+        .for_each(|(block, out)| {
+            let rows = out.len() / m;
+            let start = block * ROW_BLOCK;
+            let mut out = ndarray::ArrayViewMut2::from_shape((rows, m), out)
+                .expect("each chunk holds whole rows of length m");
+            ndarray::linalg::general_mat_mul(
+                1.0,
+                &a.slice(ndarray::s![start..start + rows, ..]),
+                &a.t(),
+                0.0,
+                &mut out,
+            );
+        });
+    nalgebra::DMatrix::from_row_slice(m, m, &buf)
 }
 
 // ---- columns ---------------------------------------------------------------------
@@ -715,6 +800,68 @@ mod tests {
             p.pca_cumulative_variance
         );
         assert_eq!(p.pca_cumulative_variance[1].1, 1.0);
+    }
+
+    fn assert_monotone(curve: &[(usize, f64)]) {
+        assert!(curve.windows(2).all(|w| w[0].1 <= w[1].1), "{curve:?}");
+    }
+
+    #[test]
+    fn exact_curve_matches_the_randomized_estimate_on_a_decaying_spectrum() {
+        // Independent Gaussian columns with geometrically decaying scale: a
+        // well-conditioned spectrum the randomized SVD resolves closely.
+        let mut rng = StdRng::seed_from_u64(11);
+        let x = Array2::from_shape_fn((400, 40), |(_, j)| {
+            let z: f64 = rand::Rng::sample(&mut rng, rand_distr::StandardNormal);
+            z * 0.85f64.powi(j as i32)
+        });
+        let exact = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::DataRelative).unwrap();
+        let randomized = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::Python).unwrap();
+        let curve = &exact.pca_cumulative_variance;
+        assert_monotone(curve);
+        assert_eq!(curve.last(), Some(&(40, 1.0)));
+        for &(dim, estimate) in &randomized.pca_cumulative_variance {
+            let (_, value) = curve.iter().find(|&&(d, _)| d == dim).copied().unwrap();
+            assert!(
+                (value - estimate).abs() < 5e-3,
+                "dim {dim}: {value} vs {estimate}"
+            );
+            // No k-dimensional projection holds more than the top k
+            // components (beyond the 4-digit rounding).
+            assert!(estimate <= value + 1e-4, "dim {dim}: {value} vs {estimate}");
+        }
+    }
+
+    #[test]
+    fn exact_curve_saturates_at_the_rank() {
+        // Rows outnumber features (the `XᵀX` side): 12 columns, the last six
+        // copies of the first six, so rank 6.
+        let mut rng = StdRng::seed_from_u64(3);
+        let base = Array2::from_shape_fn((200, 6), |_| rand::Rng::gen_range(&mut rng, -1.0..1.0));
+        let x = ndarray::concatenate![ndarray::Axis(1), base, base];
+        let p = profile_numeric_matrix(x.view(), 1000, 42, PcaProbes::DataRelative).unwrap();
+        let curve = &p.pca_cumulative_variance;
+        assert_eq!(
+            curve.iter().map(|&(d, _)| d).collect::<Vec<_>>(),
+            (2..=12).collect::<Vec<_>>()
+        );
+        assert_monotone(curve);
+        assert!(curve[3].1 < 1.0, "{curve:?}");
+        assert!(curve[4..].iter().all(|&(_, v)| v == 1.0), "{curve:?}");
+
+        // Features outnumber rows (the `XXᵀ` side): centring leaves rank
+        // n - 1, and the curve reaches 1 there and stays.
+        let wide = Array2::from_shape_fn((30, 80), |_| rand::Rng::gen_range(&mut rng, -1.0..1.0));
+        let p = profile_numeric_matrix(wide.view(), 1000, 42, PcaProbes::DataRelative).unwrap();
+        let curve = &p.pca_cumulative_variance;
+        assert_monotone(curve);
+        assert_eq!(curve.last(), Some(&(30, 1.0)));
+        let below: Vec<f64> = curve
+            .iter()
+            .filter(|&&(d, _)| d < 29)
+            .map(|&(_, v)| v)
+            .collect();
+        assert!(below.iter().all(|&v| v < 1.0), "{curve:?}");
     }
 
     #[test]
