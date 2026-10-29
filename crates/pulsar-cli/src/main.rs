@@ -335,11 +335,11 @@ fn run_fit(
         );
         bar
     };
-    let mut on_progress = |stage: &str, fraction: f64| {
-        bar.set_message(stage.to_string());
-        bar.set_position((fraction * 1000.0).round() as u64);
+    let mut on_progress = |ev: pulsar_pipeline::ProgressEvent<'_>| {
+        bar.set_message(ev.label.to_string());
+        bar.set_position((ev.fraction * 1000.0).round() as u64);
         if let Some((_, _, handle)) = &job {
-            let _ = handle.progress(stage, fraction);
+            let _ = handle.progress(ev.label, ev.fraction);
         }
     };
     let fitted = match fit(&cfg, &table, FitOptions::default(), Some(&mut on_progress)) {

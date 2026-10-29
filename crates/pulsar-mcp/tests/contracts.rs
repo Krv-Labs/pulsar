@@ -3191,3 +3191,179 @@ async fn the_html_report_is_written_beside_the_dataset() {
     assert_eq!(unknown["error_code"], "DATASET_ID_UNKNOWN");
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn sweep_progress_notifications_carry_valid_phirewall_contract() {
+    use pulsar_mcp::jobs::{PhirewallProgress, PHIREWALL_PROGRESS_META_KEY};
+    use rmcp::model::{
+        NotificationMetaObject, NumberOrString, ProgressNotificationParam, ProgressToken,
+        RequestMetaObject,
+    };
+    use rmcp::service::NotificationContext;
+
+    type RecordedProgress = (ProgressNotificationParam, NotificationMetaObject);
+
+    #[derive(Clone, Default)]
+    struct ProgressRecorder {
+        events: Arc<std::sync::Mutex<Vec<RecordedProgress>>>,
+    }
+
+    impl ClientHandler for ProgressRecorder {
+        fn on_progress(
+            &self,
+            params: ProgressNotificationParam,
+            context: NotificationContext<RoleClient>,
+        ) -> impl std::future::Future<Output = ()> + Send + '_ {
+            // rmcp's notification loop swaps `notification.extensions` into
+            // `context.extensions` before swapping `notification.get_meta_mut()`,
+            // so the wire `params._meta` (`NotificationMetaObject`) lands in
+            // `context.extensions` (or `context.meta` if future rmcp reorders).
+            let meta = context
+                .extensions
+                .get::<NotificationMetaObject>()
+                .cloned()
+                .unwrap_or(context.meta);
+            self.events.lock().unwrap().push((params, meta));
+            std::future::ready(())
+        }
+    }
+
+    const STAGE_ORDER: &[&str] = &[
+        "load",
+        "preprocess",
+        "scale",
+        "project",
+        "sweep",
+        "consensus",
+        "stability",
+        "finalize",
+    ];
+
+    let root = TempRoot::new("progress-contract");
+    let recorder = ProgressRecorder::default();
+    let client = connect(root.path(), test_options(), recorder.clone()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[(
+            "path",
+            json!(golden("blobs", "input.csv").display().to_string()),
+        )]),
+    )
+    .await;
+    let dataset_id = ingested["dataset_id"].clone();
+
+    for (token_str, expected_proj_msg, expected_proj_count) in [
+        ("tok-uncached", "projection variant 1/1", Some((1u64, 1u64))),
+        ("tok-cached", "projection (cached)", None),
+    ] {
+        recorder.events.lock().unwrap().clear();
+
+        let token = ProgressToken(NumberOrString::String(token_str.into()));
+        let mut meta = RequestMetaObject::new();
+        meta.set_progress_token(token.clone());
+        let mut params = CallToolRequestParams::new("run_topological_sweep");
+        params.meta = Some(meta);
+        params.arguments = Some(args(&[
+            ("config_yaml", json!(blobs_yaml())),
+            ("dataset_id", dataset_id.clone()),
+            ("response_format", json!("json")),
+        ]));
+        let result = client.call_tool(params).await.expect("sweep completes");
+        assert_eq!(result.is_error, Some(false));
+
+        let events = recorder.events.lock().unwrap().clone();
+        assert!(!events.is_empty(), "expected progress notifications");
+        let run_token = events[0].0.progress_token.clone();
+
+        let mut last_stage_idx = 0usize;
+        let mut last_progress = 0.0f64;
+        let mut messages = Vec::new();
+        let mut sweep_batches = Vec::new();
+
+        for (param, notif_meta) in &events {
+            assert_eq!(param.progress_token, run_token);
+            assert_eq!(param.total, Some(1.0));
+            assert!(
+                param.progress >= last_progress && param.progress <= 1.0,
+                "progress must be non-decreasing within [0, 1]: {} after {}",
+                param.progress,
+                last_progress
+            );
+            last_progress = param.progress;
+            messages.push(param.message.clone().expect("message present"));
+
+            let raw = notif_meta
+                .get(PHIREWALL_PROGRESS_META_KEY)
+                .expect("every notification carries io.phirewall/progress");
+            let contract: PhirewallProgress =
+                serde_json::from_value(raw.clone()).expect("valid PhirewallProgress JSON");
+            assert!(
+                contract.is_valid(),
+                "contract must satisfy SPEC §1: {contract:?}"
+            );
+            assert_eq!(contract.v, 1);
+            assert_eq!(contract.outer, None);
+            assert_eq!(contract.counts.get("rows"), Some(&150));
+            assert_eq!(contract.counts.get("columns"), Some(&5));
+
+            let stage_idx = STAGE_ORDER
+                .iter()
+                .position(|&s| s == contract.stage)
+                .unwrap_or_else(|| panic!("unknown stage in 8-step order: {}", contract.stage));
+            assert!(
+                stage_idx >= last_stage_idx,
+                "stages must be non-decreasing in 8-step order: {} after {}",
+                STAGE_ORDER[stage_idx],
+                STAGE_ORDER[last_stage_idx]
+            );
+            last_stage_idx = stage_idx;
+
+            match contract.stage.as_str() {
+                "project" => match expected_proj_count {
+                    Some((d, t)) => {
+                        assert_eq!(contract.done, Some(d));
+                        assert_eq!(contract.total, Some(t));
+                        assert_eq!(contract.unit.as_deref(), Some("projection"));
+                    }
+                    None => {
+                        assert_eq!(contract.done, None);
+                        assert_eq!(contract.total, None);
+                        assert_eq!(contract.unit, None);
+                    }
+                },
+                "sweep" => {
+                    assert_eq!(contract.unit.as_deref(), Some("batch"));
+                    sweep_batches.push((contract.done.unwrap(), contract.total.unwrap()));
+                }
+                _ => {
+                    assert_eq!(contract.done, None);
+                    assert_eq!(contract.total, None);
+                    assert_eq!(contract.unit, None);
+                }
+            }
+        }
+
+        assert_eq!(
+            messages,
+            vec![
+                "load",
+                "preprocess",
+                "scale",
+                expected_proj_msg,
+                "sweep batch 1/4: ball_mapper + construction",
+                "sweep batch 2/4: ball_mapper + construction",
+                "sweep batch 3/4: ball_mapper + construction",
+                "sweep batch 4/4: ball_mapper + construction",
+                "cosmic_graph",
+                "stability",
+                "graph",
+            ]
+        );
+        assert_eq!(sweep_batches, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+    }
+
+    client.cancel().await.unwrap();
+}
