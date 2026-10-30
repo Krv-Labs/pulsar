@@ -34,8 +34,8 @@ pub use payload::{
 };
 pub use plan::{PreprocessingPlan, TargetProxy};
 pub use proxies::{
-    calibrate_processed_space, dry_run_processed_space, processed_feature_names,
-    CalibrationFallback, DryRun, ProcessedSpace,
+    calibrate_processed_space, dry_run_processed_space, plan_matches_preprocessing,
+    processed_feature_names, CalibrationFallback, DryRun, ProcessedSpace,
 };
 pub use questions::build_pending_questions;
 pub use render::{

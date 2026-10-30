@@ -182,6 +182,8 @@ pub struct SweepRequest {
     pub data_path: Option<PathBuf>,
     pub precomputed: Option<Vec<Array2<f64>>>,
     pub projection_fingerprint: String,
+    /// Columns the run's preprocessing plan names as identifiers.
+    pub identifier_columns: Vec<String>,
 }
 
 /// Where progress goes besides the job record.
@@ -216,6 +218,7 @@ pub async fn run_sweep(
     let run_id = job.id();
 
     let worker_job = job.clone();
+    let identifier_columns = req.identifier_columns.clone();
     let worker = tokio::task::spawn_blocking(move || {
         let SweepRequest {
             cfg,
@@ -224,6 +227,7 @@ pub async fn run_sweep(
             data_path,
             precomputed,
             projection_fingerprint,
+            ..
         } = req;
         let table_dims = (table.n_rows(), table.n_cols());
         let mut on_progress = |ev: ProgressEvent<'_>| {
@@ -301,6 +305,7 @@ pub async fn run_sweep(
         dataset_id,
         data_path,
         projection_fingerprint,
+        identifier_columns,
     });
     state.cache.put(run_id.clone(), live.clone());
     {

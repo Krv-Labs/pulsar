@@ -180,6 +180,15 @@ pub(super) fn plan_config(
     .map_err(|e| e.to_string())
 }
 
+/// Whether `pre` is exactly the preprocessing `plan` renders to, so a run
+/// whose config carries `pre` applied this plan revision.
+pub fn plan_matches_preprocessing(
+    plan: &PreprocessingPlan,
+    pre: &pulsar_config::Preprocessing,
+) -> bool {
+    plan_config(plan, "match").is_ok_and(|config| config.preprocessing == *pre)
+}
+
 /// Why processed-space calibration fell back to raw numeric columns.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalibrationFallback {
