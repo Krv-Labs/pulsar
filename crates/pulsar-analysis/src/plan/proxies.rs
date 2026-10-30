@@ -267,6 +267,22 @@ pub fn calibrate_processed_space(
         .map_err(|e| CalibrationFallback::Profile(e.to_string()))
 }
 
+/// The processed feature names the plan's first imputation variant yields,
+/// or why the plan cannot be applied.
+pub fn processed_feature_names(
+    table: &Table,
+    plan: &PreprocessingPlan,
+) -> Result<Vec<String>, String> {
+    let config = plan_config(plan, "summary")?;
+    let variants = config.preprocessing_variants();
+    let variant = variants
+        .first()
+        .ok_or("the plan yields no preprocessing variant")?;
+    let processed =
+        preprocess(table, &variant.preprocessing, None, None).map_err(|e| e.to_string())?;
+    Ok(processed.layout.feature_names)
+}
+
 fn run(table: &Table, plan: &mut PreprocessingPlan) -> Result<ProcessedSpace, String> {
     let config = plan_config(plan, "dry_run")?;
 

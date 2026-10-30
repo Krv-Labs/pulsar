@@ -1674,6 +1674,50 @@ async fn characterize_and_probe_read_raw_data_and_explain_failures() {
 
 // ---- create_config -------------------------------------------------------------
 
+/// `preprocessing_summary.counts` agree with the config's `preprocessing:`
+/// block, and each list is as long as its count.
+fn assert_summary_matches_yaml(created: &Value) {
+    let summary = &created["preprocessing_summary"];
+    let config =
+        pulsar_config::from_yaml_str(created["config_yaml"].as_str().unwrap()).expect("config");
+    let pre = &config.preprocessing;
+    let imputed: BTreeSet<&String> = pre
+        .impute
+        .keys()
+        .chain(pre.impute_candidates.keys())
+        .collect();
+    let counts = &summary["counts"];
+    assert_eq!(
+        counts["dropped"],
+        json!(pre.drop_columns.len()),
+        "{summary}"
+    );
+    assert_eq!(counts["encoded"], json!(pre.encode.len()), "{summary}");
+    assert_eq!(counts["imputed"], json!(imputed.len()), "{summary}");
+    assert_eq!(
+        counts["kept"].as_u64().unwrap() + counts["dropped"].as_u64().unwrap(),
+        summary["input_columns"].as_u64().unwrap()
+    );
+    assert_eq!(
+        summary["output_features"],
+        created["processed_feature_count"]
+    );
+    for list in ["dropped", "encoded", "imputed"] {
+        assert_eq!(
+            json!(summary[list].as_array().unwrap().len()),
+            counts[list],
+            "{list}"
+        );
+    }
+    let dropped: Vec<&str> = summary["dropped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["column"].as_str().unwrap())
+        .collect();
+    assert_eq!(dropped, pre.drop_columns);
+}
+
 #[tokio::test]
 async fn create_config_grid_can_exceed_twenty_dimensions_on_a_wide_table() {
     // 30 columns of independent noise: variance spreads evenly, so 90% is not
@@ -1754,6 +1798,12 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     assert_eq!(created["calibration_space"], "processed");
     assert_eq!(created["preprocessing_plan"]["source"], "baseline_defaults");
     assert_eq!(created["preprocessing_plan"]["revision"], 1);
+    assert_summary_matches_yaml(&created);
+    assert_eq!(created["preprocessing_summary"]["revision"], 1);
+    assert_eq!(
+        created["preprocessing_summary"]["changes_from_previous"],
+        json!([])
+    );
     let yaml = created["config_yaml"].as_str().unwrap();
     assert!(yaml.contains("name: baseline"), "{yaml}");
     let strategy = &created["sweep_strategy"];
@@ -1842,7 +1892,13 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
         "edit_preprocessing_plan",
         args(&[
             ("plan_id", json!(plan_id)),
-            ("edits", json!([{"column": "visits1", "role": "drop"}])),
+            (
+                "edits",
+                json!([
+                    {"column": "visits1", "role": "drop"},
+                    {"column": "grade", "encode": "one_hot"},
+                ]),
+            ),
         ]),
     )
     .await;
@@ -1877,6 +1933,35 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     )
     .await;
     assert_eq!(used["preprocessing_plan"]["revision"], 2);
+    // The summary says what the edit changed, and names no category level.
+    assert_summary_matches_yaml(&used);
+    let summary = &used["preprocessing_summary"];
+    let changes = summary["changes_from_previous"].as_array().unwrap();
+    for change in [
+        json!({"column": "visits1", "field": "role", "from": "feature", "to": "drop"}),
+        json!({"column": "grade", "field": "encode", "from": null, "to": "one_hot"}),
+    ] {
+        assert!(changes.contains(&change), "{change} not in {changes:?}");
+    }
+    let grade = summary["encoded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["column"] == "grade")
+        .expect("grade is encoded");
+    let keys: BTreeSet<&str> = grade
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from(["column", "method", "levels", "features_added"])
+    );
+    assert!(grade["levels"].as_u64().unwrap() > 1, "{grade}");
+    let text = summary.to_string();
+    assert!(!text.contains("grade_"), "a level name leaked: {text}");
     assert_ne!(
         used["preprocessing_plan"]["plan_fingerprint"],
         created["preprocessing_plan"]["plan_fingerprint"]
