@@ -3452,3 +3452,195 @@ async fn sweep_progress_notifications_carry_valid_phirewall_contract() {
 
     client.cancel().await.unwrap();
 }
+
+/// Penguins with the `species` label dropped from the grouping but kept in
+/// the data, so the dossier can compare against it.
+fn penguins_without_species_yaml() -> String {
+    let yaml = std::fs::read_to_string(golden("penguins", "config.yaml")).unwrap();
+    let yaml = yaml.replace(
+        "  - rowid\n  - year\n",
+        "  - rowid\n  - species\n  - year\n",
+    );
+    let yaml = yaml.replace("    species:\n      method: one_hot\n", "");
+    assert!(yaml.contains("  - species\n") && !yaml.contains("    species:\n"));
+    yaml
+}
+
+fn column_names_in(value: &Value, out: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                if k == "column" {
+                    if let Some(c) = v.as_str() {
+                        out.insert(c.to_owned());
+                    }
+                }
+                column_names_in(v, out);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|v| column_names_in(v, out)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping() {
+    let root = TempRoot::new("threshold-table");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[(
+            "path",
+            json!(golden("penguins", "input.csv").display().to_string()),
+        )]),
+    )
+    .await;
+    let sweep = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(penguins_without_species_yaml())),
+            ("dataset_id", ingested["dataset_id"].clone()),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    // A hand-written config applies no stored plan.
+    assert!(sweep.get("preprocessing_summary").is_none());
+
+    let table = &sweep["threshold_table"];
+    assert_eq!(table["selected"], sweep["construction_threshold"]);
+    let rows = table["rows"].as_array().unwrap();
+    assert!((2..=8).contains(&rows.len()), "{table}");
+    let cutoffs: Vec<f64> = rows.iter().map(|r| r["cutoff"].as_f64().unwrap()).collect();
+    assert!(cutoffs.windows(2).all(|w| w[0] <= w[1]), "{table}");
+    for row in rows {
+        let (lo, hi) = (
+            row["range"][0].as_f64().unwrap(),
+            row["range"][1].as_f64().unwrap(),
+        );
+        let cutoff = row["cutoff"].as_f64().unwrap();
+        assert!(lo <= cutoff && cutoff <= hi, "{row}");
+        assert_eq!(row["width"].as_f64().unwrap(), hi - lo, "{row}");
+        let sizes = row["top_sizes"].as_array().unwrap();
+        assert!(!sizes.is_empty() && sizes.len() <= 6, "{row}");
+        assert!(row["groups"].as_u64().unwrap() >= sizes.len() as u64);
+    }
+    let selected: Vec<&Value> = rows.iter().filter(|r| r["selected"] == true).collect();
+    assert_eq!(selected.len(), 1, "{table}");
+    assert_eq!(
+        selected[0]["groups"], sweep["key_metrics"]["component_count"],
+        "the selected row shows the constructed graph's groups"
+    );
+
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[
+            ("detail", json!("standard")),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    let profiled: Vec<(&str, bool)> = dossier["profiled_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["column"].as_str().unwrap(),
+                f["used_for_grouping"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(profiled.contains(&("species", false)), "{profiled:?}");
+    assert!(profiled.contains(&("year", false)), "{profiled:?}");
+    assert!(profiled.contains(&("bill_length_mm", true)), "{profiled:?}");
+    let mut named = BTreeSet::new();
+    column_names_in(&dossier, &mut named);
+    assert!(!named.contains("rowid"), "row index profiled: {named:?}");
+    assert!(profiled.iter().all(|(c, _)| *c != "rowid"));
+    assert_eq!(
+        dossier["method_applied"],
+        dossier["cluster_result"]["method_used"]
+    );
+    assert_eq!(
+        dossier["cluster_count"],
+        dossier["cluster_result"]["n_clusters"]
+    );
+    assert!(dossier["interpretation_edge_weight_threshold_applied"].is_number());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_sweep_under_a_stored_plan_carries_its_summary_and_hides_its_identifiers() {
+    let root = TempRoot::new("sweep-plan");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let dataset_id = ingest_wide(&client, &tools).await;
+    let created = ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", json!(dataset_id))]),
+    )
+    .await;
+    let sweep_args = args(&[
+        ("dataset_id", json!(dataset_id)),
+        ("response_format", json!("json")),
+    ]);
+    let sweep = ok(&client, &tools, "run_topological_sweep", sweep_args.clone()).await;
+    assert_eq!(
+        sweep["preprocessing_summary"],
+        created["preprocessing_summary"]
+    );
+    // The next sweep reads the normalized active config; it still matches.
+    let again = ok(&client, &tools, "run_topological_sweep", sweep_args).await;
+    assert_eq!(
+        again["preprocessing_summary"],
+        created["preprocessing_summary"]
+    );
+
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[("response_format", json!("json"))]),
+    )
+    .await;
+    let profiled: Vec<&str> = dossier["profiled_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["column"].as_str().unwrap())
+        .collect();
+    assert!(
+        !profiled.contains(&"id"),
+        "plan identifier profiled: {profiled:?}"
+    );
+    assert!(profiled.contains(&"a"), "{profiled:?}");
+
+    // A config edited away from every stored revision names no plan.
+    let mut cfg = pulsar_config::from_yaml_str(created["config_yaml"].as_str().unwrap()).unwrap();
+    cfg.preprocessing.drop_columns.push("b".into());
+    cfg.preprocessing.impute.shift_remove("b");
+    cfg.preprocessing.impute_candidates.shift_remove("b");
+    let edited = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(pulsar_config::to_yaml(&cfg))),
+            ("dataset_id", json!(dataset_id)),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert!(edited.get("preprocessing_summary").is_none());
+    client.cancel().await.unwrap();
+}

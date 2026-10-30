@@ -29,6 +29,7 @@ use pulsar_analysis::dossier::{build_dossier, dossier_to_markdown, TopologicalDo
 use pulsar_analysis::feature_evidence::{build_feature_evidence_index, FeatureEvidenceIndex};
 use pulsar_analysis::payloads::{bounded_list, size_summary};
 use pulsar_analysis::GraphAnalysis;
+use pulsar_data::Column;
 use pulsar_pipeline::Graph;
 use pulsar_store::{
     ClusterAssignment, ClusterAssignmentRecord, RunId, StagedClusterAssignment, Store,
@@ -137,6 +138,20 @@ pub fn spec() -> ToolSpec {
                 ("clusters_run_id", s::nullable(s::string())),
                 ("construction_threshold", s::number()),
                 ("interpretation_edge_weight_threshold", s::number()),
+                ("interpretation_edge_weight_threshold_applied", s::number()),
+                ("method_applied", s::string()),
+                ("cluster_count", s::integer()),
+                (
+                    "profiled_features",
+                    s::array(s::object(
+                        &[
+                            ("column", s::string()),
+                            ("used_for_grouping", s::boolean()),
+                        ],
+                        &["column", "used_for_grouping"],
+                        false,
+                    )),
+                ),
                 ("threshold_inherited", s::boolean()),
                 ("threshold_source", s::string()),
                 ("threshold_surface", open.clone()),
@@ -202,6 +217,47 @@ fn assignment_markdown(record: &ClusterAssignmentRecord) -> String {
         String::new(),
     ]
     .join("\n")
+}
+
+/// Whether a column is a row index rather than a measurement: a row-id name
+/// (`rowid`, `row_id`, `index`, `Unnamed: 0`, blank) or integers counting
+/// the rows from 0 or 1.
+fn row_index_like(name: &str, column: &Column) -> bool {
+    let key: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if matches!(
+        key.as_str(),
+        "" | "rowid" | "rownum" | "rownumber" | "index" | "unnamed0"
+    ) {
+        return true;
+    }
+    let Column::Int(values) = column else {
+        return false;
+    };
+    let counts_from = |start: i64| (start..).zip(values).all(|(i, &v)| i == v);
+    values.len() > 1 && (counts_from(0) || counts_from(1))
+}
+
+/// Columns the dossier never profiles: the requested exclusions, the
+/// identifiers the run's preprocessing plan names, and row indexes.
+fn excluded_columns(live: &LiveRun, requested: &[String]) -> Vec<String> {
+    let mut out = requested.to_vec();
+    let row_indexes = live
+        .table
+        .names
+        .iter()
+        .zip(&live.table.columns)
+        .filter(|(name, column)| row_index_like(name, column))
+        .map(|(name, _)| name);
+    for name in live.identifier_columns.iter().chain(row_indexes) {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    out
 }
 
 fn unit_threshold(value: f64) -> bool {
@@ -489,6 +545,8 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         threshold_source,
     );
 
+    let exclude_columns = excluded_columns(&live, &p.exclude_columns);
+    let dropped = live.fitted.config.preprocessing.drop_columns.clone();
     let job = Job {
         live,
         store: state.store.clone(),
@@ -501,7 +559,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         construction_threshold,
         n_ball_maps: view.record.n_ball_maps,
         minhash_d: view.minhash_d(),
-        exclude_columns: p.exclude_columns.clone(),
+        exclude_columns,
         // Only characterize the largest clusters so a shattered graph
         // cannot stall the O(clusters x features) evidence pass.
         max_clusters_to_characterize: (p.max_clusters * 2).max(50),
@@ -580,6 +638,18 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     payload["clusters_run_id"] = json!(run_id);
     payload["construction_threshold"] = json!(construction_threshold);
     payload["interpretation_edge_weight_threshold"] = json!(interpretation_threshold);
+    payload["interpretation_edge_weight_threshold_applied"] =
+        computed.meta["interpretation_edge_weight_threshold_applied"].clone();
+    payload["method_applied"] = computed.meta["method_used"].clone();
+    payload["cluster_count"] = computed.meta["n_clusters"].clone();
+    // A column the preprocessing dropped (a label kept for comparison, say)
+    // is profiled but did not shape the groups.
+    payload["profiled_features"] = computed
+        .evidence
+        .working_columns
+        .iter()
+        .map(|c| json!({"column": c, "used_for_grouping": !dropped.contains(c)}))
+        .collect();
     payload["threshold_inherited"] = json!(threshold_inherited);
     payload["threshold_source"] = json!(threshold_source);
     payload["threshold_surface"] = surface.clone();
