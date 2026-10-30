@@ -10,12 +10,14 @@ use pulsar_analysis::{
     agent_threshold_options, finalization_gate, GraphAnalysis, Policy, ThresholdGraph,
 };
 use pulsar_config::{PulsarConfig, Threshold};
+use pulsar_core::{find_stable_thresholds_from_edges, DEFAULT_NUM_BINS};
 use pulsar_pipeline::projection_fingerprint;
 use pulsar_store::{summarize_history, JobState, RunId, RunRecord};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Map, Value};
 
 use super::config::{parse_config, resolve_dataset};
+use super::diagnostics::threshold_table;
 use super::params::{Detail, Format};
 use super::{CallContext, ToolSpec};
 use crate::envelope::{ok_result, ToolError};
@@ -113,6 +115,7 @@ pub fn sweep_spec() -> ToolSpec {
                 ("diff", s::array(s::any())),
                 ("diff_summary", open.clone()),
                 ("threshold_stability_summary", s::nullable(open.clone())),
+                ("threshold_table", s::nullable(open.clone())),
                 ("projection_method", s::string()),
                 ("projection_cached", s::boolean()),
                 ("projection_cache_status", s::any()),
@@ -693,6 +696,18 @@ fn build_response(
     if let Some(summary) = &record.threshold_stability_summary {
         response.insert("threshold_stability_summary".into(), json!(summary));
     }
+    // A fixed-threshold run has no fitted stability; one union-find pass over
+    // the affinity already in hand gives the same curve the curve tool reads.
+    let scanned = match &fitted.stability {
+        Some(_) => None,
+        None => find_stable_thresholds_from_edges(fitted.n, &affinity, DEFAULT_NUM_BINS).ok(),
+    };
+    if let Some(stability) = fitted.stability.as_ref().or(scanned.as_ref()) {
+        response.insert(
+            "threshold_table".into(),
+            threshold_table(&threshold_graph, stability, fitted.construction_threshold),
+        );
+    }
     if let Some(path) = saved_path {
         response.insert("saved_config_path".into(), json!(path));
     }
@@ -788,8 +803,10 @@ pub fn summary_payload(
             response["config_yaml_normalized"].clone(),
         );
     }
-    if let Some(path) = response.get("saved_config_path") {
-        obj.insert("saved_config_path".into(), path.clone());
+    for key in ["saved_config_path", "threshold_table"] {
+        if let Some(value) = response.get(key) {
+            obj.insert(key.into(), value.clone());
+        }
     }
     payload
 }
