@@ -754,6 +754,7 @@ impl Store {
             dataset_id: dataset_id.to_owned(),
             revision,
             plan,
+            previous_plan: None,
             created_at: now,
             updated_at: now,
         };
@@ -784,7 +785,7 @@ impl Store {
             });
         }
         record.revision = new_revision;
-        record.plan = plan;
+        record.previous_plan = Some(std::mem::replace(&mut record.plan, plan));
         record.updated_at = now_seconds();
         write_json(&self.plan_path(id), &record, true)?;
         Ok(record)
