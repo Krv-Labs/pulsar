@@ -28,8 +28,8 @@ use pulsar_analysis::clustering::resolve::{
 use pulsar_analysis::dossier::{build_dossier, dossier_to_markdown, TopologicalDossier};
 use pulsar_analysis::feature_evidence::{build_feature_evidence_index, FeatureEvidenceIndex};
 use pulsar_analysis::payloads::{bounded_list, size_summary};
+use pulsar_analysis::plan::row_index_like;
 use pulsar_analysis::GraphAnalysis;
-use pulsar_data::Column;
 use pulsar_pipeline::Graph;
 use pulsar_store::{
     ClusterAssignment, ClusterAssignmentRecord, RunId, StagedClusterAssignment, Store,
@@ -217,28 +217,6 @@ fn assignment_markdown(record: &ClusterAssignmentRecord) -> String {
         String::new(),
     ]
     .join("\n")
-}
-
-/// Whether a column is a row index rather than a measurement: a row-id name
-/// (`rowid`, `row_id`, `index`, `Unnamed: 0`, blank) or integers counting
-/// the rows from 0 or 1.
-fn row_index_like(name: &str, column: &Column) -> bool {
-    let key: String = name
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if matches!(
-        key.as_str(),
-        "" | "rowid" | "rownum" | "rownumber" | "index" | "unnamed0"
-    ) {
-        return true;
-    }
-    let Column::Int(values) = column else {
-        return false;
-    };
-    let counts_from = |start: i64| (start..).zip(values).all(|(i, &v)| i == v);
-    values.len() > 1 && (counts_from(0) || counts_from(1))
 }
 
 /// Columns the dossier never profiles: the requested exclusions, the

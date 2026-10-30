@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
-use pulsar_data::Table;
+use pulsar_data::{Column, Table};
 use serde_json::{json, Map, Value};
 
 use super::model::{DecidedBy, EntryStatus, ImputeSpec, PlanEditError, PlanEntry, Role};
@@ -35,6 +35,9 @@ pub struct DraftContext<'a> {
     /// Columns in a blank group asked about by `blank_meaning`; later
     /// builders skip them.
     pub blank_group_cols: HashSet<String>,
+    /// Give row-index columns ([`row_index_like`]) the identifier role.
+    /// Python kept them as features; on by default.
+    pub row_index_ids: bool,
 }
 
 impl<'a> DraftContext<'a> {
@@ -70,6 +73,7 @@ impl<'a> DraftContext<'a> {
             conditional_by_partner: IndexMap::new(),
             rule7b_cols: Vec::new(),
             grouped_7b: IndexMap::new(),
+            row_index_ids: true,
         }
     }
 }
@@ -339,9 +343,39 @@ fn explicit_or_constant_entry(
     None
 }
 
+/// Whether a column is a row index rather than a measurement: a row-id name
+/// (`rowid`, `row_id`, `index`, `Unnamed: 0`, blank) or integers counting
+/// the rows from 0 or 1.
+pub fn row_index_like(name: &str, column: &Column) -> bool {
+    let key: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if matches!(
+        key.as_str(),
+        "" | "rowid" | "rownum" | "rownumber" | "index" | "unnamed0"
+    ) {
+        return true;
+    }
+    let Column::Int(values) = column else {
+        return false;
+    };
+    let counts_from = |start: i64| (start..).zip(values).all(|(i, &v)| i == v);
+    values.len() > 1 && (counts_from(0) || counts_from(1))
+}
+
 fn default_entry(col: &str, ev: &ColumnEvidence, ctx: &mut DraftContext) -> PlanEntry {
     if let Some(entry) = explicit_or_constant_entry(col, ev, ctx) {
         return entry;
+    }
+    if ctx.row_index_ids
+        && ctx
+            .table
+            .column(col)
+            .is_some_and(|c| row_index_like(col, c))
+    {
+        return resolved(col, Role::Id, "row index, not a measurement".into());
     }
     let n_observed = ev.n_rows - ev.n_missing;
     if ev.kind == ColumnKind::Text

@@ -357,6 +357,26 @@ mod tests {
     }
 
     #[test]
+    fn the_default_plan_drops_a_row_index_as_an_identifier() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/golden/penguins/input.csv");
+        let t = pulsar_data::read_table(&path).unwrap();
+        let plan = draft_plan(&t, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
+        assert_eq!(plan.entries["rowid"].role, Role::Id);
+        assert_eq!(plan.entries["rowid"].decided_by, DecidedBy::Default);
+        let s = build_preprocessing_summary(&plan, None, None, t.n_rows());
+        assert!(
+            s["dropped"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"column": "rowid", "reason": "identifier"})),
+            "{}",
+            s["dropped"]
+        );
+        assert_eq!(plan.entries["bill_length_mm"].role, Role::Feature);
+    }
+
+    #[test]
     fn every_drop_reason_is_a_listed_code() {
         let t = table();
         let mut plan = draft_plan(&t, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();

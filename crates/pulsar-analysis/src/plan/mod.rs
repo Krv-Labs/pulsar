@@ -18,7 +18,9 @@ mod stakes;
 mod summary;
 mod text;
 
-pub use defaults::{populate_default_entries, validate_role_designations, DraftContext};
+pub use defaults::{
+    populate_default_entries, row_index_like, validate_role_designations, DraftContext,
+};
 pub use draft::{draft_plan, DraftError, DraftOptions};
 pub use edits::{
     apply_answers_and_edits, diff_plan_entries, VALID_ENCODE_METHODS, VALID_IMPUTE_METHODS,
