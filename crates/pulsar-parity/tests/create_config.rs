@@ -31,6 +31,10 @@ const PYTHON_DIMENSION_CAP: Option<usize> = Some(16);
 /// probes up to the feature count (see the divergences in `characterization`).
 const PYTHON_PROBES: PcaProbes<'static> = PcaProbes::Python;
 
+/// Python kept row-index columns (penguins' `rowid`) as features; production
+/// Rust drafts them as identifiers.
+const PYTHON_ROW_INDEX_IDS: bool = false;
+
 /// Python did not bound the grid by the row count; the edge-case fixtures
 /// carry no row count, so they are reproduced unbounded.
 const UNBOUNDED_ROWS: usize = usize::MAX;
@@ -132,6 +136,7 @@ fn every_table_gets_the_python_baseline_config() {
         let geo = geo.unwrap();
         let opts = DraftOptions {
             stakes: false,
+            row_index_ids: PYTHON_ROW_INDEX_IDS,
             ..DraftOptions::default()
         };
         let plan = draft_plan(&table, "ds_fixture", &opts).unwrap();

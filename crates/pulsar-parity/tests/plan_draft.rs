@@ -42,6 +42,8 @@ fn compare(name: &str) {
         time_column: args["time"].as_str().unwrap().into(),
         // These fixtures were frozen with stakes off (see plan_stakes.rs for on).
         stakes: false,
+        // Python kept row-index columns as features.
+        row_index_ids: false,
         ..DraftOptions::default()
     };
     let mut plan =

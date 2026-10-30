@@ -12,8 +12,9 @@ use pulsar_analysis::config_build::{
     CeilingSource, GridCeiling,
 };
 use pulsar_analysis::plan::{
-    calibrate_processed_space, draft_plan, plan_fingerprint, summarize_plan_counts, DraftOptions,
-    PreprocessingPlan, QuestionStatus,
+    build_preprocessing_summary, calibrate_processed_space, draft_plan, plan_fingerprint,
+    processed_feature_names, summarize_plan_counts, DraftOptions, PreprocessingPlan,
+    QuestionStatus, DROP_REASONS,
 };
 use pulsar_analysis::pyround::round_to;
 use pulsar_store::PlanId;
@@ -113,10 +114,109 @@ pub fn spec() -> ToolSpec {
         ],
         false,
     );
+    let item = |props: &[(&str, Value)]| {
+        let required: Vec<&str> = props.iter().map(|(k, _)| *k).collect();
+        s::array(s::object(props, &required, false))
+    };
+    let summary = s::object(
+        &[
+            ("revision", s::integer()),
+            ("input_columns", s::integer()),
+            ("output_features", s::nullable(s::integer())),
+            ("rows", s::integer()),
+            (
+                "counts",
+                s::object(
+                    &[
+                        ("kept", s::integer()),
+                        ("dropped", s::integer()),
+                        ("encoded", s::integer()),
+                        ("imputed", s::integer()),
+                    ],
+                    &["kept", "dropped", "encoded", "imputed"],
+                    false,
+                ),
+            ),
+            (
+                "dropped",
+                item(&[
+                    ("column", s::string()),
+                    ("reason", s::enumeration(&DROP_REASONS)),
+                ]),
+            ),
+            ("dropped_omitted", s::integer()),
+            (
+                "encoded",
+                item(&[
+                    ("column", s::string()),
+                    ("method", s::string()),
+                    ("levels", s::nullable(s::integer())),
+                    ("features_added", s::nullable(s::integer())),
+                ]),
+            ),
+            ("encoded_omitted", s::integer()),
+            (
+                "imputed",
+                item(&[
+                    ("column", s::string()),
+                    ("missing_fraction", s::nullable(s::number())),
+                    ("method", s::string()),
+                ]),
+            ),
+            ("imputed_omitted", s::integer()),
+            (
+                "scaled",
+                s::nullable(s::object(
+                    &[("method", s::string()), ("columns", s::integer())],
+                    &["method", "columns"],
+                    false,
+                )),
+            ),
+            (
+                "open_questions",
+                item(&[
+                    ("question_id", s::string()),
+                    ("question_code", s::string()),
+                    ("columns", s::array(s::string())),
+                    ("rows_affected", s::integer()),
+                ]),
+            ),
+            ("open_questions_omitted", s::integer()),
+            (
+                "changes_from_previous",
+                item(&[
+                    ("column", s::string()),
+                    ("field", s::string()),
+                    ("from", s::any()),
+                    ("to", s::any()),
+                ]),
+            ),
+            ("changes_from_previous_omitted", s::integer()),
+        ],
+        &[
+            "revision",
+            "input_columns",
+            "output_features",
+            "rows",
+            "counts",
+            "dropped",
+            "dropped_omitted",
+            "encoded",
+            "encoded_omitted",
+            "imputed",
+            "imputed_omitted",
+            "scaled",
+            "open_questions",
+            "open_questions_omitted",
+            "changes_from_previous",
+            "changes_from_previous_omitted",
+        ],
+        true,
+    );
     ToolSpec {
         name: NAME,
         title: "Create Config",
-        description: "Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset. Epsilon and dimensions are calibrated in the processed feature space under the preprocessing plan (or baseline defaults if plan_id is omitted, with a warning when open questions remain). Stores the YAML as the session's active config.",
+        description: "Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset. Epsilon and dimensions are calibrated in the processed feature space under the preprocessing plan (or baseline defaults if plan_id is omitted, with a warning when open questions remain). Stores the YAML as the session's active config. preprocessing_summary lists, as column names and counts without data values, which columns the plan drops (with a reason code), encodes and fills, its open questions, and what changed from the plan's previous revision.",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
@@ -124,6 +224,7 @@ pub fn spec() -> ToolSpec {
                 ("config_yaml", s::string()),
                 ("calibration_space", s::enumeration(&["processed", "raw"])),
                 ("preprocessing_plan", provenance),
+                ("preprocessing_summary", summary),
                 ("warnings", s::array(warning)),
                 ("sweep_strategy", sweep_strategy),
                 ("processed_feature_count", s::integer()),
@@ -143,12 +244,13 @@ fn failed(code: &str, reason: impl Into<String>, action: &str) -> ToolError {
     ToolError::new(NAME, code, reason, action)
 }
 
-/// The plan named by `plan_id`, checked against the dataset.
+/// The plan named by `plan_id`, checked against the dataset, and the
+/// revision it replaced when that is stored and readable.
 fn stored_plan(
     state: &ServerState,
     plan_id: &str,
     dataset_id: &str,
-) -> Result<PreprocessingPlan, ToolError> {
+) -> Result<(PreprocessingPlan, Option<PreprocessingPlan>), ToolError> {
     let id = PlanId::parse(plan_id).map_err(|e| ToolError::from_store(NAME, e))?;
     let record = state
         .store
@@ -172,7 +274,10 @@ fn stored_plan(
         .detail("plan_dataset_id", json!(plan.dataset_id))
         .detail("dataset_id", json!(dataset_id)));
     }
-    Ok(plan)
+    let previous = record
+        .previous_plan
+        .and_then(|v| PreprocessingPlan::from_value(v).ok());
+    Ok((plan, previous))
 }
 
 /// An agent- or user-edited plan for the dataset that this call is about to
@@ -215,13 +320,11 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     let (dataset_id, path) = resolve_dataset(state, NAME, &p.dataset_id)?
         .expect("a non-empty dataset_id always resolves or errors");
 
-    let (given, plan_source) = if p.plan_id.is_empty() {
-        (None, "baseline_defaults")
+    let (given, previous, plan_source) = if p.plan_id.is_empty() {
+        (None, None, "baseline_defaults")
     } else {
-        (
-            Some(stored_plan(state, &p.plan_id, &p.dataset_id)?),
-            "explicit_plan",
-        )
+        let (plan, previous) = stored_plan(state, &p.plan_id, &p.dataset_id)?;
+        (Some(plan), previous, "explicit_plan")
     };
     let edited_plan = if given.is_none() {
         bypassed_edited_plan(state, &p.dataset_id)
@@ -264,11 +367,17 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             &plan,
             None,
         );
-        Ok((plan, geo, processed, yaml, table.n_rows()))
+        let summary = build_preprocessing_summary(
+            &plan,
+            previous.as_ref(),
+            processed_feature_names(&table, &plan).ok().as_deref(),
+            table.n_rows(),
+        );
+        Ok((plan, geo, processed, yaml, summary, table.n_rows()))
     })
     .await
     .map_err(|e| ToolError::worker_stopped(NAME, "CONFIG_CREATION_FAILED", &e))??;
-    let (plan, geo, processed, config_yaml, n_rows) = built;
+    let (plan, geo, processed, config_yaml, summary, n_rows) = built;
     let (cumulative, n_features, n_rows_profiled) =
         calibration_curve(&geo, processed.as_ref().ok());
     let ceiling = grid_ceiling(cumulative, n_features, n_rows_profiled);
@@ -316,6 +425,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "open_questions_preview": preview,
             "decided_by": counts["decided_by"],
         },
+        "preprocessing_summary": summary,
         "sweep_strategy": {
             "projection_method": "jl",
             "projection_dimensions": dims,

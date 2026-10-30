@@ -382,6 +382,12 @@ pub struct PlanRecord {
     pub dataset_id: String,
     pub revision: u32,
     pub plan: serde_json::Value,
+    /// The plan body as it was before the last [`Store::update_plan`], so a
+    /// caller can say what the latest revision changed. Absent on revision 1.
+    ///
+    /// [`Store::update_plan`]: crate::Store::update_plan
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_plan: Option<serde_json::Value>,
     pub created_at: f64,
     pub updated_at: f64,
 }

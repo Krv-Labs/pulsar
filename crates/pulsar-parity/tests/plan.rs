@@ -31,6 +31,8 @@ fn run(csv: &str, scenario: &Value) -> Value {
     )
     .unwrap();
     let mut ctx = DraftContext::new(&table, &evidence, &targets, &entity, &time);
+    // Python kept row-index columns (penguins' `rowid`) as features.
+    ctx.row_index_ids = false;
     populate_default_entries(&mut ctx);
     json!({
         "entries": ctx.entries,

@@ -35,10 +35,14 @@ pub struct DraftOptions {
     /// Most questions to score; the rest are listed but unscored.
     pub stakes_max_questions: usize,
     pub seed: u64,
+    /// Give row-index columns the identifier role (see
+    /// [`DraftContext::row_index_ids`]); off reproduces Python's plans.
+    pub row_index_ids: bool,
 }
 
 impl Default for DraftOptions {
-    /// Python's defaults: stakes on, 2000 rows, k = 10, 16 questions.
+    /// Python's defaults (stakes on, 2000 rows, k = 10, 16 questions),
+    /// except that row-index columns are drafted as identifiers.
     fn default() -> Self {
         Self {
             target_columns: Vec::new(),
@@ -49,6 +53,7 @@ impl Default for DraftOptions {
             stakes_k: 10,
             stakes_max_questions: 16,
             seed: 0,
+            row_index_ids: true,
         }
     }
 }
@@ -165,6 +170,7 @@ pub fn draft_plan(
 
     let (entries, missing_groups, mut pending) = {
         let mut ctx = DraftContext::new(table, &evidence, &targets, &entity, &time);
+        ctx.row_index_ids = opts.row_index_ids;
         populate_default_entries(&mut ctx);
         let pending = build_pending_questions(&mut ctx);
         (ctx.entries, ctx.missing_groups, pending)

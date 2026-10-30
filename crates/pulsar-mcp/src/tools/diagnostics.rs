@@ -682,6 +682,103 @@ fn plateau_row(
     row
 }
 
+/// Longest plateaus the curve summary weighs, and the threshold table lists.
+const SUMMARY_PLATEAUS: usize = 4;
+/// Breakpoints the curve summary returns, and the threshold table lists.
+const SUMMARY_BREAKPOINTS: usize = 3;
+/// Group sizes listed per threshold table row.
+const TABLE_TOP_SIZES: usize = 6;
+
+/// The capped structural breakpoints of the H0 curve.
+fn curve_breakpoints(graph: &ThresholdGraph, stability: &StabilityResult) -> Vec<Breakpoint> {
+    structural_breakpoints(
+        graph,
+        &stability.thresholds,
+        &stability.component_counts,
+        5,
+        16,
+    )
+}
+
+/// The breakpoints the summary shows: the first few that are not dust
+/// (`small_component_absorption`) events.
+fn summary_breakpoints(breakpoints: &[Breakpoint]) -> impl Iterator<Item = &Breakpoint> {
+    breakpoints
+        .iter()
+        .filter(|b| b.event != "small_component_absorption")
+        .take(SUMMARY_BREAKPOINTS)
+}
+
+/// A plain threshold table over the cut-offs the curve summary weighs: its
+/// longest plateaus (at their midpoints) and its structural breakpoints, plus
+/// the `selected` construction threshold. Each row has the cut-off, the
+/// ascending `[lo, hi]` range of the plateau holding it (the cut-offs that
+/// give the same groups) and its width, the group count, the largest group
+/// sizes and the singletons. The selected threshold marks the plateau row
+/// that holds it, or gets a row of its own; rows sharing a range show the same
+/// groups, so a breakpoint is listed only when its range is new. Rows ascend
+/// by cut-off.
+pub fn threshold_table(
+    graph: &ThresholdGraph,
+    stability: &StabilityResult,
+    selected: f64,
+) -> Value {
+    let range_of = |t: f64| -> (f64, f64) {
+        stability
+            .plateaus
+            .iter()
+            .map(|p| {
+                let (a, b) = (p.start_threshold, p.end_threshold);
+                (a.min(b), a.max(b))
+            })
+            .find(|&(lo, hi)| lo <= t && t <= hi)
+            .unwrap_or((t, t))
+    };
+    let row = |kind: &str, cutoff: f64| -> Value {
+        let (lo, hi) = range_of(cutoff);
+        let profile = component_mass_profile(graph, cutoff, TABLE_TOP_SIZES, 0.01);
+        json!({
+            "cutoff": cutoff,
+            "range": [lo, hi],
+            "width": hi - lo,
+            "groups": profile.component_count,
+            "top_sizes": profile.top_component_sizes,
+            "singletons": profile.singleton_count,
+            "kind": kind,
+            "selected": false,
+        })
+    };
+    let holds = |row: &Value, t: f64| {
+        row["range"][0].as_f64() <= Some(t) && Some(t) <= row["range"][1].as_f64()
+    };
+
+    let mut rows: Vec<Value> = stability
+        .plateaus
+        .iter()
+        .take(SUMMARY_PLATEAUS)
+        .map(|p| row("plateau", p.midpoint()))
+        .collect();
+    match rows.iter_mut().find(|r| holds(r, selected)) {
+        Some(r) => r["selected"] = json!(true),
+        None => {
+            let mut r = row("selected", selected);
+            r["selected"] = json!(true);
+            rows.push(r);
+        }
+    }
+    for b in summary_breakpoints(&curve_breakpoints(graph, stability)) {
+        let r = row("breakpoint", b.threshold);
+        if !rows.iter().any(|x| x["range"] == r["range"]) {
+            rows.push(r);
+        }
+    }
+    rows.sort_by(|a, b| {
+        let key = |r: &Value| r["cutoff"].as_f64().unwrap_or(0.0);
+        key(a).total_cmp(&key(b))
+    });
+    json!({"selected": selected, "rows": rows})
+}
+
 /// `_threshold_curve_payload`.
 pub fn curve_payload(
     n: usize,
@@ -697,7 +794,7 @@ pub fn curve_payload(
     let optimal = stability.optimal_threshold;
     let matches_current =
         (resolved_construction_threshold - optimal).abs() <= 1e-8 + 1e-5 * optimal.abs();
-    let breakpoints = structural_breakpoints(&graph, thresholds, counts, 5, 16);
+    let breakpoints = curve_breakpoints(&graph, stability);
     let current_morph = threshold_morphology_profile(&graph, resolved_construction_threshold, 10);
     let plateau_morph = threshold_morphology_profile(&graph, optimal, 10);
     let profile_rows = |max_points: Option<usize>| -> Vec<Value> {
@@ -735,13 +832,13 @@ pub fn curve_payload(
             })
             .collect()
     };
-    let non_dust: Vec<&Breakpoint> = breakpoints
-        .iter()
-        .filter(|b| b.event != "small_component_absorption")
-        .collect();
-
     if detail == Detail::Summary {
-        let top: Vec<Plateau> = stability.plateaus.iter().take(4).cloned().collect();
+        let top: Vec<Plateau> = stability
+            .plateaus
+            .iter()
+            .take(SUMMARY_PLATEAUS)
+            .cloned()
+            .collect();
         let selected = top
             .first()
             .map(|p| json!(component_mass_profile(&graph, p.midpoint(), 8, 0.01)));
@@ -749,7 +846,7 @@ pub fn curve_payload(
         let options = agent_threshold_options(&graph, &ten, thresholds, counts, policy, 7);
         let candidates = candidate_rows(&options.candidates[..options.candidates.len().min(3)]);
         let profiles = profile_rows(Some(10));
-        let summary_bps: Vec<&Breakpoint> = non_dust.iter().copied().take(3).collect();
+        let summary_bps: Vec<&Breakpoint> = summary_breakpoints(&breakpoints).collect();
         return json!({
             "status": "ok",
             "detail": "summary",

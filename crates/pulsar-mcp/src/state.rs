@@ -31,6 +31,9 @@ pub struct LiveRun {
     pub data_path: Option<PathBuf>,
     /// Projection fingerprint of the embeddings (cache reuse across retries).
     pub projection_fingerprint: String,
+    /// Columns the run's preprocessing plan names as identifiers (empty
+    /// when the run matches no stored plan).
+    pub identifier_columns: Vec<String>,
 }
 
 impl LiveRun {

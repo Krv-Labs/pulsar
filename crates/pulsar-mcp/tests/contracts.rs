@@ -1674,6 +1674,50 @@ async fn characterize_and_probe_read_raw_data_and_explain_failures() {
 
 // ---- create_config -------------------------------------------------------------
 
+/// `preprocessing_summary.counts` agree with the config's `preprocessing:`
+/// block, and each list is as long as its count.
+fn assert_summary_matches_yaml(created: &Value) {
+    let summary = &created["preprocessing_summary"];
+    let config =
+        pulsar_config::from_yaml_str(created["config_yaml"].as_str().unwrap()).expect("config");
+    let pre = &config.preprocessing;
+    let imputed: BTreeSet<&String> = pre
+        .impute
+        .keys()
+        .chain(pre.impute_candidates.keys())
+        .collect();
+    let counts = &summary["counts"];
+    assert_eq!(
+        counts["dropped"],
+        json!(pre.drop_columns.len()),
+        "{summary}"
+    );
+    assert_eq!(counts["encoded"], json!(pre.encode.len()), "{summary}");
+    assert_eq!(counts["imputed"], json!(imputed.len()), "{summary}");
+    assert_eq!(
+        counts["kept"].as_u64().unwrap() + counts["dropped"].as_u64().unwrap(),
+        summary["input_columns"].as_u64().unwrap()
+    );
+    assert_eq!(
+        summary["output_features"],
+        created["processed_feature_count"]
+    );
+    for list in ["dropped", "encoded", "imputed"] {
+        assert_eq!(
+            json!(summary[list].as_array().unwrap().len()),
+            counts[list],
+            "{list}"
+        );
+    }
+    let dropped: Vec<&str> = summary["dropped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["column"].as_str().unwrap())
+        .collect();
+    assert_eq!(dropped, pre.drop_columns);
+}
+
 #[tokio::test]
 async fn create_config_grid_can_exceed_twenty_dimensions_on_a_wide_table() {
     // 30 columns of independent noise: variance spreads evenly, so 90% is not
@@ -1754,6 +1798,12 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     assert_eq!(created["calibration_space"], "processed");
     assert_eq!(created["preprocessing_plan"]["source"], "baseline_defaults");
     assert_eq!(created["preprocessing_plan"]["revision"], 1);
+    assert_summary_matches_yaml(&created);
+    assert_eq!(created["preprocessing_summary"]["revision"], 1);
+    assert_eq!(
+        created["preprocessing_summary"]["changes_from_previous"],
+        json!([])
+    );
     let yaml = created["config_yaml"].as_str().unwrap();
     assert!(yaml.contains("name: baseline"), "{yaml}");
     let strategy = &created["sweep_strategy"];
@@ -1842,7 +1892,13 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
         "edit_preprocessing_plan",
         args(&[
             ("plan_id", json!(plan_id)),
-            ("edits", json!([{"column": "visits1", "role": "drop"}])),
+            (
+                "edits",
+                json!([
+                    {"column": "visits1", "role": "drop"},
+                    {"column": "grade", "encode": "one_hot"},
+                ]),
+            ),
         ]),
     )
     .await;
@@ -1877,6 +1933,35 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     )
     .await;
     assert_eq!(used["preprocessing_plan"]["revision"], 2);
+    // The summary says what the edit changed, and names no category level.
+    assert_summary_matches_yaml(&used);
+    let summary = &used["preprocessing_summary"];
+    let changes = summary["changes_from_previous"].as_array().unwrap();
+    for change in [
+        json!({"column": "visits1", "field": "role", "from": "feature", "to": "drop"}),
+        json!({"column": "grade", "field": "encode", "from": null, "to": "one_hot"}),
+    ] {
+        assert!(changes.contains(&change), "{change} not in {changes:?}");
+    }
+    let grade = summary["encoded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["column"] == "grade")
+        .expect("grade is encoded");
+    let keys: BTreeSet<&str> = grade
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from(["column", "method", "levels", "features_added"])
+    );
+    assert!(grade["levels"].as_u64().unwrap() > 1, "{grade}");
+    let text = summary.to_string();
+    assert!(!text.contains("grade_"), "a level name leaked: {text}");
     assert_ne!(
         used["preprocessing_plan"]["plan_fingerprint"],
         created["preprocessing_plan"]["plan_fingerprint"]
@@ -3189,5 +3274,373 @@ async fn the_html_report_is_written_beside_the_dataset() {
     )
     .await;
     assert_eq!(unknown["error_code"], "DATASET_ID_UNKNOWN");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn sweep_progress_notifications_carry_valid_phirewall_contract() {
+    use pulsar_mcp::jobs::{PhirewallProgress, PHIREWALL_PROGRESS_META_KEY};
+    use rmcp::model::{
+        NotificationMetaObject, NumberOrString, ProgressNotificationParam, ProgressToken,
+        RequestMetaObject,
+    };
+    use rmcp::service::NotificationContext;
+
+    type RecordedProgress = (ProgressNotificationParam, NotificationMetaObject);
+
+    #[derive(Clone, Default)]
+    struct ProgressRecorder {
+        events: Arc<std::sync::Mutex<Vec<RecordedProgress>>>,
+    }
+
+    impl ClientHandler for ProgressRecorder {
+        fn on_progress(
+            &self,
+            params: ProgressNotificationParam,
+            context: NotificationContext<RoleClient>,
+        ) -> impl std::future::Future<Output = ()> + Send + '_ {
+            // rmcp's notification loop swaps `notification.extensions` into
+            // `context.extensions` before swapping `notification.get_meta_mut()`,
+            // so the wire `params._meta` (`NotificationMetaObject`) lands in
+            // `context.extensions` (or `context.meta` if future rmcp reorders).
+            let meta = context
+                .extensions
+                .get::<NotificationMetaObject>()
+                .cloned()
+                .unwrap_or(context.meta);
+            self.events.lock().unwrap().push((params, meta));
+            std::future::ready(())
+        }
+    }
+
+    const STAGE_ORDER: &[&str] = &[
+        "load",
+        "preprocess",
+        "scale",
+        "project",
+        "sweep",
+        "consensus",
+        "stability",
+        "finalize",
+    ];
+
+    let root = TempRoot::new("progress-contract");
+    let recorder = ProgressRecorder::default();
+    let client = connect(root.path(), test_options(), recorder.clone()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[(
+            "path",
+            json!(golden("blobs", "input.csv").display().to_string()),
+        )]),
+    )
+    .await;
+    let dataset_id = ingested["dataset_id"].clone();
+
+    for (token_str, expected_proj_msg, expected_proj_count) in [
+        ("tok-uncached", "projection variant 1/1", Some((1u64, 1u64))),
+        ("tok-cached", "projection (cached)", None),
+    ] {
+        recorder.events.lock().unwrap().clear();
+
+        let token = ProgressToken(NumberOrString::String(token_str.into()));
+        let mut meta = RequestMetaObject::new();
+        meta.set_progress_token(token.clone());
+        let mut params = CallToolRequestParams::new("run_topological_sweep");
+        params.meta = Some(meta);
+        params.arguments = Some(args(&[
+            ("config_yaml", json!(blobs_yaml())),
+            ("dataset_id", dataset_id.clone()),
+            ("response_format", json!("json")),
+        ]));
+        let result = client.call_tool(params).await.expect("sweep completes");
+        assert_eq!(result.is_error, Some(false));
+
+        let events = recorder.events.lock().unwrap().clone();
+        assert!(!events.is_empty(), "expected progress notifications");
+        let run_token = events[0].0.progress_token.clone();
+
+        let mut last_stage_idx = 0usize;
+        let mut last_progress = 0.0f64;
+        let mut messages = Vec::new();
+        let mut sweep_batches = Vec::new();
+
+        for (param, notif_meta) in &events {
+            assert_eq!(param.progress_token, run_token);
+            assert_eq!(param.total, Some(1.0));
+            assert!(
+                param.progress >= last_progress && param.progress <= 1.0,
+                "progress must be non-decreasing within [0, 1]: {} after {}",
+                param.progress,
+                last_progress
+            );
+            last_progress = param.progress;
+            messages.push(param.message.clone().expect("message present"));
+
+            let raw = notif_meta
+                .get(PHIREWALL_PROGRESS_META_KEY)
+                .expect("every notification carries io.phirewall/progress");
+            let contract: PhirewallProgress =
+                serde_json::from_value(raw.clone()).expect("valid PhirewallProgress JSON");
+            assert!(
+                contract.is_valid(),
+                "contract must satisfy SPEC §1: {contract:?}"
+            );
+            assert_eq!(contract.v, 1);
+            assert_eq!(contract.outer, None);
+            assert_eq!(contract.counts.get("rows"), Some(&150));
+            assert_eq!(contract.counts.get("columns"), Some(&5));
+
+            let stage_idx = STAGE_ORDER
+                .iter()
+                .position(|&s| s == contract.stage)
+                .unwrap_or_else(|| panic!("unknown stage in 8-step order: {}", contract.stage));
+            assert!(
+                stage_idx >= last_stage_idx,
+                "stages must be non-decreasing in 8-step order: {} after {}",
+                STAGE_ORDER[stage_idx],
+                STAGE_ORDER[last_stage_idx]
+            );
+            last_stage_idx = stage_idx;
+
+            match contract.stage.as_str() {
+                "project" => match expected_proj_count {
+                    Some((d, t)) => {
+                        assert_eq!(contract.done, Some(d));
+                        assert_eq!(contract.total, Some(t));
+                        assert_eq!(contract.unit.as_deref(), Some("projection"));
+                    }
+                    None => {
+                        assert_eq!(contract.done, None);
+                        assert_eq!(contract.total, None);
+                        assert_eq!(contract.unit, None);
+                    }
+                },
+                "sweep" => {
+                    assert_eq!(contract.unit.as_deref(), Some("batch"));
+                    sweep_batches.push((contract.done.unwrap(), contract.total.unwrap()));
+                }
+                _ => {
+                    assert_eq!(contract.done, None);
+                    assert_eq!(contract.total, None);
+                    assert_eq!(contract.unit, None);
+                }
+            }
+        }
+
+        assert_eq!(
+            messages,
+            vec![
+                "load",
+                "preprocess",
+                "scale",
+                expected_proj_msg,
+                "sweep batch 1/4: ball_mapper + construction",
+                "sweep batch 2/4: ball_mapper + construction",
+                "sweep batch 3/4: ball_mapper + construction",
+                "sweep batch 4/4: ball_mapper + construction",
+                "cosmic_graph",
+                "stability",
+                "graph",
+            ]
+        );
+        assert_eq!(sweep_batches, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+    }
+
+    client.cancel().await.unwrap();
+}
+
+/// Penguins with the `species` label dropped from the grouping but kept in
+/// the data, so the dossier can compare against it.
+fn penguins_without_species_yaml() -> String {
+    let yaml = std::fs::read_to_string(golden("penguins", "config.yaml")).unwrap();
+    let yaml = yaml.replace(
+        "  - rowid\n  - year\n",
+        "  - rowid\n  - species\n  - year\n",
+    );
+    let yaml = yaml.replace("    species:\n      method: one_hot\n", "");
+    assert!(yaml.contains("  - species\n") && !yaml.contains("    species:\n"));
+    yaml
+}
+
+fn column_names_in(value: &Value, out: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                if k == "column" {
+                    if let Some(c) = v.as_str() {
+                        out.insert(c.to_owned());
+                    }
+                }
+                column_names_in(v, out);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|v| column_names_in(v, out)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping() {
+    let root = TempRoot::new("threshold-table");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[(
+            "path",
+            json!(golden("penguins", "input.csv").display().to_string()),
+        )]),
+    )
+    .await;
+    let sweep = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(penguins_without_species_yaml())),
+            ("dataset_id", ingested["dataset_id"].clone()),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    // A hand-written config applies no stored plan.
+    assert!(sweep.get("preprocessing_summary").is_none());
+
+    let table = &sweep["threshold_table"];
+    assert_eq!(table["selected"], sweep["construction_threshold"]);
+    let rows = table["rows"].as_array().unwrap();
+    assert!((2..=8).contains(&rows.len()), "{table}");
+    let cutoffs: Vec<f64> = rows.iter().map(|r| r["cutoff"].as_f64().unwrap()).collect();
+    assert!(cutoffs.windows(2).all(|w| w[0] <= w[1]), "{table}");
+    for row in rows {
+        let (lo, hi) = (
+            row["range"][0].as_f64().unwrap(),
+            row["range"][1].as_f64().unwrap(),
+        );
+        let cutoff = row["cutoff"].as_f64().unwrap();
+        assert!(lo <= cutoff && cutoff <= hi, "{row}");
+        assert_eq!(row["width"].as_f64().unwrap(), hi - lo, "{row}");
+        let sizes = row["top_sizes"].as_array().unwrap();
+        assert!(!sizes.is_empty() && sizes.len() <= 6, "{row}");
+        assert!(row["groups"].as_u64().unwrap() >= sizes.len() as u64);
+    }
+    let selected: Vec<&Value> = rows.iter().filter(|r| r["selected"] == true).collect();
+    assert_eq!(selected.len(), 1, "{table}");
+    assert_eq!(
+        selected[0]["groups"], sweep["key_metrics"]["component_count"],
+        "the selected row shows the constructed graph's groups"
+    );
+
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[
+            ("detail", json!("standard")),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    let profiled: Vec<(&str, bool)> = dossier["profiled_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["column"].as_str().unwrap(),
+                f["used_for_grouping"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(profiled.contains(&("species", false)), "{profiled:?}");
+    assert!(profiled.contains(&("year", false)), "{profiled:?}");
+    assert!(profiled.contains(&("bill_length_mm", true)), "{profiled:?}");
+    let mut named = BTreeSet::new();
+    column_names_in(&dossier, &mut named);
+    assert!(!named.contains("rowid"), "row index profiled: {named:?}");
+    assert!(profiled.iter().all(|(c, _)| *c != "rowid"));
+    assert_eq!(
+        dossier["method_applied"],
+        dossier["cluster_result"]["method_used"]
+    );
+    assert_eq!(
+        dossier["cluster_count"],
+        dossier["cluster_result"]["n_clusters"]
+    );
+    assert!(dossier["interpretation_edge_weight_threshold_applied"].is_number());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_sweep_under_a_stored_plan_carries_its_summary_and_hides_its_identifiers() {
+    let root = TempRoot::new("sweep-plan");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let dataset_id = ingest_wide(&client, &tools).await;
+    let created = ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", json!(dataset_id))]),
+    )
+    .await;
+    let sweep_args = args(&[
+        ("dataset_id", json!(dataset_id)),
+        ("response_format", json!("json")),
+    ]);
+    let sweep = ok(&client, &tools, "run_topological_sweep", sweep_args.clone()).await;
+    assert_eq!(
+        sweep["preprocessing_summary"],
+        created["preprocessing_summary"]
+    );
+    // The next sweep reads the normalized active config; it still matches.
+    let again = ok(&client, &tools, "run_topological_sweep", sweep_args).await;
+    assert_eq!(
+        again["preprocessing_summary"],
+        created["preprocessing_summary"]
+    );
+
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[("response_format", json!("json"))]),
+    )
+    .await;
+    let profiled: Vec<&str> = dossier["profiled_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["column"].as_str().unwrap())
+        .collect();
+    assert!(
+        !profiled.contains(&"id"),
+        "plan identifier profiled: {profiled:?}"
+    );
+    assert!(profiled.contains(&"a"), "{profiled:?}");
+
+    // A config edited away from every stored revision names no plan.
+    let mut cfg = pulsar_config::from_yaml_str(created["config_yaml"].as_str().unwrap()).unwrap();
+    cfg.preprocessing.drop_columns.push("b".into());
+    cfg.preprocessing.impute.shift_remove("b");
+    cfg.preprocessing.impute_candidates.shift_remove("b");
+    let edited = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(pulsar_config::to_yaml(&cfg))),
+            ("dataset_id", json!(dataset_id)),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert!(edited.get("preprocessing_summary").is_none());
     client.cancel().await.unwrap();
 }

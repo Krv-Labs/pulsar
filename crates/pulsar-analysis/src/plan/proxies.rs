@@ -180,6 +180,15 @@ pub(super) fn plan_config(
     .map_err(|e| e.to_string())
 }
 
+/// Whether `pre` is exactly the preprocessing `plan` renders to, so a run
+/// whose config carries `pre` applied this plan revision.
+pub fn plan_matches_preprocessing(
+    plan: &PreprocessingPlan,
+    pre: &pulsar_config::Preprocessing,
+) -> bool {
+    plan_config(plan, "match").is_ok_and(|config| config.preprocessing == *pre)
+}
+
 /// Why processed-space calibration fell back to raw numeric columns.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CalibrationFallback {
@@ -265,6 +274,22 @@ pub fn calibrate_processed_space(
     }
     crate::characterization::profile_numeric_matrix(x.view(), 1000, 42, probes)
         .map_err(|e| CalibrationFallback::Profile(e.to_string()))
+}
+
+/// The processed feature names the plan's first imputation variant yields,
+/// or why the plan cannot be applied.
+pub fn processed_feature_names(
+    table: &Table,
+    plan: &PreprocessingPlan,
+) -> Result<Vec<String>, String> {
+    let config = plan_config(plan, "summary")?;
+    let variants = config.preprocessing_variants();
+    let variant = variants
+        .first()
+        .ok_or("the plan yields no preprocessing variant")?;
+    let processed =
+        preprocess(table, &variant.preprocessing, None, None).map_err(|e| e.to_string())?;
+    Ok(processed.layout.feature_names)
 }
 
 fn run(table: &Table, plan: &mut PreprocessingPlan) -> Result<ProcessedSpace, String> {

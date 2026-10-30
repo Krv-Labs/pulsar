@@ -6,16 +6,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pulsar_analysis::diagnostics::sparse_upper_percentile;
+use pulsar_analysis::plan::{
+    build_preprocessing_summary, plan_matches_preprocessing, PreprocessingPlan, Role,
+};
 use pulsar_analysis::{
     agent_threshold_options, finalization_gate, GraphAnalysis, Policy, ThresholdGraph,
 };
 use pulsar_config::{PulsarConfig, Threshold};
+use pulsar_core::{find_stable_thresholds_from_edges, DEFAULT_NUM_BINS};
 use pulsar_pipeline::projection_fingerprint;
 use pulsar_store::{summarize_history, JobState, RunId, RunRecord};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Map, Value};
 
 use super::config::{parse_config, resolve_dataset};
+use super::diagnostics::threshold_table;
 use super::params::{Detail, Format};
 use super::{CallContext, ToolSpec};
 use crate::envelope::{ok_result, ToolError};
@@ -113,6 +118,8 @@ pub fn sweep_spec() -> ToolSpec {
                 ("diff", s::array(s::any())),
                 ("diff_summary", open.clone()),
                 ("threshold_stability_summary", s::nullable(open.clone())),
+                ("threshold_table", s::nullable(open.clone())),
+                ("preprocessing_summary", s::nullable(open.clone())),
                 ("projection_method", s::string()),
                 ("projection_cached", s::boolean()),
                 ("projection_cache_status", s::any()),
@@ -256,6 +263,8 @@ pub struct Prepared {
     projection_method: &'static str,
     projection_cache_status: Value,
     save_config: bool,
+    /// The stored plan revision the config applies, with the one before it.
+    plan: Option<(PreprocessingPlan, Option<PreprocessingPlan>)>,
 }
 
 async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolError> {
@@ -322,6 +331,17 @@ async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolE
             }
         }
     };
+
+    let plan = dataset_id
+        .as_ref()
+        .and_then(|id| run_plan(state, id.as_str(), &cfg.preprocessing));
+    let identifier_columns = plan.as_ref().map_or_else(Vec::new, |(plan, _)| {
+        plan.entries
+            .iter()
+            .filter(|(_, e)| matches!(e.role, Role::Id | Role::Entity))
+            .map(|(col, _)| col.clone())
+            .collect()
+    });
 
     let read_path = data_path.clone();
     let table = tokio::task::spawn_blocking(move || pulsar_data::read_table(&read_path))
@@ -395,12 +415,37 @@ async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolE
             data_path: Some(data_path),
             precomputed,
             projection_fingerprint: fingerprint,
+            identifier_columns,
         },
         normalized_yaml,
         previous,
         projection_method,
         projection_cache_status,
         save_config: p.save_config,
+        plan,
+    })
+}
+
+/// The stored plan revision for `dataset_id` whose preprocessing `pre` is,
+/// most recently updated plan first, with the revision before it when that
+/// is known. A config edited away from every stored revision matches none.
+fn run_plan(
+    state: &ServerState,
+    dataset_id: &str,
+    pre: &pulsar_config::Preprocessing,
+) -> Option<(PreprocessingPlan, Option<PreprocessingPlan>)> {
+    let records = state.store.list_plans(Some(dataset_id)).ok()?;
+    records.into_iter().rev().find_map(|record| {
+        let current = PreprocessingPlan::from_value(record.plan).ok()?;
+        let previous = record
+            .previous_plan
+            .and_then(|v| PreprocessingPlan::from_value(v).ok());
+        if plan_matches_preprocessing(&current, pre) {
+            return Some((current, previous));
+        }
+        previous
+            .filter(|p| plan_matches_preprocessing(p, pre))
+            .map(|p| (p, None))
     })
 }
 
@@ -428,6 +473,7 @@ async fn execute(
         projection_method,
         projection_cache_status,
         save_config,
+        plan,
     } = prepared;
     let projection_cached = projection_cache_status["status"] == "hit";
     let cfg_for_save = save_config.then(|| request.cfg.clone());
@@ -448,7 +494,7 @@ async fn execute(
         .list_runs(record.dataset_id.as_ref())
         .map(|l| l.runs.len() + 1)
         .unwrap_or(1);
-    let response = build_response(
+    let mut response = build_response(
         &live,
         &record,
         previous.as_ref(),
@@ -459,6 +505,14 @@ async fn execute(
         saved_path.as_deref(),
         sweep_count,
     );
+    if let Some((plan, previous)) = &plan {
+        response["preprocessing_summary"] = build_preprocessing_summary(
+            plan,
+            previous.as_ref(),
+            Some(&live.fitted.layout.feature_names),
+            live.table.n_rows(),
+        );
+    }
     job.complete(&record, &artifacts)
         .map_err(|e| ToolError::from_store(SWEEP, e))?;
     state
@@ -693,6 +747,18 @@ fn build_response(
     if let Some(summary) = &record.threshold_stability_summary {
         response.insert("threshold_stability_summary".into(), json!(summary));
     }
+    // A fixed-threshold run has no fitted stability; one union-find pass over
+    // the affinity already in hand gives the same curve the curve tool reads.
+    let scanned = match &fitted.stability {
+        Some(_) => None,
+        None => find_stable_thresholds_from_edges(fitted.n, &affinity, DEFAULT_NUM_BINS).ok(),
+    };
+    if let Some(stability) = fitted.stability.as_ref().or(scanned.as_ref()) {
+        response.insert(
+            "threshold_table".into(),
+            threshold_table(&threshold_graph, stability, fitted.construction_threshold),
+        );
+    }
     if let Some(path) = saved_path {
         response.insert("saved_config_path".into(), json!(path));
     }
@@ -788,8 +854,14 @@ pub fn summary_payload(
             response["config_yaml_normalized"].clone(),
         );
     }
-    if let Some(path) = response.get("saved_config_path") {
-        obj.insert("saved_config_path".into(), path.clone());
+    for key in [
+        "saved_config_path",
+        "threshold_table",
+        "preprocessing_summary",
+    ] {
+        if let Some(value) = response.get(key) {
+            obj.insert(key.into(), value.clone());
+        }
     }
     payload
 }

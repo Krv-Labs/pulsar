@@ -15,9 +15,12 @@ mod proxies;
 mod questions;
 mod render;
 mod stakes;
+mod summary;
 mod text;
 
-pub use defaults::{populate_default_entries, validate_role_designations, DraftContext};
+pub use defaults::{
+    populate_default_entries, row_index_like, validate_role_designations, DraftContext,
+};
 pub use draft::{draft_plan, DraftError, DraftOptions};
 pub use edits::{
     apply_answers_and_edits, diff_plan_entries, VALID_ENCODE_METHODS, VALID_IMPUTE_METHODS,
@@ -33,7 +36,8 @@ pub use payload::{
 };
 pub use plan::{PreprocessingPlan, TargetProxy};
 pub use proxies::{
-    calibrate_processed_space, dry_run_processed_space, CalibrationFallback, DryRun, ProcessedSpace,
+    calibrate_processed_space, dry_run_processed_space, plan_matches_preprocessing,
+    processed_feature_names, CalibrationFallback, DryRun, ProcessedSpace,
 };
 pub use questions::build_pending_questions;
 pub use render::{
@@ -41,6 +45,7 @@ pub use render::{
     py_canonical_json, py_json_dumps, summarize_plan_counts,
 };
 pub use stakes::{compute_stakes, StakesOptions};
+pub use summary::{build_preprocessing_summary, DROP_REASONS, SUMMARY_LIMIT};
 pub use text::{
     format_col_list, format_missing_reason, is_count_like_zero_free, plural, py_repr, py_repr_list,
     py_repr_value, py_str, thousands,
