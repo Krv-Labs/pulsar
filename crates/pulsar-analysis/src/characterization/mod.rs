@@ -31,6 +31,7 @@
 //!   for every probe; only [`PcaProbes::Python`] keeps the randomized
 //!   estimate, for parity.
 
+mod group_summary;
 mod payload;
 
 use std::collections::HashMap;
@@ -43,6 +44,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use group_summary::{
+    group_summary, Cell, DefiningFeature, FeatureKind, GroupEntry, GroupSummary,
+    GroupSummaryThresholds, SmallGroups, Trait, GROUP_SUMMARY_DEFAULTS,
+};
 pub use payload::{
     characterization_payload_to_markdown, compact_characterization_payload, probe_columns_payload,
     probe_columns_payload_to_markdown,
