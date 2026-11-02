@@ -209,11 +209,17 @@ fn numeric_stats<'a>(name: &'a str, values: &[f64], labels: &[i64]) -> Option<Co
             .filter(|(x, _)| x.is_finite())
             .map(|(&x, &g)| (x, g))
     };
-    let n = observed().count();
-    if n == 0 {
+    // A constant column has no spread: say so exactly, before any rounding
+    // error in the mean can make up one.
+    let (first, _) = observed().next()?;
+    if observed().all(|(x, _)| x == first) {
         return None;
     }
-    let mean = observed().map(|(x, _)| x).sum::<f64>() / n as f64;
+    let n = observed().count();
+    // Two passes: the second corrects the first mean by the mean residual,
+    // so a large offset does not swamp the spread.
+    let rough = observed().map(|(x, _)| x).sum::<f64>() / n as f64;
+    let mean = rough + observed().map(|(x, _)| x - rough).sum::<f64>() / n as f64;
     let sd = (observed().map(|(x, _)| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
     if !(sd.is_finite() && sd > 0.0) {
         return None;
@@ -656,6 +662,42 @@ mod tests {
         for c in ["constant", "one_level", "all_missing"] {
             assert!(!names.contains(&c), "{names:?}");
         }
+    }
+
+    #[test]
+    fn constant_decimals_and_large_offsets_do_not_separate_from_rounding_error() {
+        // 0.1 is not exact in binary: its mean drifts off 0.1 by an ulp.
+        let constant = || Column::Float(vec![0.1; 20]);
+        for labels in [labels(20, 2), vec![0; 20]] {
+            let s = summarize(&table(vec![("c", constant())]), &labels);
+            assert!(
+                s.defining_features.is_empty() && s.cells.is_empty(),
+                "{s:?}"
+            );
+            assert!(s.groups.iter().all(|g| g.traits.is_empty()));
+        }
+
+        // The same noise with and without a 1e9 offset scores the same.
+        let labels = labels(200, 2);
+        let mut rng = StdRng::seed_from_u64(10);
+        let Column::Float(x) = shifted(&mut rng, &labels, 1.0) else {
+            unreachable!()
+        };
+        let offset = x.iter().map(|v| v + 1e9).collect();
+        let a = summarize(&table(vec![("x", Column::Float(x))]), &labels);
+        let b = summarize(&table(vec![("x", Column::Float(offset))]), &labels);
+        assert!(!a.defining_features.is_empty());
+        assert_eq!(a.defining_features, b.defining_features);
+        assert_eq!(a.cells, b.cells);
+
+        // A single group of 1e9 plus small noise separates nothing.
+        let one = vec![0; 200];
+        let x = (0..200).map(|_| 1e9 + rng.gen_range(-1e-3..1e-3)).collect();
+        let s = summarize(&table(vec![("x", Column::Float(x))]), &one);
+        assert!(
+            s.defining_features.is_empty() && s.cells.is_empty(),
+            "{s:?}"
+        );
     }
 
     #[test]
