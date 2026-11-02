@@ -9,7 +9,7 @@
 //!   all-rows mean) / all-rows population SD (ddof 0). A categorical or
 //!   boolean level is its 0/1 indicator, so its mean is the level's
 //!   proportion `p` and its SD is `sqrt(p(1−p))`. Missing cells (`NaN`,
-//!   infinite numbers, blanks) are excluded from every mean, SD and
+//!   infinite numbers, empty or whitespace-only text) are excluded from every mean, SD and
 //!   proportion; there is no "missing" level. All-rows statistics use every
 //!   row of the table, whatever its group.
 //! * **separation**: η², the share of the column's variance that lies
@@ -363,7 +363,12 @@ fn column_stats<'a>(
             categorical_stats(name, &v, labels, min_rows)
         }
         Column::Text(v) => {
-            let v: Vec<Option<&str>> = v.iter().map(Option::as_deref).collect();
+            // Blank text is missing whatever the source: a CSV reads an
+            // empty cell as null, a Parquet file can hold "".
+            let v: Vec<Option<&str>> = v
+                .iter()
+                .map(|s| s.as_deref().filter(|s| !s.trim().is_empty()))
+                .collect();
             categorical_stats(name, &v, labels, min_rows)
         }
     }
@@ -737,6 +742,54 @@ mod tests {
             s.defining_features.is_empty() && s.cells.is_empty(),
             "{s:?}"
         );
+    }
+
+    #[test]
+    fn blank_text_is_missing_in_csv_and_parquet_alike() {
+        // Group 0 holds "" or "  ", group 1 "A": only blanks tell them apart.
+        let labels = labels(40, 2);
+        let blank = |i: usize, g: i64| match (g, i % 4) {
+            (1, _) => "A",
+            (_, 0) => "  ",
+            _ => "",
+        };
+        let values: Vec<Option<String>> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, &g)| Some(blank(i, g).to_owned()))
+            .collect();
+        let check = |t: &Table| {
+            let s = summarize(t, &labels);
+            assert!(
+                s.defining_features.is_empty() && s.cells.is_empty(),
+                "{s:?}"
+            );
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "pulsar-group-summary-blanks-{}.parquet",
+            std::process::id()
+        ));
+        pulsar_data::write_parquet(&table(vec![("c", Column::Text(values.clone()))]), &path)
+            .unwrap();
+        let parquet = pulsar_data::read_parquet(&path);
+        let _ = std::fs::remove_file(&path);
+        let parquet = parquet.unwrap();
+        assert!(
+            matches!(&parquet.columns[0], Column::Text(v) if v.iter().any(|s| s.as_deref() == Some(""))),
+            "Parquet keeps the empty strings"
+        );
+        check(&parquet);
+
+        // A second, constant column keeps a blank row from being skipped.
+        let csv: String = std::iter::once("c,k\n".to_owned())
+            .chain(
+                values
+                    .iter()
+                    .map(|v| format!("{},1\n", v.as_deref().unwrap())),
+            )
+            .collect();
+        check(&pulsar_data::read_csv(csv.as_bytes(), "inline").unwrap());
     }
 
     #[test]
