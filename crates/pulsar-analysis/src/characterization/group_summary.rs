@@ -270,13 +270,30 @@ impl ColumnStats<'_> {
         }
     }
 
-    /// The strongest emittable difference of `group`, positive on a tie.
-    fn cell(&self, group: i64, min_rows: usize) -> Option<(Option<&str>, f64)> {
-        self.axes
-            .iter()
-            .filter(|a| self.backing(a, group) >= min_rows)
-            .filter_map(|a| Some((a.level.as_deref(), self.sd_of(a, group)?)))
-            .max_by(|(_, x), (_, y)| x.abs().total_cmp(&y.abs()).then(x.total_cmp(y)))
+    /// Each group's strongest emittable difference, positive on a tie and
+    /// the later axis on a full one. Walks only the groups each axis has a
+    /// sum for, so the work is the nonzero group-axis pairs: an emittable
+    /// level is held by `min_rows` rows, so a group without it has no cell
+    /// on it.
+    fn cells(&self, min_rows: usize) -> HashMap<i64, (Option<&str>, f64)> {
+        let mut best: HashMap<i64, (Option<&str>, f64)> = HashMap::new();
+        for axis in &self.axes {
+            for &group in axis.group_sum.keys() {
+                if self.backing(axis, group) < min_rows {
+                    continue;
+                }
+                let Some(sd) = self.sd_of(axis, group) else {
+                    continue;
+                };
+                let stronger = |&(_, b): &(_, f64)| {
+                    sd.abs().total_cmp(&b.abs()).then(sd.total_cmp(&b)) != Ordering::Less
+                };
+                if best.get(&group).is_none_or(stronger) {
+                    best.insert(group, (axis.level.as_deref(), sd));
+                }
+            }
+        }
+        best
     }
 }
 
@@ -565,14 +582,19 @@ pub fn group_summary(
         .map(|Reverse(r)| (r.stats, r.separation))
         .collect();
 
+    let best: Vec<HashMap<i64, (Option<&str>, f64)>> = scored
+        .iter()
+        .map(|(stats, _)| stats.cells(t.min_rows))
+        .collect();
     let mut cells = vec![];
     let groups = shown
         .iter()
         .map(|&(id, size)| {
             let mut traits: Vec<(Trait, f64)> = scored
                 .iter()
-                .filter_map(|(stats, _)| {
-                    let (level, sd) = stats.cell(id, t.min_rows)?;
+                .zip(&best)
+                .filter_map(|((stats, _), best)| {
+                    let &(level, sd) = best.get(&id)?;
                     (sd.abs() >= t.min_sd).then(|| {
                         let (column, cut_column) = label(stats.name);
                         let (level, cut_level) = level.map(label).unzip();
@@ -1255,6 +1277,27 @@ mod tests {
             .map(|f| (f.column.clone(), f.separation))
             .collect();
         assert_eq!(top, all);
+    }
+
+    #[test]
+    fn cells_of_many_groups_and_levels_take_linear_time() {
+        // Every group holds its own level: picking a group's cell must walk
+        // the levels it holds, not every level of the column.
+        let groups = 10_000;
+        let labels = labels(8 * groups, groups);
+        let levels = labels.iter().map(|g| Some(format!("L{g}"))).collect();
+        let all = GroupSummaryThresholds {
+            max_groups: groups,
+            max_features: 1,
+            min_sd: 0.0,
+            ..T
+        };
+        let table = table(vec![("c", Column::Text(levels))]);
+        let start = std::time::Instant::now();
+        let s = group_summary(&table, &labels, &[], &[], "components", 0.25, &all);
+        let elapsed = start.elapsed();
+        assert_eq!(s.cells.len(), groups);
+        assert!(elapsed.as_secs() < 5, "{elapsed:?}");
     }
 
     /// Every string in `v` is at most a cut label long.
