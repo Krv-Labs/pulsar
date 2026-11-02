@@ -40,15 +40,17 @@
 //! when at least `min_rows` of the group's rows hold it, so a level a group
 //! lacks is withheld and the cell falls to its next strongest level. A
 //! numeric cell needs `min_rows` observed values in the group. Groups under
-//! `min_rows` rows are only counted. No raw value is emitted, and no
-//! non-finite number is serialized.
+//! `min_rows` rows are only counted: none of their values is emitted. No
+//! raw value is emitted, and no non-finite number is serialized.
 //!
 //! Row counts (each shown group's `size`, `rows` and `small_groups.rows`)
 //! are rounded to the nearest 5, halves up, as Phirewall rounds every count
-//! it discloses (`COUNT_ROUNDING`, `round_count`), so subtracting one from
-//! another cannot recover a small group's size exactly. A nonzero count
-//! under `min_rows` is not rounded but withheld as `"under <min_rows>"`.
-//! Counts of groups are exact. Column names are never interpreted.
+//! it discloses (`COUNT_ROUNDING`, `round_count`). A nonzero count under
+//! `min_rows` is not rounded but withheld as `"under <min_rows>"`. Counts
+//! of groups are exact. Rounding each count alone does not stop the counts
+//! together from pinning down a small group's size, and the dossier around
+//! this summary gives exact sizes anyway (`clusters[].size` and
+//! `cluster_sizes_summary.preview`). Column names are never interpreted.
 //!
 //! Size: the summary is as large as the thresholds asked for. Entries
 //! follow them (`max_groups` × `max_features` cells, `max_traits` per
@@ -1232,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn row_counts_are_rounded_so_a_small_group_cannot_be_recovered() {
+    fn row_counts_are_rounded_and_a_small_remainder_withheld() {
         let mut rng = StdRng::seed_from_u64(11);
         // Groups of 12 and 13 rows and a singleton.
         let mut labels = vec![0; 12];
