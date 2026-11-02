@@ -324,11 +324,13 @@ fn numeric_stats<'a>(name: &'a str, values: &[f64], labels: &[i64]) -> Option<Co
         return None;
     }
     let n = observed().count();
-    // Two passes: the second corrects the first mean by the mean residual,
-    // so a large offset does not swamp the spread.
-    let rough = observed().map(|(x, _)| x).sum::<f64>() / n as f64;
-    let mean = rough + observed().map(|(x, _)| x - rough).sum::<f64>() / n as f64;
-    let sd = (observed().map(|(x, _)| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+    // Everything is computed shifted by the first value, and the mean is
+    // never put back on the absolute scale: an absolute mean of large
+    // values rounds to a float, and its rounding error would read as
+    // spread and as group differences.
+    let mean = observed().map(|(x, _)| x - first).sum::<f64>() / n as f64;
+    let deviation = |x: f64| (x - first) - mean;
+    let sd = (observed().map(|(x, _)| deviation(x).powi(2)).sum::<f64>() / n as f64).sqrt();
     if !(sd.is_finite() && sd > 0.0) {
         return None;
     }
@@ -336,7 +338,7 @@ fn numeric_stats<'a>(name: &'a str, values: &[f64], labels: &[i64]) -> Option<Co
     let mut distinct: Vec<f64> = Vec::with_capacity(3);
     for (x, g) in observed() {
         *group_n.entry(g).or_insert(0) += 1;
-        *group_sum.entry(g).or_insert(0.0) += x - mean;
+        *group_sum.entry(g).or_insert(0.0) += deviation(x);
         if distinct.len() < 3 && !distinct.contains(&x) {
             distinct.push(x);
         }
@@ -875,6 +877,29 @@ mod tests {
             s.defining_features.is_empty() && s.cells.is_empty(),
             "{s:?}"
         );
+    }
+
+    #[test]
+    fn a_mean_between_adjacent_floats_makes_up_no_spread() {
+        // 1e16 and 1e16 + 2 are adjacent floats: their mean, 1e16 + 1, is
+        // not one, so any absolute mean leaves a false offset.
+        let x = || {
+            Column::Float(
+                (0..16)
+                    .map(|i| if i % 2 == 0 { 1e16 } else { 1e16 + 2.0 })
+                    .collect(),
+            )
+        };
+        let s = summarize(&table(vec![("x", x())]), &[0; 16]);
+        assert!(
+            s.defining_features.is_empty() && s.cells.is_empty(),
+            "{s:?}"
+        );
+        // The same values split by group separate fully, ±1 SD.
+        let s = summarize(&table(vec![("x", x())]), &labels(16, 2));
+        assert_eq!(s.defining_features[0].separation, 1.0);
+        let sds: Vec<f64> = s.cells.iter().map(|c| c.sd).collect();
+        assert_eq!(sds, [-1.0, 1.0]);
     }
 
     #[test]
