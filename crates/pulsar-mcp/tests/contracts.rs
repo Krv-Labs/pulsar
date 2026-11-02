@@ -3580,6 +3580,32 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
     for column in summary["not_used_for_grouping"].as_array().unwrap() {
         assert!(!grouping.contains(column.as_str().unwrap()), "{column}");
     }
+
+    // Every feature id is the entry's index in profiled_features: a
+    // grouping column there, named as the entry's label shows.
+    let profiled = dossier["profiled_features"].as_array().unwrap();
+    let profiled_as = |feature: &Value, label: &Value, used: bool| {
+        let f = &profiled[feature.as_u64().unwrap() as usize];
+        assert_eq!(f["used_for_grouping"], used, "{f}");
+        let (name, label) = (f["column"].as_str().unwrap(), label.as_str().unwrap());
+        match label.strip_suffix('…') {
+            Some(cut) if name != label => assert!(name.starts_with(cut), "{name} {label}"),
+            _ => assert_eq!(name, label),
+        }
+    };
+    let traits = groups.iter().flat_map(|g| g["traits"].as_array().unwrap());
+    let entries = summary["cells"].as_array().unwrap().iter();
+    for e in features.iter().chain(entries).chain(traits) {
+        profiled_as(&e["feature"], &e["column"], true);
+    }
+    let unused_names = summary["not_used_for_grouping"].as_array().unwrap();
+    let unused_ids = summary["not_used_for_grouping_features"]
+        .as_array()
+        .unwrap();
+    assert_eq!(unused_names.len(), unused_ids.len());
+    for (id, name) in unused_ids.iter().zip(unused_names) {
+        profiled_as(id, name, false);
+    }
     summary
 }
 

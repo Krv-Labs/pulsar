@@ -25,6 +25,15 @@
 //!   columns `categorical` (ordinal text is categorical); either is `binary`
 //!   when it holds exactly two distinct values. A numeric binary column is
 //!   standardized as a number and names no level.
+//! * **feature**: a column's id, its zero-based position among the profiled
+//!   columns (the table's columns, in order, less `exclude_columns`): the
+//!   same in every run on a dataset with the same exclusions, and the
+//!   index of the column in the dossier's `profiled_features`. Every
+//!   defining feature, cell and trait carries it beside the `column` name,
+//!   which may be cut (see Size) and so is a display label, not an id.
+//!   `not_used_for_grouping_features` lists the ids of
+//!   `not_used_for_grouping`'s names, in the same order (a parallel list,
+//!   so that list stays one of names).
 //!
 //! Privacy: a categorical level backed by fewer than `min_rows` rows over
 //! all rows is never emitted nor scored, and a cell's level is only emitted
@@ -51,7 +60,7 @@
 //! name or level is marked `truncated` (a name in `not_used_for_grouping`
 //! is only cut). So a string serializes to at most 485 bytes (80
 //! characters escaped as `\u00XX`, the ellipsis and quotes), and the
-//! worst case is proportional to the requested counts: about 66 KB at the
+//! worst case is proportional to the requested counts: about 69 KB at the
 //! defaults, growing with `max_groups` × `max_features` cells and
 //! `max_traits` per group; plain-text names and levels make it a fraction
 //! of that. `size_chars` reports the actual serialized length, so a caller
@@ -113,6 +122,8 @@ pub enum FeatureKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Trait {
+    /// The column's feature id (see the module documentation).
+    pub feature: usize,
     pub column: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
@@ -162,6 +173,8 @@ fn round_count(count: usize) -> usize {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DefiningFeature {
+    /// The column's feature id (see the module documentation).
+    pub feature: usize,
     pub column: String,
     pub kind: FeatureKind,
     pub separation: f64,
@@ -173,6 +186,8 @@ pub struct DefiningFeature {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Cell {
     pub group: i64,
+    /// The column's feature id (see the module documentation).
+    pub feature: usize,
     pub column: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
@@ -194,6 +209,8 @@ pub struct GroupSummary {
     pub defining_features: Vec<DefiningFeature>,
     pub cells: Vec<Cell>,
     pub not_used_for_grouping: Vec<String>,
+    /// The feature ids of `not_used_for_grouping`, in the same order.
+    pub not_used_for_grouping_features: Vec<usize>,
     pub not_used_for_grouping_omitted: usize,
     /// The length in characters of this summary serialized as JSON
     /// (`serde_json::to_string`), this field included.
@@ -300,7 +317,7 @@ impl ColumnStats<'_> {
 /// A scored column, ordered by separation, then the earlier column first.
 struct Ranked<'a> {
     separation: f64,
-    index: usize,
+    feature: usize,
     stats: ColumnStats<'a>,
 }
 
@@ -308,7 +325,7 @@ impl Ord for Ranked<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.separation
             .total_cmp(&other.separation)
-            .then(other.index.cmp(&self.index))
+            .then(other.feature.cmp(&self.feature))
     }
 }
 
@@ -527,11 +544,12 @@ pub fn group_summary(
         .names
         .iter()
         .zip(&table.columns)
-        .filter(|(n, _)| !excluded.contains(n.as_str()));
-    let unused_listed: Vec<&String> = profiled
+        .filter(|(n, _)| !excluded.contains(n.as_str()))
+        .enumerate();
+    let unused_listed: Vec<(usize, &String)> = profiled
         .clone()
-        .filter(|(n, _)| unused.contains(n.as_str()))
-        .map(|(n, _)| n)
+        .filter(|(_, (n, _))| unused.contains(n.as_str()))
+        .map(|(feature, (n, _))| (feature, n))
         .collect();
 
     // The max_features strongest columns, kept in a bounded min-heap: a
@@ -540,9 +558,9 @@ pub fn group_summary(
     let shown_ids: HashSet<i64> = shown.iter().map(|&(g, _)| g).collect();
     let mut top: BinaryHeap<Reverse<Ranked>> = BinaryHeap::with_capacity(t.max_features + 1);
     let candidates = profiled
-        .filter(|(n, _)| !unused.contains(n.as_str()))
-        .filter_map(|(n, c)| column_stats(n, c, labels, t.min_rows));
-    for (index, mut stats) in candidates.enumerate() {
+        .filter(|(_, (n, _))| !unused.contains(n.as_str()))
+        .filter_map(|(feature, (n, c))| Some((feature, column_stats(n, c, labels, t.min_rows)?)));
+    for (feature, mut stats) in candidates {
         let eligible_n: usize = stats
             .group_n
             .iter()
@@ -559,7 +577,7 @@ pub fn group_summary(
             stats.keep_groups(&shown_ids);
             top.push(Reverse(Ranked {
                 separation,
-                index,
+                feature,
                 stats,
             }));
             if top.len() > t.max_features {
@@ -576,15 +594,15 @@ pub fn group_summary(
                 .all(|a| a.group_sum.len() <= shown.len())
     }));
     // Strongest first, the earlier column on ties.
-    let scored: Vec<(ColumnStats, f64)> = top
+    let scored: Vec<(usize, ColumnStats, f64)> = top
         .into_sorted_vec()
         .into_iter()
-        .map(|Reverse(r)| (r.stats, r.separation))
+        .map(|Reverse(r)| (r.feature, r.stats, r.separation))
         .collect();
 
     let best: Vec<HashMap<i64, (Option<&str>, f64)>> = scored
         .iter()
-        .map(|(stats, _)| stats.cells(t.min_rows))
+        .map(|(_, stats, _)| stats.cells(t.min_rows))
         .collect();
     let mut cells = vec![];
     let groups = shown
@@ -593,7 +611,7 @@ pub fn group_summary(
             let mut traits: Vec<(Trait, f64)> = scored
                 .iter()
                 .zip(&best)
-                .filter_map(|((stats, _), best)| {
+                .filter_map(|(&(feature, ref stats, _), best)| {
                     let &(level, sd) = best.get(&id)?;
                     (sd.abs() >= t.min_sd).then(|| {
                         let (column, cut_column) = label(stats.name);
@@ -601,6 +619,7 @@ pub fn group_summary(
                         let truncated = cut_column || cut_level == Some(true);
                         cells.push(Cell {
                             group: id,
+                            feature,
                             column: column.clone(),
                             level: level.clone(),
                             sd: round_to(sd, 2),
@@ -608,6 +627,7 @@ pub fn group_summary(
                         });
                         (
                             Trait {
+                                feature,
                                 column,
                                 level,
                                 sd: round_to(sd, 2),
@@ -644,9 +664,10 @@ pub fn group_summary(
         },
         defining_features: scored
             .iter()
-            .map(|(stats, separation)| {
+            .map(|(feature, stats, separation)| {
                 let (column, truncated) = label(stats.name);
                 DefiningFeature {
+                    feature: *feature,
                     column,
                     kind: stats.kind,
                     separation: *separation,
@@ -658,7 +679,12 @@ pub fn group_summary(
         not_used_for_grouping: unused_listed
             .iter()
             .take(MAX_LISTED_UNUSED)
-            .map(|n| label(n).0)
+            .map(|(_, n)| label(n).0)
+            .collect(),
+        not_used_for_grouping_features: unused_listed
+            .iter()
+            .take(MAX_LISTED_UNUSED)
+            .map(|&(feature, _)| feature)
             .collect(),
         not_used_for_grouping_omitted: unused_listed.len().saturating_sub(MAX_LISTED_UNUSED),
         size_chars: 0,
@@ -1336,6 +1362,54 @@ mod tests {
         assert_ne!(s.cells[0].level, s.cells[1].level);
     }
 
+    #[test]
+    fn columns_cut_to_one_label_keep_their_own_feature_ids() {
+        // Two names alike up to the cut, with opposite values in two groups
+        // of 8, beside an excluded column and two unused ones alike too.
+        let labels = labels(16, 2);
+        let prefix = "x".repeat(MAX_LABEL_CHARS);
+        let (a, b) = (format!("{prefix}A"), format!("{prefix}B"));
+        let (ua, ub) = (format!("{prefix}uA"), format!("{prefix}uB"));
+        let flag = |on: i64| Column::Int(labels.iter().map(|&g| i64::from(g == on)).collect());
+        let t = table(vec![
+            ("id", flag(0)),
+            (&ua, flag(0)),
+            (&a, flag(0)),
+            (&ub, flag(1)),
+            (&b, flag(1)),
+        ]);
+        let unused = [ua.clone(), ub.clone()];
+        let s = group_summary(&t, &labels, &["id".into()], &unused, "components", 0.25, &T);
+        // Profiled: ua 0, a 1, ub 2, b 3.
+        let features: Vec<usize> = s.defining_features.iter().map(|f| f.feature).collect();
+        assert_eq!(features, [1, 3]);
+        assert_eq!(s.defining_features[0].column, s.defining_features[1].column);
+        assert_eq!(s.not_used_for_grouping_features, [0, 2]);
+        assert_eq!(s.not_used_for_grouping[0], s.not_used_for_grouping[1]);
+        // Group 1 is high on b and low on a: the ids say which is which.
+        let sd_of = |feature: usize| {
+            s.cells
+                .iter()
+                .find(|c| c.group == 1 && c.feature == feature)
+                .map(|c| c.sd)
+        };
+        assert_eq!((sd_of(1), sd_of(3)), (Some(-1.0), Some(1.0)));
+        let traits: Vec<(usize, f64)> = s
+            .groups
+            .iter()
+            .find(|g| g.id == 1)
+            .unwrap()
+            .traits
+            .iter()
+            .map(|t| (t.feature, t.sd))
+            .collect();
+        assert_eq!(traits.len(), 2);
+        assert!(
+            traits.contains(&(1, -1.0)) && traits.contains(&(3, 1.0)),
+            "{traits:?}"
+        );
+    }
+
     /// The largest serialized summary under `t`: every entry at its cap,
     /// every string at its longest, every number at its widest.
     fn size_bound(t: &GroupSummaryThresholds) -> usize {
@@ -1347,19 +1421,23 @@ mod tests {
             template.len() + 1 + strings * string + numbers * number
         };
         let cell = entry(
-            r#"{"group":,"column":,"level":,"sd":,"truncated":true}"#,
+            r#"{"group":,"feature":,"column":,"level":,"sd":,"truncated":true}"#,
+            2,
+            3,
+        );
+        let trait_ = entry(
+            r#"{"feature":,"column":,"level":,"sd":,"truncated":true}"#,
             2,
             2,
         );
-        let trait_ = entry(r#"{"column":,"level":,"sd":,"truncated":true}"#, 2, 1);
         let group = entry(r#"{"id":,"size":,"traits":[]}"#, 0, 2);
         let feature = entry(
-            r#"{"column":,"kind":"categorical","separation":,"truncated":true}"#,
+            r#"{"feature":,"column":,"kind":"categorical","separation":,"truncated":true}"#,
             1,
-            1,
+            2,
         );
         let fixed = entry(
-            r#"{"thresholds":{"max_groups":,"max_features":,"min_sd":,"min_rows":,"max_traits":},"method":,"cut_off":,"group_count":,"rows":,"groups":[],"small_groups":{"count":,"rows":},"defining_features":[],"cells":[],"not_used_for_grouping":[],"not_used_for_grouping_omitted":,"size_chars":}"#,
+            r#"{"thresholds":{"max_groups":,"max_features":,"min_sd":,"min_rows":,"max_traits":},"method":,"cut_off":,"group_count":,"rows":,"groups":[],"small_groups":{"count":,"rows":},"defining_features":[],"cells":[],"not_used_for_grouping":[],"not_used_for_grouping_features":[],"not_used_for_grouping_omitted":,"size_chars":}"#,
             3,
             12,
         );
@@ -1368,6 +1446,7 @@ mod tests {
             + g * (group + tr.min(f) * trait_)
             + f * feature
             + MAX_LISTED_UNUSED * (string + 1)
+            + MAX_LISTED_UNUSED * (number + 1)
     }
 
     #[test]
@@ -1413,7 +1492,7 @@ mod tests {
             "{bytes} of {bound}"
         );
         // The figure in the module documentation.
-        assert!(size_bound(&T) < 66_000, "{}", size_bound(&T));
+        assert!(size_bound(&T) < 69_000, "{}", size_bound(&T));
     }
 
     #[test]
