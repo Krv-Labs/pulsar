@@ -32,7 +32,14 @@
 //! lacks is withheld and the cell falls to its next strongest level. A
 //! numeric cell needs `min_rows` observed values in the group. Groups under
 //! `min_rows` rows are only counted. No raw value is emitted, and no
-//! non-finite number is serialized. Column names are kept as-is and never
+//! non-finite number is serialized.
+//!
+//! Row counts (each shown group's `size`, `rows` and `small_groups.rows`)
+//! are rounded to the nearest 5, halves up, as Phirewall rounds every count
+//! it discloses (`COUNT_ROUNDING`, `round_count`), so subtracting one from
+//! another cannot recover a small group's size exactly. A nonzero count
+//! under `min_rows` is not rounded but withheld as `"under <min_rows>"`.
+//! Counts of groups are exact. Column names are kept as-is and never
 //! interpreted.
 
 use std::collections::{HashMap, HashSet};
@@ -88,6 +95,7 @@ pub struct Trait {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GroupEntry {
     pub id: i64,
+    /// Rounded to the nearest 5.
     pub size: usize,
     pub traits: Vec<Trait>,
 }
@@ -95,7 +103,31 @@ pub struct GroupEntry {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SmallGroups {
     pub count: usize,
-    pub rows: usize,
+    pub rows: RowCount,
+}
+
+/// A disclosed row count: 0, or rounded to the nearest 5, or withheld
+/// (`"under <min_rows>"`) when under `min_rows`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum RowCount {
+    Rounded(usize),
+    Withheld(String),
+}
+
+impl RowCount {
+    fn of(rows: usize, min_rows: usize) -> Self {
+        if rows == 0 || rows >= min_rows {
+            Self::Rounded(round_count(rows))
+        } else {
+            Self::Withheld(format!("under {min_rows}"))
+        }
+    }
+}
+
+/// `count` rounded to the nearest 5, halves up: Phirewall's `round_count`.
+fn round_count(count: usize) -> usize {
+    (count + 2) / 5 * 5
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -120,7 +152,7 @@ pub struct GroupSummary {
     pub method: String,
     pub cut_off: Option<f64>,
     pub group_count: usize,
-    pub rows: usize,
+    pub rows: RowCount,
     pub groups: Vec<GroupEntry>,
     pub small_groups: SmallGroups,
     pub defining_features: Vec<DefiningFeature>,
@@ -444,7 +476,7 @@ pub fn group_summary(
             traits.sort_by(|a, b| b.1.total_cmp(&a.1));
             GroupEntry {
                 id,
-                size,
+                size: round_count(size),
                 traits: traits
                     .into_iter()
                     .take(t.max_traits)
@@ -459,11 +491,11 @@ pub fn group_summary(
         method: method.to_owned(),
         cut_off: cut_off.is_finite().then_some(cut_off),
         group_count: by_size.len(),
-        rows,
+        rows: RowCount::of(rows, t.min_rows),
         groups,
         small_groups: SmallGroups {
             count: by_size.len() - shown.len(),
-            rows: rows - shown_rows,
+            rows: RowCount::of(rows - shown_rows, t.min_rows),
         },
         defining_features: scored
             .iter()
@@ -515,6 +547,13 @@ mod tests {
         }
         let text = v.to_string();
         assert!(!text.contains("NaN") && !text.contains("inf"), "{text}");
+    }
+
+    fn small(count: usize, rows: usize) -> SmallGroups {
+        SmallGroups {
+            count,
+            rows: RowCount::Rounded(rows),
+        }
     }
 
     /// Group `g` of `k` near-equal groups of `rows` rows.
@@ -708,12 +747,12 @@ mod tests {
             &table(vec![("x", shifted(&mut rng, &labels, 1.0))]),
             &labels,
         );
-        assert_eq!((s.group_count, s.rows), (1, 50));
+        assert_eq!((s.group_count, &s.rows), (1, &RowCount::Rounded(50)));
         assert_eq!(s.groups.len(), 1);
         assert_eq!((s.groups[0].id, s.groups[0].size), (7, 50));
         assert!(s.groups[0].traits.is_empty());
         assert!(s.defining_features.is_empty() && s.cells.is_empty());
-        assert_eq!((s.small_groups.count, s.small_groups.rows), (0, 0));
+        assert_eq!(s.small_groups, small(0, 0));
     }
 
     #[test]
@@ -725,7 +764,7 @@ mod tests {
             &labels,
         );
         assert!(s.groups.is_empty() && s.defining_features.is_empty() && s.cells.is_empty());
-        assert_eq!((s.small_groups.count, s.small_groups.rows), (10, 70));
+        assert_eq!(s.small_groups, small(10, 70));
     }
 
     #[test]
@@ -740,7 +779,7 @@ mod tests {
         );
         assert_eq!(s.group_count, 1504);
         assert_eq!(s.groups.len(), 4);
-        assert_eq!((s.small_groups.count, s.small_groups.rows), (1500, 1500));
+        assert_eq!(s.small_groups, small(1500, 1500));
         assert!(s.cells.len() <= T.max_groups * T.max_features);
 
         // A shattered grouping: separation over singletons would be 1.
@@ -918,12 +957,44 @@ mod tests {
             "{text}"
         );
         assert!(s.cells.iter().all(|c| c.group != 2));
-        assert_eq!((s.small_groups.count, s.small_groups.rows), (1, 5));
+        assert_eq!(s.small_groups.rows, RowCount::Withheld("under 8".into()));
+        assert_eq!(s.small_groups.count, 1);
         // Group 0 lacks "one" (strongly under-represented, 0 rows): the
         // cell falls to the level it holds.
         let cell = s.cells.iter().find(|c| c.group == 0).unwrap();
         assert_eq!(cell.level.as_deref(), Some("zero"));
         assert!(cell.sd > 0.0);
+    }
+
+    #[test]
+    fn row_counts_are_rounded_so_a_small_group_cannot_be_recovered() {
+        let mut rng = StdRng::seed_from_u64(11);
+        // Groups of 12 and 13 rows and a singleton.
+        let mut labels = vec![0; 12];
+        labels.extend([1; 13]);
+        labels.push(2);
+        let s = summarize(
+            &table(vec![("x", shifted(&mut rng, &labels, 3.0))]),
+            &labels,
+        );
+        let sizes: Vec<usize> = s.groups.iter().map(|g| g.size).collect();
+        assert_eq!(sizes, [15, 10]);
+        assert_eq!(s.rows, RowCount::Rounded(25));
+        assert_eq!(s.small_groups.count, 1);
+        let text = serde_json::to_string(&s.small_groups).unwrap();
+        assert_eq!(text, r#"{"count":1,"rows":"under 8"}"#);
+
+        // A remainder of min_rows or more is rounded too.
+        let mut labels = labels.clone();
+        labels.extend((3..12).map(|g| g as i64));
+        let s = summarize(
+            &table(vec![("x", shifted(&mut rng, &labels, 3.0))]),
+            &labels,
+        );
+        assert_eq!(s.small_groups, small(10, 10));
+        assert_eq!(s.rows, RowCount::Rounded(35));
+        assert_eq!(round_count(2), 0);
+        assert_eq!(round_count(3), 5);
     }
 
     #[test]

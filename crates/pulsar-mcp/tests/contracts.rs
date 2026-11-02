@@ -3511,13 +3511,29 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
 
     let groups = summary["groups"].as_array().unwrap();
     assert!(groups.len() as f64 <= max_groups);
+    // Row counts are rounded to the nearest 5, so they add up only to
+    // within 2 per count; a remainder under min_rows is withheld.
     let sizes: Vec<u64> = groups.iter().map(|g| g["size"].as_u64().unwrap()).collect();
     assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "{sizes:?}");
-    assert!(sizes.iter().all(|&n| n as f64 >= min_rows), "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n % 5 == 0), "{sizes:?}");
+    assert!(
+        sizes.iter().all(|&n| n as f64 + 2.0 >= min_rows),
+        "{sizes:?}"
+    );
     let small = &summary["small_groups"];
-    assert_eq!(
-        sizes.iter().sum::<u64>() + small["rows"].as_u64().unwrap(),
-        summary["rows"].as_u64().unwrap()
+    let remainder = match &small["rows"] {
+        Value::String(s) => {
+            assert_eq!(s, &format!("under {min_rows}"));
+            0
+        }
+        rows => rows.as_u64().unwrap(),
+    };
+    let rows = summary["rows"].as_u64().unwrap();
+    assert_eq!(rows % 5, 0);
+    let slack = 2 * (sizes.len() as u64 + 2) + min_rows as u64;
+    assert!(
+        (sizes.iter().sum::<u64>() + remainder).abs_diff(rows) <= slack,
+        "{summary}"
     );
     assert_eq!(
         groups.len() as u64 + small["count"].as_u64().unwrap(),
