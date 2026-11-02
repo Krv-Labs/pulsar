@@ -39,8 +39,19 @@
 //! it discloses (`COUNT_ROUNDING`, `round_count`), so subtracting one from
 //! another cannot recover a small group's size exactly. A nonzero count
 //! under `min_rows` is not rounded but withheld as `"under <min_rows>"`.
-//! Counts of groups are exact. Column names are kept as-is and never
-//! interpreted.
+//! Counts of groups are exact. Column names are never interpreted.
+//!
+//! Size: only two things grow, and both are bounded. Entries are capped by
+//! the thresholds (`max_groups` × `max_features` cells, `max_traits` per
+//! group, at most 20 unused names), and every string emitted (column
+//! names, levels, the method) is cut to [`MAX_LABEL_CHARS`] characters on a
+//! char boundary, ending in `…`; the entry holding a cut name or level is
+//! marked `truncated` (a name in `not_used_for_grouping` is only cut). So
+//! a string serializes to at most 485 bytes (80 characters escaped as
+//! `\u00XX`, the ellipsis and quotes), and the whole summary to at most
+//! about 66 KB at the defaults and 870 KB at the largest overrides (20
+//! groups, features and traits); plain-text names and levels make it a
+//! fraction of that.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -77,6 +88,17 @@ pub const GROUP_SUMMARY_DEFAULTS: GroupSummaryThresholds = GroupSummaryThreshold
 /// Columns named in `not_used_for_grouping`; the rest are only counted.
 const MAX_LISTED_UNUSED: usize = 20;
 
+/// Longest column name or level emitted, in characters, before the `…`.
+pub const MAX_LABEL_CHARS: usize = 80;
+
+/// `s` cut to [`MAX_LABEL_CHARS`] characters plus `…`, and whether it was.
+fn label(s: &str) -> (String, bool) {
+    match s.char_indices().nth(MAX_LABEL_CHARS) {
+        Some((end, _)) => (format!("{}…", &s[..end]), true),
+        None => (s.to_owned(), false),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureKind {
@@ -91,6 +113,9 @@ pub struct Trait {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
     pub sd: f64,
+    /// The column name or level was cut to `MAX_LABEL_CHARS`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -136,6 +161,9 @@ pub struct DefiningFeature {
     pub column: String,
     pub kind: FeatureKind,
     pub separation: f64,
+    /// The column name was cut to `MAX_LABEL_CHARS`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -145,6 +173,9 @@ pub struct Cell {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
     pub sd: f64,
+    /// The column name or level was cut to `MAX_LABEL_CHARS`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -522,19 +553,22 @@ pub fn group_summary(
                 .filter_map(|(stats, _)| {
                     let (level, sd) = stats.cell(id, t.min_rows)?;
                     (sd.abs() >= t.min_sd).then(|| {
-                        let level = level.map(str::to_owned);
+                        let (column, cut_column) = label(stats.name);
+                        let (level, cut_level) = level.map(label).unzip();
+                        let truncated = cut_column || cut_level == Some(true);
                         cells.push(Cell {
                             group: id,
-                            column: stats.name.to_owned(),
+                            column: column.clone(),
                             level: level.clone(),
                             sd: round_to(sd, 2),
+                            truncated,
                         });
-                        let column = stats.name.to_owned();
                         (
                             Trait {
                                 column,
                                 level,
                                 sd: round_to(sd, 2),
+                                truncated,
                             },
                             sd.abs(),
                         )
@@ -556,7 +590,7 @@ pub fn group_summary(
 
     GroupSummary {
         thresholds: *t,
-        method: method.to_owned(),
+        method: label(method).0,
         cut_off: cut_off.is_finite().then_some(cut_off),
         group_count: by_size.len(),
         rows: RowCount::of(rows, t.min_rows),
@@ -567,17 +601,21 @@ pub fn group_summary(
         },
         defining_features: scored
             .iter()
-            .map(|(stats, separation)| DefiningFeature {
-                column: stats.name.to_owned(),
-                kind: stats.kind,
-                separation: *separation,
+            .map(|(stats, separation)| {
+                let (column, truncated) = label(stats.name);
+                DefiningFeature {
+                    column,
+                    kind: stats.kind,
+                    separation: *separation,
+                    truncated,
+                }
             })
             .collect(),
         cells,
         not_used_for_grouping: unused_listed
             .iter()
             .take(MAX_LISTED_UNUSED)
-            .map(|n| (*n).clone())
+            .map(|n| label(n).0)
             .collect(),
         not_used_for_grouping_omitted: unused_listed.len().saturating_sub(MAX_LISTED_UNUSED),
     }
@@ -1004,11 +1042,17 @@ mod tests {
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
-                .for_each(|f| f["column"] = Value::Null);
+                .for_each(|f| {
+                    f["column"] = Value::Null;
+                    f.as_object_mut().unwrap().remove("truncated");
+                });
             (s, v)
         };
         let (s, a) = pick(&names);
-        assert_eq!(s.defining_features[0].column, long);
+        let cut: String = long.chars().take(MAX_LABEL_CHARS).collect();
+        assert_eq!(s.defining_features[0].column, cut + "…");
+        assert!(s.defining_features[0].truncated);
+        assert!(!s.defining_features[1].truncated);
         assert_eq!(s.defining_features.len(), 5, "no name is special-cased");
         let (_, b) = pick(&["p", "q", "r", "s", "t", "u"]);
         assert_eq!(a["defining_features"], b["defining_features"]);
@@ -1154,6 +1198,123 @@ mod tests {
             .map(|f| (f.column.clone(), f.separation))
             .collect();
         assert_eq!(top, all);
+    }
+
+    /// Every string in `v` is at most a cut label long.
+    fn assert_short_strings(v: &Value) {
+        match v {
+            Value::String(s) => assert!(s.chars().count() <= MAX_LABEL_CHARS + 1, "{s:.100}"),
+            Value::Array(a) => a.iter().for_each(assert_short_strings),
+            Value::Object(m) => m.values().for_each(assert_short_strings),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn long_levels_and_names_are_cut_and_the_bytes_bounded() {
+        // Two groups of 8, each holding its own 100k-character level.
+        let labels = labels(16, 2);
+        let long = |g: i64| Some(format!("{g}{}", "测".repeat(100_000)));
+        let name = "ß".repeat(100_000);
+        let s = summarize(
+            &table(vec![(
+                &name,
+                Column::Text(labels.iter().map(|&g| long(g)).collect()),
+            )]),
+            &labels,
+        );
+        let v = json_of(&s);
+        assert_short_strings(&v);
+        assert_eq!(s.cells.len(), 2);
+        assert!(s.cells.iter().all(|c| c.truncated));
+        assert!(s
+            .groups
+            .iter()
+            .all(|g| g.traits.iter().all(|t| t.truncated)));
+        assert!(s.defining_features[0].truncated);
+        // Cut levels stay apart: they differ before the cut.
+        assert_ne!(s.cells[0].level, s.cells[1].level);
+    }
+
+    /// The largest serialized summary under `t`: every entry at its cap,
+    /// every string at its longest, every number at its widest.
+    fn size_bound(t: &GroupSummaryThresholds) -> usize {
+        // 80 characters escaped to `\u00XX`, the ellipsis, the quotes.
+        let string = 6 * MAX_LABEL_CHARS + "…".len() + 2;
+        let number = 24; // an f64 or an i64, as serde_json writes them
+        let (g, f, tr) = (t.max_groups, t.max_features, t.max_traits);
+        let entry = |template: &str, strings: usize, numbers: usize| {
+            template.len() + 1 + strings * string + numbers * number
+        };
+        let cell = entry(
+            r#"{"group":,"column":,"level":,"sd":,"truncated":true}"#,
+            2,
+            2,
+        );
+        let trait_ = entry(r#"{"column":,"level":,"sd":,"truncated":true}"#, 2, 1);
+        let group = entry(r#"{"id":,"size":,"traits":[]}"#, 0, 2);
+        let feature = entry(
+            r#"{"column":,"kind":"categorical","separation":,"truncated":true}"#,
+            1,
+            1,
+        );
+        let fixed = entry(
+            r#"{"thresholds":{"max_groups":,"max_features":,"min_sd":,"min_rows":,"max_traits":},"method":,"cut_off":,"group_count":,"rows":,"groups":[],"small_groups":{"count":,"rows":},"defining_features":[],"cells":[],"not_used_for_grouping":[],"not_used_for_grouping_omitted":}"#,
+            3,
+            11,
+        );
+        fixed
+            + g * f * cell
+            + g * (group + tr.min(f) * trait_)
+            + f * feature
+            + MAX_LISTED_UNUSED * (string + 1)
+    }
+
+    #[test]
+    fn at_the_largest_overrides_the_size_stays_under_its_bound() {
+        let max = GroupSummaryThresholds {
+            max_groups: 20,
+            max_features: 20,
+            min_sd: 0.0,
+            min_rows: 8,
+            max_traits: 20,
+        };
+        // 20 groups of 8; 25 grouping columns where each group holds its
+        // own level, and 25 unused ones. Names and levels escape to 6
+        // bytes a character after a distinct prefix.
+        let labels = labels(160, 20);
+        let long = |prefix: usize, chars: usize| format!("{prefix:02}{}", "\u{1}".repeat(chars));
+        let levels = || {
+            Column::Text(
+                labels
+                    .iter()
+                    .map(|&g| Some(long(g as usize, 200)))
+                    .collect(),
+            )
+        };
+        let mut columns: Vec<(String, Column)> =
+            (0..25).map(|j| (long(j, 100_000), levels())).collect();
+        let unused: Vec<String> = (30..55).map(|j| long(j, 100_000)).collect();
+        columns.extend(unused.iter().map(|n| (n.clone(), levels())));
+        let (names, columns) = columns.into_iter().unzip();
+        let table = Table::new(names, columns).unwrap();
+        let s = group_summary(&table, &labels, &[], &unused, "components", 0.25, &max);
+
+        assert_eq!(s.defining_features.len(), 20);
+        assert_eq!(s.cells.len(), 20 * 20);
+        assert!(s.groups.iter().all(|g| g.traits.len() == 20));
+        assert!(s.cells.iter().all(|c| c.truncated));
+        let v = json_of(&s);
+        assert_short_strings(&v);
+        let (bytes, bound) = (v.to_string().len(), size_bound(&max));
+        // The strings are at their longest, so the bound is nearly met.
+        assert!(
+            bytes <= bound && bytes > bound * 9 / 10,
+            "{bytes} of {bound}"
+        );
+        // The figures in the module documentation.
+        assert!(size_bound(&T) < 66_000, "{}", size_bound(&T));
+        assert!(bound < 870_000, "{bound}");
     }
 
     #[test]
