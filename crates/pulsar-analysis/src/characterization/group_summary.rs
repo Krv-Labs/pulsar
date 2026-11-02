@@ -42,7 +42,8 @@
 //! Counts of groups are exact. Column names are kept as-is and never
 //! interpreted.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use pulsar_data::{Column, Table};
 use serde::Serialize;
@@ -223,6 +224,14 @@ impl ColumnStats<'_> {
         }
     }
 
+    /// Drop the per-group statistics of every group not in `groups`.
+    fn keep_groups(&mut self, groups: &HashSet<i64>) {
+        self.group_n.retain(|g, _| groups.contains(g));
+        for axis in &mut self.axes {
+            axis.group_sum.retain(|g, _| groups.contains(g));
+        }
+    }
+
     /// The strongest emittable difference of `group`, positive on a tie.
     fn cell(&self, group: i64, min_rows: usize) -> Option<(Option<&str>, f64)> {
         self.axes
@@ -232,6 +241,35 @@ impl ColumnStats<'_> {
             .max_by(|(_, x), (_, y)| x.abs().total_cmp(&y.abs()).then(x.total_cmp(y)))
     }
 }
+
+/// A scored column, ordered by separation, then the earlier column first.
+struct Ranked<'a> {
+    separation: f64,
+    index: usize,
+    stats: ColumnStats<'a>,
+}
+
+impl Ord for Ranked<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.separation
+            .total_cmp(&other.separation)
+            .then(other.index.cmp(&self.index))
+    }
+}
+
+impl PartialOrd for Ranked<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Ranked<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Ranked<'_> {}
 
 fn numeric_stats<'a>(name: &'a str, values: &[f64], labels: &[i64]) -> Option<ColumnStats<'a>> {
     let observed = || {
@@ -427,28 +465,53 @@ pub fn group_summary(
         .map(|(n, _)| n)
         .collect();
 
-    let mut scored: Vec<(ColumnStats, f64)> = profiled
+    // The max_features strongest columns, kept in a bounded min-heap: a
+    // column that loses is dropped as soon as it is scored, and a kept one
+    // holds per-group statistics of the shown groups only.
+    let shown_ids: HashSet<i64> = shown.iter().map(|&(g, _)| g).collect();
+    let mut top: BinaryHeap<Reverse<Ranked>> = BinaryHeap::with_capacity(t.max_features + 1);
+    let candidates = profiled
         .filter(|(n, _)| !unused.contains(n.as_str()))
-        .filter_map(|(n, c)| column_stats(n, c, labels, t.min_rows))
-        .filter_map(|stats| {
-            let eligible_n: usize = stats
-                .group_n
-                .iter()
-                .filter(|(g, _)| eligible.contains(g))
-                .map(|(_, &n)| n)
-                .sum();
-            let best = stats
+        .filter_map(|(n, c)| column_stats(n, c, labels, t.min_rows));
+    for (index, mut stats) in candidates.enumerate() {
+        let eligible_n: usize = stats
+            .group_n
+            .iter()
+            .filter(|(g, _)| eligible.contains(g))
+            .map(|(_, &n)| n)
+            .sum();
+        let best = stats
+            .axes
+            .iter()
+            .map(|a| stats.separation(a, &eligible, eligible_n))
+            .fold(0.0, f64::max);
+        let separation = round_to(best, 3);
+        if separation > 0.0 {
+            stats.keep_groups(&shown_ids);
+            top.push(Reverse(Ranked {
+                separation,
+                index,
+                stats,
+            }));
+            if top.len() > t.max_features {
+                top.pop();
+            }
+        }
+    }
+    debug_assert!(top.len() <= t.max_features);
+    debug_assert!(top.iter().all(|Reverse(r)| {
+        r.stats.group_n.len() <= shown.len()
+            && r.stats
                 .axes
                 .iter()
-                .map(|a| stats.separation(a, &eligible, eligible_n))
-                .fold(0.0, f64::max);
-            let separation = round_to(best, 3);
-            (separation > 0.0).then_some((stats, separation))
-        })
+                .all(|a| a.group_sum.len() <= shown.len())
+    }));
+    // Strongest first, the earlier column on ties.
+    let scored: Vec<(ColumnStats, f64)> = top
+        .into_sorted_vec()
+        .into_iter()
+        .map(|Reverse(r)| (r.stats, r.separation))
         .collect();
-    // A stable sort keeps table order on ties.
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-    scored.truncate(t.max_features);
 
     let mut cells = vec![];
     let groups = shown
@@ -1048,6 +1111,49 @@ mod tests {
         assert_eq!(s.rows, RowCount::Rounded(35));
         assert_eq!(round_count(2), 0);
         assert_eq!(round_count(3), 5);
+    }
+
+    #[test]
+    fn many_groups_and_columns_keep_the_ranking_of_a_full_sort() {
+        // 2000 groups of 8 and 40 columns shifted by different amounts.
+        let mut rng = StdRng::seed_from_u64(12);
+        let labels = labels(16_000, 2000);
+        let columns: Vec<(String, Column)> = (0..40)
+            .map(|j| {
+                (
+                    format!("f{j}"),
+                    shifted(&mut rng, &labels, 0.001 * j as f64),
+                )
+            })
+            .collect();
+        let (names, columns): (Vec<String>, Vec<Column>) = columns.into_iter().unzip();
+        let table = Table::new(names.clone(), columns).unwrap();
+        let s = summarize(&table, &labels);
+        assert_eq!(s.groups.len(), T.max_groups);
+        assert_eq!(s.small_groups.count, 2000 - T.max_groups);
+
+        // The same ranking, by a full stable sort of every column alone.
+        let mut all: Vec<(String, f64)> = names
+            .iter()
+            .zip(&table.columns)
+            .filter_map(|(n, c)| {
+                let one = summarize(
+                    &Table::new(vec![n.clone()], vec![c.clone()]).unwrap(),
+                    &labels,
+                );
+                one.defining_features
+                    .first()
+                    .map(|f| (n.clone(), f.separation))
+            })
+            .collect();
+        all.sort_by(|a, b| b.1.total_cmp(&a.1));
+        all.truncate(T.max_features);
+        let top: Vec<(String, f64)> = s
+            .defining_features
+            .iter()
+            .map(|f| (f.column.clone(), f.separation))
+            .collect();
+        assert_eq!(top, all);
     }
 
     #[test]

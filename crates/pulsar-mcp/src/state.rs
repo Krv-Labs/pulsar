@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use pulsar_analysis::characterization::GroupSummaryThresholds;
 use pulsar_analysis::feature_evidence::FeatureEvidenceIndex;
 use pulsar_config::PulsarConfig;
 use pulsar_core::TemporalCosmicGraph;
@@ -115,6 +116,10 @@ pub struct ClusterState {
     pub evidence: Arc<FeatureEvidenceIndex>,
     /// Everything besides the run and labels that `evidence` depends on.
     pub evidence_key: EvidenceKey,
+    /// The dossier's group_summary, reused while the evidence and the
+    /// thresholds match.
+    pub group_summary: serde_json::Value,
+    pub summary_thresholds: GroupSummaryThresholds,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -362,6 +362,7 @@ struct Computed {
     graph_metrics: Value,
     dossier: Option<TopologicalDossier>,
     group_summary: Value,
+    summary_thresholds: GroupSummaryThresholds,
 }
 
 /// Inputs of the blocking worker, captured before it starts.
@@ -423,13 +424,14 @@ fn compute(job: Job) -> Result<(Computed, StagedClusterAssignment), ToolError> {
         exclude_columns: sorted_exclude,
         max_clusters_to_characterize: job.max_clusters_to_characterize,
     };
-    let evidence = match &job.cached {
-        Some(c)
-            if c.run_id == job.run_id && c.labels == labels && c.evidence_key == evidence_key =>
-        {
-            c.evidence.clone()
-        }
-        _ => Arc::new(
+    // The cached clustering, when it is this run's with these labels and key.
+    let hit = job
+        .cached
+        .as_ref()
+        .filter(|c| c.run_id == job.run_id && c.labels == labels && c.evidence_key == evidence_key);
+    let evidence = match hit {
+        Some(c) => c.evidence.clone(),
+        None => Arc::new(
             build_feature_evidence_index(
                 table,
                 &labels,
@@ -475,16 +477,21 @@ fn compute(job: Job) -> Result<(Computed, StagedClusterAssignment), ToolError> {
         map.insert("component_sizes_summary".into(), size_summary(&sizes, 20));
     }
 
-    let group_summary = serde_json::to_value(group_summary(
-        table,
-        &labels,
-        &job.exclude_columns,
-        &job.dropped,
-        result.method_used,
-        result.interpretation_edge_weight_threshold_applied,
-        &job.summary_thresholds,
-    ))
-    .map_err(|e| failed(e.to_string()))?;
+    // The key holds the method, cut-off and hidden columns; the dropped
+    // columns are the run's, so only the thresholds can still differ.
+    let group_summary = match hit {
+        Some(c) if c.summary_thresholds == job.summary_thresholds => c.group_summary.clone(),
+        _ => serde_json::to_value(group_summary(
+            table,
+            &labels,
+            &job.exclude_columns,
+            &job.dropped,
+            result.method_used,
+            result.interpretation_edge_weight_threshold_applied,
+            &job.summary_thresholds,
+        ))
+        .map_err(|e| failed(e.to_string()))?,
+    };
 
     let staged = job
         .store
@@ -507,6 +514,7 @@ fn compute(job: Job) -> Result<(Computed, StagedClusterAssignment), ToolError> {
             graph_metrics,
             dossier,
             group_summary,
+            summary_thresholds: job.summary_thresholds,
         },
         staged,
     ))
@@ -540,6 +548,8 @@ fn publish(
         meta: computed.meta.clone(),
         evidence: computed.evidence.clone(),
         evidence_key: computed.evidence_key.clone(),
+        group_summary: computed.group_summary.clone(),
+        summary_thresholds: computed.summary_thresholds,
     }));
     Ok(record)
 }
@@ -767,6 +777,7 @@ mod tests {
             graph_metrics: json!({}),
             dossier: None,
             group_summary: json!({}),
+            summary_thresholds: GROUP_SUMMARY_DEFAULTS,
         }
     }
 
