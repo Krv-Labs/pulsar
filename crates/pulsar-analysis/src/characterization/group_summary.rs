@@ -171,7 +171,8 @@ impl ColumnStats<'_> {
     /// η² of one axis over the `eligible` groups. With `s` a group's sum and
     /// `m` the mean, Σ n·(s/n − m)² = Σ s²/n − 2m·Σ s + m²·Σ n, which only
     /// needs the groups where the axis has a nonzero sum.
-    fn separation(&self, axis: &Axis, eligible: &HashSet<i64>) -> f64 {
+    /// `eligible_n` is the column's observed rows in the eligible groups.
+    fn separation(&self, axis: &Axis, eligible: &HashSet<i64>, eligible_n: usize) -> f64 {
         let (mut squares, mut sums) = (0.0, 0.0);
         for (g, &s) in &axis.group_sum {
             if eligible.contains(g) {
@@ -179,12 +180,6 @@ impl ColumnStats<'_> {
                 sums += s;
             }
         }
-        let eligible_n: usize = self
-            .group_n
-            .iter()
-            .filter(|(g, _)| eligible.contains(g))
-            .map(|(_, &n)| n)
-            .sum();
         let m = axis.mean;
         let between = squares - 2.0 * m * sums + m * m * eligible_n as f64;
         let total = self.n as f64 * axis.sd * axis.sd;
@@ -393,10 +388,16 @@ pub fn group_summary(
         .filter(|(n, _)| !unused.contains(n.as_str()))
         .filter_map(|(n, c)| column_stats(n, c, labels, t.min_rows))
         .filter_map(|stats| {
+            let eligible_n: usize = stats
+                .group_n
+                .iter()
+                .filter(|(g, _)| eligible.contains(g))
+                .map(|(_, &n)| n)
+                .sum();
             let best = stats
                 .axes
                 .iter()
-                .map(|a| stats.separation(a, &eligible))
+                .map(|a| stats.separation(a, &eligible, eligible_n))
                 .fold(0.0, f64::max);
             let separation = round_to(best, 3);
             (separation > 0.0).then_some((stats, separation))
