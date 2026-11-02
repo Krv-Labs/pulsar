@@ -3483,6 +3483,90 @@ fn column_names_in(value: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
+/// The group_summary invariants that hold on any data: bounded, finite,
+/// thresholds echoed, counts adding up, only grouping columns defining, and
+/// no group or level under min_rows. Returns it.
+fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
+    fn finite(v: &Value) {
+        match v {
+            Value::Number(n) => assert!(n.as_f64().unwrap().is_finite(), "{n}"),
+            Value::Array(a) => a.iter().for_each(finite),
+            Value::Object(m) => m.values().for_each(finite),
+            _ => {}
+        }
+    }
+    let summary = &dossier["group_summary"];
+    let bytes = summary.to_string().len();
+    assert!(bytes < 20_000, "group_summary is {bytes} bytes");
+    finite(summary);
+    assert_eq!(summary["thresholds"], thresholds);
+    let at = |k: &str| thresholds[k].as_f64().unwrap();
+    let (max_groups, min_rows, min_sd) = (at("max_groups"), at("min_rows"), at("min_sd"));
+    assert_eq!(summary["method"], dossier["method_applied"]);
+    assert_eq!(
+        summary["cut_off"],
+        dossier["interpretation_edge_weight_threshold_applied"]
+    );
+    assert_eq!(summary["group_count"], dossier["cluster_count"]);
+
+    let groups = summary["groups"].as_array().unwrap();
+    assert!(groups.len() as f64 <= max_groups);
+    let sizes: Vec<u64> = groups.iter().map(|g| g["size"].as_u64().unwrap()).collect();
+    assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n as f64 >= min_rows), "{sizes:?}");
+    let small = &summary["small_groups"];
+    assert_eq!(
+        sizes.iter().sum::<u64>() + small["rows"].as_u64().unwrap(),
+        summary["rows"].as_u64().unwrap()
+    );
+    assert_eq!(
+        groups.len() as u64 + small["count"].as_u64().unwrap(),
+        summary["group_count"].as_u64().unwrap()
+    );
+
+    let grouping: BTreeSet<&str> = dossier["profiled_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["used_for_grouping"] == true)
+        .map(|f| f["column"].as_str().unwrap())
+        .collect();
+    let features = summary["defining_features"].as_array().unwrap();
+    assert!(features.len() as f64 <= at("max_features"));
+    let separations: Vec<f64> = features
+        .iter()
+        .map(|f| f["separation"].as_f64().unwrap())
+        .collect();
+    assert!(separations.windows(2).all(|w| w[0] >= w[1]));
+    assert!(separations.iter().all(|s| *s > 0.0 && *s <= 1.0));
+    let defining: BTreeSet<&str> = features
+        .iter()
+        .map(|f| f["column"].as_str().unwrap())
+        .collect();
+    assert!(defining.is_subset(&grouping), "{defining:?}");
+
+    let shown: BTreeSet<i64> = groups.iter().map(|g| g["id"].as_i64().unwrap()).collect();
+    for cell in summary["cells"].as_array().unwrap() {
+        assert!(shown.contains(&cell["group"].as_i64().unwrap()), "{cell}");
+        assert!(
+            defining.contains(cell["column"].as_str().unwrap()),
+            "{cell}"
+        );
+        assert!(cell["sd"].as_f64().unwrap().abs() >= min_sd, "{cell}");
+    }
+    for group in groups {
+        let traits = group["traits"].as_array().unwrap();
+        assert!(traits.len() as f64 <= at("max_traits"));
+        assert!(traits
+            .iter()
+            .all(|t| t["sd"].as_f64().unwrap().abs() >= min_sd));
+    }
+    for column in summary["not_used_for_grouping"].as_array().unwrap() {
+        assert!(!grouping.contains(column.as_str().unwrap()), "{column}");
+    }
+    summary
+}
+
 #[tokio::test]
 async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping() {
     let root = TempRoot::new("threshold-table");
@@ -3574,6 +3658,168 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         dossier["cluster_result"]["n_clusters"]
     );
     assert!(dossier["interpretation_edge_weight_threshold_applied"].is_number());
+
+    let defaults =
+        json!({"max_groups": 6, "max_features": 5, "min_sd": 0.5, "min_rows": 8, "max_traits": 3});
+    let summary = checked_group_summary(&dossier, defaults.clone());
+    let not_used: Vec<&str> = summary["not_used_for_grouping"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert_eq!(not_used, ["species", "year"], "{summary}");
+
+    // A higher cut-off splits the penguins into groups that differ.
+    let split = rows
+        .iter()
+        .filter(|r| {
+            r["top_sizes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|n| n.as_u64().unwrap() >= 8)
+                .count()
+                >= 3
+        })
+        .map(|r| r["cutoff"].as_f64().unwrap())
+        .next()
+        .expect("a cut-off with three groups of 8 or more");
+    let split_dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[
+            ("method", json!("components")),
+            ("interpretation_edge_weight_threshold", json!(split)),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    let summary = checked_group_summary(&split_dossier, defaults.clone());
+    assert!(
+        summary["groups"].as_array().unwrap().len() >= 2,
+        "{summary}"
+    );
+    assert!(
+        !summary["defining_features"].as_array().unwrap().is_empty(),
+        "{summary}"
+    );
+    eprintln!(
+        "penguins group_summary: {}",
+        serde_json::to_string_pretty(summary).unwrap()
+    );
+
+    let overrides = args(&[
+        ("response_format", json!("json")),
+        ("summary_max_groups", json!(2)),
+        ("summary_max_features", json!(2)),
+        ("summary_min_sd", json!(0.0)),
+        ("summary_min_rows", json!(20)),
+        ("summary_max_traits", json!(1)),
+    ]);
+    let narrowed = ok(&client, &tools, "generate_cluster_dossier", overrides).await;
+    checked_group_summary(
+        &narrowed,
+        json!({"max_groups": 2, "max_features": 2, "min_sd": 0.0, "min_rows": 20, "max_traits": 1}),
+    );
+    for (name, value) in [
+        ("summary_min_rows", json!(3)),
+        ("summary_max_groups", json!(0)),
+        ("summary_max_features", json!(500)),
+        ("summary_min_sd", json!(-1.0)),
+    ] {
+        let refused = err(&client, "generate_cluster_dossier", args(&[(name, value)])).await;
+        assert_eq!(refused["error_code"], "INVALID_ARGUMENT", "{name}");
+    }
+    client.cancel().await.unwrap();
+}
+
+/// 240 rows, 220 columns: three hidden blobs show in a few numeric and one
+/// categorical column; the rest is noise, ordinal text and a constant.
+fn synthetic_wide_csv(dir: &Path) -> PathBuf {
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut noise = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let header: Vec<String> = (0..220)
+        .map(|j| match j {
+            0 => "größe_ß→测试".to_owned(),
+            1 => "constant".to_owned(),
+            2 => "grade".to_owned(),
+            3 => "arm".to_owned(),
+            j => format!("measurement_{j:03}"),
+        })
+        .collect();
+    let mut csv = header.join(",") + "\n";
+    for i in 0..240 {
+        let blob = i % 3;
+        let row: Vec<String> = (0..220)
+            .map(|j| match j {
+                1 => "1".to_owned(),
+                2 => ["I", "II", "III"][(i / 7) % 3].to_owned(),
+                3 => ["left", "middle", "right"][blob].to_owned(),
+                j if j % 50 == 0 => format!("{:.6}", blob as f64 * 4.0 + noise()),
+                _ => format!("{:.6}", noise()),
+            })
+            .collect();
+        csv += &(row.join(",") + "\n");
+    }
+    let path = dir.join("synthetic_wide.csv");
+    std::fs::write(&path, csv).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn the_dossier_group_summary_stays_bounded_on_a_wide_synthetic_table() {
+    let root = TempRoot::new("group-summary-wide");
+    let csv = synthetic_wide_csv(root.path());
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[("path", json!(csv.display().to_string()))]),
+    )
+    .await;
+    ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", ingested["dataset_id"].clone())]),
+    )
+    .await;
+    ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("dataset_id", ingested["dataset_id"].clone()),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[("response_format", json!("json"))]),
+    )
+    .await;
+    let defaults =
+        json!({"max_groups": 6, "max_features": 5, "min_sd": 0.5, "min_rows": 8, "max_traits": 3});
+    let summary = checked_group_summary(&dossier, defaults);
+    let defining: Vec<&str> = summary["defining_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["column"].as_str().unwrap())
+        .collect();
+    assert!(!defining.contains(&"constant"), "{summary}");
     client.cancel().await.unwrap();
 }
 

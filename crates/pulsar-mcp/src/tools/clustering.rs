@@ -17,6 +17,9 @@
 
 use std::sync::Arc;
 
+use pulsar_analysis::characterization::{
+    group_summary, GroupSummaryThresholds, GROUP_SUMMARY_DEFAULTS,
+};
 use pulsar_analysis::cluster_payloads::{
     build_cluster_selection, build_evidence_payload, build_summary_evidence_payload,
     cluster_result_payload, cluster_selection_to_markdown, prepend_threshold_markdown,
@@ -106,6 +109,16 @@ pub struct Params {
     pub exclude_columns: Vec<String>,
     /// Run to cluster, from run_topological_sweep. Omit for the latest run. Labels are published into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT).
     pub run_id: String,
+    /// group_summary: groups listed, largest first (1-20). Default 6.
+    pub summary_max_groups: Option<usize>,
+    /// group_summary: defining features listed, strongest first (1-20). Default 5.
+    pub summary_max_features: Option<usize>,
+    /// group_summary: smallest |sd| called a difference (finite, >= 0). Default 0.5.
+    pub summary_min_sd: Option<f64>,
+    /// group_summary: smallest group or categorical level shown (>= 8, the default; it can only be raised).
+    pub summary_min_rows: Option<usize>,
+    /// group_summary: differences listed per group (0-20). Default 3.
+    pub summary_max_traits: Option<usize>,
 }
 
 impl Default for Params {
@@ -120,6 +133,11 @@ impl Default for Params {
             response_format: Format::Markdown,
             exclude_columns: Vec::new(),
             run_id: String::new(),
+            summary_max_groups: None,
+            summary_max_features: None,
+            summary_min_sd: None,
+            summary_min_rows: None,
+            summary_max_traits: None,
         }
     }
 }
@@ -158,6 +176,7 @@ pub fn spec() -> ToolSpec {
                 ("cluster_assignment", open.clone()),
                 ("cluster_assignment_id", s::string()),
                 ("cluster_selection", open.clone()),
+                ("group_summary", open.clone()),
                 ("clusters", s::array(open.clone())),
                 ("recommended_next_tools", s::array(s::string())),
                 ("detail_hint", s::string()),
@@ -238,6 +257,58 @@ fn excluded_columns(live: &LiveRun, requested: &[String]) -> Vec<String> {
     out
 }
 
+/// Largest summary_max_groups / max_features / max_traits: keeps the
+/// group_summary small.
+const MAX_SUMMARY_LIST: usize = 20;
+
+/// The group_summary thresholds: the defaults with the requested overrides.
+fn summary_thresholds(p: &Params) -> Result<GroupSummaryThresholds, ToolError> {
+    let d = GROUP_SUMMARY_DEFAULTS;
+    let list = |name: &str, value: Option<usize>, min: usize, default: usize| match value {
+        Some(v) if !(min..=MAX_SUMMARY_LIST).contains(&v) => Err(ToolError::invalid_argument(
+            NAME,
+            format!("{name} must be between {min} and {MAX_SUMMARY_LIST}, got '{v}'"),
+            format!("Pass {name} in [{min}, {MAX_SUMMARY_LIST}], or omit it for {default}."),
+        )),
+        v => Ok(v.unwrap_or(default)),
+    };
+    let min_sd = p.summary_min_sd.unwrap_or(d.min_sd);
+    if !(min_sd.is_finite() && min_sd >= 0.0) {
+        return Err(ToolError::invalid_argument(
+            NAME,
+            format!("summary_min_sd must be a finite number >= 0, got '{min_sd}'"),
+            format!("Pass summary_min_sd >= 0, or omit it for {}.", d.min_sd),
+        ));
+    }
+    let min_rows = p.summary_min_rows.unwrap_or(d.min_rows);
+    if min_rows < d.min_rows {
+        // A privacy floor: groups and levels this small are never shown.
+        return Err(ToolError::invalid_argument(
+            NAME,
+            format!(
+                "summary_min_rows must be >= {}, got '{min_rows}'",
+                d.min_rows
+            ),
+            format!(
+                "Pass summary_min_rows >= {} or omit it; the floor can only be raised.",
+                d.min_rows
+            ),
+        ));
+    }
+    Ok(GroupSummaryThresholds {
+        max_groups: list("summary_max_groups", p.summary_max_groups, 1, d.max_groups)?,
+        max_features: list(
+            "summary_max_features",
+            p.summary_max_features,
+            1,
+            d.max_features,
+        )?,
+        min_sd,
+        min_rows,
+        max_traits: list("summary_max_traits", p.summary_max_traits, 0, d.max_traits)?,
+    })
+}
+
 fn unit_threshold(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
@@ -290,6 +361,7 @@ struct Computed {
     /// `_graph_metrics_payload`: component sizes as a bounded summary.
     graph_metrics: Value,
     dossier: Option<TopologicalDossier>,
+    group_summary: Value,
 }
 
 /// Inputs of the blocking worker, captured before it starts.
@@ -306,6 +378,9 @@ struct Job {
     n_ball_maps: usize,
     minhash_d: Option<usize>,
     exclude_columns: Vec<String>,
+    /// Columns the preprocessing dropped: profiled but not used for grouping.
+    dropped: Vec<String>,
+    summary_thresholds: GroupSummaryThresholds,
     max_clusters_to_characterize: usize,
     detail: DossierDetail,
 }
@@ -400,6 +475,17 @@ fn compute(job: Job) -> Result<(Computed, StagedClusterAssignment), ToolError> {
         map.insert("component_sizes_summary".into(), size_summary(&sizes, 20));
     }
 
+    let group_summary = serde_json::to_value(group_summary(
+        table,
+        &labels,
+        &job.exclude_columns,
+        &job.dropped,
+        result.method_used,
+        result.interpretation_edge_weight_threshold_applied,
+        &job.summary_thresholds,
+    ))
+    .map_err(|e| failed(e.to_string()))?;
+
     let staged = job
         .store
         .stage_cluster_assignment(ClusterAssignment {
@@ -420,6 +506,7 @@ fn compute(job: Job) -> Result<(Computed, StagedClusterAssignment), ToolError> {
             evidence_key,
             graph_metrics,
             dossier,
+            group_summary,
         },
         staged,
     ))
@@ -523,6 +610,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         threshold_source,
     );
 
+    let summary_thresholds = summary_thresholds(&p)?;
     let exclude_columns = excluded_columns(&live, &p.exclude_columns);
     let dropped = live.fitted.config.preprocessing.drop_columns.clone();
     let job = Job {
@@ -538,6 +626,8 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         n_ball_maps: view.record.n_ball_maps,
         minhash_d: view.minhash_d(),
         exclude_columns,
+        dropped: dropped.clone(),
+        summary_thresholds,
         // Only characterize the largest clusters so a shattered graph
         // cannot stall the O(clusters x features) evidence pass.
         max_clusters_to_characterize: (p.max_clusters * 2).max(50),
@@ -633,6 +723,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     payload["threshold_surface"] = surface.clone();
     payload["cluster_assignment"] = assignment_summary(&record);
     payload["cluster_assignment_id"] = json!(record.cluster_assignment_id);
+    payload["group_summary"] = computed.group_summary.clone();
     let text = match p.response_format {
         Format::Markdown => Some(prepend_threshold_markdown(&text, &surface)),
         Format::Json => None,
@@ -675,6 +766,7 @@ mod tests {
             },
             graph_metrics: json!({}),
             dossier: None,
+            group_summary: json!({}),
         }
     }
 
