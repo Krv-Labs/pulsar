@@ -41,17 +41,21 @@
 //! under `min_rows` is not rounded but withheld as `"under <min_rows>"`.
 //! Counts of groups are exact. Column names are never interpreted.
 //!
-//! Size: only two things grow, and both are bounded. Entries are capped by
-//! the thresholds (`max_groups` × `max_features` cells, `max_traits` per
-//! group, at most 20 unused names), and every string emitted (column
-//! names, levels, the method) is cut to [`MAX_LABEL_CHARS`] characters on a
-//! char boundary, ending in `…`; the entry holding a cut name or level is
-//! marked `truncated` (a name in `not_used_for_grouping` is only cut). So
-//! a string serializes to at most 485 bytes (80 characters escaped as
-//! `\u00XX`, the ellipsis and quotes), and the whole summary to at most
-//! about 66 KB at the defaults and 870 KB at the largest overrides (20
-//! groups, features and traits); plain-text names and levels make it a
-//! fraction of that.
+//! Size: the summary is as large as the thresholds asked for. Entries
+//! follow them (`max_groups` × `max_features` cells, `max_traits` per
+//! group, at most 20 unused names) and there is no cap on them here:
+//! `max_groups` is applied as at most the group count and `max_features` to the
+//! number of grouping columns, which is just "all of them". Every string
+//! emitted (column names, levels, the method) is cut to [`MAX_LABEL_CHARS`]
+//! characters on a char boundary, ending in `…`; the entry holding a cut
+//! name or level is marked `truncated` (a name in `not_used_for_grouping`
+//! is only cut). So a string serializes to at most 485 bytes (80
+//! characters escaped as `\u00XX`, the ellipsis and quotes), and the
+//! worst case is proportional to the requested counts: about 66 KB at the
+//! defaults, growing with `max_groups` × `max_features` cells and
+//! `max_traits` per group; plain-text names and levels make it a fraction
+//! of that. `size_chars` reports the actual serialized length, so a caller
+//! can see what drove an oversized answer.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -191,6 +195,9 @@ pub struct GroupSummary {
     pub cells: Vec<Cell>,
     pub not_used_for_grouping: Vec<String>,
     pub not_used_for_grouping_omitted: usize,
+    /// The length in characters of this summary serialized as JSON
+    /// (`serde_json::to_string`), this field included.
+    pub size_chars: usize,
 }
 
 /// One standardized axis of a column: the column itself (numeric) or one
@@ -462,12 +469,24 @@ pub fn group_summary(
 ) -> GroupSummary {
     let rows = table.n_rows();
     assert_eq!(labels.len(), rows, "one label per table row");
-    let t = thresholds;
 
     let mut sizes: HashMap<i64, usize> = HashMap::new();
     for &g in labels {
         *sizes.entry(g).or_insert(0) += 1;
     }
+    // Asking for more groups or features than exist is asking for all of
+    // them: clamp (the request is still what is echoed).
+    let grouping_columns = table
+        .names
+        .iter()
+        .filter(|n| !exclude_columns.contains(n) && !not_used_for_grouping.contains(n))
+        .count();
+    let clamped = GroupSummaryThresholds {
+        max_groups: thresholds.max_groups.min(sizes.len()),
+        max_features: thresholds.max_features.min(grouping_columns),
+        ..*thresholds
+    };
+    let t = &clamped;
     let mut by_size: Vec<(i64, usize)> = sizes.into_iter().collect();
     by_size.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let eligible: HashSet<i64> = by_size
@@ -588,8 +607,8 @@ pub fn group_summary(
         })
         .collect();
 
-    GroupSummary {
-        thresholds: *t,
+    let mut summary = GroupSummary {
+        thresholds: *thresholds,
         method: label(method).0,
         cut_off: cut_off.is_finite().then_some(cut_off),
         group_count: by_size.len(),
@@ -618,7 +637,20 @@ pub fn group_summary(
             .map(|n| label(n).0)
             .collect(),
         not_used_for_grouping_omitted: unused_listed.len().saturating_sub(MAX_LISTED_UNUSED),
+        size_chars: 0,
+    };
+    // The count is part of what it counts: repeat until its digits settle.
+    loop {
+        let n = serde_json::to_string(&summary)
+            .expect("a summary serializes")
+            .chars()
+            .count();
+        if n == summary.size_chars {
+            break;
+        }
+        summary.size_chars = n;
     }
+    summary
 }
 
 #[cfg(test)]
@@ -1259,9 +1291,9 @@ mod tests {
             1,
         );
         let fixed = entry(
-            r#"{"thresholds":{"max_groups":,"max_features":,"min_sd":,"min_rows":,"max_traits":},"method":,"cut_off":,"group_count":,"rows":,"groups":[],"small_groups":{"count":,"rows":},"defining_features":[],"cells":[],"not_used_for_grouping":[],"not_used_for_grouping_omitted":}"#,
+            r#"{"thresholds":{"max_groups":,"max_features":,"min_sd":,"min_rows":,"max_traits":},"method":,"cut_off":,"group_count":,"rows":,"groups":[],"small_groups":{"count":,"rows":},"defining_features":[],"cells":[],"not_used_for_grouping":[],"not_used_for_grouping_omitted":,"size_chars":}"#,
             3,
-            11,
+            12,
         );
         fixed
             + g * f * cell
@@ -1271,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn at_the_largest_overrides_the_size_stays_under_its_bound() {
+    fn at_large_overrides_the_size_stays_under_its_bound() {
         let max = GroupSummaryThresholds {
             max_groups: 20,
             max_features: 20,
@@ -1312,9 +1344,76 @@ mod tests {
             bytes <= bound && bytes > bound * 9 / 10,
             "{bytes} of {bound}"
         );
-        // The figures in the module documentation.
+        // The figure in the module documentation.
         assert!(size_bound(&T) < 66_000, "{}", size_bound(&T));
-        assert!(bound < 870_000, "{bound}");
+    }
+
+    #[test]
+    fn large_requests_are_honoured_and_clamped_to_what_exists() {
+        let (table, labels, unused) = wide(3000);
+        let ask = |n: usize| GroupSummaryThresholds {
+            max_groups: n,
+            max_features: n,
+            min_sd: 0.0,
+            min_rows: 8,
+            max_traits: n,
+        };
+        // Past the old cap of 20: all 9 groups, and 40 features of the 220
+        // grouping columns.
+        let s = group_summary(&table, &labels, &[], &unused, "spectral", 0.1, &ask(40));
+        assert_eq!(s.groups.len(), 9);
+        assert_eq!(s.defining_features.len(), 40);
+        assert!(
+            s.defining_features.len() > 20,
+            "{}",
+            s.defining_features.len()
+        );
+        assert!(s.groups.iter().any(|g| g.traits.len() > 3));
+        // More than exists is all of it, echoed as applied.
+        let s = group_summary(
+            &table,
+            &labels,
+            &[],
+            &unused,
+            "spectral",
+            0.1,
+            &ask(100_000),
+        );
+        assert_eq!(s.thresholds, ask(100_000));
+        assert_eq!(s.groups.len(), 9);
+        assert!(s.defining_features.len() <= 220);
+    }
+
+    #[test]
+    fn size_chars_is_the_serialized_length() {
+        let (table, labels, unused) = wide(3000);
+        for t in [
+            T,
+            GroupSummaryThresholds {
+                max_groups: 50,
+                max_features: 50,
+                ..T
+            },
+        ] {
+            let s = group_summary(&table, &labels, &[], &unused, "spectral", 0.1, &t);
+            let text = serde_json::to_string(&s).unwrap();
+            assert_eq!(s.size_chars, text.chars().count());
+            assert!(s.size_chars > 1000);
+        }
+        // Non-ASCII names count as characters, not bytes.
+        let t = table_of_unicode();
+        let s = summarize(&t.0, &t.1);
+        assert_eq!(
+            s.size_chars,
+            serde_json::to_string(&s).unwrap().chars().count()
+        );
+    }
+
+    fn table_of_unicode() -> (Table, Vec<i64>) {
+        let mut rng = StdRng::seed_from_u64(11);
+        let labels = labels(40, 2);
+        let x = shifted(&mut rng, &labels, 2.0);
+        (table(vec![("größe→测试", x)]), labels)
     }
 
     #[test]

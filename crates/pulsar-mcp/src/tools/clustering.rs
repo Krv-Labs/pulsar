@@ -109,15 +109,15 @@ pub struct Params {
     pub exclude_columns: Vec<String>,
     /// Run to cluster, from run_topological_sweep. Omit for the latest run. Labels are published into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT).
     pub run_id: String,
-    /// group_summary: groups listed, largest first (1-20). Default 6.
+    /// group_summary: groups listed, largest first (>= 1; more than exist means all). Default 6.
     pub summary_max_groups: Option<usize>,
-    /// group_summary: defining features listed, strongest first (1-20). Default 5.
+    /// group_summary: defining features listed, strongest first (>= 1; more than exist means all). Default 5.
     pub summary_max_features: Option<usize>,
     /// group_summary: smallest |sd| called a difference (finite, >= 0). Default 0.5.
     pub summary_min_sd: Option<f64>,
     /// group_summary: smallest group or categorical level shown (>= 8, the default; it can only be raised).
     pub summary_min_rows: Option<usize>,
-    /// group_summary: differences listed per group (0-20). Default 3.
+    /// group_summary: differences listed per group (>= 1). Default 3.
     pub summary_max_traits: Option<usize>,
 }
 
@@ -257,18 +257,14 @@ fn excluded_columns(live: &LiveRun, requested: &[String]) -> Vec<String> {
     out
 }
 
-/// Largest summary_max_groups / max_features / max_traits: keeps the
-/// group_summary small.
-const MAX_SUMMARY_LIST: usize = 20;
-
 /// The group_summary thresholds: the defaults with the requested overrides.
 fn summary_thresholds(p: &Params) -> Result<GroupSummaryThresholds, ToolError> {
     let d = GROUP_SUMMARY_DEFAULTS;
     let list = |name: &str, value: Option<usize>, min: usize, default: usize| match value {
-        Some(v) if !(min..=MAX_SUMMARY_LIST).contains(&v) => Err(ToolError::invalid_argument(
+        Some(v) if v < min => Err(ToolError::invalid_argument(
             NAME,
-            format!("{name} must be between {min} and {MAX_SUMMARY_LIST}, got '{v}'"),
-            format!("Pass {name} in [{min}, {MAX_SUMMARY_LIST}], or omit it for {default}."),
+            format!("{name} must be >= {min}, got '{v}'"),
+            format!("Pass {name} >= {min}, or omit it for {default}."),
         )),
         v => Ok(v.unwrap_or(default)),
     };
@@ -305,7 +301,7 @@ fn summary_thresholds(p: &Params) -> Result<GroupSummaryThresholds, ToolError> {
         )?,
         min_sd,
         min_rows,
-        max_traits: list("summary_max_traits", p.summary_max_traits, 0, d.max_traits)?,
+        max_traits: list("summary_max_traits", p.summary_max_traits, 1, d.max_traits)?,
     })
 }
 

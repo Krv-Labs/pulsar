@@ -3739,10 +3739,34 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         &narrowed,
         json!({"max_groups": 2, "max_features": 2, "min_sd": 0.0, "min_rows": 20, "max_traits": 1}),
     );
+    // Large requests are honoured, not refused: groups and features are
+    // clamped to what exists, and size_chars is the serialized length.
+    let huge = args(&[
+        ("response_format", json!("json")),
+        ("summary_max_groups", json!(500)),
+        ("summary_max_features", json!(500)),
+        ("summary_max_traits", json!(500)),
+    ]);
+    let huge = ok(&client, &tools, "generate_cluster_dossier", huge).await;
+    let summary = &huge["group_summary"];
+    let t = &summary["thresholds"];
+    assert_eq!(t["max_groups"], 500, "{t}");
+    assert!(
+        summary["groups"].as_array().unwrap().len() as u64
+            <= summary["group_count"].as_u64().unwrap()
+    );
+    let mut bare = summary.clone();
+    let size = bare.as_object_mut().unwrap().remove("size_chars").unwrap();
+    assert!(size.as_u64().unwrap() > 0);
+    assert_eq!(
+        serde_json::to_string(summary).unwrap().chars().count() as u64,
+        size.as_u64().unwrap()
+    );
     for (name, value) in [
         ("summary_min_rows", json!(3)),
         ("summary_max_groups", json!(0)),
-        ("summary_max_features", json!(500)),
+        ("summary_max_features", json!(0)),
+        ("summary_max_traits", json!(0)),
         ("summary_min_sd", json!(-1.0)),
     ] {
         let refused = err(&client, "generate_cluster_dossier", args(&[(name, value)])).await;
