@@ -91,6 +91,34 @@ fn test_options() -> ServerOptions {
     }
 }
 
+/// The `io.phirewall/summary` key and its schema. The schema is
+/// Phirewall's `docs/contracts/summary-v1.json`, vendored byte for byte:
+/// it must match Phirewall's copy, which is the source of truth.
+const SUMMARY: &str = "io.phirewall/summary";
+
+fn summary_validator() -> &'static jsonschema::Validator {
+    static VALIDATOR: std::sync::OnceLock<jsonschema::Validator> = std::sync::OnceLock::new();
+    VALIDATOR.get_or_init(|| {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phirewall-summary-v1.json");
+        let schema: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        jsonschema::validator_for(&schema).expect("the vendored schema compiles")
+    })
+}
+
+/// `payload`'s summary object, checked against the v1 schema.
+fn summary_of<'a>(payload: &'a Value, name: &str) -> &'a Value {
+    let summary = payload
+        .get(SUMMARY)
+        .unwrap_or_else(|| panic!("{name}: no {SUMMARY}"));
+    let errors: Vec<String> = summary_validator()
+        .iter_errors(summary)
+        .map(|e| format!("{} at {}", e, e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{name}: {errors:#?}\n{summary}");
+    summary
+}
+
 fn args(pairs: &[(&str, Value)]) -> JsonObject {
     pairs
         .iter()
@@ -130,6 +158,9 @@ async fn ok<H: ClientHandler>(
         .and_then(|t| t.output_schema.clone())
         .expect("output schema");
     validate(&Value::Object((*schema).clone()), &payload, name);
+    if payload.get(SUMMARY).is_some() {
+        summary_of(&payload, name);
+    }
     assert!(
         !result.content.is_empty(),
         "{name}: a text view is required"
@@ -1032,6 +1063,13 @@ fn plan_csv() -> String {
     golden("plan", "wide.csv").display().to_string()
 }
 
+/// The header of `plan_csv`, in order.
+fn plan_csv_columns() -> Vec<String> {
+    let text = std::fs::read_to_string(plan_csv()).unwrap();
+    let header = text.lines().next().unwrap();
+    header.split(',').map(str::to_owned).collect()
+}
+
 async fn ingest_wide<H: ClientHandler>(
     client: &RunningService<RoleClient, H>,
     tools: &[Tool],
@@ -1674,10 +1712,11 @@ async fn characterize_and_probe_read_raw_data_and_explain_failures() {
 
 // ---- create_config -------------------------------------------------------------
 
-/// `preprocessing_summary.counts` agree with the config's `preprocessing:`
-/// block, and each list is as long as its count.
-fn assert_summary_matches_yaml(created: &Value) {
-    let summary = &created["preprocessing_summary"];
+/// The summary's `inputs.counts` agree with the config's `preprocessing:`
+/// block, each list is as long as its count, and every feature id is the
+/// column's position in the table.
+fn assert_summary_matches_yaml(created: &Value, columns: &[String]) {
+    let summary = &summary_of(created, "create_config")["inputs"];
     let config =
         pulsar_config::from_yaml_str(created["config_yaml"].as_str().unwrap()).expect("config");
     let pre = &config.preprocessing;
@@ -1716,6 +1755,12 @@ fn assert_summary_matches_yaml(created: &Value) {
         .map(|d| d["column"].as_str().unwrap())
         .collect();
     assert_eq!(dropped, pre.drop_columns);
+    for list in ["dropped", "encoded", "imputed", "changes_from_previous"] {
+        for e in summary[list].as_array().unwrap() {
+            let feature = e["feature"].as_u64().unwrap() as usize;
+            assert_eq!(columns[feature], e["column"], "{e}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1798,12 +1843,11 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     assert_eq!(created["calibration_space"], "processed");
     assert_eq!(created["preprocessing_plan"]["source"], "baseline_defaults");
     assert_eq!(created["preprocessing_plan"]["revision"], 1);
-    assert_summary_matches_yaml(&created);
-    assert_eq!(created["preprocessing_summary"]["revision"], 1);
-    assert_eq!(
-        created["preprocessing_summary"]["changes_from_previous"],
-        json!([])
-    );
+    assert_summary_matches_yaml(&created, &plan_csv_columns());
+    let inputs = &created[SUMMARY]["inputs"];
+    assert_eq!(inputs["revision"], 1);
+    assert_eq!(inputs["changes_from_previous"], json!([]));
+    assert_eq!(created[SUMMARY]["run"]["dataset_id"], json!(dataset_id));
     let yaml = created["config_yaml"].as_str().unwrap();
     assert!(yaml.contains("name: baseline"), "{yaml}");
     let strategy = &created["sweep_strategy"];
@@ -1934,12 +1978,14 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     .await;
     assert_eq!(used["preprocessing_plan"]["revision"], 2);
     // The summary says what the edit changed, and names no category level.
-    assert_summary_matches_yaml(&used);
-    let summary = &used["preprocessing_summary"];
+    let columns = plan_csv_columns();
+    assert_summary_matches_yaml(&used, &columns);
+    let summary = &used[SUMMARY]["inputs"];
     let changes = summary["changes_from_previous"].as_array().unwrap();
+    let feature = |c: &str| columns.iter().position(|n| n == c).unwrap();
     for change in [
-        json!({"column": "visits1", "field": "role", "from": "feature", "to": "drop"}),
-        json!({"column": "grade", "field": "encode", "from": null, "to": "one_hot"}),
+        json!({"feature": feature("visits1"), "column": "visits1", "field": "role", "to": "drop"}),
+        json!({"feature": feature("grade"), "column": "grade", "field": "encode", "to": "one_hot"}),
     ] {
         assert!(changes.contains(&change), "{change} not in {changes:?}");
     }
@@ -1957,7 +2003,7 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
         .collect();
     assert_eq!(
         keys,
-        BTreeSet::from(["column", "method", "levels", "features_added"])
+        BTreeSet::from(["feature", "column", "method", "levels"])
     );
     assert!(grade["levels"].as_u64().unwrap() > 1, "{grade}");
     let text = summary.to_string();
@@ -3483,10 +3529,11 @@ fn column_names_in(value: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// The group_summary invariants that hold on any data: bounded, finite,
-/// thresholds echoed, counts adding up, only grouping columns defining, and
-/// no group or level under min_rows. Returns it.
-fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
+/// The summary's `grouping` invariants that hold on any data: valid
+/// against the v1 schema, finite, limits echoed as applied, counts adding
+/// up, only grouping columns defining, no group or level under min_rows,
+/// and every feature id the id of a `profiled_features` entry. Returns it.
+fn checked_group_summary(dossier: &Value, limits: Value) -> &Value {
     fn finite(v: &Value) {
         match v {
             Value::Number(n) => assert!(n.as_f64().unwrap().is_finite(), "{n}"),
@@ -3495,12 +3542,14 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
             _ => {}
         }
     }
-    let summary = &dossier["group_summary"];
+    let contract = summary_of(dossier, "generate_cluster_dossier");
+    let summary = &contract["grouping"];
     let bytes = summary.to_string().len();
-    assert!(bytes < 20_000, "group_summary is {bytes} bytes");
+    assert!(bytes < 20_000, "grouping is {bytes} bytes");
     finite(summary);
-    assert_eq!(summary["thresholds"], thresholds);
-    let at = |k: &str| thresholds[k].as_f64().unwrap();
+    assert_eq!(summary["limits"], limits);
+    assert_eq!(contract["run"]["run_id"], dossier["run_id"]);
+    let at = |k: &str| limits[k].as_f64().unwrap();
     let (max_groups, min_rows, min_sd) = (at("max_groups"), at("min_rows"), at("min_sd"));
     assert_eq!(summary["method"], dossier["method_applied"]);
     assert_eq!(
@@ -3515,7 +3564,6 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
     // within 2 per count; a remainder under min_rows is withheld.
     let sizes: Vec<u64> = groups.iter().map(|g| g["size"].as_u64().unwrap()).collect();
     assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "{sizes:?}");
-    assert!(sizes.iter().all(|&n| n % 5 == 0), "{sizes:?}");
     assert!(
         sizes.iter().all(|&n| n as f64 + 2.0 >= min_rows),
         "{sizes:?}"
@@ -3528,8 +3576,7 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
         }
         rows => rows.as_u64().unwrap(),
     };
-    let rows = summary["rows"].as_u64().unwrap();
-    assert_eq!(rows % 5, 0);
+    let rows = contract["run"]["rows"].as_u64().unwrap();
     let slack = 2 * (sizes.len() as u64 + 2) + min_rows as u64;
     assert!(
         (sizes.iter().sum::<u64>() + remainder).abs_diff(rows) <= slack,
@@ -3540,13 +3587,21 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
         summary["group_count"].as_u64().unwrap()
     );
 
-    let grouping: BTreeSet<&str> = dossier["profiled_features"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|f| f["used_for_grouping"] == true)
-        .map(|f| f["column"].as_str().unwrap())
-        .collect();
+    // Every feature id names a profiled_features entry: a grouping column
+    // there (or, for an unused one, not), named as the entry's label shows.
+    let profiled = dossier["profiled_features"].as_array().unwrap();
+    let profiled_as = |e: &Value, used: bool| {
+        let f = profiled
+            .iter()
+            .find(|f| f["feature"] == e["feature"])
+            .unwrap_or_else(|| panic!("{e} is not profiled"));
+        assert_eq!(f["used_for_grouping"], used, "{f}");
+        let (name, label) = (f["column"].as_str().unwrap(), e["column"].as_str().unwrap());
+        match label.strip_suffix('…') {
+            Some(cut) if name != label => assert!(name.starts_with(cut), "{name} {label}"),
+            _ => assert_eq!(name, label),
+        }
+    };
     let features = summary["defining_features"].as_array().unwrap();
     assert!(features.len() as f64 <= at("max_features"));
     let separations: Vec<f64> = features
@@ -3554,18 +3609,17 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
         .map(|f| f["separation"].as_f64().unwrap())
         .collect();
     assert!(separations.windows(2).all(|w| w[0] >= w[1]));
-    assert!(separations.iter().all(|s| *s > 0.0 && *s <= 1.0));
-    let defining: BTreeSet<&str> = features
+    let defining: BTreeSet<u64> = features
         .iter()
-        .map(|f| f["column"].as_str().unwrap())
+        .map(|f| f["feature"].as_u64().unwrap())
         .collect();
-    assert!(defining.is_subset(&grouping), "{defining:?}");
 
     let shown: BTreeSet<i64> = groups.iter().map(|g| g["id"].as_i64().unwrap()).collect();
-    for cell in summary["cells"].as_array().unwrap() {
+    let cells = summary["cells"].as_array().unwrap();
+    for cell in cells {
         assert!(shown.contains(&cell["group"].as_i64().unwrap()), "{cell}");
         assert!(
-            defining.contains(cell["column"].as_str().unwrap()),
+            defining.contains(&cell["feature"].as_u64().unwrap()),
             "{cell}"
         );
         assert!(cell["sd"].as_f64().unwrap().abs() >= min_sd, "{cell}");
@@ -3577,36 +3631,31 @@ fn checked_group_summary(dossier: &Value, thresholds: Value) -> &Value {
             .iter()
             .all(|t| t["sd"].as_f64().unwrap().abs() >= min_sd));
     }
-    for column in summary["not_used_for_grouping"].as_array().unwrap() {
-        assert!(!grouping.contains(column.as_str().unwrap()), "{column}");
-    }
-
-    // Every feature id is the entry's index in profiled_features: a
-    // grouping column there, named as the entry's label shows.
-    let profiled = dossier["profiled_features"].as_array().unwrap();
-    let profiled_as = |feature: &Value, label: &Value, used: bool| {
-        let f = &profiled[feature.as_u64().unwrap() as usize];
-        assert_eq!(f["used_for_grouping"], used, "{f}");
-        let (name, label) = (f["column"].as_str().unwrap(), label.as_str().unwrap());
-        match label.strip_suffix('…') {
-            Some(cut) if name != label => assert!(name.starts_with(cut), "{name} {label}"),
-            _ => assert_eq!(name, label),
-        }
-    };
     let traits = groups.iter().flat_map(|g| g["traits"].as_array().unwrap());
-    let entries = summary["cells"].as_array().unwrap().iter();
-    for e in features.iter().chain(entries).chain(traits) {
-        profiled_as(&e["feature"], &e["column"], true);
+    for e in features.iter().chain(cells).chain(traits) {
+        profiled_as(e, true);
     }
-    let unused_names = summary["not_used_for_grouping"].as_array().unwrap();
-    let unused_ids = summary["not_used_for_grouping_features"]
-        .as_array()
-        .unwrap();
-    assert_eq!(unused_names.len(), unused_ids.len());
-    for (id, name) in unused_ids.iter().zip(unused_names) {
-        profiled_as(id, name, false);
+    for e in summary["not_used_for_grouping"].as_array().unwrap() {
+        profiled_as(e, false);
     }
     summary
+}
+
+/// The limits a dossier applies for `asked`: groups and features clamped
+/// to what exists, at least 1.
+fn applied(dossier: &Value, asked: Value) -> Value {
+    let grouping = dossier["profiled_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["used_for_grouping"] == true)
+        .count() as u64;
+    let groups = dossier["cluster_count"].as_u64().unwrap();
+    let mut out = asked.clone();
+    let clamp = |k: &str, n: u64| json!(asked[k].as_u64().unwrap().min(n).max(1));
+    out["max_groups"] = clamp("max_groups", groups);
+    out["max_features"] = clamp("max_features", grouping);
+    out
 }
 
 #[tokio::test]
@@ -3636,11 +3685,10 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
     )
     .await;
     // A hand-written config applies no stored plan.
-    assert!(sweep.get("preprocessing_summary").is_none());
+    assert!(summary_of(&sweep, "sweep").get("inputs").is_none());
 
-    let table = &sweep["threshold_table"];
-    assert_eq!(table["selected"], sweep["construction_threshold"]);
-    let rows = table["rows"].as_array().unwrap();
+    let table = &summary_of(&sweep, "sweep")["thresholds"];
+    let rows = table["cuts"].as_array().unwrap();
     assert!((2..=8).contains(&rows.len()), "{table}");
     let cutoffs: Vec<f64> = rows.iter().map(|r| r["cutoff"].as_f64().unwrap()).collect();
     assert!(cutoffs.windows(2).all(|w| w[0] <= w[1]), "{table}");
@@ -3651,13 +3699,13 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         );
         let cutoff = row["cutoff"].as_f64().unwrap();
         assert!(lo <= cutoff && cutoff <= hi, "{row}");
-        assert_eq!(row["width"].as_f64().unwrap(), hi - lo, "{row}");
         let sizes = row["top_sizes"].as_array().unwrap();
         assert!(!sizes.is_empty() && sizes.len() <= 6, "{row}");
         assert!(row["groups"].as_u64().unwrap() >= sizes.len() as u64);
     }
     let selected: Vec<&Value> = rows.iter().filter(|r| r["selected"] == true).collect();
     assert_eq!(selected.len(), 1, "{table}");
+    assert_eq!(selected[0]["cutoff"], sweep["construction_threshold"]);
     assert_eq!(
         selected[0]["groups"], sweep["key_metrics"]["component_count"],
         "the selected row shows the constructed graph's groups"
@@ -3673,24 +3721,29 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         ]),
     )
     .await;
-    let profiled: Vec<(&str, bool)> = dossier["profiled_features"]
+    // Feature ids are positions in the full table: rowid is 0 and excluded.
+    let profiled: Vec<(u64, &str, bool)> = dossier["profiled_features"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| {
             (
+                f["feature"].as_u64().unwrap(),
                 f["column"].as_str().unwrap(),
                 f["used_for_grouping"].as_bool().unwrap(),
             )
         })
         .collect();
-    assert!(profiled.contains(&("species", false)), "{profiled:?}");
-    assert!(profiled.contains(&("year", false)), "{profiled:?}");
-    assert!(profiled.contains(&("bill_length_mm", true)), "{profiled:?}");
+    assert!(profiled.contains(&(1, "species", false)), "{profiled:?}");
+    assert!(profiled.contains(&(8, "year", false)), "{profiled:?}");
+    assert!(
+        profiled.contains(&(3, "bill_length_mm", true)),
+        "{profiled:?}"
+    );
     let mut named = BTreeSet::new();
     column_names_in(&dossier, &mut named);
     assert!(!named.contains("rowid"), "row index profiled: {named:?}");
-    assert!(profiled.iter().all(|(c, _)| *c != "rowid"));
+    assert!(profiled.iter().all(|(_, c, _)| *c != "rowid"));
     assert_eq!(
         dossier["method_applied"],
         dossier["cluster_result"]["method_used"]
@@ -3703,14 +3756,12 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
 
     let defaults =
         json!({"max_groups": 6, "max_features": 5, "min_sd": 0.5, "min_rows": 8, "max_traits": 3});
-    let summary = checked_group_summary(&dossier, defaults.clone());
-    let not_used: Vec<&str> = summary["not_used_for_grouping"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c.as_str().unwrap())
-        .collect();
-    assert_eq!(not_used, ["species", "year"], "{summary}");
+    let summary = checked_group_summary(&dossier, applied(&dossier, defaults.clone()));
+    assert_eq!(
+        summary["not_used_for_grouping"],
+        json!([{"feature": 1, "column": "species"}, {"feature": 8, "column": "year"}]),
+        "{summary}"
+    );
 
     // A higher cut-off splits the penguins into groups that differ.
     let split = rows
@@ -3720,7 +3771,7 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter(|n| n.as_u64().unwrap() >= 8)
+                .filter(|n| n.as_u64().is_some_and(|n| n >= 8))
                 .count()
                 >= 3
         })
@@ -3738,7 +3789,7 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         ]),
     )
     .await;
-    let summary = checked_group_summary(&split_dossier, defaults.clone());
+    let summary = checked_group_summary(&split_dossier, applied(&split_dossier, defaults.clone()));
     assert!(
         summary["groups"].as_array().unwrap().len() >= 2,
         "{summary}"
@@ -3748,7 +3799,7 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         "{summary}"
     );
     eprintln!(
-        "penguins group_summary: {}",
+        "penguins grouping: {}",
         serde_json::to_string_pretty(summary).unwrap()
     );
 
@@ -3761,12 +3812,11 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         ("summary_max_traits", json!(1)),
     ]);
     let narrowed = ok(&client, &tools, "generate_cluster_dossier", overrides).await;
-    checked_group_summary(
-        &narrowed,
-        json!({"max_groups": 2, "max_features": 2, "min_sd": 0.0, "min_rows": 20, "max_traits": 1}),
-    );
+    let asked =
+        json!({"max_groups": 2, "max_features": 2, "min_sd": 0.0, "min_rows": 20, "max_traits": 1});
+    checked_group_summary(&narrowed, applied(&narrowed, asked));
     // Large requests are honoured, not refused: groups and features are
-    // clamped to what exists, and size_chars is the serialized length.
+    // clamped to what exists, and the limits say what was applied.
     let huge = args(&[
         ("response_format", json!("json")),
         ("summary_max_groups", json!(500)),
@@ -3774,20 +3824,9 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         ("summary_max_traits", json!(500)),
     ]);
     let huge = ok(&client, &tools, "generate_cluster_dossier", huge).await;
-    let summary = &huge["group_summary"];
-    let t = &summary["thresholds"];
-    assert_eq!(t["max_groups"], 500, "{t}");
-    assert!(
-        summary["groups"].as_array().unwrap().len() as u64
-            <= summary["group_count"].as_u64().unwrap()
-    );
-    let mut bare = summary.clone();
-    let size = bare.as_object_mut().unwrap().remove("size_chars").unwrap();
-    assert!(size.as_u64().unwrap() > 0);
-    assert_eq!(
-        serde_json::to_string(summary).unwrap().chars().count() as u64,
-        size.as_u64().unwrap()
-    );
+    let asked = json!({"max_groups": 500, "max_features": 500, "min_sd": 0.5, "min_rows": 8, "max_traits": 500});
+    let summary = checked_group_summary(&huge, applied(&huge, asked));
+    assert!(summary["limits"]["max_groups"].as_u64().unwrap() < 500);
     for (name, value) in [
         ("summary_min_rows", json!(3)),
         ("summary_max_groups", json!(0)),
@@ -3878,7 +3917,7 @@ async fn the_dossier_group_summary_stays_bounded_on_a_wide_synthetic_table() {
     .await;
     let defaults =
         json!({"max_groups": 6, "max_features": 5, "min_sd": 0.5, "min_rows": 8, "max_traits": 3});
-    let summary = checked_group_summary(&dossier, defaults);
+    let summary = checked_group_summary(&dossier, applied(&dossier, defaults));
     let defining: Vec<&str> = summary["defining_features"]
         .as_array()
         .unwrap()
@@ -3887,6 +3926,137 @@ async fn the_dossier_group_summary_stays_bounded_on_a_wide_synthetic_table() {
         .collect();
     assert!(!defining.contains(&"constant"), "{summary}");
     client.cancel().await.unwrap();
+}
+
+/// Every tool that emits the summary object does so valid against the v1
+/// schema, with its own parts, on the table `csv`; feature ids agree across
+/// the parts and with the dossier's `profiled_features`.
+async fn check_summary_parts(csv: &Path, tag: &str) {
+    let root = TempRoot::new(tag);
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[("path", json!(csv.display().to_string()))]),
+    )
+    .await;
+    let dataset_id = ingested["dataset_id"].clone();
+    let parts = |v: &Value| -> BTreeSet<String> {
+        let keys = v.as_object().unwrap().keys();
+        keys.filter(|k| !["version", "row_floor", "run"].contains(&k.as_str()))
+            .cloned()
+            .collect()
+    };
+    let set =
+        |names: &[&str]| -> BTreeSet<String> { names.iter().map(|n| n.to_string()).collect() };
+
+    let created = ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", dataset_id.clone())]),
+    )
+    .await;
+    let config = summary_of(&created, "create_config");
+    assert_eq!(parts(config), set(&["inputs"]), "{config}");
+    assert_eq!(config["run"]["dataset_id"], dataset_id);
+    assert!(config["run"].get("run_id").is_none());
+    for key in ["preprocessing_summary", "threshold_table", "group_summary"] {
+        assert!(created.get(key).is_none(), "{key}");
+    }
+
+    let sweep_args = args(&[
+        ("dataset_id", dataset_id.clone()),
+        ("response_format", json!("json")),
+    ]);
+    let first = ok(&client, &tools, "run_topological_sweep", sweep_args.clone()).await;
+    let sweep = summary_of(&first, "sweep");
+    assert_eq!(parts(sweep), set(&["inputs", "thresholds"]), "{sweep}");
+    assert_eq!(sweep["run"]["run_id"], first["run_id"]);
+    assert_eq!(sweep["inputs"], config["inputs"]);
+    let n_columns = first["data_shape"][1].as_u64().unwrap();
+    for list in ["dropped", "encoded", "imputed"] {
+        for e in sweep["inputs"][list].as_array().unwrap() {
+            assert!(e["feature"].as_u64().unwrap() < n_columns, "{e}");
+        }
+    }
+    for key in ["preprocessing_summary", "threshold_table", "group_summary"] {
+        assert!(first.get(key).is_none(), "{key}");
+    }
+    // A second run on the dataset says what changed (here, nothing).
+    let second = ok(&client, &tools, "run_topological_sweep", sweep_args).await;
+    let again = summary_of(&second, "sweep");
+    assert_eq!(
+        parts(again),
+        set(&["changes", "inputs", "thresholds"]),
+        "{again}"
+    );
+    assert!(second["diff_summary"].is_object(), "the native diff stays");
+
+    let curve = ok(
+        &client,
+        &tools,
+        "get_threshold_stability_curve",
+        args(&[("response_format", json!("json"))]),
+    )
+    .await;
+    let curve_summary = summary_of(&curve, "curve");
+    assert_eq!(parts(curve_summary), set(&["thresholds"]));
+    assert_eq!(curve_summary["thresholds"], again["thresholds"]);
+
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[("response_format", json!("json"))]),
+    )
+    .await;
+    let defaults =
+        json!({"max_groups": 6, "max_features": 5, "min_sd": 0.5, "min_rows": 8, "max_traits": 3});
+    checked_group_summary(&dossier, applied(&dossier, defaults));
+    assert_eq!(parts(&dossier[SUMMARY]), set(&["grouping"]));
+    assert!(dossier.get("group_summary").is_none());
+    // A column has one id: in the inputs and in profiled_features alike.
+    let inputs = &sweep["inputs"];
+    for f in dossier["profiled_features"].as_array().unwrap() {
+        for list in ["encoded", "imputed"] {
+            for e in inputs[list].as_array().unwrap() {
+                if e["column"] == f["column"] {
+                    assert_eq!(e["feature"], f["feature"], "{e} {f}");
+                }
+            }
+        }
+    }
+    client.cancel().await.unwrap();
+}
+
+#[test]
+fn the_vendored_schema_refuses_what_v1_forbids() {
+    let valid = json!({"version": 1, "row_floor": 8, "run": {"run_id": "run_a", "rows": 345}});
+    assert!(summary_validator().is_valid(&valid));
+    for (pointer, bad) in [
+        ("/version", json!(2)),
+        ("/row_floor", json!(5)),
+        ("/run/rows", json!(343)),
+        ("/run", json!({"rows": 345})),
+    ] {
+        let mut v = valid.clone();
+        *v.pointer_mut(pointer).unwrap() = bad;
+        assert!(!summary_validator().is_valid(&v), "{v}");
+    }
+}
+
+#[tokio::test]
+async fn every_summary_tool_answers_the_phirewall_contract_on_penguins() {
+    check_summary_parts(&golden("penguins", "input.csv"), "summary-penguins").await;
+}
+
+#[tokio::test]
+async fn every_summary_tool_answers_the_phirewall_contract_on_a_wide_table() {
+    let dir = TempRoot::new("summary-wide-csv");
+    check_summary_parts(&synthetic_wide_csv(dir.path()), "summary-wide").await;
 }
 
 #[tokio::test]
@@ -3907,16 +4077,10 @@ async fn a_sweep_under_a_stored_plan_carries_its_summary_and_hides_its_identifie
         ("response_format", json!("json")),
     ]);
     let sweep = ok(&client, &tools, "run_topological_sweep", sweep_args.clone()).await;
-    assert_eq!(
-        sweep["preprocessing_summary"],
-        created["preprocessing_summary"]
-    );
+    assert_eq!(sweep[SUMMARY]["inputs"], created[SUMMARY]["inputs"]);
     // The next sweep reads the normalized active config; it still matches.
     let again = ok(&client, &tools, "run_topological_sweep", sweep_args).await;
-    assert_eq!(
-        again["preprocessing_summary"],
-        created["preprocessing_summary"]
-    );
+    assert_eq!(again[SUMMARY]["inputs"], created[SUMMARY]["inputs"]);
 
     let dossier = ok(
         &client,
@@ -3953,6 +4117,6 @@ async fn a_sweep_under_a_stored_plan_carries_its_summary_and_hides_its_identifie
         ]),
     )
     .await;
-    assert!(edited.get("preprocessing_summary").is_none());
+    assert!(summary_of(&edited, "sweep").get("inputs").is_none());
     client.cancel().await.unwrap();
 }

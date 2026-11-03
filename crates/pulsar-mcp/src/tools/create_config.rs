@@ -14,7 +14,7 @@ use pulsar_analysis::config_build::{
 use pulsar_analysis::plan::{
     build_preprocessing_summary, calibrate_processed_space, draft_plan, plan_fingerprint,
     processed_feature_names, summarize_plan_counts, DraftOptions, PreprocessingPlan,
-    QuestionStatus, DROP_REASONS,
+    QuestionStatus,
 };
 use pulsar_analysis::pyround::round_to;
 use pulsar_store::PlanId;
@@ -26,6 +26,7 @@ use super::characterize::{characterization_error, load, registered};
 use super::config::{parse_config, resolve_dataset};
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
+use crate::phirewall;
 use crate::schema::{self as s, input_schema};
 use crate::state::ServerState;
 
@@ -114,109 +115,10 @@ pub fn spec() -> ToolSpec {
         ],
         false,
     );
-    let item = |props: &[(&str, Value)]| {
-        let required: Vec<&str> = props.iter().map(|(k, _)| *k).collect();
-        s::array(s::object(props, &required, false))
-    };
-    let summary = s::object(
-        &[
-            ("revision", s::integer()),
-            ("input_columns", s::integer()),
-            ("output_features", s::nullable(s::integer())),
-            ("rows", s::integer()),
-            (
-                "counts",
-                s::object(
-                    &[
-                        ("kept", s::integer()),
-                        ("dropped", s::integer()),
-                        ("encoded", s::integer()),
-                        ("imputed", s::integer()),
-                    ],
-                    &["kept", "dropped", "encoded", "imputed"],
-                    false,
-                ),
-            ),
-            (
-                "dropped",
-                item(&[
-                    ("column", s::string()),
-                    ("reason", s::enumeration(&DROP_REASONS)),
-                ]),
-            ),
-            ("dropped_omitted", s::integer()),
-            (
-                "encoded",
-                item(&[
-                    ("column", s::string()),
-                    ("method", s::string()),
-                    ("levels", s::nullable(s::integer())),
-                    ("features_added", s::nullable(s::integer())),
-                ]),
-            ),
-            ("encoded_omitted", s::integer()),
-            (
-                "imputed",
-                item(&[
-                    ("column", s::string()),
-                    ("missing_fraction", s::nullable(s::number())),
-                    ("method", s::string()),
-                ]),
-            ),
-            ("imputed_omitted", s::integer()),
-            (
-                "scaled",
-                s::nullable(s::object(
-                    &[("method", s::string()), ("columns", s::integer())],
-                    &["method", "columns"],
-                    false,
-                )),
-            ),
-            (
-                "open_questions",
-                item(&[
-                    ("question_id", s::string()),
-                    ("question_code", s::string()),
-                    ("columns", s::array(s::string())),
-                    ("rows_affected", s::integer()),
-                ]),
-            ),
-            ("open_questions_omitted", s::integer()),
-            (
-                "changes_from_previous",
-                item(&[
-                    ("column", s::string()),
-                    ("field", s::string()),
-                    ("from", s::any()),
-                    ("to", s::any()),
-                ]),
-            ),
-            ("changes_from_previous_omitted", s::integer()),
-        ],
-        &[
-            "revision",
-            "input_columns",
-            "output_features",
-            "rows",
-            "counts",
-            "dropped",
-            "dropped_omitted",
-            "encoded",
-            "encoded_omitted",
-            "imputed",
-            "imputed_omitted",
-            "scaled",
-            "open_questions",
-            "open_questions_omitted",
-            "changes_from_previous",
-            "changes_from_previous_omitted",
-        ],
-        true,
-    );
     ToolSpec {
         name: NAME,
         title: "Create Config",
-        description: "Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset. Epsilon and dimensions are calibrated in the processed feature space under the preprocessing plan (or baseline defaults if plan_id is omitted, with a warning when open questions remain). Stores the YAML as the session's active config. preprocessing_summary lists, as column names and counts without data values, which columns the plan drops (with a reason code), encodes and fills, its open questions, and what changed from the plan's previous revision.",
+        description: "Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset. Epsilon and dimensions are calibrated in the processed feature space under the preprocessing plan (or baseline defaults if plan_id is omitted, with a warning when open questions remain). Stores the YAML as the session's active config.",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
@@ -224,7 +126,7 @@ pub fn spec() -> ToolSpec {
                 ("config_yaml", s::string()),
                 ("calibration_space", s::enumeration(&["processed", "raw"])),
                 ("preprocessing_plan", provenance),
-                ("preprocessing_summary", summary),
+                (phirewall::KEY, s::open_object()),
                 ("warnings", s::array(warning)),
                 ("sweep_strategy", sweep_strategy),
                 ("processed_feature_count", s::integer()),
@@ -371,7 +273,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             &plan,
             previous.as_ref(),
             processed_feature_names(&table, &plan).ok().as_deref(),
-            table.n_rows(),
+            phirewall::ROW_FLOOR,
         );
         Ok((plan, geo, processed, yaml, summary, table.n_rows()))
     })
@@ -425,7 +327,6 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "open_questions_preview": preview,
             "decided_by": counts["decided_by"],
         },
-        "preprocessing_summary": summary,
         "sweep_strategy": {
             "projection_method": "jl",
             "projection_dimensions": dims,
@@ -500,6 +401,12 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         }
     }
 
+    payload[phirewall::KEY] = phirewall::summary(
+        None,
+        Some(dataset_id.to_string()),
+        n_rows,
+        [("inputs", summary)],
+    );
     {
         let mut session = state.session();
         session.active_config_yaml = Some(config_yaml);

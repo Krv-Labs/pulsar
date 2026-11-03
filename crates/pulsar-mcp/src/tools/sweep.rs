@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pulsar_analysis::diagnostics::sparse_upper_percentile;
+use pulsar_analysis::disclosure::row_fraction;
 use pulsar_analysis::plan::{
     build_preprocessing_summary, plan_matches_preprocessing, PreprocessingPlan, Role,
 };
@@ -26,6 +27,7 @@ use super::{CallContext, ToolSpec};
 use crate::envelope::{ok_result, ToolError};
 use crate::jobs::{run_sweep, submit, ProgressTarget, SweepRequest};
 use crate::markdown;
+use crate::phirewall;
 use crate::schema::{self as s, input_schema};
 use crate::state::{LiveRun, ServerState};
 
@@ -118,8 +120,7 @@ pub fn sweep_spec() -> ToolSpec {
                 ("diff", s::array(s::any())),
                 ("diff_summary", open.clone()),
                 ("threshold_stability_summary", s::nullable(open.clone())),
-                ("threshold_table", s::nullable(open.clone())),
-                ("preprocessing_summary", s::nullable(open.clone())),
+                (phirewall::KEY, open.clone()),
                 ("projection_method", s::string()),
                 ("projection_cached", s::boolean()),
                 ("projection_cache_status", s::any()),
@@ -506,11 +507,11 @@ async fn execute(
         sweep_count,
     );
     if let Some((plan, previous)) = &plan {
-        response["preprocessing_summary"] = build_preprocessing_summary(
+        response[phirewall::KEY]["inputs"] = build_preprocessing_summary(
             plan,
             previous.as_ref(),
             Some(&live.fitted.layout.feature_names),
-            live.table.n_rows(),
+            phirewall::ROW_FLOOR,
         );
     }
     job.complete(&record, &artifacts)
@@ -753,12 +754,32 @@ fn build_response(
         Some(_) => None,
         None => find_stable_thresholds_from_edges(fitted.n, &affinity, DEFAULT_NUM_BINS).ok(),
     };
+    let mut parts = vec![];
     if let Some(stability) = fitted.stability.as_ref().or(scanned.as_ref()) {
-        response.insert(
-            "threshold_table".into(),
-            threshold_table(&threshold_graph, stability, fitted.construction_threshold),
-        );
+        parts.push((
+            "thresholds",
+            threshold_table(
+                &threshold_graph,
+                stability,
+                fitted.construction_threshold,
+                phirewall::ROW_FLOOR,
+            ),
+        ));
     }
+    let same_dataset =
+        previous.is_some_and(|p| p.dataset_id.is_some() && p.dataset_id == record.dataset_id);
+    if same_dataset {
+        parts.push(("changes", changes_part(&response["diff"])));
+    }
+    response.insert(
+        phirewall::KEY.into(),
+        phirewall::summary(
+            Some(record.run_id.to_string()),
+            record.dataset_id.as_ref().map(|d| d.to_string()),
+            live.table.n_rows(),
+            parts,
+        ),
+    );
     if let Some(path) = saved_path {
         response.insert("saved_config_path".into(), json!(path));
     }
@@ -766,6 +787,59 @@ fn build_response(
         response.insert("dataset_id".into(), json!(ds));
     }
     Value::Object(response)
+}
+
+/// The settings (by name) and metrics (`{previous, current}` by name) that
+/// `diff` rows say changed.
+fn diff_changes(diff: &[Value]) -> (Vec<Value>, Map<String, Value>) {
+    let mut parameter_changes = Vec::new();
+    let mut metric_changes = Map::new();
+    for row in diff {
+        let field = row["field"].as_str().unwrap_or("");
+        match field {
+            "n_edges" | "component_count" | "giant_fraction" => {
+                metric_changes.insert(
+                    field.to_owned(),
+                    json!({"previous": row["previous"], "current": row["current"]}),
+                );
+            }
+            "projection_dimensions" | "pca_dims" => {
+                parameter_changes.push(json!("sweep.projection.dimensions.values"))
+            }
+            "epsilon" => parameter_changes.push(json!("cosmic_graph.epsilon")),
+            other => parameter_changes.push(json!(other)),
+        }
+    }
+    (parameter_changes, metric_changes)
+}
+
+/// The `changes` part from the sweep's `diff` rows: settings by name, and
+/// metrics before and after, finite only, with `giant_fraction` (a share
+/// of rows) to 2 dp.
+fn changes_part(diff: &Value) -> Value {
+    let diff = diff.as_array().map(Vec::as_slice).unwrap_or_default();
+    let (settings, metric_changes) = diff_changes(diff);
+    let mut metrics = vec![];
+    let mut omitted = 0;
+    for (code, change) in metric_changes {
+        let at = |k: &str| change[k].as_f64().filter(|x| x.is_finite());
+        let (Some(before), Some(after)) = (at("previous"), at("current")) else {
+            omitted += 1;
+            continue;
+        };
+        let (before, after) = if code == "giant_fraction" {
+            (json!(row_fraction(before)), json!(row_fraction(after)))
+        } else {
+            (change["previous"].clone(), change["current"].clone())
+        };
+        metrics.push(json!({"code": code, "before": before, "after": after}));
+    }
+    json!({
+        "changed_settings": settings,
+        "changed_settings_omitted": 0,
+        "metrics": metrics,
+        "metrics_omitted": omitted,
+    })
 }
 
 /// `build_sweep_summary_payload`.
@@ -794,24 +868,7 @@ pub fn summary_payload(
     .filter_map(|k| metrics.get(*k).map(|v| ((*k).to_owned(), v.clone())))
     .collect();
     let diff: Vec<Value> = response["diff"].as_array().cloned().unwrap_or_default();
-    let mut parameter_changes = Vec::new();
-    let mut metric_changes = Map::new();
-    for row in &diff {
-        let field = row["field"].as_str().unwrap_or("");
-        match field {
-            "n_edges" | "component_count" | "giant_fraction" => {
-                metric_changes.insert(
-                    field.to_owned(),
-                    json!({"previous": row["previous"], "current": row["current"]}),
-                );
-            }
-            "projection_dimensions" | "pca_dims" => {
-                parameter_changes.push(json!("sweep.projection.dimensions.values"))
-            }
-            "epsilon" => parameter_changes.push(json!("cosmic_graph.epsilon")),
-            other => parameter_changes.push(json!(other)),
-        }
-    }
+    let (parameter_changes, metric_changes) = diff_changes(&diff);
     let changes_returned = parameter_changes.len() + metric_changes.len();
     let mut payload = json!({
         "status": response["status"],
@@ -854,11 +911,7 @@ pub fn summary_payload(
             response["config_yaml_normalized"].clone(),
         );
     }
-    for key in [
-        "saved_config_path",
-        "threshold_table",
-        "preprocessing_summary",
-    ] {
+    for key in ["saved_config_path", phirewall::KEY] {
         if let Some(value) = response.get(key) {
             obj.insert(key.into(), value.clone());
         }

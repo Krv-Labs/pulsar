@@ -43,6 +43,7 @@ use serde_json::{json, Value};
 use super::params::Format;
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
+use crate::phirewall;
 use crate::schema::{self as s, input_schema};
 use crate::state::{ClusterState, EvidenceKey, LiveRun, ServerState};
 
@@ -109,15 +110,15 @@ pub struct Params {
     pub exclude_columns: Vec<String>,
     /// Run to cluster, from run_topological_sweep. Omit for the latest run. Labels are published into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT).
     pub run_id: String,
-    /// group_summary: groups listed, largest first (>= 1; more than exist means all). Default 6.
+    /// Summary grouping: groups listed, largest first (>= 1; more than exist means all). Default 6.
     pub summary_max_groups: Option<usize>,
-    /// group_summary: defining features listed, strongest first (>= 1; more than exist means all). Default 5.
+    /// Summary grouping: defining features listed, strongest first (>= 1; more than exist means all). Default 5.
     pub summary_max_features: Option<usize>,
-    /// group_summary: smallest |sd| called a difference (finite, >= 0). Default 0.5.
+    /// Summary grouping: smallest |sd| called a difference (finite, >= 0). Default 0.5.
     pub summary_min_sd: Option<f64>,
-    /// group_summary: smallest group or categorical level shown (>= 8, the default; it can only be raised).
+    /// Summary grouping: smallest group or categorical level shown (>= 8, the default; it can only be raised).
     pub summary_min_rows: Option<usize>,
-    /// group_summary: differences listed per group (>= 1). Default 3.
+    /// Summary grouping: differences listed per group (>= 1). Default 3.
     pub summary_max_traits: Option<usize>,
 }
 
@@ -163,10 +164,11 @@ pub fn spec() -> ToolSpec {
                     "profiled_features",
                     s::array(s::object(
                         &[
+                            ("feature", s::integer()),
                             ("column", s::string()),
                             ("used_for_grouping", s::boolean()),
                         ],
-                        &["column", "used_for_grouping"],
+                        &["feature", "column", "used_for_grouping"],
                         false,
                     )),
                 ),
@@ -176,7 +178,7 @@ pub fn spec() -> ToolSpec {
                 ("cluster_assignment", open.clone()),
                 ("cluster_assignment_id", s::string()),
                 ("cluster_selection", open.clone()),
-                ("group_summary", open.clone()),
+                (phirewall::KEY, open.clone()),
                 ("clusters", s::array(open.clone())),
                 ("recommended_next_tools", s::array(s::string())),
                 ("detail_hint", s::string()),
@@ -619,6 +621,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     let summary_thresholds = summary_thresholds(&p)?;
     let exclude_columns = excluded_columns(&live, &p.exclude_columns);
     let dropped = live.fitted.config.preprocessing.drop_columns.clone();
+    let live_run = live.clone();
     let job = Job {
         live,
         store: state.store.clone(),
@@ -717,19 +720,29 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     payload["method_applied"] = computed.meta["method_used"].clone();
     payload["cluster_count"] = computed.meta["n_clusters"].clone();
     // A column the preprocessing dropped (a label kept for comparison, say)
-    // is profiled but did not shape the groups.
+    // is profiled but did not shape the groups. `feature` is the column's
+    // position in the table, as in the summary's grouping.
+    let names = &live_run.table.names;
     payload["profiled_features"] = computed
         .evidence
         .working_columns
         .iter()
-        .map(|c| json!({"column": c, "used_for_grouping": !dropped.contains(c)}))
+        .map(|c| {
+            let feature = names.iter().position(|n| n == c).expect("a table column");
+            json!({"feature": feature, "column": c, "used_for_grouping": !dropped.contains(c)})
+        })
         .collect();
     payload["threshold_inherited"] = json!(threshold_inherited);
     payload["threshold_source"] = json!(threshold_source);
     payload["threshold_surface"] = surface.clone();
     payload["cluster_assignment"] = assignment_summary(&record);
     payload["cluster_assignment_id"] = json!(record.cluster_assignment_id);
-    payload["group_summary"] = computed.group_summary.clone();
+    payload[phirewall::KEY] = phirewall::summary(
+        Some(run_id.to_string()),
+        live_run.dataset_id.as_ref().map(|d| d.to_string()),
+        live_run.table.n_rows(),
+        [("grouping", computed.group_summary.clone())],
+    );
     let text = match p.response_format {
         Format::Markdown => Some(prepend_threshold_markdown(&text, &surface)),
         Format::Json => None,

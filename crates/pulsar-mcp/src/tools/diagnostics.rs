@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use pulsar_analysis::disclosure::RowCount;
 use pulsar_analysis::pyround::round_to;
 use pulsar_analysis::thresholds::{
     component_mass_profile, mass_profile_hint, significant_component_sizes,
@@ -20,6 +21,7 @@ use super::params::{Detail, Format};
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
 use crate::markdown;
+use crate::phirewall;
 use crate::schema::{self as s, input_schema};
 use crate::state::{GraphArtifact, RunView, ServerState};
 use pulsar_store::RunId;
@@ -536,6 +538,7 @@ pub fn curve_spec() -> ToolSpec {
                 ("full_detail_available", s::string()),
                 ("agent_threshold_options", open.clone()),
                 ("plateaus", s::array(open.clone())),
+                (phirewall::KEY, open.clone()),
                 ("curve_sample", s::array(open)),
                 ("curve_sample_omitted", s::integer()),
                 ("curve_sample_guidance", s::string()),
@@ -709,19 +712,20 @@ fn summary_breakpoints(breakpoints: &[Breakpoint]) -> impl Iterator<Item = &Brea
         .take(SUMMARY_BREAKPOINTS)
 }
 
-/// A plain threshold table over the cut-offs the curve summary weighs: its
-/// longest plateaus (at their midpoints) and its structural breakpoints, plus
-/// the `selected` construction threshold. Each row has the cut-off, the
-/// ascending `[lo, hi]` range of the plateau holding it (the cut-offs that
-/// give the same groups) and its width, the group count, the largest group
-/// sizes and the singletons. The selected threshold marks the plateau row
-/// that holds it, or gets a row of its own; rows sharing a range show the same
-/// groups, so a breakpoint is listed only when its range is new. Rows ascend
-/// by cut-off.
+/// The `thresholds` part of `io.phirewall/summary` v1: the cut-offs the
+/// curve summary weighs, its longest plateaus (at their midpoints) and its
+/// structural breakpoints, plus the `selected` construction threshold. Each
+/// cut has the cut-off, the ascending `[lo, hi]` range of the plateau
+/// holding it (the cut-offs that give the same groups), the group count, the
+/// largest group sizes (rounded, or withheld under `row_floor`) and the
+/// singletons. The selected threshold marks the plateau cut that holds it,
+/// or gets a cut of its own; cuts sharing a range show the same groups, so a
+/// breakpoint is listed only when its range is new. Cuts ascend by cut-off.
 pub fn threshold_table(
     graph: &ThresholdGraph,
     stability: &StabilityResult,
     selected: f64,
+    row_floor: usize,
 ) -> Value {
     let range_of = |t: f64| -> (f64, f64) {
         stability
@@ -737,12 +741,16 @@ pub fn threshold_table(
     let row = |kind: &str, cutoff: f64| -> Value {
         let (lo, hi) = range_of(cutoff);
         let profile = component_mass_profile(graph, cutoff, TABLE_TOP_SIZES, 0.01);
+        let top_sizes: Vec<RowCount> = profile
+            .top_component_sizes
+            .iter()
+            .map(|&n| RowCount::of(n, row_floor))
+            .collect();
         json!({
             "cutoff": cutoff,
             "range": [lo, hi],
-            "width": hi - lo,
             "groups": profile.component_count,
-            "top_sizes": profile.top_component_sizes,
+            "top_sizes": top_sizes,
             "singletons": profile.singleton_count,
             "kind": kind,
             "selected": false,
@@ -776,27 +784,27 @@ pub fn threshold_table(
         let key = |r: &Value| r["cutoff"].as_f64().unwrap_or(0.0);
         key(a).total_cmp(&key(b))
     });
-    json!({"selected": selected, "rows": rows})
+    json!({"cuts": rows})
 }
 
 /// `_threshold_curve_payload`.
 pub fn curve_payload(
     n: usize,
     affinity: &[(usize, usize, f64)],
+    graph: &ThresholdGraph,
     resolved_construction_threshold: f64,
     stability: &StabilityResult,
     detail: Detail,
     policy: Policy,
 ) -> Value {
-    let graph = ThresholdGraph::from_edges(n, affinity);
     let thresholds = &stability.thresholds;
     let counts = &stability.component_counts;
     let optimal = stability.optimal_threshold;
     let matches_current =
         (resolved_construction_threshold - optimal).abs() <= 1e-8 + 1e-5 * optimal.abs();
-    let breakpoints = curve_breakpoints(&graph, stability);
-    let current_morph = threshold_morphology_profile(&graph, resolved_construction_threshold, 10);
-    let plateau_morph = threshold_morphology_profile(&graph, optimal, 10);
+    let breakpoints = curve_breakpoints(graph, stability);
+    let current_morph = threshold_morphology_profile(graph, resolved_construction_threshold, 10);
+    let plateau_morph = threshold_morphology_profile(graph, optimal, 10);
     let profile_rows = |max_points: Option<usize>| -> Vec<Value> {
         let indices = match max_points {
             Some(m) => linspace_indices(thresholds.len(), m),
@@ -806,7 +814,7 @@ pub fn curve_payload(
         indices
             .into_iter()
             .map(|i| {
-                let row = threshold_morphology_profile(&graph, thresholds[i], top_k);
+                let row = threshold_morphology_profile(graph, thresholds[i], top_k);
                 if max_points.is_none() {
                     json!({
                         "threshold": round_to(row.threshold, 6),
@@ -827,7 +835,7 @@ pub fn curve_payload(
             .iter()
             .map(|c| {
                 let mut row = compact_candidate(c);
-                row["morphology"] = json!(threshold_morphology_profile(&graph, c.threshold(), 10));
+                row["morphology"] = json!(threshold_morphology_profile(graph, c.threshold(), 10));
                 row
             })
             .collect()
@@ -841,9 +849,9 @@ pub fn curve_payload(
             .collect();
         let selected = top
             .first()
-            .map(|p| json!(component_mass_profile(&graph, p.midpoint(), 8, 0.01)));
+            .map(|p| json!(component_mass_profile(graph, p.midpoint(), 8, 0.01)));
         let ten: Vec<Plateau> = stability.plateaus.iter().take(10).cloned().collect();
-        let options = agent_threshold_options(&graph, &ten, thresholds, counts, policy, 7);
+        let options = agent_threshold_options(graph, &ten, thresholds, counts, policy, 7);
         let candidates = candidate_rows(&options.candidates[..options.candidates.len().min(3)]);
         let profiles = profile_rows(Some(10));
         let summary_bps: Vec<&Breakpoint> = summary_breakpoints(&breakpoints).collect();
@@ -880,7 +888,7 @@ pub fn curve_payload(
         .plateaus
         .iter()
         .take(10)
-        .map(|p| plateau_row(&graph, n, affinity, p, true))
+        .map(|p| plateau_row(graph, n, affinity, p, true))
         .collect();
     let selected = plateaus
         .first()
@@ -890,7 +898,7 @@ pub fn curve_payload(
         .map(|i| json!({"threshold": thresholds[i], "component_count": counts[i], "singleton_count": singletons[i]}))
         .collect();
     let twenty: Vec<Plateau> = stability.plateaus.iter().take(20).cloned().collect();
-    let options = agent_threshold_options(&graph, &twenty, thresholds, counts, policy, 12);
+    let options = agent_threshold_options(graph, &twenty, thresholds, counts, policy, 12);
     let enriched = candidate_rows(&options.candidates);
     let mut audit = serde_json::to_value(&options).unwrap_or(json!({}));
     if let Some(obj) = audit.as_object_mut() {
@@ -938,8 +946,9 @@ pub async fn curve(state: &ServerState, p: CurveParams) -> Result<CallToolResult
     let policy: Policy = p.threshold_candidate_policy.into();
     let detail = p.detail;
     let run_id = view.record.run_id.clone();
+    let (dataset_id, n_rows) = (view.record.dataset_id.clone(), view.record.n_rows);
     let live = view.live.is_some();
-    let mut payload = tokio::task::spawn_blocking(move || -> Result<Value, ToolError> {
+    let (mut payload, thresholds) = tokio::task::spawn_blocking(move || -> Result<_, ToolError> {
         let stability =
             find_stable_thresholds_from_edges(affinity.n, &affinity.edges, DEFAULT_NUM_BINS)
                 .map_err(|e| {
@@ -950,13 +959,19 @@ pub async fn curve(state: &ServerState, p: CurveParams) -> Result<CallToolResult
                         "Check get_runtime_context for the session state, then retry.",
                     )
                 })?;
-        Ok(curve_payload(
+        let graph = ThresholdGraph::from_edges(affinity.n, &affinity.edges);
+        let payload = curve_payload(
             affinity.n,
             &affinity.edges,
+            &graph,
             resolved,
             &stability,
             detail,
             policy,
+        );
+        Ok((
+            payload,
+            threshold_table(&graph, &stability, resolved, phirewall::ROW_FLOOR),
         ))
     })
     .await
@@ -967,6 +982,12 @@ pub async fn curve(state: &ServerState, p: CurveParams) -> Result<CallToolResult
         "persisted"
     });
     payload["run_id"] = json!(run_id);
+    payload[phirewall::KEY] = phirewall::summary(
+        Some(run_id.to_string()),
+        dataset_id.map(|d| d.to_string()),
+        n_rows,
+        [("thresholds", thresholds)],
+    );
     let text = match p.response_format {
         Format::Markdown => Some(markdown::threshold_curve(&payload)),
         Format::Json => None,
