@@ -136,14 +136,21 @@ fn indicator_code(indicator: &str) -> &str {
 
 /// `{feature, column, field, to}` for each column whose role, imputation
 /// method, encoding or blank marker differs from `previous`. Imputation is
-/// compared by method only, so a fill value never appears.
+/// compared by method only, so a fill value never appears. Markers are
+/// compared as written (`group:a` to `group:b` is a change) but shown as
+/// their code.
 fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value> {
+    // (field, value compared, value shown)
     let fields = |e: &PlanEntry| {
         [
-            ("role", json!(e.role)),
-            ("impute", json!(e.impute_method())),
-            ("encode", json!(e.encode)),
-            ("indicator", json!(indicator_code(&e.indicator))),
+            ("role", json!(e.role), json!(e.role)),
+            ("impute", json!(e.impute_method()), json!(e.impute_method())),
+            ("encode", json!(e.encode), json!(e.encode)),
+            (
+                "indicator",
+                json!(e.indicator),
+                json!(indicator_code(&e.indicator)),
+            ),
         ]
     };
     let mut out = Vec::new();
@@ -151,9 +158,9 @@ fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value>
         let Some(new) = plan.entries.get(col) else {
             continue;
         };
-        for ((field, from), (_, to)) in fields(old).into_iter().zip(fields(new)) {
+        for ((field, from, _), (_, to, shown)) in fields(old).into_iter().zip(fields(new)) {
             if from != to {
-                out.push(entry(plan, col, json!({"field": field, "to": to})));
+                out.push(entry(plan, col, json!({"field": field, "to": shown})));
             }
         }
     }
@@ -424,5 +431,20 @@ mod tests {
             json!([{"feature": 5, "column": "age", "field": "role", "to": "drop"}])
         );
         assert!(s["output_features"].is_null());
+    }
+
+    #[test]
+    fn a_marker_moved_between_groups_is_a_change_shown_as_its_code() {
+        let t = table();
+        let mut previous = draft_plan(&t, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
+        previous.entries.get_mut("score").unwrap().indicator = "group:mg1".into();
+        let mut plan = previous.clone();
+        plan.entries.get_mut("score").unwrap().indicator = "group:mg2".into();
+        let s = build_preprocessing_summary(&plan, Some(&previous), None, 8);
+        assert_eq!(
+            s["changes_from_previous"],
+            json!([{"feature": 4, "column": "score", "field": "indicator", "to": "group"}])
+        );
+        assert!(!s.to_string().contains("mg"), "{s}");
     }
 }
