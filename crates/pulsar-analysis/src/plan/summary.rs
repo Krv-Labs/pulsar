@@ -1,22 +1,21 @@
-//! A short account of what a plan does to the data (`preprocessing_summary`
-//! on `create_config`), for a reviewer who knows the domain.
+//! A short account of what a plan does to the data: the `inputs` part of
+//! `io.phirewall/summary` v1, for a reviewer who knows the domain.
 //!
 //! It names columns and counts, never values: a category level or a fill
 //! value can be patient-level data, so neither is read here. Drop reasons are
 //! codes derived from the entry's role, provenance and evidence, not the
-//! entry's prose `reason`, which can quote a value.
+//! entry's prose `reason`, which can quote a value. Every column is named by
+//! its `feature` id, its position in the plan (the table's column order),
+//! beside a label cut by [`label`].
 
 use std::collections::HashMap;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use super::model::{DecidedBy, PlanEntry, QuestionStatus, Role};
 use super::plan::PreprocessingPlan;
+use crate::disclosure::{label, row_fraction, RowCount};
 use crate::evidence::{ColumnEvidence, ColumnKind};
-use crate::pyround::round_to;
-
-/// Most items listed per section; the rest are counted in `<key>_omitted`.
-pub const SUMMARY_LIMIT: usize = 50;
 
 /// Every code [`drop_reason`] can return.
 pub const DROP_REASONS: [&str; 10] = [
@@ -105,7 +104,37 @@ fn features_added<'a>(
     added
 }
 
-/// `{column, field, from, to}` for each column whose role, imputation
+/// `{feature, column, truncated?}` for the plan's column `col`, or `None`
+/// for a name the plan does not have.
+fn column(plan: &PreprocessingPlan, col: &str) -> Option<Value> {
+    let feature = plan.entries.get_index_of(col)?;
+    let (column, truncated) = label(col);
+    let mut out = json!({"feature": feature, "column": column});
+    if truncated {
+        out["truncated"] = json!(true);
+    }
+    Some(out)
+}
+
+/// `column` with `fields` added.
+fn entry(plan: &PreprocessingPlan, col: &str, fields: Value) -> Value {
+    let mut out = column(plan, col).expect("an entry of the plan");
+    if let (Value::Object(out), Value::Object(fields)) = (&mut out, fields) {
+        out.extend(fields);
+    }
+    out
+}
+
+/// A blank marker as a code: `none`, `own`, or `group` for `group:<gid>`.
+fn indicator_code(indicator: &str) -> &str {
+    if indicator.starts_with("group:") {
+        "group"
+    } else {
+        indicator
+    }
+}
+
+/// `{feature, column, field, to}` for each column whose role, imputation
 /// method, encoding or blank marker differs from `previous`. Imputation is
 /// compared by method only, so a fill value never appears.
 fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value> {
@@ -114,7 +143,7 @@ fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value>
             ("role", json!(e.role)),
             ("impute", json!(e.impute_method())),
             ("encode", json!(e.encode)),
-            ("indicator", json!(e.indicator)),
+            ("indicator", json!(indicator_code(&e.indicator))),
         ]
     };
     let mut out = Vec::new();
@@ -124,25 +153,14 @@ fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value>
         };
         for ((field, from), (_, to)) in fields(old).into_iter().zip(fields(new)) {
             if from != to {
-                out.push(json!({"column": col, "field": field, "from": from, "to": to}));
+                out.push(entry(plan, col, json!({"field": field, "to": to})));
             }
         }
     }
     out
 }
 
-/// Put the first [`SUMMARY_LIMIT`] items under `key` and the rest's count
-/// under `<key>_omitted`.
-fn insert_capped(out: &mut Map<String, Value>, key: &str, items: Vec<Value>) {
-    let omitted = items.len().saturating_sub(SUMMARY_LIMIT);
-    out.insert(
-        key.into(),
-        Value::Array(items.into_iter().take(SUMMARY_LIMIT).collect()),
-    );
-    out.insert(format!("{key}_omitted"), json!(omitted));
-}
-
-/// The summary of `plan` as `create_config` reports it.
+/// The `inputs` part for `plan`.
 ///
 /// `counts` agree with the plan's `preprocessing:` block: `kept` columns are
 /// features, `dropped` are the block's `drop_columns` (every non-feature
@@ -151,15 +169,16 @@ fn insert_capped(out: &mut Map<String, Value>, key: &str, items: Vec<Value>) {
 /// whose blanks become their own category), so those two can overlap.
 ///
 /// `feature_names` are the processed features when the plan applies to the
-/// data; without them `output_features`, `features_added` and `scaled` are
-/// null. `scaled` is the pipeline's fixed z-scoring of every processed
-/// feature, not a plan decision. `changes_from_previous` compares against
-/// `previous`, the revision this one replaced, and is empty without one.
+/// data; without them `output_features` and `levels` are null.
+/// `changes_from_previous` compares against `previous`, the revision this
+/// one replaced, and is empty without one. Every list is whole, so each
+/// `*_omitted` is 0; an open question's `rows_affected` is a row count
+/// disclosed under `row_floor`.
 pub fn build_preprocessing_summary(
     plan: &PreprocessingPlan,
     previous: Option<&PreprocessingPlan>,
     feature_names: Option<&[String]>,
-    n_rows: usize,
+    row_floor: usize,
 ) -> Value {
     let ev_by_col: HashMap<&str, &ColumnEvidence> = plan
         .evidence
@@ -184,15 +203,18 @@ pub fn build_preprocessing_summary(
         .entries
         .values()
         .filter(|e| e.role != Role::Feature)
-        .map(|e| json!({"column": e.column, "reason": drop_reason(e, &ev_by_col, cat_threshold)}))
+        .map(|e| {
+            let reason = drop_reason(e, &ev_by_col, cat_threshold);
+            entry(plan, &e.column, json!({"reason": reason}))
+        })
         .collect();
     let encoded: Vec<Value> = features
         .iter()
         .filter_map(|e| Some((e, e.encode.as_ref()?)))
         .map(|(e, method)| {
-            // One-hot adds one feature per level, so the two counts agree.
+            // One-hot adds one feature per level.
             let n = added.as_ref().map(|a| a[e.column.as_str()]);
-            json!({"column": e.column, "method": method, "levels": n, "features_added": n})
+            entry(plan, &e.column, json!({"method": method, "levels": n}))
         })
         .collect();
     let imputed: Vec<Value> = features
@@ -201,8 +223,12 @@ pub fn build_preprocessing_summary(
         .map(|(e, method)| {
             let fraction = ev_by_col
                 .get(e.column.as_str())
-                .map(|ev| round_to(ev.missing_fraction, 4));
-            json!({"column": e.column, "missing_fraction": fraction, "method": method})
+                .map(|ev| row_fraction(ev.missing_fraction));
+            entry(
+                plan,
+                &e.column,
+                json!({"missing_fraction": fraction, "method": method}),
+            )
         })
         .collect();
     let open_questions: Vec<Value> = plan
@@ -210,46 +236,42 @@ pub fn build_preprocessing_summary(
         .values()
         .filter(|q| q.status == QuestionStatus::Open)
         .map(|q| {
+            let columns: Vec<Value> = q
+                .applies_to
+                .iter()
+                .filter_map(|c| column(plan, c))
+                .collect();
             json!({
-                "question_id": q.question_id,
-                "question_code": q.topic,
-                "columns": q.applies_to,
-                "rows_affected": q.rows_affected,
+                "code": q.topic,
+                "columns": columns,
+                "columns_omitted": 0,
+                "rows_affected": RowCount::of(q.rows_affected, row_floor),
             })
         })
         .collect();
 
-    let mut out = Map::new();
-    out.insert("revision".into(), json!(plan.revision));
-    out.insert("input_columns".into(), json!(plan.entries.len()));
-    out.insert(
-        "output_features".into(),
-        json!(feature_names.map(<[String]>::len)),
-    );
-    out.insert("rows".into(), json!(n_rows));
-    out.insert(
-        "counts".into(),
-        json!({
+    let changes_from_previous = previous.map(|p| changes(p, plan)).unwrap_or_default();
+    json!({
+        "revision": plan.revision,
+        "input_columns": plan.entries.len(),
+        "output_features": feature_names.map(<[String]>::len),
+        "counts": {
             "kept": features.len(),
             "dropped": dropped.len(),
             "encoded": encoded.len(),
             "imputed": imputed.len(),
-        }),
-    );
-    insert_capped(&mut out, "dropped", dropped);
-    insert_capped(&mut out, "encoded", encoded);
-    insert_capped(&mut out, "imputed", imputed);
-    out.insert(
-        "scaled".into(),
-        json!(feature_names.map(|n| json!({"method": "standard", "columns": n.len()}))),
-    );
-    insert_capped(&mut out, "open_questions", open_questions);
-    insert_capped(
-        &mut out,
-        "changes_from_previous",
-        previous.map(|p| changes(p, plan)).unwrap_or_default(),
-    );
-    Value::Object(out)
+        },
+        "dropped": dropped,
+        "dropped_omitted": 0,
+        "encoded": encoded,
+        "encoded_omitted": 0,
+        "imputed": imputed,
+        "imputed_omitted": 0,
+        "open_questions": open_questions,
+        "open_questions_omitted": 0,
+        "changes_from_previous": changes_from_previous,
+        "changes_from_previous_omitted": 0,
+    })
 }
 
 #[cfg(test)]
@@ -321,7 +343,7 @@ mod tests {
         let t = table();
         let plan = draft_plan(&t, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
         let names = processed_feature_names(&t, &plan).unwrap();
-        let s = build_preprocessing_summary(&plan, None, Some(&names), t.n_rows());
+        let s = build_preprocessing_summary(&plan, None, Some(&names), 8);
 
         assert_eq!(
             s["counts"],
@@ -330,9 +352,9 @@ mod tests {
         assert_eq!(
             s["dropped"],
             json!([
-                {"column": "pid", "reason": "identifier"},
-                {"column": "site", "reason": "constant"},
-                {"column": "rare", "reason": "missing"},
+                {"feature": 0, "column": "pid", "reason": "identifier"},
+                {"feature": 3, "column": "site", "reason": "constant"},
+                {"feature": 6, "column": "rare", "reason": "missing"},
             ])
         );
         // ward: three levels plus its blank category; ward_type's dummies are
@@ -340,15 +362,20 @@ mod tests {
         assert_eq!(
             s["encoded"],
             json!([
-                {"column": "ward", "method": "one_hot", "levels": 4, "features_added": 4},
-                {"column": "ward_type", "method": "one_hot", "levels": 2, "features_added": 2},
+                {"feature": 1, "column": "ward", "method": "one_hot", "levels": 4},
+                {"feature": 2, "column": "ward_type", "method": "one_hot", "levels": 2},
             ])
         );
         assert_eq!(s["output_features"], json!(names.len()));
-        assert_eq!(
-            s["scaled"],
-            json!({"method": "standard", "columns": names.len()})
-        );
+        // score is blank in 8 of 36 rows: 0.22 to 2 dp.
+        let score = s["imputed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["column"] == "score")
+            .unwrap();
+        assert_eq!(score["feature"], 4);
+        assert_eq!(score["missing_fraction"], 0.22);
         assert_eq!(s["changes_from_previous"], json!([]));
         let text = s.to_string();
         for level in ["north", "south", "east", "acute", "rehab", "(blank)"] {
@@ -364,12 +391,12 @@ mod tests {
         let plan = draft_plan(&t, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
         assert_eq!(plan.entries["rowid"].role, Role::Id);
         assert_eq!(plan.entries["rowid"].decided_by, DecidedBy::Default);
-        let s = build_preprocessing_summary(&plan, None, None, t.n_rows());
+        let s = build_preprocessing_summary(&plan, None, None, 8);
         assert!(
             s["dropped"]
                 .as_array()
                 .unwrap()
-                .contains(&json!({"column": "rowid", "reason": "identifier"})),
+                .contains(&json!({"feature": 0, "column": "rowid", "reason": "identifier"})),
             "{}",
             s["dropped"]
         );
@@ -384,15 +411,18 @@ mod tests {
         let age = plan.entries.get_mut("age").unwrap();
         age.role = Role::Drop;
         age.decided_by = DecidedBy::User;
-        let s = build_preprocessing_summary(&plan, Some(&previous), None, t.n_rows());
+        let s = build_preprocessing_summary(&plan, Some(&previous), None, 8);
         for d in s["dropped"].as_array().unwrap() {
             assert!(DROP_REASONS.contains(&d["reason"].as_str().unwrap()), "{d}");
         }
-        assert_eq!(s["dropped"][2], json!({"column": "age", "reason": "user"}));
+        assert_eq!(
+            s["dropped"][2],
+            json!({"feature": 5, "column": "age", "reason": "user"})
+        );
         assert_eq!(
             s["changes_from_previous"],
-            json!([{"column": "age", "field": "role", "from": "feature", "to": "drop"}])
+            json!([{"feature": 5, "column": "age", "field": "role", "to": "drop"}])
         );
-        assert!(s["output_features"].is_null() && s["scaled"].is_null());
+        assert!(s["output_features"].is_null());
     }
 }

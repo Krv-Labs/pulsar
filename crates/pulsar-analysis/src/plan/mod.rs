@@ -45,7 +45,7 @@ pub use render::{
     py_canonical_json, py_json_dumps, summarize_plan_counts,
 };
 pub use stakes::{compute_stakes, StakesOptions};
-pub use summary::{build_preprocessing_summary, DROP_REASONS, SUMMARY_LIMIT};
+pub use summary::{build_preprocessing_summary, DROP_REASONS};
 pub use text::{
     format_col_list, format_missing_reason, is_count_like_zero_free, plural, py_repr, py_repr_list,
     py_repr_value, py_str, thousands,

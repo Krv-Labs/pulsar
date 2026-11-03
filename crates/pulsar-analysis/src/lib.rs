@@ -26,6 +26,7 @@ pub mod components;
 pub mod config_build;
 pub mod config_overrides;
 pub mod diagnostics;
+pub mod disclosure;
 pub mod dossier;
 pub mod dossier_payloads;
 pub mod error;

@@ -46,7 +46,7 @@ use thiserror::Error;
 
 pub use group_summary::{
     group_summary, Cell, DefiningFeature, FeatureKind, GroupEntry, GroupSummary,
-    GroupSummaryThresholds, RowCount, SmallGroups, Trait, GROUP_SUMMARY_DEFAULTS,
+    GroupSummaryThresholds, SmallGroups, Trait, Unused, GROUP_SUMMARY_DEFAULTS,
 };
 pub use payload::{
     characterization_payload_to_markdown, compact_characterization_payload, probe_columns_payload,

@@ -25,15 +25,12 @@
 //!   columns `categorical` (ordinal text is categorical); either is `binary`
 //!   when it holds exactly two distinct values. A numeric binary column is
 //!   standardized as a number and names no level.
-//! * **feature**: a column's id, its zero-based position among the profiled
-//!   columns (the table's columns, in order, less `exclude_columns`): the
-//!   same in every run on a dataset with the same exclusions, and the
-//!   index of the column in the dossier's `profiled_features`. Every
-//!   defining feature, cell and trait carries it beside the `column` name,
-//!   which may be cut (see Size) and so is a display label, not an id.
-//!   `not_used_for_grouping_features` lists the ids of
-//!   `not_used_for_grouping`'s names, in the same order (a parallel list,
-//!   so that list stays one of names).
+//! * **feature**: a column's id, its zero-based position in the table (all
+//!   columns, before `exclude_columns`): the same in every run on a
+//!   dataset, whatever is excluded, and the `feature` of the column's entry
+//!   in the dossier's `profiled_features`. Every defining feature, cell,
+//!   trait and unused column carries it beside the `column` name, which may
+//!   be cut (see Size) and so is a display label, not an id.
 //!
 //! Privacy: a categorical level backed by fewer than `min_rows` rows over
 //! all rows is never emitted nor scored, and a cell's level is only emitted
@@ -43,7 +40,7 @@
 //! `min_rows` rows are only counted: none of their values is emitted. No
 //! raw value is emitted, and no non-finite number is serialized.
 //!
-//! Row counts (each shown group's `size`, `rows` and `small_groups.rows`)
+//! Row counts (each shown group's `size` and `small_groups.rows`)
 //! are rounded to the nearest 5, halves up, as Phirewall rounds every count
 //! it discloses (`COUNT_ROUNDING`, `round_count`). A nonzero count under
 //! `min_rows` is not rounded but withheld as `"under <min_rows>"`. Counts
@@ -52,21 +49,18 @@
 //! this summary gives exact sizes anyway (`clusters[].size` and
 //! `cluster_sizes_summary.preview`). Column names are never interpreted.
 //!
-//! Size: the summary is as large as the thresholds asked for. Entries
-//! follow them (`max_groups` × `max_features` cells, `max_traits` per
-//! group, at most 20 unused names) and there is no cap on them here:
-//! `max_groups` is applied as at most the group count and `max_features` to the
-//! number of grouping columns, which is just "all of them". Every string
-//! emitted (column names, levels, the method) is cut to [`MAX_LABEL_CHARS`]
-//! characters on a char boundary, ending in `…`; the entry holding a cut
-//! name or level is marked `truncated` (a name in `not_used_for_grouping`
-//! is only cut). So a string serializes to at most 485 bytes (80
-//! characters escaped as `\u00XX`, the ellipsis and quotes), and the
-//! worst case is proportional to the requested counts: about 69 KB at the
-//! defaults, growing with `max_groups` × `max_features` cells and
-//! `max_traits` per group; plain-text names and levels make it a fraction
-//! of that. `size_chars` reports the actual serialized length, so a caller
-//! can see what drove an oversized answer.
+//! Size: the summary is as large as the limits asked for. Entries follow
+//! them (`max_groups` × `max_features` cells, `max_traits` per group, every
+//! unused column) and there is no cap on them here: `max_groups` is applied
+//! as at most the group count and `max_features` as at most the number of
+//! grouping columns (each at least 1), and `limits` echoes those applied
+//! values. Every column name and level is cut to
+//! [`MAX_LABEL_CHARS`](crate::disclosure::MAX_LABEL_CHARS)
+//! characters on a char boundary, ending in `…`, and the entry holding a
+//! cut one is marked `truncated`; `method` is a code and is not cut. So a
+//! string serializes to at most 485 bytes (80 characters escaped as
+//! `\u00XX`, the ellipsis and quotes), and the worst case is proportional
+//! to the requested counts; the caller's answer size limit bounds the rest.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -74,10 +68,11 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use pulsar_data::{Column, Table};
 use serde::Serialize;
 
+use crate::disclosure::{label, round_count, RowCount};
 use crate::pyround::round_to;
 
 /// The report's bounds. The defaults are [`GROUP_SUMMARY_DEFAULTS`]; the
-/// thresholds applied are echoed in the output.
+/// bounds applied (after clamping to what exists) are echoed as `limits`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct GroupSummaryThresholds {
     /// Groups listed, largest first; the rest are one `small_groups` count.
@@ -99,20 +94,6 @@ pub const GROUP_SUMMARY_DEFAULTS: GroupSummaryThresholds = GroupSummaryThreshold
     min_rows: 8,
     max_traits: 3,
 };
-
-/// Columns named in `not_used_for_grouping`; the rest are only counted.
-const MAX_LISTED_UNUSED: usize = 20;
-
-/// Longest column name or level emitted, in characters, before the `…`.
-pub const MAX_LABEL_CHARS: usize = 80;
-
-/// `s` cut to [`MAX_LABEL_CHARS`] characters plus `…`, and whether it was.
-fn label(s: &str) -> (String, bool) {
-    match s.char_indices().nth(MAX_LABEL_CHARS) {
-        Some((end, _)) => (format!("{}…", &s[..end]), true),
-        None => (s.to_owned(), false),
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,30 +130,6 @@ pub struct SmallGroups {
     pub rows: RowCount,
 }
 
-/// A disclosed row count: 0, or rounded to the nearest 5, or withheld
-/// (`"under <min_rows>"`) when under `min_rows`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
-pub enum RowCount {
-    Rounded(usize),
-    Withheld(String),
-}
-
-impl RowCount {
-    fn of(rows: usize, min_rows: usize) -> Self {
-        if rows == 0 || rows >= min_rows {
-            Self::Rounded(round_count(rows))
-        } else {
-            Self::Withheld(format!("under {min_rows}"))
-        }
-    }
-}
-
-/// `count` rounded to the nearest 5, halves up: Phirewall's `round_count`.
-fn round_count(count: usize) -> usize {
-    (count + 2) / 5 * 5
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DefiningFeature {
     /// The column's feature id (see the module documentation).
@@ -199,24 +156,32 @@ pub struct Cell {
     pub truncated: bool,
 }
 
+/// A profiled column the grouping did not use.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Unused {
+    /// The column's feature id (see the module documentation).
+    pub feature: usize,
+    pub column: String,
+    /// The column name was cut to `MAX_LABEL_CHARS`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// The `grouping` part of `io.phirewall/summary` v1.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GroupSummary {
-    pub thresholds: GroupSummaryThresholds,
+    /// The bounds applied, after clamping to what exists.
+    pub limits: GroupSummaryThresholds,
     pub method: String,
     pub cut_off: Option<f64>,
     pub group_count: usize,
-    pub rows: RowCount,
     pub groups: Vec<GroupEntry>,
     pub small_groups: SmallGroups,
     pub defining_features: Vec<DefiningFeature>,
     pub cells: Vec<Cell>,
-    pub not_used_for_grouping: Vec<String>,
-    /// The feature ids of `not_used_for_grouping`, in the same order.
-    pub not_used_for_grouping_features: Vec<usize>,
+    pub not_used_for_grouping: Vec<Unused>,
+    /// Always 0: every unused column is listed.
     pub not_used_for_grouping_omitted: usize,
-    /// The length in characters of this summary serialized as JSON
-    /// (`serde_json::to_string`), this field included.
-    pub size_chars: usize,
 }
 
 /// One standardized axis of a column: the column itself (numeric) or one
@@ -513,15 +478,15 @@ pub fn group_summary(
         *sizes.entry(g).or_insert(0) += 1;
     }
     // Asking for more groups or features than exist is asking for all of
-    // them: clamp (the request is still what is echoed).
+    // them: clamp, and echo what was applied.
     let grouping_columns = table
         .names
         .iter()
         .filter(|n| !exclude_columns.contains(n) && !not_used_for_grouping.contains(n))
         .count();
     let clamped = GroupSummaryThresholds {
-        max_groups: thresholds.max_groups.min(sizes.len()),
-        max_features: thresholds.max_features.min(grouping_columns),
+        max_groups: thresholds.max_groups.min(sizes.len()).max(1),
+        max_features: thresholds.max_features.min(grouping_columns).max(1),
         ..*thresholds
     };
     let t = &clamped;
@@ -546,8 +511,8 @@ pub fn group_summary(
         .names
         .iter()
         .zip(&table.columns)
-        .filter(|(n, _)| !excluded.contains(n.as_str()))
-        .enumerate();
+        .enumerate()
+        .filter(|(_, (n, _))| !excluded.contains(n.as_str()));
     let unused_listed: Vec<(usize, &String)> = profiled
         .clone()
         .filter(|(_, (n, _))| unused.contains(n.as_str()))
@@ -653,12 +618,11 @@ pub fn group_summary(
         })
         .collect();
 
-    let mut summary = GroupSummary {
-        thresholds: *thresholds,
-        method: label(method).0,
+    GroupSummary {
+        limits: clamped,
+        method: method.to_owned(),
         cut_off: cut_off.is_finite().then_some(cut_off),
         group_count: by_size.len(),
-        rows: RowCount::of(rows, t.min_rows),
         groups,
         small_groups: SmallGroups {
             count: by_size.len() - shown.len(),
@@ -680,29 +644,17 @@ pub fn group_summary(
         cells,
         not_used_for_grouping: unused_listed
             .iter()
-            .take(MAX_LISTED_UNUSED)
-            .map(|(_, n)| label(n).0)
+            .map(|&(feature, n)| {
+                let (column, truncated) = label(n);
+                Unused {
+                    feature,
+                    column,
+                    truncated,
+                }
+            })
             .collect(),
-        not_used_for_grouping_features: unused_listed
-            .iter()
-            .take(MAX_LISTED_UNUSED)
-            .map(|&(feature, _)| feature)
-            .collect(),
-        not_used_for_grouping_omitted: unused_listed.len().saturating_sub(MAX_LISTED_UNUSED),
-        size_chars: 0,
-    };
-    // The count is part of what it counts: repeat until its digits settle.
-    loop {
-        let n = serde_json::to_string(&summary)
-            .expect("a summary serializes")
-            .chars()
-            .count();
-        if n == summary.size_chars {
-            break;
-        }
-        summary.size_chars = n;
+        not_used_for_grouping_omitted: 0,
     }
-    summary
 }
 
 #[cfg(test)]
@@ -711,6 +663,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use crate::disclosure::MAX_LABEL_CHARS;
 
     const T: GroupSummaryThresholds = GROUP_SUMMARY_DEFAULTS;
 
@@ -1008,7 +961,7 @@ mod tests {
             &table(vec![("x", shifted(&mut rng, &labels, 1.0))]),
             &labels,
         );
-        assert_eq!((s.group_count, &s.rows), (1, &RowCount::Rounded(50)));
+        assert_eq!(s.group_count, 1);
         assert_eq!(s.groups.len(), 1);
         assert_eq!((s.groups[0].id, s.groups[0].size), (7, 50));
         assert!(s.groups[0].traits.is_empty());
@@ -1097,8 +1050,8 @@ mod tests {
             "{:?}",
             s.defining_features
         );
-        assert_eq!(s.not_used_for_grouping.len(), MAX_LISTED_UNUSED);
-        assert_eq!(s.not_used_for_grouping_omitted, 10);
+        assert_eq!(s.not_used_for_grouping.len(), unused.len());
+        assert_eq!(s.not_used_for_grouping_omitted, 0);
         let bytes = serde_json::to_string(&s).unwrap().len();
         assert!(bytes < 20_000, "{bytes} bytes");
     }
@@ -1246,7 +1199,6 @@ mod tests {
         );
         let sizes: Vec<usize> = s.groups.iter().map(|g| g.size).collect();
         assert_eq!(sizes, [15, 10]);
-        assert_eq!(s.rows, RowCount::Rounded(25));
         assert_eq!(s.small_groups.count, 1);
         let text = serde_json::to_string(&s.small_groups).unwrap();
         assert_eq!(text, r#"{"count":1,"rows":"under 8"}"#);
@@ -1259,7 +1211,6 @@ mod tests {
             &labels,
         );
         assert_eq!(s.small_groups, small(10, 10));
-        assert_eq!(s.rows, RowCount::Rounded(35));
         assert_eq!(round_count(2), 0);
         assert_eq!(round_count(3), 5);
     }
@@ -1382,12 +1333,20 @@ mod tests {
         ]);
         let unused = [ua.clone(), ub.clone()];
         let s = group_summary(&t, &labels, &["id".into()], &unused, "components", 0.25, &T);
-        // Profiled: ua 0, a 1, ub 2, b 3.
+        // Table positions, the excluded id included: ua 1, a 2, ub 3, b 4.
         let features: Vec<usize> = s.defining_features.iter().map(|f| f.feature).collect();
-        assert_eq!(features, [1, 3]);
+        assert_eq!(features, [2, 4]);
         assert_eq!(s.defining_features[0].column, s.defining_features[1].column);
-        assert_eq!(s.not_used_for_grouping_features, [0, 2]);
-        assert_eq!(s.not_used_for_grouping[0], s.not_used_for_grouping[1]);
+        let unused: Vec<(usize, bool)> = s
+            .not_used_for_grouping
+            .iter()
+            .map(|u| (u.feature, u.truncated))
+            .collect();
+        assert_eq!(unused, [(1, true), (3, true)]);
+        assert_eq!(
+            s.not_used_for_grouping[0].column,
+            s.not_used_for_grouping[1].column
+        );
         // Group 1 is high on b and low on a: the ids say which is which.
         let sd_of = |feature: usize| {
             s.cells
@@ -1395,7 +1354,7 @@ mod tests {
                 .find(|c| c.group == 1 && c.feature == feature)
                 .map(|c| c.sd)
         };
-        assert_eq!((sd_of(1), sd_of(3)), (Some(-1.0), Some(1.0)));
+        assert_eq!((sd_of(2), sd_of(4)), (Some(-1.0), Some(1.0)));
         let traits: Vec<(usize, f64)> = s
             .groups
             .iter()
@@ -1407,14 +1366,15 @@ mod tests {
             .collect();
         assert_eq!(traits.len(), 2);
         assert!(
-            traits.contains(&(1, -1.0)) && traits.contains(&(3, 1.0)),
+            traits.contains(&(2, -1.0)) && traits.contains(&(4, 1.0)),
             "{traits:?}"
         );
     }
 
-    /// The largest serialized summary under `t`: every entry at its cap,
-    /// every string at its longest, every number at its widest.
-    fn size_bound(t: &GroupSummaryThresholds) -> usize {
+    /// The largest serialized summary under `t` with `unused` unused
+    /// columns: every entry at its cap, every string at its longest, every
+    /// number at its widest.
+    fn size_bound(t: &GroupSummaryThresholds, unused: usize) -> usize {
         // 80 characters escaped to `\u00XX`, the ellipsis, the quotes.
         let string = 6 * MAX_LABEL_CHARS + "…".len() + 2;
         let number = 24; // an f64 or an i64, as serde_json writes them
@@ -1438,17 +1398,17 @@ mod tests {
             1,
             2,
         );
+        let unused_entry = entry(r#"{"feature":,"column":,"truncated":true}"#, 1, 1);
         let fixed = entry(
-            r#"{"thresholds":{"max_groups":,"max_features":,"min_sd":,"min_rows":,"max_traits":},"method":,"cut_off":,"group_count":,"rows":,"groups":[],"small_groups":{"count":,"rows":},"defining_features":[],"cells":[],"not_used_for_grouping":[],"not_used_for_grouping_features":[],"not_used_for_grouping_omitted":,"size_chars":}"#,
-            3,
-            12,
+            r#"{"limits":{"max_groups":,"max_features":,"min_sd":,"min_rows":,"max_traits":},"method":,"cut_off":,"group_count":,"groups":[],"small_groups":{"count":,"rows":},"defining_features":[],"cells":[],"not_used_for_grouping":[],"not_used_for_grouping_omitted":}"#,
+            2,
+            10,
         );
         fixed
             + g * f * cell
             + g * (group + tr.min(f) * trait_)
             + f * feature
-            + MAX_LISTED_UNUSED * (string + 1)
-            + MAX_LISTED_UNUSED * (number + 1)
+            + unused * unused_entry
     }
 
     #[test]
@@ -1487,14 +1447,12 @@ mod tests {
         assert!(s.cells.iter().all(|c| c.truncated));
         let v = json_of(&s);
         assert_short_strings(&v);
-        let (bytes, bound) = (v.to_string().len(), size_bound(&max));
+        let (bytes, bound) = (v.to_string().len(), size_bound(&max, unused.len()));
         // The strings are at their longest, so the bound is nearly met.
         assert!(
             bytes <= bound && bytes > bound * 9 / 10,
             "{bytes} of {bound}"
         );
-        // The figure in the module documentation.
-        assert!(size_bound(&T) < 69_000, "{}", size_bound(&T));
     }
 
     #[test]
@@ -1528,41 +1486,16 @@ mod tests {
             0.1,
             &ask(100_000),
         );
-        assert_eq!(s.thresholds, ask(100_000));
         assert_eq!(s.groups.len(), 9);
-        assert!(s.defining_features.len() <= 220);
-    }
-
-    #[test]
-    fn size_chars_is_the_serialized_length() {
-        let (table, labels, unused) = wide(3000);
-        for t in [
-            T,
-            GroupSummaryThresholds {
-                max_groups: 50,
-                max_features: 50,
-                ..T
-            },
-        ] {
-            let s = group_summary(&table, &labels, &[], &unused, "spectral", 0.1, &t);
-            let text = serde_json::to_string(&s).unwrap();
-            assert_eq!(s.size_chars, text.chars().count());
-            assert!(s.size_chars > 1000);
-        }
-        // Non-ASCII names count as characters, not bytes.
-        let t = table_of_unicode();
-        let s = summarize(&t.0, &t.1);
         assert_eq!(
-            s.size_chars,
-            serde_json::to_string(&s).unwrap().chars().count()
+            s.limits,
+            GroupSummaryThresholds {
+                max_groups: s.group_count,
+                max_features: 220,
+                ..ask(100_000)
+            }
         );
-    }
-
-    fn table_of_unicode() -> (Table, Vec<i64>) {
-        let mut rng = StdRng::seed_from_u64(11);
-        let labels = labels(40, 2);
-        let x = shifted(&mut rng, &labels, 2.0);
-        (table(vec![("größe→测试", x)]), labels)
+        assert!(s.defining_features.len() <= 220);
     }
 
     #[test]
