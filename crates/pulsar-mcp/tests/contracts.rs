@@ -626,6 +626,11 @@ async fn async_sweeps_are_polled_through_the_job_model_and_survive_a_new_client(
         assert_eq!(waited["status"], "complete");
         assert_eq!(waited["response_available"], true);
         assert_eq!(waited["sweep"]["run_id"], run_id);
+        // The contract sits at the top level, where the gateway looks.
+        let summary = summary_of(&waited, "wait_job");
+        assert_eq!(summary["run"]["run_id"], run_id);
+        assert_eq!(summary, &waited["sweep"][SUMMARY]);
+        assert!(summary.get("thresholds").is_some(), "{summary}");
         assert_eq!(waited["job"]["state"], "complete");
         assert_eq!(waited["job"]["progress"], 1.0);
         client.cancel().await.unwrap();
@@ -650,6 +655,7 @@ async fn async_sweeps_are_polled_through_the_job_model_and_survive_a_new_client(
     )
     .await;
     assert_eq!(job["response_available"], true);
+    assert_eq!(summary_of(&job, "get_job")["run"]["run_id"], run_id);
     let curve = ok(
         &client,
         &tools,

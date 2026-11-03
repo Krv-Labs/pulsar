@@ -160,6 +160,7 @@ fn job_schema() -> Value {
             ("run_complete", s::boolean()),
             ("response_available", s::boolean()),
             ("sweep", s::open_object()),
+            (phirewall::KEY, s::open_object()),
             ("poll_with", s::string()),
         ],
         &["status", "run_id", "job"],
@@ -968,6 +969,10 @@ fn job_payload(state: &ServerState, run_id: &RunId) -> Result<(Value, JobState),
     });
     if let Some(r) = response {
         payload["sweep"] = summary_payload(&r, 20, false);
+        // The gateway reads the contract at the top level only.
+        if let Some(summary) = r.get(phirewall::KEY) {
+            payload[phirewall::KEY] = summary.clone();
+        }
     }
     if !job.state.is_terminal() {
         payload["poll_with"] = json!("wait_job");
