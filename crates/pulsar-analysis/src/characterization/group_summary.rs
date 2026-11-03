@@ -580,7 +580,8 @@ pub fn group_summary(
                 .zip(&best)
                 .filter_map(|(&(feature, ref stats, _), best)| {
                     let &(level, sd) = best.get(&id)?;
-                    (sd.abs() >= t.min_sd).then(|| {
+                    // The bound holds for the value shown, not the raw one.
+                    (round_to(sd, 2).abs() >= t.min_sd).then(|| {
                         let (column, cut_column) = label(stats.name);
                         let (level, cut_level) = level.map(label).unzip();
                         let truncated = cut_column || cut_level == Some(true);
@@ -743,6 +744,28 @@ mod tests {
         let eta2 = 20.0 * 0.2f64.powi(2) / (20.0 * 0.24);
         assert_eq!(s.defining_features[0].separation, round_to(eta2, 3));
         assert_eq!(s.defining_features[0].kind, FeatureKind::Binary);
+    }
+
+    #[test]
+    fn min_sd_bounds_the_rounded_sd_that_is_shown() {
+        // 8 zeros then 9 ones: sds -1.0607 and 0.9428, shown as -1.06 and
+        // 0.94. Under min_sd 0.941 the second is not a difference.
+        let labels: Vec<i64> = (0..17).map(|i| i64::from(i >= 8)).collect();
+        let x = labels.iter().map(|&g| g as f64).collect();
+        let t = GroupSummaryThresholds { min_sd: 0.941, ..T };
+        let s = group_summary(
+            &table(vec![("x", Column::Float(x))]),
+            &labels,
+            &[],
+            &[],
+            "components",
+            0.25,
+            &t,
+        );
+        let sds: Vec<(i64, f64)> = s.cells.iter().map(|c| (c.group, c.sd)).collect();
+        assert_eq!(sds, vec![(0, -1.06)]);
+        let traits = s.groups.iter().flat_map(|g| &g.traits);
+        assert!(traits.into_iter().all(|tr| tr.sd.abs() >= 0.941));
     }
 
     #[test]
