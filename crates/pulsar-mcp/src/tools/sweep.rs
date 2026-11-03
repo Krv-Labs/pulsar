@@ -491,15 +491,24 @@ async fn execute(
         },
         None => None,
     };
-    let sweep_count = state
+    // This run is not listed until the job completes.
+    let history = state
         .store
         .list_runs(record.dataset_id.as_ref())
-        .map(|l| l.runs.len() + 1)
-        .unwrap_or(1);
+        .map(|l| l.runs)
+        .unwrap_or_default();
+    let sweep_count = history.len() + 1;
+    // The contract's `changes` compare with the latest earlier run on this
+    // dataset, whichever session ran it.
+    let on_dataset = record
+        .dataset_id
+        .as_ref()
+        .and_then(|_| history.iter().rev().find(|r| r.run_id != record.run_id));
     let mut response = build_response(
         &live,
         &record,
         previous.as_ref(),
+        on_dataset,
         &normalized_yaml,
         projection_method,
         projection_cached,
@@ -628,6 +637,7 @@ fn build_response(
     live: &LiveRun,
     record: &RunRecord,
     previous: Option<&RunRecord>,
+    on_dataset: Option<&RunRecord>,
     normalized_yaml: &str,
     projection_method: &str,
     projection_cached: bool,
@@ -767,10 +777,8 @@ fn build_response(
             ),
         ));
     }
-    let same_dataset =
-        previous.is_some_and(|p| p.dataset_id.is_some() && p.dataset_id == record.dataset_id);
-    if same_dataset {
-        parts.push(("changes", changes_part(&response["diff"])));
+    if let Some(changes) = on_dataset.and_then(|p| changes_part(p, record, &fitted.config)) {
+        parts.push(("changes", changes));
     }
     response.insert(
         phirewall::KEY.into(),
@@ -814,33 +822,79 @@ fn diff_changes(diff: &[Value]) -> (Vec<Value>, Map<String, Value>) {
     (parameter_changes, metric_changes)
 }
 
-/// The `changes` part from the sweep's `diff` rows: settings by name, and
-/// metrics before and after, finite only, with `giant_fraction` (a share
-/// of rows) to 2 dp.
-fn changes_part(diff: &Value) -> Value {
-    let diff = diff.as_array().map(Vec::as_slice).unwrap_or_default();
-    let (settings, metric_changes) = diff_changes(diff);
+/// The dotted names (`section.field`, or a top-level field) of the config
+/// settings whose values differ. Fields are compared as resolved, never
+/// through a label, and names stop at the field: no column or value.
+fn changed_settings(before: &PulsarConfig, after: &PulsarConfig) -> Vec<String> {
+    fn fields(cfg: &PulsarConfig) -> Map<String, Value> {
+        match serde_json::to_value(cfg) {
+            Ok(Value::Object(m)) => m,
+            _ => Map::new(),
+        }
+    }
+    fn differing<'a>(a: &'a Map<String, Value>, b: &'a Map<String, Value>) -> Vec<&'a String> {
+        let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        keys.retain(|k| a.get(*k) != b.get(*k));
+        keys
+    }
+    let (a, b) = (fields(before), fields(after));
+    let mut out = vec![];
+    for key in differing(&a, &b) {
+        match (a.get(key), b.get(key)) {
+            (Some(Value::Object(x)), Some(Value::Object(y))) => {
+                out.extend(differing(x, y).into_iter().map(|f| format!("{key}.{f}")));
+            }
+            _ => out.push(key.clone()),
+        }
+    }
+    out
+}
+
+/// The `changes` part: `current` against `previous`, an earlier run on the
+/// same dataset. Settings by name; metrics that differ, before and after,
+/// with `giant_fraction` (a share of rows) to 2 dp and left out when either
+/// run's largest group is under the row floor. `None` when the previous
+/// run's config cannot be read, so nothing can be said about settings.
+fn changes_part(
+    previous: &RunRecord,
+    current: &RunRecord,
+    current_cfg: &PulsarConfig,
+) -> Option<Value> {
+    let settings = changed_settings(&config_of(previous)?, current_cfg);
+    let (pm, cm) = (&previous.metrics, &current.metrics);
     let mut metrics = vec![];
     let mut omitted = 0;
-    for (code, change) in metric_changes {
-        let at = |k: &str| change[k].as_f64().filter(|x| x.is_finite());
-        let (Some(before), Some(after)) = (at("previous"), at("current")) else {
-            omitted += 1;
-            continue;
-        };
-        let (before, after) = if code == "giant_fraction" {
-            (json!(row_fraction(before)), json!(row_fraction(after)))
-        } else {
-            (change["previous"].clone(), change["current"].clone())
-        };
-        metrics.push(json!({"code": code, "before": before, "after": after}));
+    if pm.n_edges != cm.n_edges {
+        metrics.push(json!({"code": "n_edges", "before": pm.n_edges, "after": cm.n_edges}));
     }
-    json!({
+    if pm.component_count != cm.component_count {
+        metrics.push(json!({"code": "component_count", "before": pm.component_count, "after": cm.component_count}));
+    }
+    if pm.giant_fraction != cm.giant_fraction {
+        let backed = |m: &pulsar_store::RunMetrics| {
+            m.giant_fraction.is_finite()
+                && m.component_sizes
+                    .first()
+                    .is_none_or(|&s| s == 0 || s >= phirewall::ROW_FLOOR)
+        };
+        if backed(pm) && backed(cm) {
+            metrics.push(json!({
+                "code": "giant_fraction",
+                "before": row_fraction(pm.giant_fraction),
+                "after": row_fraction(cm.giant_fraction),
+            }));
+        } else {
+            omitted += 1;
+        }
+    }
+    Some(json!({
         "changed_settings": settings,
         "changed_settings_omitted": 0,
         "metrics": metrics,
         "metrics_omitted": omitted,
-    })
+    }))
 }
 
 /// `build_sweep_summary_payload`.

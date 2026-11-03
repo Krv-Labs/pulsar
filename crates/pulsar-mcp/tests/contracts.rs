@@ -4126,3 +4126,206 @@ async fn a_sweep_under_a_stored_plan_carries_its_summary_and_hides_its_identifie
     assert!(summary_of(&edited, "sweep").get("inputs").is_none());
     client.cancel().await.unwrap();
 }
+
+/// A json sweep of `yaml` on `dataset_id`, and its summary object.
+async fn sweep_on<H: ClientHandler>(
+    client: &RunningService<RoleClient, H>,
+    tools: &[Tool],
+    dataset_id: &Value,
+    yaml: &str,
+) -> Value {
+    let sweep = ok(
+        client,
+        tools,
+        "run_topological_sweep",
+        args(&[
+            ("config_yaml", json!(yaml)),
+            ("dataset_id", dataset_id.clone()),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    summary_of(&sweep, "sweep").clone()
+}
+
+async fn ingest<H: ClientHandler>(
+    client: &RunningService<RoleClient, H>,
+    tools: &[Tool],
+    path: &Path,
+) -> Value {
+    let ingested = ok(
+        client,
+        tools,
+        "ingest_dataset",
+        args(&[("path", json!(path.display().to_string()))]),
+    )
+    .await;
+    ingested["dataset_id"].clone()
+}
+
+#[tokio::test]
+async fn changes_compare_with_the_latest_run_on_the_same_dataset_across_sessions() {
+    let root = TempRoot::new("changes-dataset");
+    let (blobs, penguins) = (
+        golden("blobs", "input.csv"),
+        golden("penguins", "input.csv"),
+    );
+    let (a, b) = (blobs_yaml(), penguins_without_species_yaml());
+    let a_id;
+    {
+        let client = connect(root.path(), test_options(), ()).await;
+        let tools = client.list_all_tools().await.unwrap();
+        a_id = ingest(&client, &tools, &blobs).await;
+        let b_id = ingest(&client, &tools, &penguins).await;
+        assert_ne!(a_id, b_id);
+        let a1 = sweep_on(&client, &tools, &a_id, &a).await;
+        assert!(a1.get("changes").is_none(), "first run on A: {a1}");
+        let b1 = sweep_on(&client, &tools, &b_id, &b).await;
+        assert!(b1.get("changes").is_none(), "first run on B: {b1}");
+        // A again: compared with A1, not B1, so nothing changed.
+        let a2 = sweep_on(&client, &tools, &a_id, &a).await;
+        assert_eq!(
+            a2["changes"],
+            json!({"changed_settings": [], "changed_settings_omitted": 0, "metrics": [], "metrics_omitted": 0}),
+            "{a2}"
+        );
+        client.cancel().await.unwrap();
+    }
+    // A new session over the same store still finds A's last run.
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let mut changed = a.clone();
+    changed = changed.replace(
+        "construction_threshold: auto",
+        "construction_threshold: 0.5",
+    );
+    assert_ne!(changed, a);
+    let a3 = sweep_on(&client, &tools, &a_id, &changed).await;
+    assert_eq!(
+        a3["changes"]["changed_settings"],
+        json!(["cosmic_graph.construction_threshold"]),
+        "{a3}"
+    );
+    client.cancel().await.unwrap();
+}
+
+/// blobs' config with the epsilon grid `grid`.
+fn blobs_with_grid(grid: &[&str]) -> String {
+    let values: String = grid.iter().map(|e| format!("      - {e}\n")).collect();
+    let yaml = blobs_yaml();
+    let old = "      values:\n      - 0.4\n      - 0.8\n";
+    assert!(yaml.contains(old));
+    yaml.replace(old, &format!("      values:\n{values}"))
+}
+
+#[tokio::test]
+async fn changed_settings_name_every_config_field_that_differs() {
+    let root = TempRoot::new("changes-settings");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let id = ingest(&client, &tools, &golden("blobs", "input.csv")).await;
+    let settings = |s: &Value| s["changes"]["changed_settings"].clone();
+
+    let base = blobs_with_grid(&["0.4", "0.6", "0.8"]);
+    sweep_on(&client, &tools, &id, &base).await;
+    // Same extrema, a different interior point.
+    let interior = blobs_with_grid(&["0.4", "0.7", "0.8"]);
+    let s = sweep_on(&client, &tools, &id, &interior).await;
+    assert_eq!(settings(&s), json!(["ball_mapper.epsilons"]), "{s}");
+    // A change under 0.001, which a 3 dp label hides.
+    let fine = blobs_with_grid(&["0.4", "0.7", "0.8004"]);
+    let s = sweep_on(&client, &tools, &id, &fine).await;
+    assert_eq!(settings(&s), json!(["ball_mapper.epsilons"]), "{s}");
+    let threshold = fine.replace(
+        "construction_threshold: auto",
+        "construction_threshold: 0.5",
+    );
+    let s = sweep_on(&client, &tools, &id, &threshold).await;
+    assert_eq!(
+        settings(&s),
+        json!(["cosmic_graph.construction_threshold"]),
+        "{s}"
+    );
+    let dropped = threshold.replace("  - blob\n", "  - blob\n  - x3\n");
+    assert_ne!(dropped, threshold);
+    let s = sweep_on(&client, &tools, &id, &dropped).await;
+    assert_eq!(settings(&s), json!(["preprocessing.drop_columns"]), "{s}");
+    let imputed = dropped.replace(
+        "  - x3\n",
+        "  - x3\n  impute:\n    x0:\n      method: fill_median\n",
+    );
+    let s = sweep_on(&client, &tools, &id, &imputed).await;
+    // The resolved config keeps the column's candidates beside its policy.
+    let impute = json!(["preprocessing.impute", "preprocessing.impute_candidates"]);
+    assert_eq!(settings(&s), impute, "{s}");
+    // Another method for the same column: named the same way.
+    let refilled = imputed.replace("      method: fill_median\n", "      method: fill_mean\n");
+    let s = sweep_on(&client, &tools, &id, &refilled).await;
+    assert_eq!(settings(&s), impute, "{s}");
+    // Two fields at once, sorted; names only, never a value or column.
+    let both = refilled
+        .replace("  - x3\n", "")
+        .replace("minhash_d: 256", "minhash_d: 128");
+    let s = sweep_on(&client, &tools, &id, &both).await;
+    assert_eq!(
+        settings(&s),
+        json!(["cosmic_graph.minhash_d", "preprocessing.drop_columns"]),
+        "{s}"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn giant_fraction_is_withheld_when_a_run_s_largest_group_is_under_the_floor() {
+    let root = TempRoot::new("changes-giant");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let id = ingest(&client, &tools, &golden("blobs", "input.csv")).await;
+    let sweep = |yaml: String| {
+        let (client, tools, id) = (&client, &tools, &id);
+        async move {
+            ok(
+                client,
+                tools,
+                "run_topological_sweep",
+                args(&[
+                    ("config_yaml", json!(yaml)),
+                    ("dataset_id", id.clone()),
+                    ("response_format", json!("json")),
+                    ("detail", json!("full")),
+                ]),
+            )
+            .await
+        }
+    };
+    let largest = |r: &Value| r["metrics"]["component_sizes"][0].as_u64().unwrap();
+    let joined = sweep(blobs_yaml()).await;
+    assert!(largest(&joined) >= 8, "{}", joined["metrics"]);
+    // A cut-off so high the graph falls apart into groups under 8 rows.
+    let fragmented = sweep(blobs_yaml().replace(
+        "construction_threshold: auto",
+        "construction_threshold: 0.99",
+    ))
+    .await;
+    assert!(largest(&fragmented) < 8, "{}", fragmented["metrics"]);
+    assert_ne!(
+        joined["metrics"]["giant_fraction"],
+        fragmented["metrics"]["giant_fraction"]
+    );
+    let changes = &summary_of(&fragmented, "sweep")["changes"];
+    let codes: Vec<&str> = changes["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["code"].as_str().unwrap())
+        .collect();
+    assert!(!codes.contains(&"giant_fraction"), "{changes}");
+    assert_eq!(changes["metrics_omitted"], 1, "{changes}");
+    // And back: the previous run is the fragmented one, so still withheld.
+    let rejoined = sweep(blobs_yaml()).await;
+    assert_eq!(
+        summary_of(&rejoined, "sweep")["changes"]["metrics_omitted"],
+        1
+    );
+    client.cancel().await.unwrap();
+}
