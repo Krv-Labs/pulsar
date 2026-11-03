@@ -38,7 +38,9 @@
       "description": "A column name or level as the server read it, cut to 80 characters plus \"…\" (on a character boundary). The entry holding a cut label sets `truncated: true`. Display only, never an id.",
       "type": "string",
       "minLength": 1,
-      "maxLength": 81
+      "maxLength": 81,
+      "if": { "minLength": 81 },
+      "then": { "pattern": "…$" }
     },
     "code": {
       "description": "A fixed machine word (a method, reason, metric or question code), never data.",
@@ -64,7 +66,7 @@
       "description": "A disclosed row count: 0, or rounded to the nearest 5 (halves up), or the string \"under N\" when nonzero and under the floor that applies.",
       "oneOf": [
         { "type": "integer", "minimum": 0, "multipleOf": 5 },
-        { "type": "string", "pattern": "^under [1-9][0-9]*$" }
+        { "type": "string", "pattern": "^under ([89]|[1-9][0-9]+)$" }
       ]
     },
     "column": {
@@ -76,6 +78,8 @@
         "column": { "$ref": "#/$defs/label" },
         "truncated": { "$ref": "#/$defs/truncated" }
       },
+      "if": { "required": ["column"], "properties": { "column": { "minLength": 81 } } },
+      "then": { "required": ["truncated"], "properties": { "truncated": { "const": true } } },
       "additionalProperties": true
     },
 
@@ -332,7 +336,9 @@
       "properties": {
         "level": { "$ref": "#/$defs/label" },
         "sd": { "description": "Rounded to 2 decimals; finite.", "type": "number" }
-      }
+      },
+      "if": { "required": ["level"], "properties": { "level": { "minLength": 81 } } },
+      "then": { "required": ["truncated"], "properties": { "truncated": { "const": true } } }
     },
 
     "changes": {

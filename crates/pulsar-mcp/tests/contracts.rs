@@ -106,7 +106,8 @@ fn summary_validator() -> &'static jsonschema::Validator {
     })
 }
 
-/// `payload`'s summary object, checked against the v1 schema.
+/// `payload`'s summary object, checked against the v1 schema and the
+/// rules the schema cannot state.
 fn summary_of<'a>(payload: &'a Value, name: &str) -> &'a Value {
     let summary = payload
         .get(SUMMARY)
@@ -116,7 +117,79 @@ fn summary_of<'a>(payload: &'a Value, name: &str) -> &'a Value {
         .map(|e| format!("{} at {}", e, e.instance_path()))
         .collect();
     assert!(errors.is_empty(), "{name}: {errors:#?}\n{summary}");
+    let violations = contract_violations(summary);
+    assert!(violations.is_empty(), "{name}: {violations:#?}\n{summary}");
     summary
+}
+
+/// What v1 requires that its schema does not check: every "under N" has N
+/// = row_floor (`grouping.limits.min_rows` inside `grouping`); a label over
+/// 80 characters is 80 plus "…" in an entry with `truncated: true`, and
+/// `truncated` marks such a label; a row share is to 2 dp, and the giant
+/// group's share of a run's rows is never shown as 0.
+fn contract_violations(summary: &Value) -> Vec<String> {
+    fn walk(v: &Value, floor: u64, path: &str, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => {
+                if let Some(n) = s.strip_prefix("under ") {
+                    if n.parse::<u64>().ok() != Some(floor) {
+                        out.push(format!("{path}: {s:?} with floor {floor}"));
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    walk(item, floor, &format!("{path}[{i}]"), out);
+                }
+            }
+            Value::Object(m) => {
+                let labels: Vec<&str> = ["column", "level"]
+                    .iter()
+                    .filter_map(|k| m.get(*k).and_then(Value::as_str))
+                    .collect();
+                let cut = |l: &&str| l.chars().count() == 81 && l.ends_with('…');
+                let truncated = m.get("truncated") == Some(&json!(true));
+                for l in &labels {
+                    if l.chars().count() > 80 && !(cut(l) && truncated) {
+                        out.push(format!("{path}: {l:?} is long but not marked cut"));
+                    }
+                }
+                if truncated && !labels.iter().any(cut) {
+                    out.push(format!("{path}: truncated without a cut label"));
+                }
+                let share = |x: &Value, what: &str, out: &mut Vec<String>| {
+                    if let Some(x) = x.as_f64() {
+                        if (x * 100.0).round() / 100.0 != x || !(0.0..=1.0).contains(&x) {
+                            out.push(format!("{path}: {what} {x} is not a 2 dp share"));
+                        }
+                    }
+                };
+                if let Some(x) = m.get("missing_fraction") {
+                    share(x, "missing_fraction", out);
+                }
+                if m.get("code") == Some(&json!("giant_fraction")) {
+                    for k in ["before", "after"] {
+                        share(&m[k], k, out);
+                        if m[k].as_f64() == Some(0.0) {
+                            out.push(format!("{path}: giant_fraction {k} shown as 0"));
+                        }
+                    }
+                }
+                for (k, child) in m {
+                    let floor = match (path, k.as_str()) {
+                        ("", "grouping") => child["limits"]["min_rows"].as_u64().unwrap_or(0),
+                        _ => floor,
+                    };
+                    walk(child, floor, &format!("{path}/{k}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = vec![];
+    let floor = summary["row_floor"].as_u64().unwrap_or(0);
+    walk(summary, floor, "", &mut out);
+    out
 }
 
 fn args(pairs: &[(&str, Value)]) -> JsonObject {
@@ -3846,8 +3919,13 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
     client.cancel().await.unwrap();
 }
 
-/// 240 rows, 220 columns: three hidden blobs show in a few numeric and one
-/// categorical column; the rest is noise, ordinal text and a constant.
+/// A column name over the 80-character label limit.
+const WIDE_LONG_NAME: &str =
+    "a_column_whose_name_runs_well_past_the_eighty_character_label_limit_of_summary_v1_by_design";
+
+/// 240 rows, 220 columns: three hidden blobs show in a few numeric and two
+/// categorical columns (one with a name too long to show whole); one blank
+/// cell; the rest is noise, ordinal text and a constant.
 fn synthetic_wide_csv(dir: &Path) -> PathBuf {
     let mut state: u64 = 0x2545_F491_4F6C_DD1D;
     let mut noise = || {
@@ -3862,6 +3940,7 @@ fn synthetic_wide_csv(dir: &Path) -> PathBuf {
             1 => "constant".to_owned(),
             2 => "grade".to_owned(),
             3 => "arm".to_owned(),
+            4 => WIDE_LONG_NAME.to_owned(),
             j => format!("measurement_{j:03}"),
         })
         .collect();
@@ -3873,6 +3952,9 @@ fn synthetic_wide_csv(dir: &Path) -> PathBuf {
                 1 => "1".to_owned(),
                 2 => ["I", "II", "III"][(i / 7) % 3].to_owned(),
                 3 => ["left", "middle", "right"][blob].to_owned(),
+                4 => ["p", "q", "r"][blob].to_owned(),
+                // One blank in 240 rows: a share of 0.004, shown as 0.01.
+                5 if i == 0 => String::new(),
                 j if j % 50 == 0 => format!("{:.6}", blob as f64 * 4.0 + noise()),
                 _ => format!("{:.6}", noise()),
             })
@@ -3936,8 +4018,9 @@ async fn the_dossier_group_summary_stays_bounded_on_a_wide_synthetic_table() {
 
 /// Every tool that emits the summary object does so valid against the v1
 /// schema, with its own parts, on the table `csv`; feature ids agree across
-/// the parts and with the dossier's `profiled_features`.
-async fn check_summary_parts(csv: &Path, tag: &str) {
+/// the parts and with the dossier's `profiled_features`. Returns the
+/// sweep's `inputs`.
+async fn check_summary_parts(csv: &Path, tag: &str) -> Value {
     let root = TempRoot::new(tag);
     let client = connect(root.path(), test_options(), ()).await;
     let tools = client.list_all_tools().await.unwrap();
@@ -3978,7 +4061,8 @@ async fn check_summary_parts(csv: &Path, tag: &str) {
         ("response_format", json!("json")),
     ]);
     let first = ok(&client, &tools, "run_topological_sweep", sweep_args.clone()).await;
-    let sweep = summary_of(&first, "sweep");
+    let sweep = summary_of(&first, "sweep").clone();
+    let sweep = &sweep;
     assert_eq!(parts(sweep), set(&["inputs", "thresholds"]), "{sweep}");
     assert_eq!(sweep["run"]["run_id"], first["run_id"]);
     assert_eq!(sweep["inputs"], config["inputs"]);
@@ -4036,6 +4120,7 @@ async fn check_summary_parts(csv: &Path, tag: &str) {
         }
     }
     client.cancel().await.unwrap();
+    sweep["inputs"].clone()
 }
 
 #[test]
@@ -4052,6 +4137,111 @@ fn the_vendored_schema_refuses_what_v1_forbids() {
         *v.pointer_mut(pointer).unwrap() = bad;
         assert!(!summary_validator().is_valid(&v), "{v}");
     }
+    // Labels: one cut to 80 plus "…" is marked; nothing else is 81 long.
+    let cut = format!("{}…", "c".repeat(80));
+    let with_column = |column: Value| {
+        let mut v = valid.clone();
+        v["inputs"] = json!({
+            "revision": 1, "input_columns": 1, "output_features": 1,
+            "counts": {"kept": 1, "dropped": 0, "encoded": 1, "imputed": 0},
+            "dropped": [], "dropped_omitted": 0,
+            "encoded": [column], "encoded_omitted": 0,
+            "imputed": [], "imputed_omitted": 0,
+            "open_questions": [], "open_questions_omitted": 0,
+            "changes_from_previous": [], "changes_from_previous_omitted": 0,
+        });
+        v
+    };
+    let entry = |column: &str, truncated: Option<bool>| {
+        let mut e = json!({"feature": 0, "column": column, "method": "one_hot", "levels": 2});
+        if let Some(t) = truncated {
+            e["truncated"] = json!(t);
+        }
+        with_column(e)
+    };
+    assert!(summary_validator().is_valid(&entry("short", None)));
+    assert!(summary_validator().is_valid(&entry(&cut, Some(true))));
+    for bad in [
+        entry(&cut, None),
+        entry(&cut, Some(false)),
+        entry(&"c".repeat(81), Some(true)),
+        entry(&format!("{}…", "c".repeat(81)), Some(true)),
+    ] {
+        assert!(!summary_validator().is_valid(&bad), "{bad}");
+    }
+    // "under N" is never under the least floor, 8.
+    for (rows, ok) in [
+        ("under 8", true),
+        ("under 20", true),
+        ("under 1", false),
+        ("under 7", false),
+        ("under 08", false),
+    ] {
+        let mut v = valid.clone();
+        v["run"]["rows"] = json!(rows);
+        assert_eq!(summary_validator().is_valid(&v), ok, "{v}");
+    }
+}
+
+/// The rules `contract_violations` checks, each broken once in an object
+/// the schema accepts.
+#[test]
+fn the_contract_checks_refuse_what_the_schema_cannot() {
+    let base = json!({"version": 1, "row_floor": 8, "run": {"run_id": "r", "rows": 100}});
+    let cut = format!("{}…", "c".repeat(80));
+    let with = |pointer: &str, value: Value| {
+        let mut v = base.clone();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        let mut at = &mut v;
+        for part in parent.split('/').skip(1) {
+            at = &mut at[part];
+        }
+        at[key] = value;
+        v
+    };
+    let grouping = |rows: &str| json!({"limits": {"min_rows": 20}, "small_groups": {"count": 1, "rows": rows}});
+    let changes = |before: f64| {
+        json!({"changed_settings": [], "changed_settings_omitted": 0, "metrics_omitted": 0,
+               "metrics": [{"code": "giant_fraction", "before": before, "after": 0.5}]})
+    };
+    let imputed = |fraction: f64| json!({"imputed": [{"feature": 1, "column": "x", "method": "fill_mean", "missing_fraction": fraction}]});
+    let column = |label: &str, truncated: bool| {
+        let mut e = json!({"feature": 0, "column": label});
+        if truncated {
+            e["truncated"] = json!(true);
+        }
+        json!({"not_used_for_grouping": [e], "limits": {"min_rows": 8}})
+    };
+    let good = [
+        base.clone(),
+        with("/run/rows", json!("under 8")),
+        with("/grouping", grouping("under 20")),
+        with("/changes", changes(0.33)),
+        with("/inputs", imputed(0.01)),
+        with("/grouping", column(&cut, true)),
+    ];
+    for v in &good {
+        assert_eq!(contract_violations(v), Vec::<String>::new(), "{v}");
+    }
+    let bad = [
+        with("/run/rows", json!("under 1")),
+        with("/run/rows", json!("under 20")),
+        with("/grouping", grouping("under 8")),
+        with("/changes", changes(0.333)),
+        with("/changes", changes(0.0)),
+        with("/inputs", imputed(0.004)),
+        with("/inputs", imputed(1.5)),
+        with("/grouping", column(&cut, false)),
+        with("/grouping", column(&"c".repeat(81), true)),
+        with("/grouping", column("short", true)),
+    ];
+    for v in &bad {
+        assert!(!contract_violations(v).is_empty(), "accepted: {v}");
+    }
+    // Those the schema alone lets through.
+    for v in [&bad[1], &bad[3], &bad[4]] {
+        assert!(summary_validator().is_valid(v), "{v}");
+    }
 }
 
 #[tokio::test]
@@ -4062,7 +4252,22 @@ async fn every_summary_tool_answers_the_phirewall_contract_on_penguins() {
 #[tokio::test]
 async fn every_summary_tool_answers_the_phirewall_contract_on_a_wide_table() {
     let dir = TempRoot::new("summary-wide-csv");
-    check_summary_parts(&synthetic_wide_csv(dir.path()), "summary-wide").await;
+    let inputs = check_summary_parts(&synthetic_wide_csv(dir.path()), "summary-wide").await;
+    let find = |list: &str, feature: u64| {
+        inputs[list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["feature"] == feature)
+            .unwrap_or_else(|| panic!("feature {feature} not in {list}: {inputs}"))
+            .clone()
+    };
+    let long = find("encoded", 4);
+    let cut: String = WIDE_LONG_NAME.chars().take(80).collect();
+    assert_eq!(long["column"], format!("{cut}…"), "{long}");
+    assert_eq!(long["truncated"], true, "{long}");
+    // One blank in 240 rows is a nonzero share: never shown as 0.
+    assert_eq!(find("imputed", 5)["missing_fraction"], 0.01);
 }
 
 #[tokio::test]
