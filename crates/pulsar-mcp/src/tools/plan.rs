@@ -10,10 +10,10 @@
 use std::collections::HashSet;
 
 use pulsar_analysis::plan::{
-    apply_answers_and_edits, build_draft_plan_payload, build_edit_plan_payload, diff_plan_entries,
-    draft_plan, draft_plan_payload_to_markdown, dry_run_processed_space,
-    edit_plan_payload_to_markdown, DecidedBy, Detail as PlanDetail, DraftError, DraftOptions,
-    Limits, PlanEditError, PreprocessingPlan,
+    apply_answers_and_edits, build_draft_plan_payload, build_edit_plan_payload,
+    build_preprocessing_summary, diff_plan_entries, draft_plan, draft_plan_payload_to_markdown,
+    dry_run_processed_space, edit_plan_payload_to_markdown, processed_feature_names, DecidedBy,
+    Detail as PlanDetail, DraftError, DraftOptions, Limits, PlanEditError, PreprocessingPlan,
 };
 use pulsar_data::Table;
 use pulsar_store::{PlanId, StoreError};
@@ -25,6 +25,7 @@ use super::config::resolve_dataset;
 use super::params::{Detail, Format};
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
+use crate::phirewall;
 use crate::schema::{self as s, input_schema};
 use crate::state::ServerState;
 
@@ -40,6 +41,25 @@ fn compact(payload: &Value) -> String {
 }
 
 /// Keep only next-step tools this server actually registers.
+/// The plan's `inputs` part for Phirewall's panel, so a plan shows as its own
+/// card before any sweep runs; `previous` is the revision it replaced.
+fn attach_summary(
+    payload: &mut Value,
+    table: &Table,
+    plan: &PreprocessingPlan,
+    previous: Option<&PreprocessingPlan>,
+) {
+    let names = processed_feature_names(table, plan).ok();
+    let inputs =
+        build_preprocessing_summary(plan, previous, names.as_deref(), phirewall::ROW_FLOOR);
+    payload[phirewall::KEY] = phirewall::summary(
+        None,
+        Some(plan.dataset_id.clone()),
+        table.n_rows(),
+        [("inputs", inputs)],
+    );
+}
+
 fn only_registered(payload: &mut Value) {
     let names: HashSet<&'static str> = super::catalog().iter().map(|t| t.name).collect();
     if let Some(list) = payload.get_mut("next_tools").and_then(Value::as_array_mut) {
@@ -221,7 +241,8 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
                     list.push(json!(format!("Processed-space dry-run failed: {error}")));
                 }
             }
-            let payload = build_draft_plan_payload(&plan, space.as_ref(), detail, limits);
+            let mut payload = build_draft_plan_payload(&plan, space.as_ref(), detail, limits);
+            attach_summary(&mut payload, &table, &plan, None);
             Ok((plan, payload))
         })
         .await
@@ -391,13 +412,14 @@ pub async fn edit(state: &ServerState, p: EditParams) -> Result<CallToolResult, 
             let mut updated = apply_answers_and_edits(&worker_plan, &answers, &edits, source)?;
             let changes = diff_plan_entries(&worker_plan, &updated);
             let (space, validation) = dry_run_processed_space(&table, &mut updated);
-            let payload = build_edit_plan_payload(
+            let mut payload = build_edit_plan_payload(
                 &updated,
                 &changes,
                 space.as_ref(),
                 &validation,
                 Limits::default(),
             );
+            attach_summary(&mut payload, &table, &updated, Some(&worker_plan));
             Ok((updated, payload))
         },
     )

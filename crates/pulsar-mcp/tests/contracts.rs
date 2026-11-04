@@ -1205,6 +1205,15 @@ async fn the_plan_loop_persists_checks_revisions_and_survives_a_restart() {
         plan_id.starts_with("pp_") && plan_id.len() == 15,
         "{plan_id}"
     );
+    // The draft carries its own panel summary (checked against the schema by
+    // `ok`), so the plan shows as a card before any sweep runs.
+    let draft_inputs = &draft[SUMMARY]["inputs"];
+    assert_eq!(draft_inputs["revision"], 1);
+    assert_eq!(draft_inputs["changes_from_previous"], json!([]));
+    assert!(
+        !draft_inputs["kept"].as_array().unwrap().is_empty(),
+        "{draft_inputs}"
+    );
     assert_eq!(
         (draft["revision"].clone(), draft["detail"].clone()),
         (json!(1), json!("summary"))
@@ -2032,6 +2041,18 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     )
     .await;
     assert_eq!(edited["revision"], 2);
+    // The edit carries its own panel summary (checked against the schema by
+    // `ok`), so the plan shows as a card before any sweep runs.
+    let edit_inputs = &edited[SUMMARY]["inputs"];
+    assert_eq!(edit_inputs["revision"], 2);
+    assert_eq!(edited[SUMMARY]["run"]["dataset_id"], json!(dataset_id));
+    assert!(
+        !edit_inputs["changes_from_previous"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{edit_inputs}"
+    );
     let bypassed = ok(
         &client,
         &tools,
