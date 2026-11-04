@@ -297,7 +297,7 @@
                 "maxItems": 6,
                 "items": { "$ref": "#/$defs/rowCount" }
               },
-              "singletons": { "description": "Groups of one row, exact.", "type": "integer", "minimum": 0 },
+              "singletons": { "description": "Groups of one row. Each is one row, so the count is disclosed as a row count.", "$ref": "#/$defs/rowCount" },
               "kind": { "enum": ["plateau", "breakpoint", "selected"] },
               "selected": { "type": "boolean" }
             },

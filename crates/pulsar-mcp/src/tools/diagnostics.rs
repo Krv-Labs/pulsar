@@ -751,7 +751,8 @@ pub fn threshold_table(
             "range": [lo, hi],
             "groups": profile.component_count,
             "top_sizes": top_sizes,
-            "singletons": profile.singleton_count,
+            // A singleton is one row, so their count is a row count.
+            "singletons": RowCount::of(profile.singleton_count, row_floor),
             "kind": kind,
             "selected": false,
         })
