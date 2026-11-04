@@ -18,6 +18,13 @@ use crate::jobs::ProgressTarget;
 use crate::state::ServerState;
 use crate::tools::{self, CallContext, ToolSpec};
 
+/// How long a sweep task lives, counted from its creation. `rmcp`'s default
+/// is five minutes, and at its TTL the task manager aborts the work and marks
+/// the task failed, so a longer sweep was killed mid-run. A sweep's real limit
+/// is the client's to enforce (it cancels with `tasks/cancel`); this only has
+/// to outlast any sweep, and bounds how long a finished task is kept.
+pub const SWEEP_TASK_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+
 #[derive(Clone)]
 pub struct PulsarServer {
     state: Arc<ServerState>,
@@ -131,6 +138,7 @@ impl ServerHandler for PulsarServer {
             let task = self.state.tasks.spawn(
                 TaskOptions::new()
                     .with_status_message("sweep queued")
+                    .with_ttl_ms(SWEEP_TASK_TTL_MS)
                     .with_poll_interval_ms(500),
                 move |task_ctx| {
                     Box::pin(async move {

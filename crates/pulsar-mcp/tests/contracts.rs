@@ -794,6 +794,12 @@ async fn task_capable_clients_get_a_task_handle_for_the_sweep() {
     let CallToolResponse::Task(created) = response else {
         panic!("expected a task handle, got {response:?}");
     };
+    // rmcp's default TTL (five minutes) aborted longer sweeps mid-run.
+    assert_eq!(
+        created.task.ttl_ms,
+        Some(pulsar_mcp::server::SWEEP_TASK_TTL_MS),
+        "the sweep task outlives any sweep"
+    );
     let task_id = created.task.task_id.clone();
     let mut result: Option<Map<String, Value>> = None;
     for _ in 0..600 {
