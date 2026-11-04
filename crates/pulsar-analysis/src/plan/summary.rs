@@ -116,6 +116,64 @@ fn column(plan: &PreprocessingPlan, col: &str) -> Option<Value> {
     Some(out)
 }
 
+/// The share of rows where `col` is blank, or `None` without evidence.
+/// Every blank share the summary reports comes through here, so a
+/// disclosure rule for shares (share × rows is a row count) applies in one
+/// place.
+fn blank_share(ev_by_col: &HashMap<&str, &ColumnEvidence>, col: &str) -> Option<f64> {
+    ev_by_col
+        .get(col)
+        .map(|ev| row_fraction(ev.missing_fraction))
+}
+
+/// `{partner, relation}` when `col` is blank exactly where a 0/1 partner
+/// column has one value: the partner named as a plan column, and the
+/// relation as its code (`missing_when_partner_zero` or `_nonzero`).
+fn partner(
+    plan: &PreprocessingPlan,
+    ev_by_col: &HashMap<&str, &ColumnEvidence>,
+    col: &str,
+) -> Option<Value> {
+    let md = ev_by_col.get(col)?.mask_dependency.as_ref()?;
+    let is_flag = ev_by_col
+        .get(md.partner.as_str())
+        .is_some_and(|p| p.kind == ColumnKind::Boolean);
+    if !is_flag {
+        return None;
+    }
+    Some(json!({"partner": column(plan, &md.partner)?, "relation": md.relation.as_str()}))
+}
+
+/// The open question `e` belongs to, by id, if it is still open.
+fn open_question<'a>(plan: &'a PreprocessingPlan, e: &PlanEntry) -> Option<&'a str> {
+    let id = e.question_id.as_deref()?;
+    plan.questions
+        .values()
+        .find(|q| q.question_id == id && q.status == QuestionStatus::Open)
+        .map(|q| q.question_id.as_str())
+}
+
+/// The fields every column's line carries beside its own: its blank share,
+/// who decided its treatment, its open question, and for a column blank
+/// where a 0/1 partner has one value, that partner.
+fn common(
+    plan: &PreprocessingPlan,
+    ev_by_col: &HashMap<&str, &ColumnEvidence>,
+    e: &PlanEntry,
+) -> Value {
+    let mut out = json!({
+        "missing_fraction": blank_share(ev_by_col, &e.column),
+        "decided_by": e.decided_by,
+    });
+    if let Some(id) = open_question(plan, e) {
+        out["question"] = json!(id);
+    }
+    if let Some(Value::Object(p)) = partner(plan, ev_by_col, &e.column) {
+        out.as_object_mut().expect("an object").extend(p);
+    }
+    out
+}
+
 /// `column` with `fields` added.
 fn entry(plan: &PreprocessingPlan, col: &str, fields: Value) -> Value {
     let mut out = column(plan, col).expect("an entry of the plan");
@@ -160,7 +218,11 @@ fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value>
         };
         for ((field, from, _), (_, to, shown)) in fields(old).into_iter().zip(fields(new)) {
             if from != to {
-                out.push(entry(plan, col, json!({"field": field, "to": shown})));
+                out.push(entry(
+                    plan,
+                    col,
+                    json!({"field": field, "to": shown, "by": new.decided_by}),
+                ));
             }
         }
     }
@@ -212,7 +274,10 @@ pub fn build_preprocessing_summary(
         .filter(|e| e.role != Role::Feature)
         .map(|e| {
             let reason = drop_reason(e, &ev_by_col, cat_threshold);
-            entry(plan, &e.column, json!({"reason": reason}))
+            let mut fields = common(plan, &ev_by_col, e);
+            fields["reason"] = json!(reason);
+            fields["role"] = json!(e.role);
+            entry(plan, &e.column, fields)
         })
         .collect();
     let encoded: Vec<Value> = features
@@ -228,14 +293,22 @@ pub fn build_preprocessing_summary(
         .iter()
         .filter_map(|e| Some((e, e.impute_method()?)))
         .map(|(e, method)| {
-            let fraction = ev_by_col
-                .get(e.column.as_str())
-                .map(|ev| row_fraction(ev.missing_fraction));
+            let fraction = blank_share(&ev_by_col, &e.column);
             entry(
                 plan,
                 &e.column,
                 json!({"missing_fraction": fraction, "method": method}),
             )
+        })
+        .collect();
+    // Every feature, with its blank share and blank marker: with `dropped`,
+    // one line per input column.
+    let kept: Vec<Value> = features
+        .iter()
+        .map(|e| {
+            let mut fields = common(plan, &ev_by_col, e);
+            fields["indicator"] = json!(indicator_code(&e.indicator));
+            entry(plan, &e.column, fields)
         })
         .collect();
     let open_questions: Vec<Value> = plan
@@ -249,6 +322,8 @@ pub fn build_preprocessing_summary(
                 .filter_map(|c| column(plan, c))
                 .collect();
             json!({
+                "id": q.question_id,
+                "default": q.default_option_id,
                 "code": q.topic,
                 "columns": columns,
                 "columns_omitted": 0,
@@ -268,6 +343,8 @@ pub fn build_preprocessing_summary(
             "encoded": encoded.len(),
             "imputed": imputed.len(),
         },
+        "kept": kept,
+        "kept_omitted": 0,
         "dropped": dropped,
         "dropped_omitted": 0,
         "encoded": encoded,
@@ -359,9 +436,12 @@ mod tests {
         assert_eq!(
             s["dropped"],
             json!([
-                {"feature": 0, "column": "pid", "reason": "identifier"},
-                {"feature": 3, "column": "site", "reason": "constant"},
-                {"feature": 6, "column": "rare", "reason": "missing"},
+                {"feature": 0, "column": "pid", "reason": "identifier", "role": "id",
+                 "missing_fraction": 0.0, "decided_by": "default"},
+                {"feature": 3, "column": "site", "reason": "constant", "role": "drop",
+                 "missing_fraction": 0.0, "decided_by": "default"},
+                {"feature": 6, "column": "rare", "reason": "missing", "role": "drop",
+                 "missing_fraction": 0.83, "decided_by": "default", "question": "q2"},
             ])
         );
         // ward: three levels plus its blank category; ward_type's dummies are
@@ -383,6 +463,16 @@ mod tests {
             .unwrap();
         assert_eq!(score["feature"], 4);
         assert_eq!(score["missing_fraction"], 0.22);
+        // With `dropped`, one line per input column; each kept one carries
+        // its blank share and marker.
+        let kept = s["kept"].as_array().unwrap();
+        assert_eq!(kept.len() + s["dropped"].as_array().unwrap().len(), 7);
+        let kept_score = kept.iter().find(|e| e["column"] == "score").unwrap();
+        assert_eq!(kept_score["missing_fraction"], 0.22);
+        assert!(kept_score["indicator"].is_string(), "{kept_score}");
+        for q in s["open_questions"].as_array().unwrap() {
+            assert!(q["id"].is_string() && q["default"].is_string(), "{q}");
+        }
         assert_eq!(s["changes_from_previous"], json!([]));
         let text = s.to_string();
         for level in ["north", "south", "east", "acute", "rehab", "(blank)"] {
@@ -400,10 +490,10 @@ mod tests {
         assert_eq!(plan.entries["rowid"].decided_by, DecidedBy::Default);
         let s = build_preprocessing_summary(&plan, None, None, 8);
         assert!(
-            s["dropped"]
-                .as_array()
-                .unwrap()
-                .contains(&json!({"feature": 0, "column": "rowid", "reason": "identifier"})),
+            s["dropped"].as_array().unwrap().contains(
+                &json!({"feature": 0, "column": "rowid", "reason": "identifier",
+                    "role": "id", "missing_fraction": 0.0, "decided_by": "default"})
+            ),
             "{}",
             s["dropped"]
         );
@@ -422,13 +512,11 @@ mod tests {
         for d in s["dropped"].as_array().unwrap() {
             assert!(DROP_REASONS.contains(&d["reason"].as_str().unwrap()), "{d}");
         }
-        assert_eq!(
-            s["dropped"][2],
-            json!({"feature": 5, "column": "age", "reason": "user"})
-        );
+        assert_eq!(s["dropped"][2]["reason"], "user");
+        assert_eq!(s["dropped"][2]["decided_by"], "user");
         assert_eq!(
             s["changes_from_previous"],
-            json!([{"feature": 5, "column": "age", "field": "role", "to": "drop"}])
+            json!([{"feature": 5, "column": "age", "field": "role", "to": "drop", "by": "user"}])
         );
         assert!(s["output_features"].is_null());
     }
@@ -443,8 +531,49 @@ mod tests {
         let s = build_preprocessing_summary(&plan, Some(&previous), None, 8);
         assert_eq!(
             s["changes_from_previous"],
-            json!([{"feature": 4, "column": "score", "field": "indicator", "to": "group"}])
+            json!([{"feature": 4, "column": "score", "field": "indicator", "to": "group",
+                    "by": "default"}])
         );
         assert!(!s.to_string().contains("mg"), "{s}");
+    }
+
+    /// A column blank exactly where a 0/1 flag is false names the flag and
+    /// how the two relate, whoever dropped it.
+    #[test]
+    fn a_column_blank_unless_a_flag_is_set_names_the_flag() {
+        let n = 40;
+        let died: Vec<Option<bool>> = (0..n).map(|i| Some(i % 4 == 0)).collect();
+        let death_age = (0..n)
+            .map(|i| {
+                if i % 4 == 0 {
+                    60.0 + i as f64
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
+        let score = (0..n).map(|i| i as f64).collect();
+        let t = Table::new(
+            vec!["died".into(), "death_age".into(), "score".into()],
+            vec![
+                Column::Bool(died),
+                Column::Float(death_age),
+                Column::Float(score),
+            ],
+        )
+        .unwrap();
+        let plan = draft_plan(&t, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
+        let s = build_preprocessing_summary(&plan, None, None, 8);
+        let lines: Vec<&Value> = s["kept"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(s["dropped"].as_array().unwrap())
+            .collect();
+        let death_age = lines.iter().find(|e| e["column"] == "death_age").unwrap();
+        assert_eq!(death_age["partner"]["column"], "died", "{death_age}");
+        assert_eq!(death_age["relation"], "missing_when_partner_zero");
+        let score = lines.iter().find(|e| e["column"] == "score").unwrap();
+        assert!(score.get("partner").is_none(), "{score}");
     }
 }

@@ -2069,8 +2069,10 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     let changes = summary["changes_from_previous"].as_array().unwrap();
     let feature = |c: &str| columns.iter().position(|n| n == c).unwrap();
     for change in [
-        json!({"feature": feature("visits1"), "column": "visits1", "field": "role", "to": "drop"}),
-        json!({"feature": feature("grade"), "column": "grade", "field": "encode", "to": "one_hot"}),
+        json!({"feature": feature("visits1"), "column": "visits1", "field": "role", "to": "drop",
+               "by": "agent"}),
+        json!({"feature": feature("grade"), "column": "grade", "field": "encode", "to": "one_hot",
+               "by": "agent"}),
     ] {
         assert!(changes.contains(&change), "{change} not in {changes:?}");
     }
