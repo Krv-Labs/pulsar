@@ -484,9 +484,11 @@ async fn execute(
     let saved_path = match cfg_for_save {
         Some(cfg) => match save_config_file(&cfg, live.data_path.as_deref()) {
             Ok(path) => Some(path),
-            Err(err) => {
+            Err(mut err) => {
                 let _ = job.fail("CONFIG_SAVE_FAILED", "could not save config file");
-                return Err(err);
+                // The sweep itself finished and is live: say so.
+                err.reason += &format!(" The sweep itself completed: run {} is now the session's latest run and the previous cluster labels were cleared.", live.run_id);
+                return Err(err.detail("run_id", json!(live.run_id)));
             }
         },
         None => None,

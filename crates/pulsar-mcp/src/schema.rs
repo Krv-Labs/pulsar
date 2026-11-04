@@ -59,6 +59,34 @@ pub fn object(properties: &[(&str, Value)], required: &[&str], additional: bool)
     })
 }
 
+/// `truncation`: present when a result was cut to fit the response budget
+/// (see [`crate::budget`]). `next` is the call that continues it.
+pub fn truncation() -> Value {
+    object(
+        &[
+            ("truncated", boolean()),
+            ("shown", integer()),
+            ("total", integer()),
+            ("omitted_cluster_ids", array(integer())),
+            ("budget_chars", integer()),
+            ("next", nullable(string())),
+            ("next_call", nullable(open_object())),
+        ],
+        &["truncated", "budget_chars"],
+        true,
+    )
+}
+
+/// `schema` with an optional `truncation` property, so a trimmed result
+/// still validates.
+pub fn with_truncation(schema: &JsonObject) -> Arc<JsonObject> {
+    let mut schema = schema.clone();
+    if let Some(Value::Object(props)) = schema.get_mut("properties") {
+        props.entry("truncation").or_insert_with(truncation);
+    }
+    Arc::new(schema)
+}
+
 pub fn as_object(schema: Value) -> Arc<JsonObject> {
     match schema {
         Value::Object(map) => Arc::new(map),

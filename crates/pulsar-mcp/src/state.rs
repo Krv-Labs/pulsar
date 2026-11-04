@@ -19,9 +19,10 @@ use rmcp::task_manager::TaskManager;
 
 use crate::envelope::ToolError;
 
-/// Default `PULSAR_MCP_MAX_RESPONSE_BYTES`: ~25k tokens, the tool-result cap
-/// of the stricter agent hosts.
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100_000;
+/// Default `PULSAR_MCP_MAX_RESPONSE_BYTES`, the hard limit in agent-visible
+/// characters: under Claude Code's 50,000-character spill line (see
+/// [`crate::budget`]).
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = crate::budget::DEFAULT_HARD_LIMIT;
 
 /// A fitted model held in memory with what it was fitted on.
 pub struct LiveRun {
@@ -59,6 +60,9 @@ pub struct Session {
     /// Labels and evidence published by `generate_cluster_dossier`; a new
     /// sweep clears them.
     pub clusters: Option<Arc<ClusterState>>,
+    /// The last persisted (non-live) assignment a cluster read tool loaded
+    /// by `cluster_assignment_id`; never the live labels.
+    pub persisted_clusters: Option<Arc<ClusterState>>,
     /// Longitudinal panels built in this session, oldest first (at most
     /// [`MAX_LONGITUDINAL_ARTIFACTS`]).
     pub longitudinal: Vec<Arc<LongitudinalArtifact>>,

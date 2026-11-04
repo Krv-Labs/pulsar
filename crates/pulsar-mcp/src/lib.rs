@@ -19,6 +19,7 @@
 // add noise for no measurable gain.
 #![allow(clippy::result_large_err)]
 
+pub mod budget;
 pub mod envelope;
 pub mod guide;
 pub mod jobs;

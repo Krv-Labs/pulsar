@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `get_cluster_detail`: per-cluster evidence sections (`topological_neighbors`, `tier_counts`, `feature_preview`, `numeric_features`, `categorical_features`, `central_rows`, at the dossier's `clusters[]` paths) for any persisted `cluster_assignment_id`, including merged ones, paged largest first by `cursor` or picked by `cluster_ids`. Evidence is built for the page only; the live labels are never changed.
+- `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix` and `compare_clusters` take an optional `cluster_assignment_id` to read an earlier assignment while its run is loaded, and name the assignment they used. `get_cluster_profile` characterizes a cluster the dossier skipped on demand instead of calling it unknown.
+
+### Changed
+
+- Responses are budgeted in agent-visible characters (text plus structured content, without the gateway-stripped `io.phirewall/release` key). `PULSAR_MCP_MAX_RESPONSE_BYTES` defaults to 45,000 (was 100,000), under Claude Code's 50,000-character spill line; budget-aware tools render to 38,000 (5% under a 40,000 target).
+- `generate_cluster_dossier` fits the budget by construction: it keeps the header and an index of every cluster (`cluster_index`), shortens per-cluster sections before dropping whole ones, and reports `truncation` (`shown`, `total`, `omitted_cluster_ids`, `budget_chars`, `next` / `next_call`, a valid `get_cluster_detail` call) mirrored as one line of text. `detail='full'` follows the same budget.
+- An over-budget result is trimmed (largest arrays and strings first, every id kept) with a `truncation` notice instead of being replaced by `RESPONSE_TOO_LARGE`; that error now only happens when no trimmed form fits, stays under 5,000 characters and names the ids the call committed. Oversized error envelopes are trimmed the same way. `get_cluster_signal_matrix`, `get_feature_signal` and `get_cluster_profile` lower their own `max_clusters` / `max_features` to fit and say so.
+
+### Fixed
+
+- A dossier over the response limit no longer reports failure after it had already published new live labels (the agent never saw the new `cluster_assignment_id`, and the next cluster read failed with an unknown cluster id).
+- A sweep whose `save_config` file write fails says that the run completed, is now the session's latest run and cleared the cluster labels; `create_config` validates its config before storing the drafted plan.
+
 ## [0.7.0] - 2026-10-28
 
 Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt binary per platform (eight platform packages plus the launcher: macOS arm64/x64, Linux arm64/x64 on glibc and musl, Windows x64/arm64). `npx -y @krv-labs/pulsar install` registers the MCP server with detected agents and upgrades the entries the Python installer wrote. `thema-pulsar` on PyPI stays at 0.6 with no further releases (ADR 0002). The entries further down (0.6.0 and earlier) describe the Python package this replaces.

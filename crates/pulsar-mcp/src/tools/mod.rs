@@ -4,11 +4,13 @@
 
 pub mod artifact;
 pub mod characterize;
+pub mod cluster_detail;
 pub mod cluster_evidence;
 pub mod clustering;
 pub mod config;
 pub mod create_config;
 pub mod diagnostics;
+pub mod dossier_budget;
 pub mod export;
 pub mod ingest;
 pub mod longitudinal;
@@ -49,7 +51,7 @@ impl ToolSpec {
             .open_world(false);
         Tool::new(self.name, self.description, self.input_schema.clone())
             .with_title(self.title)
-            .with_raw_output_schema(self.output_schema.clone())
+            .with_raw_output_schema(crate::schema::with_truncation(&self.output_schema))
             .with_annotations(annotations)
     }
 }
@@ -82,6 +84,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         diagnostics::skeleton_spec(),
         artifact::spec(),
         clustering::spec(),
+        cluster_detail::spec(),
         longitudinal::build_spec(),
         longitudinal::diagnose_spec(),
         longitudinal::archetypes_spec(),
@@ -155,6 +158,9 @@ pub async fn dispatch(
             diagnostics::skeleton(&state, parse_params(diagnostics::SKELETON, args)?).await
         }
         clustering::NAME => clustering::call(&state, parse_params(clustering::NAME, args)?).await,
+        cluster_detail::NAME => {
+            cluster_detail::call(&state, parse_params(cluster_detail::NAME, args)?).await
+        }
         artifact::NAME => artifact::call(&state, parse_params(artifact::NAME, args)?).await,
         cluster_evidence::PROFILE => {
             cluster_evidence::profile(&state, parse_params(cluster_evidence::PROFILE, args)?).await

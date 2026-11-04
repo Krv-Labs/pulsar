@@ -12,7 +12,7 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::task_manager::{TaskExit, TaskOptions};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
 
-use crate::envelope::{result_size_bytes, too_large};
+use crate::budget;
 use crate::guide::INSTRUCTIONS;
 use crate::jobs::ProgressTarget;
 use crate::state::ServerState;
@@ -69,10 +69,8 @@ impl PulsarServer {
                 Err(error) => error.into_result(),
             };
         match state.options.max_response_bytes {
-            Some(limit) if result_size_bytes(&result) > limit => {
-                too_large(&name, result_size_bytes(&result), limit)
-            }
-            _ => result,
+            Some(limit) => budget::degrade(&name, result, limit),
+            None => result,
         }
     }
 }

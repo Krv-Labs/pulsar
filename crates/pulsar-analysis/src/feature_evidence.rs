@@ -946,7 +946,7 @@ pub struct ClusterBundle {
 }
 
 /// Cached feature evidence derived from one clustering assignment.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct FeatureEvidenceIndex {
     pub cluster_bundles: BTreeMap<i64, ClusterBundle>,
     pub numeric_global_ranking: Vec<String>,
@@ -1082,6 +1082,44 @@ pub fn build_feature_evidence_index(
     exclude_columns: &[String],
     max_clusters_to_characterize: Option<usize>,
 ) -> Result<FeatureEvidenceIndex, EvidenceIndexError> {
+    build_index(
+        table,
+        clusters,
+        edges,
+        exclude_columns,
+        max_clusters_to_characterize,
+        None,
+    )
+}
+
+/// [`build_feature_evidence_index`] characterizing exactly the clusters
+/// `cluster_ids` (unknown ids are ignored), so a page of a large clustering
+/// costs what the page holds.
+pub fn build_feature_evidence_index_for_clusters(
+    table: &Table,
+    clusters: &[i64],
+    edges: &[(usize, usize, f64)],
+    exclude_columns: &[String],
+    cluster_ids: &[i64],
+) -> Result<FeatureEvidenceIndex, EvidenceIndexError> {
+    build_index(
+        table,
+        clusters,
+        edges,
+        exclude_columns,
+        None,
+        Some(cluster_ids),
+    )
+}
+
+fn build_index(
+    table: &Table,
+    clusters: &[i64],
+    edges: &[(usize, usize, f64)],
+    exclude_columns: &[String],
+    max_clusters_to_characterize: Option<usize>,
+    only: Option<&[i64]>,
+) -> Result<FeatureEvidenceIndex, EvidenceIndexError> {
     let n_rows = table.n_rows();
     if clusters.len() != n_rows {
         return Err(EvidenceIndexError::Alignment {
@@ -1124,6 +1162,15 @@ pub fn build_feature_evidence_index(
             );
             omitted = n_unique - max;
         }
+    }
+    if let Some(ids) = only {
+        let wanted: HashSet<i64> = sizes
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| ids.contains(c))
+            .collect();
+        omitted = n_unique - wanted.len();
+        target = Some(wanted);
     }
 
     let adjacency = graph_cluster_adjacency(edges, clusters);

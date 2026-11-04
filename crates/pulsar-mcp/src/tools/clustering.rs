@@ -41,8 +41,8 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
 use super::params::Format;
-use super::ToolSpec;
-use crate::envelope::{ok_result, ToolError};
+use super::{dossier_budget, ToolSpec};
+use crate::envelope::ToolError;
 use crate::phirewall;
 use crate::schema::{self as s, input_schema};
 use crate::state::{ClusterState, EvidenceKey, LiveRun, ServerState};
@@ -148,7 +148,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Cluster Evidence Dossier",
-        description: "Cluster the latest run's graph and build a statistical evidence dossier. Persists a cluster_assignment_id and publishes the labels into the session for the cluster tools and exports; a new sweep clears them. Start with detail='summary'; escalate only after narrowing focus.",
+        description: "Cluster the latest run's graph and build a statistical evidence dossier. Persists a cluster_assignment_id and publishes the labels into the session for the cluster tools and exports; a new sweep clears them. Start with detail='summary'; escalate only after narrowing focus. Fits the response budget: every cluster is indexed, and truncation.next (get_cluster_detail) pages the sections not shown.",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
@@ -183,7 +183,9 @@ pub fn spec() -> ToolSpec {
                 ("recommended_next_tools", s::array(s::string())),
                 ("detail_hint", s::string()),
                 ("surface_labels_ref", s::string()),
-                ("surface_labels", open),
+                ("surface_labels", open.clone()),
+                ("cluster_index", open),
+                ("truncation", s::truncation()),
             ],
             &[
                 "status",
@@ -242,7 +244,7 @@ fn assignment_markdown(record: &ClusterAssignmentRecord) -> String {
 
 /// Columns the dossier never profiles: the requested exclusions, the
 /// identifiers the run's preprocessing plan names, and row indexes.
-fn excluded_columns(live: &LiveRun, requested: &[String]) -> Vec<String> {
+pub(crate) fn excluded_columns(live: &LiveRun, requested: &[String]) -> Vec<String> {
     let mut out = requested.to_vec();
     let row_indexes = live
         .table
@@ -727,9 +729,11 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         .evidence
         .working_columns
         .iter()
-        .map(|c| {
-            let feature = names.iter().position(|n| n == c).expect("a table column");
-            json!({"feature": feature, "column": c, "used_for_grouping": !dropped.contains(c)})
+        .filter_map(|c| {
+            let feature = names.iter().position(|n| n == c)?;
+            Some(
+                json!({"feature": feature, "column": c, "used_for_grouping": !dropped.contains(c)}),
+            )
         })
         .collect();
     payload["threshold_inherited"] = json!(threshold_inherited);
@@ -747,7 +751,9 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         Format::Markdown => Some(prepend_threshold_markdown(&text, &surface)),
         Format::Json => None,
     };
-    Ok(ok_result(payload, text))
+    // The labels are published: from here on the result must reach the
+    // agent, so it is fitted to the budget instead of failing over it.
+    Ok(dossier_budget::fit_published(state, payload, text))
 }
 
 #[cfg(test)]

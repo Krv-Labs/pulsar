@@ -104,13 +104,16 @@ Reveal the dataset's topology; do not force convenient clusters.
    for latent structure inside one continuous dominant component.
    Any new `run_topological_sweep` discards the session's cluster labels: dossiers can only be
    published for the latest run (`SESSION_REVISION_CONFLICT` otherwise).
+   The dossier fits the response budget: it always lists every cluster in `cluster_index` and
+   shows sections largest first; `truncation.next` is the `get_cluster_detail` call that pages
+   through the rest (any persisted `cluster_assignment_id`, live labels unchanged).
 9. Contrast: read the published labels with `get_cluster_profile` (one cluster),
    `get_feature_signal` (chosen features across clusters), `get_cluster_signal_matrix`
    (all features at a glance) and `compare_clusters` (two clusters, per-feature tests). Identify
    the 'Pivot Feature' that most cleanly separates a cluster from its topological neighbours;
-   do not name clusters in isolation. These tools read only the latest dossier: after a new
-   sweep they return `CLUSTERS_NOT_BUILT`, and `run_id` is a provenance check
-   (`CLUSTERS_STALE`), not a way to recover old labels.
+   do not name clusters in isolation. These tools read the latest dossier's labels; pass
+   `cluster_assignment_id` to read an earlier assignment while its run is loaded. After a new
+   sweep they return `CLUSTERS_NOT_BUILT` without one; `run_id` is a provenance check.
 
 ## LONGITUDINAL DATA (PANELS)
 Long-format data (one row per entity and time step) is the wrong input for the static sweep,

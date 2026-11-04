@@ -22,11 +22,13 @@ use pulsar_analysis::dossier_payloads::{
 };
 use pulsar_analysis::plan::py_str;
 use rmcp::model::CallToolResult;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
+use super::cluster_detail;
 use super::clustering::{surface_labels, DossierDetail};
 use super::params::Format;
 use super::ToolSpec;
+use crate::budget;
 use crate::envelope::{ok_result, ToolError};
 use crate::schema::{self as s, input_schema};
 use crate::state::{ClusterState, ServerState};
@@ -58,7 +60,7 @@ fn standard() -> DossierDetail {
 
 /// The labels published for the session, checked against `run_id` (empty:
 /// against the session's latest run).
-fn require_clusters(
+pub(crate) fn require_clusters(
     state: &ServerState,
     tool: &'static str,
     run_id: &str,
@@ -72,7 +74,7 @@ fn require_clusters(
             tool,
             "CLUSTERS_NOT_BUILT",
             "No cluster evidence found in this session.",
-            "Run generate_cluster_dossier first (detail='summary' is enough).",
+            "Run generate_cluster_dossier first (detail='summary' is enough), or pass the cluster_assignment_id of a persisted assignment.",
         ));
     };
     if !run_id.is_empty() {
@@ -151,6 +153,9 @@ pub struct ProfileParams {
     /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
     #[serde(default)]
     pub run_id: String,
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    #[serde(default)]
+    pub cluster_assignment_id: Option<String>,
 }
 
 pub fn profile_spec() -> ToolSpec {
@@ -163,6 +168,7 @@ pub fn profile_spec() -> ToolSpec {
             &[
                 ("status", ok_enum()),
                 ("clusters_run_id", s::nullable(s::string())),
+                ("cluster_assignment_id", s::string()),
                 ("cluster_result", s::open_object()),
                 ("detail", s::enumeration(&["summary", "standard", "full"])),
                 ("max_features", s::integer()),
@@ -180,42 +186,138 @@ pub fn profile_spec() -> ToolSpec {
 
 pub async fn profile(state: &ServerState, p: ProfileParams) -> Result<CallToolResult, ToolError> {
     at_least_one(PROFILE, "max_features", p.max_features)?;
-    let clusters = require_clusters(state, PROFILE, &p.run_id)?;
-    let full = p.detail == DossierDetail::Full;
-    let cluster = cluster_profile_payload(
-        &clusters.evidence,
-        p.cluster_id,
-        p.detail.as_str(),
-        p.max_features,
+    let clusters = cluster_detail::resolve(
+        state,
+        PROFILE,
+        &p.run_id,
+        p.cluster_assignment_id.as_deref(),
     )
-    .map_err(|_| {
-        ToolError::new(
-            PROFILE,
-            "CLUSTER_ID_UNKNOWN",
-            format!("Unknown cluster_id '{}'.", p.cluster_id),
-            "Use generate_cluster_dossier first and inspect available cluster IDs.",
-        )
-    })?;
-    let mut payload = json!({
-        "status": "ok",
-        "clusters_run_id": clusters.run_id,
-        "cluster_result": compact_cluster_result_payload(&clusters.meta, full),
-        "detail": p.detail.as_str(),
-        "max_features": p.max_features,
-        "cluster": cluster,
-    });
-    add_surface_labels(&mut payload, full);
-    let text = match p.response_format {
-        Format::Markdown => {
-            let applied = py_str(&clusters.meta["interpretation_edge_weight_threshold_applied"]);
-            Some(format!(
-                "_Cluster membership and evidence are computed on the interpretation slice @ interpretation_edge_weight_threshold ({applied}) of the [0,1]-normalized weighted adjacency (sparsified only when enabled), not the persisted graph @ construction_threshold._\n\n{}",
-                cluster_profile_payload_to_markdown(&payload)
-            ))
-        }
-        Format::Json => None,
+    .await?;
+    let full = p.detail == DossierDetail::Full;
+    // The dossier characterizes only its largest clusters; any other
+    // cluster of the labels is characterized on demand.
+    let evidence = if clusters
+        .evidence
+        .cluster_bundles
+        .contains_key(&p.cluster_id)
+    {
+        clusters.evidence.clone()
+    } else {
+        cluster_detail::evidence_for(state, &clusters, &[p.cluster_id])
+            .await
+            .filter(|e| e.cluster_bundles.contains_key(&p.cluster_id))
+            .ok_or_else(|| {
+                cluster_detail::unknown_cluster(state, PROFILE, p.cluster_id, &clusters)
+            })?
     };
-    Ok(ok_result(payload, text))
+    let render = |max_features: usize| -> Result<CallToolResult, ToolError> {
+        let cluster =
+            cluster_profile_payload(&evidence, p.cluster_id, p.detail.as_str(), max_features)
+                .map_err(|_| {
+                    cluster_detail::unknown_cluster(state, PROFILE, p.cluster_id, &clusters)
+                })?;
+        let mut payload = json!({
+            "status": "ok",
+            "clusters_run_id": clusters.run_id,
+            "cluster_assignment_id": clusters.cluster_assignment_id,
+            // Every cluster's size only while it fits.
+            "cluster_result": compact_cluster_result_payload(&clusters.meta, full && max_features == p.max_features),
+            "detail": p.detail.as_str(),
+            "max_features": max_features,
+            "cluster": cluster,
+        });
+        add_surface_labels(&mut payload, full);
+        let text = match p.response_format {
+            Format::Markdown => {
+                let applied =
+                    py_str(&clusters.meta["interpretation_edge_weight_threshold_applied"]);
+                Some(format!(
+                    "_Cluster membership and evidence are computed on the interpretation slice @ interpretation_edge_weight_threshold ({applied}) of the [0,1]-normalized weighted adjacency (sparsified only when enabled), not the persisted graph @ construction_threshold._\n\n{}",
+                    cluster_profile_payload_to_markdown(&payload)
+                ))
+            }
+            Format::Json => None,
+        };
+        Ok(ok_result(payload, text))
+    };
+    fit_knob(state, "max_features", p.max_features, render, |_, _| None)
+}
+
+/// Re-render with `knob` halved until the result fits the response budget
+/// (at 1 the middleware trims what is left). A reduced result says so in
+/// `truncation`, with `next(payload, applied)` as the call for the rest.
+fn fit_knob(
+    state: &ServerState,
+    knob: &str,
+    asked: usize,
+    render: impl Fn(usize) -> Result<CallToolResult, ToolError>,
+    next: impl Fn(&Value, usize) -> Option<(String, Value)>,
+) -> Result<CallToolResult, ToolError> {
+    let budget = budget::render_budget(state.options.max_response_bytes);
+    let mut k = asked;
+    loop {
+        let mut result = render(k)?;
+        if budget::visible_chars(&result) <= budget || k <= 1 {
+            if k < asked {
+                if let Some(payload) = result.structured_content.as_mut() {
+                    let (next, next_call) =
+                        next(payload, k).map_or((Value::Null, Value::Null), |(n, c)| (json!(n), c));
+                    let line = format!(
+                        "Truncated: {knob} reduced from {asked} to {k} to fit the {budget}-character budget.{}",
+                        next.as_str().map(|n| format!(" Next: {n}")).unwrap_or_default()
+                    );
+                    payload["truncation"] = json!({
+                        "truncated": true,
+                        "budget_chars": budget,
+                        "reduced": {"parameter": knob, "asked": asked, "applied": k},
+                        "next": next,
+                        "next_call": next_call,
+                    });
+                    if let Some(rmcp::model::ContentBlock::Text(t)) = result.content.first_mut() {
+                        t.text = format!("{line}\n\n{}", t.text);
+                    }
+                }
+            }
+            return Ok(result);
+        }
+        k /= 2;
+    }
+}
+
+/// The same tool for the next clusters `omitted` (from a payload's
+/// `cluster_selection.omitted_ids`), `per` at a time.
+fn next_clusters(
+    tool: &str,
+    payload: &Value,
+    per: usize,
+    base: &Map<String, Value>,
+    requested: Option<&[i64]>,
+) -> Option<(String, Value)> {
+    let omitted: Vec<i64> = payload["cluster_selection"]["omitted_ids"]["preview"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_i64)
+        .collect();
+    let ids: Vec<i64> = match requested {
+        Some(r) => r
+            .iter()
+            .copied()
+            .filter(|id| omitted.contains(id))
+            .take(per)
+            .collect(),
+        None => omitted.into_iter().take(per).collect(),
+    };
+    if ids.is_empty() {
+        return None;
+    }
+    let mut arguments = base.clone();
+    arguments.insert("cluster_ids".into(), json!(ids));
+    arguments.insert("max_clusters".into(), json!(per));
+    let args: Vec<String> = arguments.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    Some((
+        format!("{tool}({})", args.join(", ")),
+        json!({"tool": tool, "arguments": arguments}),
+    ))
 }
 
 // ---- get_feature_signal ----------------------------------------------------------------
@@ -239,6 +341,9 @@ pub struct SignalParams {
     /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
     #[serde(default)]
     pub run_id: String,
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    #[serde(default)]
+    pub cluster_assignment_id: Option<String>,
 }
 
 pub fn signal_spec() -> ToolSpec {
@@ -251,6 +356,7 @@ pub fn signal_spec() -> ToolSpec {
             &[
                 ("status", ok_enum()),
                 ("clusters_run_id", s::nullable(s::string())),
+                ("cluster_assignment_id", s::string()),
                 ("cluster_result", s::open_object()),
                 ("cluster_selection", s::open_object()),
                 ("signals", s::open_object()),
@@ -273,34 +379,53 @@ pub fn signal_spec() -> ToolSpec {
 
 pub async fn signal(state: &ServerState, p: SignalParams) -> Result<CallToolResult, ToolError> {
     at_least_one(SIGNAL, "max_clusters", p.max_clusters)?;
-    let clusters = require_clusters(state, SIGNAL, &p.run_id)?;
+    let clusters =
+        cluster_detail::resolve(state, SIGNAL, &p.run_id, p.cluster_assignment_id.as_deref())
+            .await?;
     let full = p.detail == DossierDetail::Full;
-    let signals = feature_signal_payload(
-        &clusters.evidence,
-        &p.feature_names,
-        p.cluster_ids.as_deref(),
-        p.detail.as_str(),
-        Some(p.max_clusters),
-    );
-    let shown: Vec<i64> = signals["clusters"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|c| c["cluster_id"].as_i64())
-        .collect();
-    let mut payload = json!({
-        "status": "ok",
-        "clusters_run_id": clusters.run_id,
-        "cluster_result": compact_cluster_result_payload(&clusters.meta, full),
-        "cluster_selection": build_cluster_selection(&clusters.meta, &shown, "signal"),
-        "signals": signals,
-    });
-    add_surface_labels(&mut payload, full);
-    let text = match p.response_format {
-        Format::Markdown => Some(feature_signal_payload_to_markdown(&payload["signals"])),
-        Format::Json => None,
+    let render = |max_clusters: usize| -> Result<CallToolResult, ToolError> {
+        let signals = feature_signal_payload(
+            &clusters.evidence,
+            &p.feature_names,
+            p.cluster_ids.as_deref(),
+            p.detail.as_str(),
+            Some(max_clusters),
+        );
+        let shown: Vec<i64> = signals["clusters"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["cluster_id"].as_i64())
+            .collect();
+        let mut payload = json!({
+            "status": "ok",
+            "clusters_run_id": clusters.run_id,
+            "cluster_assignment_id": clusters.cluster_assignment_id,
+            "cluster_result": compact_cluster_result_payload(&clusters.meta, full && max_clusters == p.max_clusters),
+            "cluster_selection": build_cluster_selection(&clusters.meta, &shown, "signal"),
+            "signals": signals,
+        });
+        add_surface_labels(&mut payload, full);
+        let text = match p.response_format {
+            Format::Markdown => Some(feature_signal_payload_to_markdown(&payload["signals"])),
+            Format::Json => None,
+        };
+        Ok(ok_result(payload, text))
     };
-    Ok(ok_result(payload, text))
+    let mut base = Map::new();
+    base.insert(
+        "cluster_assignment_id".into(),
+        json!(clusters.cluster_assignment_id),
+    );
+    base.insert("feature_names".into(), json!(p.feature_names));
+    base.insert("detail".into(), json!(p.detail.as_str()));
+    fit_knob(
+        state,
+        "max_clusters",
+        p.max_clusters,
+        render,
+        |payload, k| next_clusters(SIGNAL, payload, k, &base, p.cluster_ids.as_deref()),
+    )
 }
 
 // ---- get_cluster_signal_matrix ---------------------------------------------------------
@@ -322,6 +447,9 @@ pub struct MatrixParams {
     /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
     #[serde(default)]
     pub run_id: String,
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    #[serde(default)]
+    pub cluster_assignment_id: Option<String>,
 }
 
 pub fn matrix_spec() -> ToolSpec {
@@ -335,6 +463,7 @@ pub fn matrix_spec() -> ToolSpec {
             &[
                 ("status", ok_enum()),
                 ("clusters_run_id", s::nullable(s::string())),
+                ("cluster_assignment_id", s::string()),
                 ("cluster_result", open.clone()),
                 ("surface_labels_ref", s::string()),
                 ("cluster_selection", open.clone()),
@@ -373,51 +502,70 @@ pub fn matrix_spec() -> ToolSpec {
 
 pub async fn matrix(state: &ServerState, p: MatrixParams) -> Result<CallToolResult, ToolError> {
     at_least_one(MATRIX, "max_clusters", p.max_clusters)?;
-    let clusters = require_clusters(state, MATRIX, &p.run_id)?;
+    let clusters =
+        cluster_detail::resolve(state, MATRIX, &p.run_id, p.cluster_assignment_id.as_deref())
+            .await?;
     let ids = p.cluster_ids.as_deref();
-    let build = |markdown: bool| {
-        signal_matrix_payload(
-            &clusters.evidence,
-            ids,
-            p.include_context_tier,
-            Some(p.max_clusters),
-            markdown,
-        )
-    };
-    let signal_matrix = build(false);
-    let omitted: Vec<i64> = signal_matrix["omitted_clusters"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|c| c["cluster_id"].as_i64())
-        .collect();
-    let universe: Vec<i64> = match ids {
-        Some(ids) => ids.to_vec(),
-        None => clusters.meta["cluster_sizes"]
+    let render = |max_clusters: usize| -> Result<CallToolResult, ToolError> {
+        let build = |markdown: bool| {
+            signal_matrix_payload(
+                &clusters.evidence,
+                ids,
+                p.include_context_tier,
+                Some(max_clusters),
+                markdown,
+            )
+        };
+        let signal_matrix = build(false);
+        let omitted: Vec<i64> = signal_matrix["omitted_clusters"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|c| c["cluster_id"].as_i64())
-            .collect(),
+            .collect();
+        let universe: Vec<i64> = match ids {
+            Some(ids) => ids.to_vec(),
+            None => clusters.meta["cluster_sizes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["cluster_id"].as_i64())
+                .collect(),
+        };
+        let shown: Vec<i64> = universe
+            .into_iter()
+            .filter(|id| !omitted.contains(id))
+            .collect();
+        let selection = build_cluster_selection(&clusters.meta, &shown, "signal");
+        let text = p.return_markdown.then(|| {
+            let report = build(true);
+            cluster_selection_to_markdown(&selection)
+                + report["markdown_report"].as_str().unwrap_or("")
+        });
+        let payload = json!({
+            "status": "ok",
+            "clusters_run_id": clusters.run_id,
+            "cluster_assignment_id": clusters.cluster_assignment_id,
+            "cluster_result": compact_cluster_result_payload(&clusters.meta, false),
+            "surface_labels_ref": "get_workflow_guide",
+            "cluster_selection": selection,
+            "signal_matrix": signal_matrix,
+        });
+        Ok(ok_result(payload, text))
     };
-    let shown: Vec<i64> = universe
-        .into_iter()
-        .filter(|id| !omitted.contains(id))
-        .collect();
-    let selection = build_cluster_selection(&clusters.meta, &shown, "signal");
-    let text = p.return_markdown.then(|| {
-        let report = build(true);
-        cluster_selection_to_markdown(&selection) + report["markdown_report"].as_str().unwrap_or("")
-    });
-    let payload = json!({
-        "status": "ok",
-        "clusters_run_id": clusters.run_id,
-        "cluster_result": compact_cluster_result_payload(&clusters.meta, false),
-        "surface_labels_ref": "get_workflow_guide",
-        "cluster_selection": selection,
-        "signal_matrix": signal_matrix,
-    });
-    Ok(ok_result(payload, text))
+    let mut base = Map::new();
+    base.insert(
+        "cluster_assignment_id".into(),
+        json!(clusters.cluster_assignment_id),
+    );
+    base.insert("include_context_tier".into(), json!(p.include_context_tier));
+    fit_knob(
+        state,
+        "max_clusters",
+        p.max_clusters,
+        render,
+        |payload, k| next_clusters(MATRIX, payload, k, &base, ids),
+    )
 }
 
 // ---- compare_clusters ------------------------------------------------------------------
@@ -434,6 +582,9 @@ pub struct CompareParams {
     /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
     #[serde(default)]
     pub run_id: String,
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    #[serde(default)]
+    pub cluster_assignment_id: Option<String>,
 }
 
 pub fn compare_spec() -> ToolSpec {
@@ -447,6 +598,7 @@ pub fn compare_spec() -> ToolSpec {
             &[
                 ("status", ok_enum()),
                 ("clusters_run_id", s::nullable(s::string())),
+                ("cluster_assignment_id", s::string()),
                 ("cluster_a", s::integer()),
                 ("cluster_b", s::integer()),
                 ("features_compared", s::integer()),
@@ -493,7 +645,13 @@ fn finite_or_null(x: f64) -> Value {
 
 pub async fn compare(state: &ServerState, p: CompareParams) -> Result<CallToolResult, ToolError> {
     at_least_one(COMPARE, "max_features", p.max_features)?;
-    let clusters = require_clusters(state, COMPARE, &p.run_id)?;
+    let clusters = cluster_detail::resolve(
+        state,
+        COMPARE,
+        &p.run_id,
+        p.cluster_assignment_id.as_deref(),
+    )
+    .await?;
     let live = state.cache.get(&clusters.run_id).ok_or_else(|| {
         ToolError::new(
             COMPARE,
@@ -540,6 +698,7 @@ pub async fn compare(state: &ServerState, p: CompareParams) -> Result<CallToolRe
     let payload = json!({
         "status": "ok",
         "clusters_run_id": clusters.run_id,
+        "cluster_assignment_id": clusters.cluster_assignment_id,
         "cluster_a": a,
         "cluster_b": b,
         "features_compared": results.len(),

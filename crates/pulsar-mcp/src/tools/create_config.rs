@@ -287,6 +287,8 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
 
     // A freshly drafted plan is stored so `edit_preprocessing_plan` can refine it.
     let plan_handle = PlanId::parse(&plan.plan_id).map_err(|e| ToolError::from_store(NAME, e))?;
+    // Checked before anything is stored, so a failure stores nothing.
+    let config = parse_config(NAME, &config_yaml)?;
     if plan_source == "baseline_defaults" {
         state
             .store
@@ -294,7 +296,6 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             .map_err(|e| ToolError::from_store(NAME, e))?;
     }
 
-    let config = parse_config(NAME, &config_yaml)?;
     let variants = config.preprocessing_variants().len();
     let (dims, seeds) = (&config.projection.dimensions, &config.projection.seeds);
     let counts = summarize_plan_counts(&plan);

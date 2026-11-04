@@ -759,9 +759,10 @@ async fn oversized_responses_become_a_parseable_error_envelope() {
         (),
     )
     .await;
+    // Too small for any trimmed form: a short error, not a cut result.
     let e = err(&client, "get_workflow_guide", args(&[])).await;
     assert_eq!(e["error_code"], "RESPONSE_TOO_LARGE");
-    assert_eq!(e["details"]["limit_bytes"], 200);
+    assert_eq!(e["details"]["limit_chars"], 200);
     client.cancel().await.unwrap();
 }
 
