@@ -8,10 +8,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pulsar_mcp::budget::{render_budget, visible_chars, MAX_ERROR_CHARS};
+use pulsar_mcp::budget::{json_chars, render_budget, visible_chars, MAX_ERROR_CHARS};
 use pulsar_mcp::{PulsarServer, ServerOptions, ServerState};
 use pulsar_store::Store;
-use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, ContentBlock,
+    Implementation, JsonObject, Tool,
+};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::ServiceExt;
 use serde_json::{json, Value};
@@ -41,9 +44,23 @@ impl Drop for TempRoot {
     }
 }
 
-type Client = RunningService<RoleClient, ()>;
+type Client = RunningService<RoleClient, ClientConfig>;
 
 async fn connect(root: &Path, hard: Option<usize>) -> Client {
+    connect_as(root, hard, ClientConfig::default()).await
+}
+
+/// A client that declares `io.phirewall/release` v1, as the gateway does.
+async fn connect_phirewall(root: &Path, hard: Option<usize>) -> Client {
+    let mut v1 = JsonObject::new();
+    v1.insert("version".into(), json!(1));
+    let mut caps = ClientCapabilities::default();
+    caps.experimental = Some([("io.phirewall/release".to_owned(), v1)].into());
+    let config = ClientConfig::new(caps, Implementation::new("phirewall-test", "0"));
+    connect_as(root, hard, config).await
+}
+
+async fn connect_as(root: &Path, hard: Option<usize>, handler: ClientConfig) -> Client {
     let store = Store::open_at(root).unwrap();
     let options = ServerOptions {
         max_response_bytes: hard,
@@ -57,7 +74,7 @@ async fn connect(root: &Path, hard: Option<usize>) -> Client {
         let service = PulsarServer::new(state).serve((ar, aw)).await.unwrap();
         let _ = service.waiting().await;
     });
-    ().serve((br, bw)).await.unwrap()
+    handler.serve((br, bw)).await.unwrap()
 }
 
 async fn call(client: &Client, name: &str, args: Value) -> CallToolResult {
@@ -815,4 +832,46 @@ async fn unprobed_tools_fit_the_budget_on_fixtures() {
         );
     }
     client.cancel().await.unwrap();
+}
+
+/// Under the gateway, each detail page carries its `io.phirewall/release`
+/// block, which grows with the page; the page is fitted with it counted.
+#[tokio::test(flavor = "multi_thread")]
+async fn detail_pages_fit_the_budget_with_their_release_block() {
+    let root = TempRoot::new("detail-release");
+    let client = connect_phirewall(&root.0, Some(HARD)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    swept(&client, &tools, &root.0).await;
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        json!({"response_format": "json"}),
+    )
+    .await;
+    let mut next = Value::Null;
+    let mut pages = 0;
+    loop {
+        let args = if next.is_null() {
+            json!({"cluster_assignment_id": dossier["cluster_assignment_id"], "response_format": "json"})
+        } else {
+            next["arguments"].clone()
+        };
+        let result = call(&client, "get_cluster_detail", args).await;
+        let page = result.structured_content.clone().unwrap();
+        assert!(
+            page.get("io.phirewall/release").is_some(),
+            "no release block"
+        );
+        let size = json_chars(&page) + text(&result).chars().count();
+        assert!(
+            size <= render_budget(Some(HARD)),
+            "page {pages}: {size} chars"
+        );
+        pages += 1;
+        next = page["truncation"]["next_call"].clone();
+        if next.is_null() || pages > 50 {
+            break;
+        }
+    }
 }

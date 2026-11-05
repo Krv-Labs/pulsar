@@ -29,7 +29,7 @@ use super::dossier_budget::{
 use super::dossier_render::section_markdown;
 use super::params::Format;
 use super::{clustering, ToolSpec};
-use crate::budget::{self, pair_chars};
+use crate::budget;
 use crate::envelope::{ok_result, ToolError};
 use crate::release;
 use crate::schema::{self as s, input_schema};
@@ -730,14 +730,15 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
                 )
             }
         };
+        release::attach_detail(state, &loaded.live_run.run_id, &loaded.labels, &mut payload);
         (payload, text)
     };
-    let fits = |pair: &(Value, String)| pair_chars(&pair.0, &pair.1) <= budget;
+    // The release block grows with the page (labels per cluster entry), so
+    // it is counted in the fit, though the gateway strips it.
+    let fits =
+        |pair: &(Value, String)| budget::json_chars(&pair.0) + pair.1.chars().count() <= budget;
 
-    let finish = |(mut payload, text): (Value, String)| {
-        release::attach_detail(state, &loaded.live_run.run_id, &loaded.labels, &mut payload);
-        Ok(ok_result(payload, Some(text)))
-    };
+    let finish = |(payload, text): (Value, String)| Ok(ok_result(payload, Some(text)));
 
     let mut list = built;
     let n = list.len();
