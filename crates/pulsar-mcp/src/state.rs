@@ -4,10 +4,16 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use pulsar_analysis::feature_evidence::FeatureEvidenceIndex;
 use pulsar_config::PulsarConfig;
+use pulsar_core::TemporalCosmicGraph;
+use pulsar_data::Key;
 use pulsar_data::Table;
+use pulsar_pipeline::CosmicTrajectory;
 use pulsar_pipeline::{Fitted, Graph};
-use pulsar_store::{DatasetId, ModelCache, RunId, RunRecord, Store, StoreError};
+use pulsar_store::{
+    ClusterAssignmentId, DatasetId, LongitudinalId, ModelCache, RunId, RunRecord, Store, StoreError,
+};
 use rmcp::task_manager::TaskManager;
 
 use crate::envelope::ToolError;
@@ -44,6 +50,77 @@ pub struct Session {
     pub latest_run_id: Option<RunId>,
     pub active_config_yaml: Option<String>,
     pub active_config_dataset_id: Option<DatasetId>,
+    /// The preprocessing plan most recently drafted or edited.
+    pub latest_plan_id: Option<pulsar_store::PlanId>,
+    /// Labels and evidence published by `generate_cluster_dossier`; a new
+    /// sweep clears them.
+    pub clusters: Option<Arc<ClusterState>>,
+    /// Longitudinal panels built in this session, oldest first (at most
+    /// [`MAX_LONGITUDINAL_ARTIFACTS`]).
+    pub longitudinal: Vec<Arc<LongitudinalArtifact>>,
+    /// Graph artifacts from `create_graph_artifact`, oldest first (at most
+    /// [`MAX_GRAPH_ARTIFACTS`]). A new sweep marks them stale, not gone.
+    pub graph_artifacts: Vec<Arc<GraphArtifact>>,
+}
+
+/// Graph artifacts kept in the session.
+pub const MAX_GRAPH_ARTIFACTS: usize = 8;
+
+/// A derived graph (spectral sparsifier) of one run, with its measurements.
+#[derive(Debug)]
+pub struct GraphArtifact {
+    /// `graph_<12 hex>`.
+    pub artifact_id: String,
+    pub run_id: RunId,
+    pub kind: String,
+    pub params: serde_json::Value,
+    /// Weights on `[0, 1]`.
+    pub graph: Graph,
+    pub metrics: pulsar_analysis::GraphMetrics,
+}
+
+/// Longitudinal panels kept in memory; older ones keep only their store
+/// record (enough to rebuild).
+pub const MAX_LONGITUDINAL_ARTIFACTS: usize = 4;
+
+/// One built longitudinal panel and the representations it was built with.
+#[derive(Debug)]
+pub struct LongitudinalArtifact {
+    pub longitudinal_id: LongitudinalId,
+    pub dataset_id: Option<DatasetId>,
+    pub representation: &'static str,
+    pub trajectory: Option<CosmicTrajectory>,
+    pub temporal: Option<TemporalCosmicGraph>,
+    pub entity_column: String,
+    pub time_column: String,
+    pub feature_columns: Vec<String>,
+    pub times: Vec<Key>,
+    /// The pivot report.
+    pub report: serde_json::Value,
+    pub config_yaml: String,
+}
+
+/// One published clustering of the session's latest run: what the cluster
+/// tools read, and the evidence cache a repeated dossier reuses.
+#[derive(Debug)]
+pub struct ClusterState {
+    pub run_id: RunId,
+    pub cluster_assignment_id: ClusterAssignmentId,
+    pub labels: Vec<i64>,
+    /// `cluster_result_payload` of the clustering.
+    pub meta: serde_json::Value,
+    pub evidence: Arc<FeatureEvidenceIndex>,
+    /// Everything besides the run and labels that `evidence` depends on.
+    pub evidence_key: EvidenceKey,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvidenceKey {
+    pub method: String,
+    pub interpretation_edge_weight_threshold: f64,
+    /// Sorted.
+    pub exclude_columns: Vec<String>,
+    pub max_clusters_to_characterize: usize,
 }
 
 #[derive(Debug, Clone)]

@@ -70,6 +70,110 @@ pub fn depth_profile(d: usize, n: usize, delta: f64) -> DepthProfile {
     }
 }
 
+/// Above this row count characterization suggests considering a lower depth.
+pub const MASSIVE_N_THRESHOLD: usize = 500_000;
+pub const STANDARD_DEPTHS: [usize; 4] = [512, 256, 128, 64];
+
+/// A suggested depth, its profile and the reasoning in words.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Recommendation {
+    pub recommended_d: usize,
+    pub profile: DepthProfile,
+    pub note: String,
+}
+
+fn f(x: f64) -> String {
+    pulsar_data::preprocess::py_float_repr(x)
+}
+
+/// Recommend a signature depth for `n` points: the smallest standard depth
+/// meeting `target_eps`, else the largest that fits `memory_budget_bytes`,
+/// else the default (with a note when `n` is massive).
+pub fn recommend_d(
+    n: usize,
+    memory_budget_bytes: Option<usize>,
+    target_eps: Option<f64>,
+    candidates: &[usize],
+    delta: f64,
+) -> Recommendation {
+    let mut chosen = DEFAULT_D;
+    let note;
+    if let Some(eps) = target_eps {
+        let required = depth_for_epsilon(eps, delta);
+        chosen = candidates
+            .iter()
+            .copied()
+            .filter(|&c| c >= required)
+            .min()
+            .unwrap_or(required);
+        note = format!(
+            "d={chosen} meets a Hoeffding error of \u{2264}{eps:.3} at {}% confidence (requires d\u{2265}{required}).",
+            ((1.0 - delta) * 100.0) as i64
+        );
+    } else if let Some(budget) = memory_budget_bytes {
+        let fitting: Vec<usize> = candidates
+            .iter()
+            .copied()
+            .filter(|&c| signature_memory_bytes(c, n) <= budget)
+            .collect();
+        if let Some(&best) = fitting.iter().max() {
+            chosen = best;
+            note = format!(
+                "d={chosen} is the largest standard depth whose signature ({}) fits the {} budget.",
+                fmt_bytes(signature_memory_bytes(chosen, n)),
+                fmt_bytes(budget)
+            );
+        } else {
+            chosen = candidates.iter().copied().min().unwrap_or(DEFAULT_D);
+            note = format!(
+                "Even d={chosen} needs {}, exceeding the {} budget \u{2014} consider batching.",
+                fmt_bytes(signature_memory_bytes(chosen, n)),
+                fmt_bytes(budget)
+            );
+        }
+    } else if n >= MASSIVE_N_THRESHOLD {
+        chosen = 128;
+        let (default_prof, chosen_prof) = (
+            depth_profile(DEFAULT_D, n, delta),
+            depth_profile(chosen, n, delta),
+        );
+        note = format!(
+            "n={} is large: lowering minhash_d {DEFAULT_D}\u{2192}{chosen} cuts signature memory {}\u{2192}{} and construction time ~2\u{d7} \u{2014} 95% CI widens \u{b1}{}\u{2192}\u{b1}{}. Default d={DEFAULT_D} is fine if memory allows.",
+            crate::plan::thousands(n),
+            default_prof.signature_memory_human,
+            chosen_prof.signature_memory_human,
+            f(default_prof.ci95_half_width_worst),
+            f(chosen_prof.ci95_half_width_worst),
+        );
+    } else {
+        note = format!(
+            "Default minhash_d={DEFAULT_D} is appropriate (n={}); no tuning needed.",
+            crate::plan::thousands(n)
+        );
+    }
+    Recommendation {
+        recommended_d: chosen,
+        profile: depth_profile(chosen, n, delta),
+        note,
+    }
+}
+
+/// The characterization advisory block; `None` unless `n` is massive.
+pub fn massive_dataset_advisory(n: usize, current_d: usize) -> Option<serde_json::Value> {
+    if n < MASSIVE_N_THRESHOLD {
+        return None;
+    }
+    let rec = recommend_d(n, None, None, &STANDARD_DEPTHS, DEFAULT_DELTA);
+    Some(serde_json::json!({
+        "parameter": "cosmic_graph.minhash_d",
+        "current": current_d,
+        "current_profile": depth_profile(current_d, n, DEFAULT_DELTA),
+        "suggested": rec.recommended_d,
+        "suggested_profile": rec.profile,
+        "message": rec.note,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

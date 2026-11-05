@@ -4,50 +4,25 @@
 - **Writing Style**: Always use **American English spelling** ("optimize", "analyze", "modeling").
 
 ## Project Architecture
-**Pulsar** is a Rust-backed Python library for topological data analysis. Performance-critical algorithms live in `src/` (PyO3/maturin) and are exposed as `pulsar._pulsar`. Python orchestrates the pipeline in `pulsar/pipeline.py`, MCP tooling in `pulsar/mcp/`, and exports in `pulsar/exports.py`.
+**Pulsar** is a pure-Rust topology workbench for tabular data, served to agents over MCP and shipped as the npm package `@krv-labs/pulsar` (npmjs.com). There is no Python in this repository. `.claude/CLAUDE.md` is the full contributor guide.
 
 ### Layout
-- **`src/`**: Rust core (Ball Mapper, cosmic graph, MinHash, pseudo-Laplacian, etc.)
-- **`pulsar/`**: Python package (pipeline, config, MCP server, exports)
-- **`tests/`**: Python and Rust tests; `tests/correctness/` for parity checks
-- **`docs/source/`**: Sphinx documentation
-- **`demos/`**: Domain-specific examples (penguins, MMLU, EHR, energy)
+- **`crates/`**: the workspace (`pulsar-core` numerics, `pulsar-config`, `pulsar-data`, `pulsar-pipeline`, `pulsar-store`, `pulsar-analysis`, `pulsar-report`, `pulsar-mcp`, `pulsar-install`, `pulsar-cli`, `pulsar-parity`)
+- **`npm/`**: the `pulsar` launcher and the platform-package builder
+- **`tests/fixtures/golden/`**: frozen parity fixtures (never regenerated; see its README)
+- **`docs/`**: ADRs and design notes
 
 ## Dev Commands
 ```bash
-uv sync --group dev --group mcp
-uv run maturin develop --release
-uv run pytest -v
-cargo test --lib
-uv run ruff check pulsar tests demos
+cargo build --release -p pulsar-cli
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo fmt --all
+node npm/scripts/smoke.mjs   # pack + clean install + MCP handshake (needs a release build)
 ```
 
 ## Versioning & Releases
-`Cargo.toml` `[package].version` is the **single source of truth**. Maturin injects it into wheels; `pulsar/_version.py` reads the same file for editable checkouts. CI runs `python scripts/check_versions.py` to enforce consistency.
+`[workspace.package].version` in the root `Cargo.toml` is the single source of truth; the npm builder reads it. A `v*` tag matching that version triggers `.github/workflows/release.yml`, which builds every platform package, publishes to npmjs.com and verifies the published packages.
 
-### Patch release checklist (e.g. `v0.2.5`)
-1. Branch from `main`: `git checkout -b release/v0.2.5`
-2. Bump `[package].version` in `Cargo.toml` (pyproject.toml uses `dynamic = ["version"]` — no separate bump).
-3. Update `CHANGELOG.md`:
-   - Move `[Unreleased]` notes into a dated `## [X.Y.Z] - YYYY-MM-DD` section.
-   - Leave an empty `## [Unreleased]` heading at the top.
-4. Docs pick up the version automatically via `from pulsar import __version__` in `docs/source/conf.py`.
-5. Run `python scripts/check_versions.py` and `uv run pytest tests/test_version.py -v`.
-6. Open a PR to `main`; wait for CI.
-7. After merge, tag and push to trigger PyPI + GitHub Release:
-   ```bash
-   git checkout main && git pull
-   git tag v0.2.5
-   git push origin v0.2.5
-   ```
-
-> Tag version must match `Cargo.toml` (prefix `v`, e.g. `v0.2.5`). The release workflow in `.github/workflows/release.yml` publishes wheels/sdist to PyPI and creates a GitHub Release on tag push.
-
-See also: `docs/source/releases.rst` for the full contributor guide.
-
-## MCP Server (`pulsar-mcp`)
-Exposes thick, workflow-aware tools for agent-driven topological analysis. Agents should follow the ingest → characterize → create_config → sweep → diagnose → dossier loop documented in the README and `docs/source/userGuides/mcp.rst`.
-
-Key tools: `characterize_dataset`, `create_config`, `run_topological_sweep`, `diagnose_cosmic_graph`, `generate_cluster_dossier`, `compare_clusters`, `export_labeled_data`, `export_dataset_bundle`.
-
-Call `get_workflow_guide` once at session start for the opinionated procedure map.
+## MCP Server
+Exposes workflow-aware tools for agent-driven topological analysis. Agents follow ingest → characterize → create_config → sweep → diagnose → dossier, and call `get_workflow_guide` once at session start for the procedure map.

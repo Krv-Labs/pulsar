@@ -1,7 +1,7 @@
 //! Parity harness for the v1.0 Rust port (#60).
 //!
 //! Golden fixtures in `tests/fixtures/golden/` are frozen from Pulsar v0.5
-//! (Python) by `scripts/golden/generate.py`. Every stage ported from Python
+//! (Python) by `generate.py` (Python generator, see `tests/fixtures/golden/README.md`). Every stage ported from Python
 //! must reproduce them within the tolerance its artifact declares in
 //! `manifest.json`. Do not regenerate fixtures to silence a failure.
 

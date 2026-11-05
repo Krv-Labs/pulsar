@@ -1,15 +1,12 @@
 use thiserror::Error;
 
-/// All errors that can originate from the Pulsar Rust backend.
-///
-/// Every variant maps to a Python `ValueError` when propagated across the
-/// PyO3 boundary (see the `From<PulsarError> for pyo3::PyErr` impl below,
-/// available behind the `python` feature).
+/// All errors that can originate from the Pulsar numeric core. Each variant
+/// has a stable [`code`](PulsarError::code) for the agent-facing envelopes.
 #[derive(Debug, Error)]
 pub enum PulsarError {
     /// Raised when an array passed to a function has the wrong number of rows
     /// or columns.  The `expected` and `got` fields are human-readable strings
-    /// (e.g. `"3 columns"`) so the Python error message is self-explanatory.
+    /// (e.g. `"3 columns"`) so the error message is self-explanatory.
     ///
     /// Produced by: `scale.rs` (`transform`, `inverse_transform`),
     ///              `pca.rs` (`transform`).
@@ -52,19 +49,5 @@ impl PulsarError {
             PulsarError::InvalidParameter { .. } => "INVALID_PARAMETER",
             PulsarError::SvdFailed => "SVD_FAILED",
         }
-    }
-}
-
-/// Convert a `PulsarError` into a Python `ValueError`.
-///
-/// This impl is required by PyO3: any `Result<_, PulsarError>` returned from
-/// a `#[pyfunction]` or `#[pymethods]` method is automatically converted to a
-/// Python exception by this conversion. It lives in this crate (behind the
-/// `python` feature) because the orphan rule forbids implementing it in the
-/// extension crate.
-#[cfg(feature = "python")]
-impl From<PulsarError> for pyo3::PyErr {
-    fn from(e: PulsarError) -> pyo3::PyErr {
-        pyo3::exceptions::PyValueError::new_err(e.to_string())
     }
 }

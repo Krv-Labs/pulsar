@@ -15,8 +15,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
+arrow = { version = "57", default-features = false }
+parquet = { version = "57", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
+pulsar-report = { path = "../pulsar-report" }
 pulsar-config = { path = "../pulsar-config" }
 pulsar-core = { path = "../pulsar-core" }
 pulsar-data = { path = "../pulsar-data" }
 pulsar-pipeline = { path = "../pulsar-pipeline" }
 pulsar-analysis = { path = "../pulsar-analysis" }
+serde_yaml_ng = "0.10"

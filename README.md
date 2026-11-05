@@ -1,128 +1,158 @@
 # Pulsar
 
-Rust-backed Python library for topological data analysis. Implements the Thema pipeline: imputation → scaling → projection → Ball Mapper → Cosmic Graph.
+Topological data analysis for tabular data, built to be driven by an agent.
+Pulsar implements the Thema pipeline (imputation, scaling, a grid of
+projections, Ball Mapper per grid cell, a pseudo-Laplacian, and a cosmic graph
+whose construction threshold is chosen by H0 persistent homology) and serves it
+over MCP, with a CLI beside it. Pure Rust, shipped on npm as
+[`@krv-labs/pulsar`](https://www.npmjs.com/package/@krv-labs/pulsar).
 
-Performance-critical algorithms are written in Rust (PyO3/maturin) and exposed as `pulsar._pulsar`. Python orchestrates the pipeline.
+Tools return **measurements, not conclusions**: geometry, graph state,
+threshold surfaces, cluster evidence and their provenance. The agent and the
+user supply the domain meaning.
 
+## Install
 
+No Rust or Python needed; npm installs one prebuilt binary for your platform.
 
-#### MCP!
-<details> 
-<summary>Let the Agent Do the Math</summary>
-
-Until now, topological data analysis required a Ph.D. in algebraic topology and a masochistic tolerance for parameter tuning. 
-
-By default, Pulsar exposes a rich Python API. This is great when you *actually* want to build custom pipelines, but when you just want to find out why your dataset is acting weird, writing boilerplate is tedious and unintuitive.
-
-We get lots of complaints about it actually, with people asking things like:
-
-> Why is my cosmic graph a hairball? What the hell should my epsilon range be? Why did my PCA just drop 90% of the variance?
-
-We hear you, but we're not convinced that writing a 50-line hyperparameter grid search is what you really want. You don't want to have to manually calculate k-NN distances every time you load a CSV. And I doubt you really want to stare at a raw NetworkX adjacency matrix either — you want answers. You want to point an LLM at your data and say, "Find the natural clusters and tell me why they exist."
-
-The Pulsar MCP (Model Context Protocol) Server is our attempt to give you what you *actually* want, without any of the downsides of doing something stupid like guessing topological parameters.
-
-### Setup
-
-You do **not** need to clone this repository. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then register Pulsar with your agent tools:
-
-```sh
-uvx --from thema-pulsar pulsar install
+```bash
+npx -y @krv-labs/pulsar install      # register the MCP server with every agent it detects
+npx -y @krv-labs/pulsar status       # which agents have it, and whether each entry is healthy
 ```
 
-`pulsar install` detects Claude Code, Claude Desktop, Codex CLI, Gemini CLI, GitHub Copilot CLI, Cursor, VS Code, and Google Antigravity, then writes the MCP server entry each client expects (absolute-path `uvx` by default). Re-run anytime to repair drifted configs. Check status with `uvx --from thema-pulsar pulsar status`; remove registrations with `uvx --from thema-pulsar pulsar uninstall`.
+`pulsar install` writes the entry each client expects for Claude Code, Claude
+Desktop, Codex CLI, Gemini CLI, GitHub Copilot CLI, Cursor, VS Code and Google
+Antigravity. Every config it edits is backed up first (`*.pulsar.backup`),
+files with comments it would drop are refused, and only Pulsar's own entries
+are ever changed. `pulsar uninstall` removes exactly what it added.
 
-The installer prompts on your terminal directly, so it still appears when output is piped (`pulsar install | tee install.log`). Where there is no console at all — CI, a systemd unit — pass explicit harness ids (`claude`, `claude-desktop`, `codex`, `gemini`, `copilot`, `cursor`, `vscode`, `antigravity`) or `--all`:
-
-```sh
-uvx --from thema-pulsar pulsar install --all
-uvx --from thema-pulsar pulsar uninstall --all --yes
-```
-
-Prefer a persistent server binary? Use `pipx install "thema-pulsar[mcp]"` and `pulsar install --mode pipx`.
-
-<details>
-<summary>Manual client configuration</summary>
-
-For clients configured with JSON (Claude Desktop, Cursor, Windsurf):
+Or point any MCP host at it directly:
 
 ```json
-{
-  "mcpServers": {
-    "pulsar": {
-      "command": "uvx",
-      "args": ["--from", "thema-pulsar[mcp]", "pulsar-mcp"],
-      "env": {}
-    }
-  }
-}
+{ "mcpServers": { "pulsar": { "command": "npx", "args": ["-y", "@krv-labs/pulsar", "mcp"] } } }
 ```
 
-For CLI clients:
+For a persistent command, `npm install -g @krv-labs/pulsar` (then
+`pulsar --help`). Platforms: macOS arm64/x64, Linux x64/arm64 (glibc and
+musl), Windows x64/arm64.
 
-```sh
-claude mcp add pulsar -- uvx --from "thema-pulsar[mcp]" pulsar-mcp
-gemini mcp add --scope user --timeout 60000 pulsar uvx -- --from "thema-pulsar[mcp]" pulsar-mcp
+### Coming from the Python package (`thema-pulsar`)
+
+Pulsar 0.7 replaces the Python library with a Rust implementation of the same
+pipeline and MCP tools, proven against frozen reference outputs of the Python
+version. `thema-pulsar` stays installable from PyPI at 0.6 but gets no further
+releases. To move an agent setup over, run `npx -y @krv-labs/pulsar install`:
+it recognizes the `uvx --from thema-pulsar …` entries the Python installer
+wrote and rewrites them to the new server. Configs are unchanged (`params.yaml`
+is read as before); the Python API (`ThemaRS`) is not part of 0.7.
+
+## The agent loop
+
+Topological data analysis used to mean a PhD in algebraic topology and a high
+tolerance for parameter tuning ("why is my cosmic graph a hairball? what
+should epsilon be?"). The MCP server lets the agent do that work, one
+measured step at a time:
+
+1. **Ingest** a host-visible CSV/Parquet path and get a stable `dataset_id`.
+2. **Characterize** it (`characterize_dataset`, `probe_columns`) and, for messy
+   data, draft a reviewable **preprocessing plan**.
+3. **Create a calibrated config** with `create_config`: epsilon and projection
+   dimensions are calibrated against the processed feature space, never guessed.
+4. **Sweep** (`run_topological_sweep`, async jobs with progress for big grids).
+5. **Diagnose** the graph (`diagnose_cosmic_graph`,
+   `get_threshold_stability_curve`) and iterate with `refine_config`.
+6. **Explain** the structure: `generate_cluster_dossier`, then
+   `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix` and
+   `compare_clusters` (Welch t, KS, Cohen's d).
+7. **Export**: labeled CSV, a Parquet bundle, or a standalone HTML report.
+
+Longitudinal panels (one row per entity and time step) get their own tools:
+`build_longitudinal_graph`, trajectory archetypes, cross-time neighbours and
+trajectory classification. Call `get_workflow_guide` once at the start of a
+session for the full procedure and tool map.
+
+Things that save time:
+
+- **Don't skip diagnosis.** If the graph is a giant hairball or all dust, the
+  clusters will be too. The stability curve shows where the structure is.
+- **Keep labels out of the geometry.** If your table has an outcome column,
+  drop it with `refine_config` (`preprocessing.drop_columns`); it still shows
+  up in the cluster evidence, which is where you want it.
+- **Let `create_config` handle non-numeric columns**: low-cardinality strings
+  are one-hot encoded, high-cardinality ones dropped.
+
+## CLI
+
+```bash
+pulsar fit params.yaml            # run a sweep, print a JSON summary of the cosmic graph
+pulsar runs list                  # persisted runs
+pulsar config validate params.yaml
+pulsar mcp                        # the MCP server on stdio
+pulsar schema config              # JSON Schema of params.yaml
 ```
 
-GUI-launched apps on macOS often do not inherit your shell `PATH`. If a client cannot find `uvx`, run `which uvx` and use that absolute path as `"command"`, or use `pulsar install` which resolves it for you.
+Runs, datasets and plans persist in `~/.local/share/pulsar` (or
+`$PULSAR_STORE_DIR`), so handles survive restarts.
 
-</details>
+## Configuration
 
-Two things that trip people up: the first launch can take up to a minute while `uvx` downloads Pulsar (hence Gemini's `--timeout 60000`), and Gemini will not start stdio MCP servers in an untrusted workspace—choose **Trust folder** when prompted. The [MCP setup guide](https://github.com/Krv-Labs/pulsar/blob/main/docs/source/userGuides/mcp.rst) covers both, per client.
+Thresholding is automatic by default; most configs only need data,
+preprocessing and the sweep grid.
 
-### General Overview
+```yaml
+run:
+  name: my_experiment
+  data: path/to/data.csv # CSV or Parquet
 
-What follows from here is the exact workflow we designed to dogfood the pipeline. It covers every sensible step of a topological analysis, from geometry probing to statistical dossiers. 
+preprocessing:
+  drop_columns: [id, timestamp]
+  impute:
+    age: { method: sample_normal, seed: 42 } # fill_mean | fill_median | fill_mode | sample_normal | sample_categorical | fill_value
+    category: { method: sample_categorical, seed: 7 }
 
-It's important you let the agent follow this exact sequence for a few reasons:
-1. We want the graph to actually have signal out of the box.
-2. Really just the first reason, that's the whole point of these tools.
+sweep:
+  projection:
+    method: jl # or pca
+    dimensions: { values: [2, 3, 5] }
+    seed: { values: [42, 7, 13] }
+  ball_mapper:
+    epsilon:
+      range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
 
-Here is the exact loop the agent should run:
+cosmic_graph:
+  construction: minhash # or exact
+  minhash_d: 256
+  construction_threshold: auto
+```
 
-1. **Ingest the dataset** to get a stable `dataset_id` handle.
-2. **Create a calibrated config** via `create_config(dataset_id)` — calibrates epsilon and projection dimensions against the processed feature space.
-3. **Sweep the topology** using that config.
-4. **Diagnose the graph** to see if it's a giant useless blob or actually balanced. Use the metrics to decide what to adjust, then iterate via `refine_config`.
-5. **Generate the dossier** to explain the clusters in plain English.
-6. **Compare clusters** for academic-grade p-values.
-7. **Export** the labeled data.
+## Build from source
 
-### Tool Fly-By
+```bash
+cargo build --release -p pulsar-cli      # target/release/pulsar
+cargo test --workspace                   # unit, contract and golden-fixture parity tests
+node npm/scripts/smoke.mjs               # pack + install + MCP handshake on this platform
+scripts/install.sh                       # build, install to ~/.local/bin, register detected agents
+```
 
-We didn't just wrap our Python functions in JSON schemas. We built *Thick Tools*—stateful, workflow-aware engines that pass configuration directly between each other so you don't have to watch the agent screw up file I/O.
+| Crate | Role |
+|---|---|
+| `pulsar-core` | numeric engine: impute, scale, PCA/JL, Ball Mapper, pseudo-Laplacian, cosmic graph, H0, temporal |
+| `pulsar-config` | `params.yaml` loader, JSON Schema, structured errors |
+| `pulsar-data` | CSV/Parquet ingest (pandas-compatible typing), preprocessing executor, CSV export |
+| `pulsar-pipeline` | `fit` / `fit_multi`, projection fingerprint, progress, `CosmicTrajectory` |
+| `pulsar-store` | persistent store, typed handles, job model, model cache |
+| `pulsar-analysis` | thresholds, clustering, diagnostics, evidence, dossier, preprocessing plan, longitudinal |
+| `pulsar-report` | Parquet dataset bundle and the standalone HTML report |
+| `pulsar-mcp` | the MCP server: typed tools, error envelope, async jobs |
+| `pulsar-install` | `pulsar install / uninstall / status` |
+| `pulsar-cli` | the `pulsar` binary |
+| `pulsar-parity` | parity tests against frozen outputs of the Python reference ([provenance](tests/fixtures/golden/README.md)) |
 
-*   `ingest_dataset(path)`: Registers a host-visible CSV/Parquet path and returns the stable `dataset_id` every other tool keys off of.
-*   `create_config(dataset_id)`: The primary config generation tool. Analyzes k-NN distances and projection dimensions in the *processed* feature space (after preprocessing + scaling) to produce a calibrated YAML config. Never let the agent guess parameters.
-*   `run_topological_sweep`: Runs the heavy Rust pipeline. Takes inline YAML and returns structured JSON with metrics and experiment diff. Config persistence is opt-in via `save_config=True`.
-*   `diagnose_cosmic_graph`: Returns current graph-state observables: scale, component morphology, weight distribution, sweep support, observed patterns, and risk factors. The agent interprets those measurements against the user's objective.
-*   `refine_config`: Applies targeted overrides (or deletions) to a config by dotted path instead of regenerating the whole YAML, for iterating after a diagnosis.
-*   `generate_cluster_dossier`: Returns structured JSON with per-cluster profiles (Z-scores, homogeneity, concentration) plus a Markdown summary. Includes clustering method metadata (method used, silhouette score).
-*   `compare_clusters`: Runs Welch's T-tests, KS-tests, and Cohen's d between two specific clusters. Because sometimes your boss wants a p-value.
-*   `export_labeled_data`: Maps semantic names to a `cluster_assignment_id` from `generate_cluster_dossier` and dumps that exact clustering to a CSV.
-
-That's the core loop — there's a much larger surface for longitudinal/temporal panels, graph artifacts, threshold tuning, and HTML/Parquet exports. See the [MCP guide](https://github.com/Krv-Labs/pulsar/blob/main/docs/source/userGuides/mcp.rst) for the full tool table, or call `get_workflow_guide` from the agent itself for the opinionated end-to-end procedure.
-
-### Pitfalls & Annoyances
-
-We try to make things foolproof, but some of you goofballs are going to try to break it anyway. Here is what to avoid:
-
-*   **Don't let the agent write YAML files manually.** 
-    The tools pass YAML strings directly in memory (`suggested_params_yaml` -> `config_yaml`). If you watch the agent try to use `write_file` to save a `params.yaml` before running the sweep, stop it. If you make the agent do unnecessary file I/O you belong in prison.
-*   **Don't skip the diagnosis step.**
-    If the graph is a giant hairball, your clusters will be garbage. Use `diagnose_cosmic_graph` to inspect graph-state measurements, then decide whether the user's objective calls for threshold inspection, config refinement, or a different interpretation surface.
-*   **Handle non-numeric data appropriately.**
-    Pulsar is a geometric engine. It needs floats. `characterize_dataset` will automatically tell the agent which low-cardinality strings to one-hot encode and which high-cardinality strings to drop. Don't fight it.
-
-</details>
-
-> [!NOTE]  
-> For more guides, workflows, and an end-to-end MCP example, see [`demos/penguins/README.md`](demos/penguins/README.md).
+Design notes: [`docs/adr/`](docs/adr) and [`docs/design/mcp-roadmap.md`](docs/design/mcp-roadmap.md).
 
 ## Citation
 
-If you use this package in your research, please cite:
+If you use Pulsar in research, please cite:
 
 ```bibtex
 @article{Gathrid2025,
@@ -139,121 +169,9 @@ If you use this package in your research, please cite:
   issn    = {2058-7546}
 }
 ```
-Which introduced the original [`Thema`](https://github.com/Krv-Labs/Thema) algorithm.
 
-## Installation
+which introduced the original [Thema](https://github.com/Krv-Labs/Thema) algorithm.
 
-### Agent / MCP (recommended)
+## License
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
-
-```sh
-uvx --from thema-pulsar pulsar install
-```
-
-That registers Pulsar with the agent tools on your machine. No clone, venv, or Rust toolchain required. See the MCP Setup section above for status/uninstall, pipx mode, and manual client config.
-
-### Library (from source)
-
-Requires Rust and Python 3.10+.
-
-```bash
-uv sync
-uv run maturin develop --release
-```
-
-## Quick start
-
-```python
-from pulsar import ThemaRS
-
-model = ThemaRS("params.yaml").fit()
-
-graph = model.cosmic_graph        # sparse networkx.Graph with 'weight' edge attributes
-adj   = model.weighted_adjacency  # dense weighted adjacency, materialized lazily on access
-edges = model.weighted_edges()    # thresholded sparse edge list
-reps  = model.select_representatives()  # uses the configured default
-
-# Opt-in spectral sparsification hook: a leverage-aware, epsilon-controlled graph
-# that preserves spectrum/distances (not topology). Useful for spectral analysis;
-# it is NOT a construction-time speedup. update=True refreshes model.cosmic_graph.
-model.spectral_sparsify(epsilon=0.8, seed=7, update=True)
-```
-
-Copy `params.yaml.sample` to `params.yaml` and edit it for your dataset.
-
-## Progress reporting
-
-- Stage weight constants for `progress_callback` live in `pulsar.runtime.utils._STAGE_WEIGHTS`; `pulsar.runtime.utils._build_cumulative_fractions` turns them into cumulative fractions (used by `ThemaRS.fit`).
-- `_rayon_thread_override` in `pulsar.runtime.utils` caps `RAYON_NUM_THREADS` for Rust-heavy stages when notebooks need stricter thread control.
-- For notebooks: use `pulsar.runtime.progress.fit_with_progress(model, data)` or `fit_multi_with_progress(model, datasets)` — renders a transient rich progress bar.
-
-## Demos
-
-Demo scripts organized by domain under `demos/`:
-
-**Energy domain:**
-```bash
-uv run python demos/energy/coal.py  # US Coal Plants (downloads dataset automatically)
-```
-
-**EHR domain:**
-```bash
-uv run python demos/ehr/physionet.py --synthetic             # Synthetic data mode
-uv run python demos/ehr/physionet.py --data path/to/eicu.csv # Real eICU CSV data
-uv run python demos/ehr/ecg_arrhythmia.py                    # ECG arrhythmia classification
-```
-
-**LLM/MMLU domain:**
-```bash
-jupyter notebook demos/mmlu/mmlu_topology_demo.ipynb
-```
-
-## Configuration
-
-Cosmic graph thresholding is automatic by default, and representative selection has a sensible default. Most users only need to configure data, preprocessing, and sweeps.
-
-```yaml
-run:
-  name: my_experiment
-  data: path/to/data.csv # CSV or parquet
-
-preprocessing:
-  drop_columns: [id, timestamp]
-  impute:
-    age:
-      method: sample_normal # fill_mean | fill_median | fill_mode |
-      seed: 42 # sample_normal | sample_categorical
-    category:
-      method: sample_categorical
-      seed: 7
-
-sweep:
-  projection:
-    method: jl # default; set to pca for legacy randomized PCA
-    dimensions:
-      values: [2, 3, 5]
-    seed:
-      values: [42, 7, 13]
-    center: true
-  ball_mapper:
-    epsilon:
-      range: { min: 0.1, max: 1.5, steps: 8 } # or: values: [0.3, 0.5, 0.8]
-cosmic_graph:
-  construction: minhash
-  minhash_d: 256
-  minhash_seed: 42
-  construction_threshold: auto
-  sparsify: false # opt-in spectral sparsification hook (off by default)
-  sparsify_epsilon: 1.0
-  sparsify_seed: 42
-```
-
-## Development
-
-```bash
-uv run maturin develop        # debug build
-uv run maturin develop --release  # optimised build
-uv run pytest tests/ -v
-uv run pytest tests/test_benchmark_accelerations.py -s -v
-```
+BSD 3-Clause; see [LICENSE](LICENSE).

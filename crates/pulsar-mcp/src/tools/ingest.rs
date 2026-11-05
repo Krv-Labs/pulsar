@@ -10,8 +10,7 @@ use crate::state::ServerState;
 
 pub const NAME: &str = "ingest_dataset";
 
-#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct Params {
     /// Absolute path to a CSV or Parquet file on the machine running this server (host-visible; sandbox-only paths fail).
     pub path: String,

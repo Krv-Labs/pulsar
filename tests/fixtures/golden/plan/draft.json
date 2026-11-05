@@ -1,0 +1,6366 @@
+{
+ "plain": {
+  "csv": "plan/input.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "date_columns",
+    "text": "Some columns hold dates (`visit`). Should the map ignore them, or use only whether each date is filled in?",
+    "applies_to": [
+     "visit"
+    ],
+    "rows_affected": 40,
+    "options": [
+     {
+      "option_id": "ignore",
+      "label": "Ignore dates",
+      "effect": "Leaves date columns out of the map",
+      "edits": [
+       {
+        "column": "visit",
+        "role": "drop",
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_date",
+      "label": "Use whether date is filled in",
+      "effect": "Leaves raw dates out of the map (1 date column has no blanks and stays out)",
+      "edits": []
+     }
+    ],
+    "default_option_id": "ignore",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "conditional_column",
+    "text": "2 columns (`dose` and `dose_txt`) only have values when `flag` is not 0 \u2014 they are blank for everyone else. Should the map use them?",
+    "applies_to": [
+     "dose",
+     "dose_txt"
+    ],
+    "rows_affected": 14,
+    "options": [
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `dose` and `dose_txt` out of the map because the blank pattern largely repeats `flag`",
+      "edits": [
+       {
+        "column": "dose",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "dose_txt",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "blank_as_zero",
+      "label": "Treat blanks as 0",
+      "effect": "Keeps in the map with blanks set to 0 and no blank marker (largely repeats `flag`)",
+      "edits": [
+       {
+        "column": "dose",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "dose_txt",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "estimate_and_mark",
+      "label": "Fill with median and mark blanks",
+      "effect": "Keeps in the map with blanks filled by the median and adds a 0/1 blank marker that largely repeats `flag`",
+      "edits": [
+       {
+        "column": "dose",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "dose_txt",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "leave_out",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q3": {
+    "question_id": "q3",
+    "topic": "mixed_values",
+    "text": "2 columns mostly hold numbers but also the value 'unk' (8 entries in total; e.g. `code_mixed`: 6). Should those values count as their own category, or as unreadable entries treated like blanks?",
+    "applies_to": [
+     "code_mixed",
+     "amount_mixed"
+    ],
+    "rows_affected": 7,
+    "options": [
+     {
+      "option_id": "as_categories",
+      "label": "Treat as categories",
+      "effect": "Each distinct value (including non-numeric text) gets its own 0/1 category column; blanks become '(blank)'",
+      "edits": [
+       {
+        "column": "code_mixed",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": "(blank)",
+        "indicator": "none",
+        "encode": "one_hot"
+       },
+       {
+        "column": "amount_mixed",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": "(blank)",
+        "indicator": "none",
+        "encode": "one_hot"
+       }
+      ]
+     },
+     {
+      "option_id": "as_blank",
+      "label": "Treat non-numeric text as blank",
+      "effect": "8 'unk' entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker",
+      "edits": [
+       {
+        "column": "code_mixed",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       },
+       {
+        "column": "amount_mixed",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       }
+      ]
+     },
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `code_mixed` and `amount_mixed` out of the map",
+      "edits": [
+       {
+        "column": "code_mixed",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       },
+       {
+        "column": "amount_mixed",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       }
+      ]
+     }
+    ],
+    "default_option_id": "as_blank",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q4": {
+    "question_id": "q4",
+    "topic": "blank_meaning",
+    "text": "`age` and `weight` never record a 0. Both are blank for the same 4 rows. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "age",
+     "weight"
+    ],
+    "rows_affected": 4,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "Both columns get 0 where blank; no extra marker column",
+      "edits": [
+       {
+        "column": "age",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "weight",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus one shared 0/1 marker column for the blank pattern",
+      "edits": [
+       {
+        "column": "age",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "weight",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q5": {
+    "question_id": "q5",
+    "topic": "blank_meaning",
+    "text": "`count` is blank for 3 rows and never records a 0. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "count"
+    ],
+    "rows_affected": 3,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "Blanks become 0; no extra marker column",
+      "edits": [
+       {
+        "column": "count",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus a 0/1 marker column for which rows were blank",
+      "edits": [
+       {
+        "column": "count",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q6": {
+    "question_id": "q6",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 40,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "rid": {
+    "column": "rid",
+    "role": "id",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "unique text value per observed row (40 distinct values)",
+    "question_id": null
+   },
+   "age": {
+    "column": "age",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "4 blanks; no recorded 0; blank on the same rows as 1 other column (mg2)",
+    "question_id": "q4"
+   },
+   "weight": {
+    "column": "weight",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "4 blanks; no recorded 0; blank on the same rows as 1 other column (mg2)",
+    "question_id": "q4"
+   },
+   "flag": {
+    "column": "flag",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete boolean column (2 distinct values)",
+    "question_id": null
+   },
+   "dose": {
+    "column": "dose",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": "q2"
+   },
+   "dose_txt": {
+    "column": "dose_txt",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": "q2"
+   },
+   "code_mixed": {
+    "column": "code_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (6 rows; 1 blank); kept as 4 categories",
+    "question_id": "q3"
+   },
+   "amount_mixed": {
+    "column": "amount_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (2 rows; 1 blank); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": "q3"
+   },
+   "visit": {
+    "column": "visit",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (40 distinct values; 0 blanks)",
+    "question_id": "q1"
+   },
+   "city": {
+    "column": "city",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "text column with 3 categories and 2 blanks; blanks become '(blank)' category",
+    "question_id": null
+   },
+   "city_full": {
+    "column": "city_full",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "20 distinct text categories (exceeds sqrt(40) = 6); would add 20 columns",
+    "question_id": null
+   },
+   "const": {
+    "column": "const",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "one distinct value; adds no distance information",
+    "question_id": null
+   },
+   "empty": {
+    "column": "empty",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "all 40 rows are blank",
+    "question_id": null
+   },
+   "count": {
+    "column": "count",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "3 blanks; no recorded 0",
+    "question_id": "q5"
+   },
+   "clean": {
+    "column": "clean",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "numtxt_clean": {
+    "column": "numtxt_clean",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (0 blanks); coerced to numbers with median fill",
+    "question_id": null
+   },
+   "numtxt_blank": {
+    "column": "numtxt_blank",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (2 blanks); coerced to numbers with median fill",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 40,
+   "columns": 17,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 5,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "rid",
+    "dose",
+    "dose_txt",
+    "visit",
+    "city_full",
+    "const",
+    "empty"
+   ],
+   "missing_indicator_groups": {
+    "age_and_1_more": [
+     "age",
+     "weight"
+    ]
+   },
+   "impute": {
+    "age": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "weight": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "code_mixed": {
+     "method": "fill_value",
+     "value": "(blank)",
+     "indicator": false
+    },
+    "amount_mixed": {
+     "method": "fill_median"
+    },
+    "city": {
+     "method": "fill_value",
+     "value": "(blank)",
+     "indicator": false
+    },
+    "count": {
+     "method": "fill_median"
+    },
+    "numtxt_clean": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "numtxt_blank": {
+     "method": "fill_median"
+    }
+   },
+   "encode": {
+    "code_mixed": {
+     "method": "one_hot"
+    },
+    "city": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "73ab7d4a6f35",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (73ab7d4a6f35)\npreprocessing:\n  drop_columns:\n  - rid\n  - dose\n  - dose_txt\n  - visit\n  - city_full\n  - const\n  - empty\n  missing_indicator_groups:\n    age_and_1_more:\n    - age\n    - weight\n  impute:\n    age:\n      method: fill_median\n      indicator: false\n    weight:\n      method: fill_median\n      indicator: false\n    code_mixed:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    amount_mixed:\n      method: fill_median\n    city:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    count:\n      method: fill_median\n    numtxt_clean:\n      method: fill_median\n      indicator: false\n    numtxt_blank:\n      method: fill_median\n  encode:\n    code_mixed:\n      method: one_hot\n    city:\n      method: one_hot",
+  "marker_legend": [
+   {
+    "marker_column": "age_and_1_more_was_missing",
+    "columns_preview": [
+     "age",
+     "weight"
+    ],
+    "columns_count": 2
+   },
+   {
+    "marker_column": "amount_mixed_was_missing",
+    "columns_preview": [
+     "amount_mixed"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "count_was_missing",
+    "columns_preview": [
+     "count"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "numtxt_blank_was_missing",
+    "columns_preview": [
+     "numtxt_blank"
+    ],
+    "columns_count": 1
+   }
+  ],
+  "counts": {
+   "columns": 17,
+   "feature_columns": 10,
+   "dropped": 7,
+   "open_entries": 8,
+   "open_questions": 6,
+   "decided_by": {
+    "default": 17,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": null,
+  "valid": false,
+  "error": "Column 'amount_mixed' is configured for numeric imputation (fill_median) but contains non-numeric values. Sample: ['27,210', '51,309', 'unk', '27,240', '8,891']. Clean the data or use a string imputation method."
+ },
+ "roles": {
+  "csv": "plan/input.csv",
+  "args": {
+   "targets": [
+    "flag",
+    "age"
+   ],
+   "entity": "rid",
+   "time": "visit"
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "conditional_column",
+    "text": "2 columns (`dose` and `dose_txt`) only have values when `flag` is not 0 \u2014 they are blank for everyone else. Should the map use them?",
+    "applies_to": [
+     "dose",
+     "dose_txt"
+    ],
+    "rows_affected": 14,
+    "options": [
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `dose` and `dose_txt` out of the map because the blank pattern largely repeats `flag`",
+      "edits": [
+       {
+        "column": "dose",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "dose_txt",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "blank_as_zero",
+      "label": "Treat blanks as 0",
+      "effect": "Keeps in the map with blanks set to 0 and no blank marker (largely repeats `flag`)",
+      "edits": [
+       {
+        "column": "dose",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "dose_txt",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "estimate_and_mark",
+      "label": "Fill with median and mark blanks",
+      "effect": "Keeps in the map with blanks filled by the median and adds a 0/1 blank marker that largely repeats `flag`",
+      "edits": [
+       {
+        "column": "dose",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "dose_txt",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "leave_out",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "mixed_values",
+    "text": "2 columns mostly hold numbers but also the value 'unk' (8 entries in total; e.g. `code_mixed`: 6). Should those values count as their own category, or as unreadable entries treated like blanks?",
+    "applies_to": [
+     "code_mixed",
+     "amount_mixed"
+    ],
+    "rows_affected": 7,
+    "options": [
+     {
+      "option_id": "as_categories",
+      "label": "Treat as categories",
+      "effect": "Each distinct value (including non-numeric text) gets its own 0/1 category column; blanks become '(blank)'",
+      "edits": [
+       {
+        "column": "code_mixed",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": "(blank)",
+        "indicator": "none",
+        "encode": "one_hot"
+       },
+       {
+        "column": "amount_mixed",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": "(blank)",
+        "indicator": "none",
+        "encode": "one_hot"
+       }
+      ]
+     },
+     {
+      "option_id": "as_blank",
+      "label": "Treat non-numeric text as blank",
+      "effect": "8 'unk' entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker",
+      "edits": [
+       {
+        "column": "code_mixed",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       },
+       {
+        "column": "amount_mixed",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       }
+      ]
+     },
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `code_mixed` and `amount_mixed` out of the map",
+      "edits": [
+       {
+        "column": "code_mixed",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       },
+       {
+        "column": "amount_mixed",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       }
+      ]
+     }
+    ],
+    "default_option_id": "as_blank",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q3": {
+    "question_id": "q3",
+    "topic": "blank_meaning",
+    "text": "`count` is blank for 3 rows and never records a 0. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "count"
+    ],
+    "rows_affected": 3,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "Blanks become 0; no extra marker column",
+      "edits": [
+       {
+        "column": "count",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus a 0/1 marker column for which rows were blank",
+      "edits": [
+       {
+        "column": "count",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "rid": {
+    "column": "rid",
+    "role": "entity",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as entity column",
+    "question_id": null
+   },
+   "age": {
+    "column": "age",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "weight": {
+    "column": "weight",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "4 blanks; no recorded 0; blank on the same rows as 1 other column (mg2)",
+    "question_id": null
+   },
+   "flag": {
+    "column": "flag",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "dose": {
+    "column": "dose",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": "q1"
+   },
+   "dose_txt": {
+    "column": "dose_txt",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "14 blanks; blank on the exact rows where flag is 0",
+    "question_id": "q1"
+   },
+   "code_mixed": {
+    "column": "code_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (6 rows; 1 blank); kept as 4 categories",
+    "question_id": "q2"
+   },
+   "amount_mixed": {
+    "column": "amount_mixed",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'unk' (2 rows; 1 blank); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": "q2"
+   },
+   "visit": {
+    "column": "visit",
+    "role": "time",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as time column",
+    "question_id": null
+   },
+   "city": {
+    "column": "city",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "text column with 3 categories and 2 blanks; blanks become '(blank)' category",
+    "question_id": null
+   },
+   "city_full": {
+    "column": "city_full",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "20 distinct text categories (exceeds sqrt(40) = 6); would add 20 columns",
+    "question_id": null
+   },
+   "const": {
+    "column": "const",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "one distinct value; adds no distance information",
+    "question_id": null
+   },
+   "empty": {
+    "column": "empty",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "all 40 rows are blank",
+    "question_id": null
+   },
+   "count": {
+    "column": "count",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "3 blanks; no recorded 0",
+    "question_id": "q3"
+   },
+   "clean": {
+    "column": "clean",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "numtxt_clean": {
+    "column": "numtxt_clean",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (0 blanks); coerced to numbers with median fill",
+    "question_id": null
+   },
+   "numtxt_blank": {
+    "column": "numtxt_blank",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "numeric text (2 blanks); coerced to numbers with median fill",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 40,
+   "columns": 17,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 3,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "rid",
+    "age",
+    "flag",
+    "dose",
+    "dose_txt",
+    "visit",
+    "city_full",
+    "const",
+    "empty"
+   ],
+   "missing_indicator_groups": {
+    "weight": [
+     "weight"
+    ]
+   },
+   "impute": {
+    "weight": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "code_mixed": {
+     "method": "fill_value",
+     "value": "(blank)",
+     "indicator": false
+    },
+    "amount_mixed": {
+     "method": "fill_median"
+    },
+    "city": {
+     "method": "fill_value",
+     "value": "(blank)",
+     "indicator": false
+    },
+    "count": {
+     "method": "fill_median"
+    },
+    "numtxt_clean": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "numtxt_blank": {
+     "method": "fill_median"
+    }
+   },
+   "encode": {
+    "code_mixed": {
+     "method": "one_hot"
+    },
+    "city": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "7daf886bd493",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (7daf886bd493)\npreprocessing:\n  drop_columns:\n  - rid\n  - age\n  - flag\n  - dose\n  - dose_txt\n  - visit\n  - city_full\n  - const\n  - empty\n  missing_indicator_groups:\n    weight:\n    - weight\n  impute:\n    weight:\n      method: fill_median\n      indicator: false\n    code_mixed:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    amount_mixed:\n      method: fill_median\n    city:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    count:\n      method: fill_median\n    numtxt_clean:\n      method: fill_median\n      indicator: false\n    numtxt_blank:\n      method: fill_median\n  encode:\n    code_mixed:\n      method: one_hot\n    city:\n      method: one_hot",
+  "marker_legend": [
+   {
+    "marker_column": "weight_was_missing",
+    "columns_preview": [
+     "weight"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "amount_mixed_was_missing",
+    "columns_preview": [
+     "amount_mixed"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "count_was_missing",
+    "columns_preview": [
+     "count"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "numtxt_blank_was_missing",
+    "columns_preview": [
+     "numtxt_blank"
+    ],
+    "columns_count": 1
+   }
+  ],
+  "counts": {
+   "columns": 17,
+   "feature_columns": 8,
+   "dropped": 9,
+   "open_entries": 5,
+   "open_questions": 3,
+   "decided_by": {
+    "default": 13,
+    "agent": 4,
+    "user": 0
+   }
+  },
+  "processed_space": null,
+  "valid": false,
+  "error": "Column 'amount_mixed' is configured for numeric imputation (fill_median) but contains non-numeric values. Sample: ['27,210', '51,309', 'unk', '27,240', '8,891']. Clean the data or use a string imputation method."
+ },
+ "wide": {
+  "csv": "plan/wide.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "date_columns",
+    "text": "Some columns hold dates (`last_seen` and `when`). Should the map ignore them, or use only whether each date is filled in?",
+    "applies_to": [
+     "last_seen",
+     "when"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "ignore",
+      "label": "Ignore dates",
+      "effect": "Leaves date columns out of the map",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "none"
+       },
+       {
+        "column": "when",
+        "role": "drop",
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_date",
+      "label": "Use whether date is filled in",
+      "effect": "Leaves raw dates out of the map and adds a 0/1 blank marker (note: this marker would repeat `n_events`); 1 date column has no blanks and stays out",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "ignore",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "duplicate_signal",
+    "text": "1 total in this table is an exact sum of other columns (`t_cd` = `c` + `d`). Counting both gives those signals extra weight. Keep everything, keep only the totals, or keep only the parts?",
+    "applies_to": [
+     "t_cd",
+     "c",
+     "d"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_all",
+      "label": "Keep everything",
+      "effect": "Keeps both the total columns and the part columns in the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_totals",
+      "label": "Keep only the totals",
+      "effect": "Keeps `t_cd` and leaves `c` and `d` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "drop"
+       },
+       {
+        "column": "d",
+        "role": "drop"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_parts",
+      "label": "Keep only the parts",
+      "effect": "Keeps `c` and `d` and leaves `t_cd` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "drop"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_all",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q3": {
+    "question_id": "q3",
+    "topic": "duplicate_signal",
+    "text": "2 columns have identical values to another column (e.g. `a_dup` = `a`), so the map counts those signals twice. Keep all of them, or leave out the duplicates?",
+    "applies_to": [
+     "a",
+     "c",
+     "a_dup",
+     "c_dup"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_both",
+      "label": "Keep both",
+      "effect": "Keeps all duplicate columns in the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "feature"
+       },
+       {
+        "column": "c_dup",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_one",
+      "label": "Keep only one",
+      "effect": "Keeps `a` and `c` and leaves duplicate `a_dup` and `c_dup` out of the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "drop"
+       },
+       {
+        "column": "c_dup",
+        "role": "drop"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_both",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q4": {
+    "question_id": "q4",
+    "topic": "mostly_blank",
+    "text": "`sparse4` is blank for 87% of rows (and 3 other columns are blank for more than half of rows, including `sparse1` and `sparse2`), and the data doesn't show why. Leave them out, keep only whether each has a value, or estimate the missing values?",
+    "applies_to": [
+     "sparse4",
+     "sparse1",
+     "sparse2",
+     "sparse3"
+    ],
+    "rows_affected": 52,
+    "options": [
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_value",
+      "label": "Keep only whether value is filled in",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map and adds 0/1 markers for whether values are filled in",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse4"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse3"
+       }
+      ]
+     },
+     {
+      "option_id": "estimate_and_mark",
+      "label": "Fill with median and mark blanks",
+      "effect": "Keeps in the map with blanks filled by the median of observed rows and a 0/1 blank marker (about 70% of these values would be estimates)",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       },
+       {
+        "column": "sparse1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "leave_out",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q5": {
+    "question_id": "q5",
+    "topic": "blank_meaning",
+    "text": "`visits1` and `visits2` never record a 0 (1 other column sometimes does). All 3 are blank for the same 8 rows. They are blank exactly where `n_events` is 0. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "rows_affected": 8,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "All 3 columns get 0 where blank; no extra marker column",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus one shared 0/1 marker column for the blank pattern",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q6": {
+    "question_id": "q6",
+    "topic": "code_columns",
+    "text": "Some whole-number columns might be labels rather than amounts (e.g. `grade`: 5 distinct values, `n_events`: 4 distinct values; 2 columns). For labels, bigger numbers don't mean 'more'. Are any of these labels or codes?",
+    "applies_to": [
+     "grade",
+     "n_events"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "all_amounts",
+      "label": "All are amounts",
+      "effect": "Keeps all as numeric amounts in the map",
+      "edits": []
+     }
+    ],
+    "default_option_id": "all_amounts",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q7": {
+    "question_id": "q7",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "id": {
+    "column": "id",
+    "role": "id",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "unique text value per observed row (60 distinct values)",
+    "question_id": null
+   },
+   "a": {
+    "column": "a",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "b": {
+    "column": "b",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c": {
+    "column": "c",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "d": {
+    "column": "d",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_ab": {
+    "column": "t_ab",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_cd": {
+    "column": "t_cd",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "a_dup": {
+    "column": "a_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c_dup": {
+    "column": "c_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "grade": {
+    "column": "grade",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (5 distinct values)",
+    "question_id": null
+   },
+   "n_events": {
+    "column": "n_events",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (4 distinct values)",
+    "question_id": null
+   },
+   "visits1": {
+    "column": "visits1",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "visits2": {
+    "column": "visits2",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "visits_zero": {
+    "column": "visits_zero",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "last_seen": {
+    "column": "last_seen",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (52 distinct values; 8 blanks)",
+    "question_id": "q1"
+   },
+   "sparse1": {
+    "column": "sparse1",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q4"
+   },
+   "sparse2": {
+    "column": "sparse2",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; no recorded 0; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q4"
+   },
+   "sparse3": {
+    "column": "sparse3",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "34 blanks",
+    "question_id": "q4"
+   },
+   "sparse4": {
+    "column": "sparse4",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "52 blanks",
+    "question_id": "q4"
+   },
+   "when": {
+    "column": "when",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (60 distinct values; 0 blanks)",
+    "question_id": "q1"
+   }
+  },
+  "cost": {
+   "rows": 60,
+   "columns": 20,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 5,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "id",
+    "last_seen",
+    "sparse1",
+    "sparse2",
+    "sparse3",
+    "sparse4",
+    "when"
+   ],
+   "missing_indicator_groups": {
+    "visits1_and_2_more": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ]
+   },
+   "impute": {
+    "visits1": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "visits2": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "visits_zero": {
+     "method": "fill_median",
+     "indicator": false
+    }
+   }
+  },
+  "fingerprint": "fc1dd2f7a6e9",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (fc1dd2f7a6e9)\npreprocessing:\n  drop_columns:\n  - id\n  - last_seen\n  - sparse1\n  - sparse2\n  - sparse3\n  - sparse4\n  - when\n  missing_indicator_groups:\n    visits1_and_2_more:\n    - visits1\n    - visits2\n    - visits_zero\n  impute:\n    visits1:\n      method: fill_median\n      indicator: false\n    visits2:\n      method: fill_median\n      indicator: false\n    visits_zero:\n      method: fill_median\n      indicator: false",
+  "marker_legend": [
+   {
+    "marker_column": "visits1_and_2_more_was_missing",
+    "columns_preview": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "columns_count": 3
+   }
+  ],
+  "counts": {
+   "columns": 20,
+   "feature_columns": 13,
+   "dropped": 7,
+   "open_entries": 9,
+   "open_questions": 7,
+   "decided_by": {
+    "default": 20,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 14,
+   "missing_marker_count": 1,
+   "dummy_column_count": 0
+  },
+  "valid": true
+ },
+ "wide_targets": {
+  "csv": "plan/wide.csv",
+  "args": {
+   "targets": [
+    "grade"
+   ],
+   "entity": "id",
+   "time": "when"
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "duplicate_signal",
+    "text": "1 total in this table is an exact sum of other columns (`t_cd` = `c` + `d`). Counting both gives those signals extra weight. Keep everything, keep only the totals, or keep only the parts?",
+    "applies_to": [
+     "t_cd",
+     "c",
+     "d"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_all",
+      "label": "Keep everything",
+      "effect": "Keeps both the total columns and the part columns in the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_totals",
+      "label": "Keep only the totals",
+      "effect": "Keeps `t_cd` and leaves `c` and `d` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "drop"
+       },
+       {
+        "column": "d",
+        "role": "drop"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_parts",
+      "label": "Keep only the parts",
+      "effect": "Keeps `c` and `d` and leaves `t_cd` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "drop"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_all",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "duplicate_signal",
+    "text": "2 columns have identical values to another column (e.g. `a_dup` = `a`), so the map counts those signals twice. Keep all of them, or leave out the duplicates?",
+    "applies_to": [
+     "a",
+     "c",
+     "a_dup",
+     "c_dup"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_both",
+      "label": "Keep both",
+      "effect": "Keeps all duplicate columns in the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "feature"
+       },
+       {
+        "column": "c_dup",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_one",
+      "label": "Keep only one",
+      "effect": "Keeps `a` and `c` and leaves duplicate `a_dup` and `c_dup` out of the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "drop"
+       },
+       {
+        "column": "c_dup",
+        "role": "drop"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_both",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q3": {
+    "question_id": "q3",
+    "topic": "mostly_blank",
+    "text": "`sparse4` is blank for 87% of rows (and 3 other columns are blank for more than half of rows, including `sparse1` and `sparse2`), and the data doesn't show why. Leave them out, keep only whether each has a value, or estimate the missing values?",
+    "applies_to": [
+     "sparse4",
+     "sparse1",
+     "sparse2",
+     "sparse3"
+    ],
+    "rows_affected": 52,
+    "options": [
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_value",
+      "label": "Keep only whether value is filled in",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map and adds 0/1 markers for whether values are filled in",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse4"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse3"
+       }
+      ]
+     },
+     {
+      "option_id": "estimate_and_mark",
+      "label": "Fill with median and mark blanks",
+      "effect": "Keeps in the map with blanks filled by the median of observed rows and a 0/1 blank marker (about 70% of these values would be estimates)",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       },
+       {
+        "column": "sparse1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "leave_out",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q4": {
+    "question_id": "q4",
+    "topic": "date_columns",
+    "text": "Some columns hold dates (`last_seen`). Should the map ignore them, or use only whether each date is filled in?",
+    "applies_to": [
+     "last_seen"
+    ],
+    "rows_affected": 8,
+    "options": [
+     {
+      "option_id": "ignore",
+      "label": "Ignore dates",
+      "effect": "Leaves date columns out of the map",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_date",
+      "label": "Use whether date is filled in",
+      "effect": "Leaves raw dates out of the map and adds a 0/1 blank marker (note: this marker would repeat `n_events`)",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "ignore",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q5": {
+    "question_id": "q5",
+    "topic": "blank_meaning",
+    "text": "`visits1` and `visits2` never record a 0 (1 other column sometimes does). All 3 are blank for the same 8 rows. They are blank exactly where `n_events` is 0. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "rows_affected": 8,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "All 3 columns get 0 where blank; no extra marker column",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus one shared 0/1 marker column for the blank pattern",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q6": {
+    "question_id": "q6",
+    "topic": "code_columns",
+    "text": "Some whole-number columns might be labels rather than amounts (e.g. `n_events`: 4 distinct values). For labels, bigger numbers don't mean 'more'. Are any of these labels or codes?",
+    "applies_to": [
+     "n_events"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "all_amounts",
+      "label": "All are amounts",
+      "effect": "Keeps all as numeric amounts in the map",
+      "edits": []
+     }
+    ],
+    "default_option_id": "all_amounts",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "id": {
+    "column": "id",
+    "role": "entity",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as entity column",
+    "question_id": null
+   },
+   "a": {
+    "column": "a",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "b": {
+    "column": "b",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c": {
+    "column": "c",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "d": {
+    "column": "d",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_ab": {
+    "column": "t_ab",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_cd": {
+    "column": "t_cd",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "a_dup": {
+    "column": "a_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c_dup": {
+    "column": "c_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "grade": {
+    "column": "grade",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "n_events": {
+    "column": "n_events",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (4 distinct values)",
+    "question_id": null
+   },
+   "visits1": {
+    "column": "visits1",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "visits2": {
+    "column": "visits2",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "visits_zero": {
+    "column": "visits_zero",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "last_seen": {
+    "column": "last_seen",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (52 distinct values; 8 blanks)",
+    "question_id": "q4"
+   },
+   "sparse1": {
+    "column": "sparse1",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q3"
+   },
+   "sparse2": {
+    "column": "sparse2",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; no recorded 0; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q3"
+   },
+   "sparse3": {
+    "column": "sparse3",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "34 blanks",
+    "question_id": "q3"
+   },
+   "sparse4": {
+    "column": "sparse4",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "52 blanks",
+    "question_id": "q3"
+   },
+   "when": {
+    "column": "when",
+    "role": "time",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as time column",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 60,
+   "columns": 20,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 5,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [
+   {
+    "column": "visits1_and_2_more_was_missing",
+    "target": "grade",
+    "marker_rows": 8,
+    "share_with_target": 0.75,
+    "target_base_rate": 0.8333
+   }
+  ],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "id",
+    "grade",
+    "last_seen",
+    "sparse1",
+    "sparse2",
+    "sparse3",
+    "sparse4",
+    "when"
+   ],
+   "missing_indicator_groups": {
+    "visits1_and_2_more": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ]
+   },
+   "impute": {
+    "visits1": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "visits2": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "visits_zero": {
+     "method": "fill_median",
+     "indicator": false
+    }
+   }
+  },
+  "fingerprint": "7859fea6ce90",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (7859fea6ce90)\npreprocessing:\n  drop_columns:\n  - id\n  - grade\n  - last_seen\n  - sparse1\n  - sparse2\n  - sparse3\n  - sparse4\n  - when\n  missing_indicator_groups:\n    visits1_and_2_more:\n    - visits1\n    - visits2\n    - visits_zero\n  impute:\n    visits1:\n      method: fill_median\n      indicator: false\n    visits2:\n      method: fill_median\n      indicator: false\n    visits_zero:\n      method: fill_median\n      indicator: false",
+  "marker_legend": [
+   {
+    "marker_column": "visits1_and_2_more_was_missing",
+    "columns_preview": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "columns_count": 3
+   }
+  ],
+  "counts": {
+   "columns": 20,
+   "feature_columns": 12,
+   "dropped": 8,
+   "open_entries": 8,
+   "open_questions": 6,
+   "decided_by": {
+    "default": 17,
+    "agent": 3,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 13,
+   "missing_marker_count": 1,
+   "dummy_column_count": 0
+  },
+  "valid": true
+ },
+ "single": {
+  "csv": "plan/single.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "duplicate_signal",
+    "text": "1 total in this table is an exact sum of other columns (`rs` = `r` + `s`). Counting both gives those signals extra weight. Keep everything, keep only the totals, or keep only the parts?",
+    "applies_to": [
+     "rs",
+     "r",
+     "s"
+    ],
+    "rows_affected": 30,
+    "options": [
+     {
+      "option_id": "keep_all",
+      "label": "Keep everything",
+      "effect": "Keeps both the total columns and the part columns in the map",
+      "edits": [
+       {
+        "column": "rs",
+        "role": "feature"
+       },
+       {
+        "column": "r",
+        "role": "feature"
+       },
+       {
+        "column": "s",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_totals",
+      "label": "Keep only the totals",
+      "effect": "Keeps `rs` and leaves `r` and `s` out of the map",
+      "edits": [
+       {
+        "column": "rs",
+        "role": "feature"
+       },
+       {
+        "column": "r",
+        "role": "drop"
+       },
+       {
+        "column": "s",
+        "role": "drop"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_parts",
+      "label": "Keep only the parts",
+      "effect": "Keeps `r` and `s` and leaves `rs` out of the map",
+      "edits": [
+       {
+        "column": "rs",
+        "role": "drop"
+       },
+       {
+        "column": "r",
+        "role": "feature"
+       },
+       {
+        "column": "s",
+        "role": "feature"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_all",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "duplicate_signal",
+    "text": "`q` has identical values to `p`, so the map counts that signal twice. Keep both columns, or keep only `p`?",
+    "applies_to": [
+     "p",
+     "q"
+    ],
+    "rows_affected": 30,
+    "options": [
+     {
+      "option_id": "keep_both",
+      "label": "Keep both",
+      "effect": "Keeps both `p` and `q` in the map",
+      "edits": [
+       {
+        "column": "p",
+        "role": "feature"
+       },
+       {
+        "column": "q",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_one",
+      "label": "Keep only one",
+      "effect": "Keeps `p` and leaves duplicate `q` out of the map",
+      "edits": [
+       {
+        "column": "p",
+        "role": "feature"
+       },
+       {
+        "column": "q",
+        "role": "drop"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_both",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q3": {
+    "question_id": "q3",
+    "topic": "mostly_blank",
+    "text": "`solo` is blank for 70% of rows, and the data doesn't show why. Leave it out, keep only whether it has a value, or estimate the missing values?",
+    "applies_to": [
+     "solo"
+    ],
+    "rows_affected": 21,
+    "options": [
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `solo` out of the map",
+      "edits": [
+       {
+        "column": "solo",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_value",
+      "label": "Keep only whether value is filled in",
+      "effect": "Leaves `solo` out of the map and adds a 0/1 marker for whether it has a value",
+      "edits": [
+       {
+        "column": "solo",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:solo"
+       }
+      ]
+     },
+     {
+      "option_id": "estimate_and_mark",
+      "label": "Fill with median and mark blanks",
+      "effect": "Keeps in the map with blanks filled by the median of observed rows and a 0/1 blank marker (about 70% of these values would be estimates)",
+      "edits": [
+       {
+        "column": "solo",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "leave_out",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q4": {
+    "question_id": "q4",
+    "topic": "mixed_values",
+    "text": "`mix_one` holds the number 5 and the value 'x?' (3 rows). Should those values count as their own category, or as unreadable entries treated like blanks?",
+    "applies_to": [
+     "mix_one"
+    ],
+    "rows_affected": 3,
+    "options": [
+     {
+      "option_id": "as_categories",
+      "label": "Treat as categories",
+      "effect": "Each distinct value (including non-numeric text) gets its own 0/1 category column; blanks become '(blank)'",
+      "edits": [
+       {
+        "column": "mix_one",
+        "role": "feature",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": "one_hot"
+       }
+      ]
+     },
+     {
+      "option_id": "as_blank",
+      "label": "Treat non-numeric text as blank",
+      "effect": "3 'x?' entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker",
+      "edits": [
+       {
+        "column": "mix_one",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       }
+      ]
+     },
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `mix_one` out of the map",
+      "edits": [
+       {
+        "column": "mix_one",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       }
+      ]
+     }
+    ],
+    "default_option_id": "as_categories",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q5": {
+    "question_id": "q5",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 30,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "p": {
+    "column": "p",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (30 distinct values)",
+    "question_id": null
+   },
+   "q": {
+    "column": "q",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (30 distinct values)",
+    "question_id": null
+   },
+   "r": {
+    "column": "r",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (30 distinct values)",
+    "question_id": null
+   },
+   "s": {
+    "column": "s",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (30 distinct values)",
+    "question_id": null
+   },
+   "rs": {
+    "column": "rs",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (30 distinct values)",
+    "question_id": null
+   },
+   "mix_one": {
+    "column": "mix_one",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'x?' (3 rows; 0 blanks); kept as 2 categories",
+    "question_id": "q4"
+   },
+   "solo": {
+    "column": "solo",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "21 blanks",
+    "question_id": "q3"
+   }
+  },
+  "cost": {
+   "rows": 30,
+   "columns": 7,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 4,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "solo"
+   ],
+   "encode": {
+    "mix_one": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "815f2148886f",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (815f2148886f)\npreprocessing:\n  drop_columns:\n  - solo\n  encode:\n    mix_one:\n      method: one_hot",
+  "marker_legend": [],
+  "counts": {
+   "columns": 7,
+   "feature_columns": 6,
+   "dropped": 1,
+   "open_entries": 2,
+   "open_questions": 5,
+   "decided_by": {
+    "default": 7,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 7,
+   "missing_marker_count": 0,
+   "dummy_column_count": 2
+  },
+  "valid": true
+ },
+ "sums": {
+  "csv": "plan/sums.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "duplicate_signal",
+    "text": "2 totals in this table are exact sums of other columns (e.g. `t_ab` = `a` + `b`). Counting both gives those signals extra weight. Keep everything, keep only the totals, or keep only the parts?",
+    "applies_to": [
+     "t_ab",
+     "t_cd",
+     "a",
+     "b",
+     "c",
+     "d"
+    ],
+    "rows_affected": 40,
+    "options": [
+     {
+      "option_id": "keep_all",
+      "label": "Keep everything",
+      "effect": "Keeps both the total columns and the part columns in the map",
+      "edits": [
+       {
+        "column": "t_ab",
+        "role": "feature"
+       },
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "b",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_totals",
+      "label": "Keep only the totals",
+      "effect": "Keeps `t_ab` and `t_cd` and leaves `a`, `b`, `c`, and 1 more out of the map",
+      "edits": [
+       {
+        "column": "t_ab",
+        "role": "feature"
+       },
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "a",
+        "role": "drop"
+       },
+       {
+        "column": "b",
+        "role": "drop"
+       },
+       {
+        "column": "c",
+        "role": "drop"
+       },
+       {
+        "column": "d",
+        "role": "drop"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_parts",
+      "label": "Keep only the parts",
+      "effect": "Keeps `a`, `b`, `c`, and 1 more and leaves `t_ab` and `t_cd` out of the map",
+      "edits": [
+       {
+        "column": "t_ab",
+        "role": "drop"
+       },
+       {
+        "column": "t_cd",
+        "role": "drop"
+       },
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "b",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_all",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 40,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "a": {
+    "column": "a",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "b": {
+    "column": "b",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "c": {
+    "column": "c",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "d": {
+    "column": "d",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "t_ab": {
+    "column": "t_ab",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "t_cd": {
+    "column": "t_cd",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   },
+   "noise": {
+    "column": "noise",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (40 distinct values)",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 40,
+   "columns": 7,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 1,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": []
+  },
+  "fingerprint": "cb6ce3bc6783",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (cb6ce3bc6783)\npreprocessing:\n  drop_columns: []",
+  "marker_legend": [],
+  "counts": {
+   "columns": 7,
+   "feature_columns": 7,
+   "dropped": 0,
+   "open_entries": 0,
+   "open_questions": 2,
+   "decided_by": {
+    "default": 7,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 7,
+   "missing_marker_count": 0,
+   "dummy_column_count": 0
+  },
+  "valid": true
+ },
+ "penguins": {
+  "csv": "penguins/input.csv",
+  "args": {
+   "targets": [
+    "species"
+   ],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "blank_meaning",
+    "text": "`flipper_length_mm`, `body_mass_g`, `bill_length_mm`, and 1 more never record a 0. All 4 are blank for the same 2 rows. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "bill_length_mm",
+     "bill_depth_mm",
+     "flipper_length_mm",
+     "body_mass_g"
+    ],
+    "rows_affected": 2,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "All 4 columns get 0 where blank; no extra marker column",
+      "edits": [
+       {
+        "column": "bill_length_mm",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "bill_depth_mm",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "flipper_length_mm",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "body_mass_g",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus one shared 0/1 marker column for the blank pattern",
+      "edits": [
+       {
+        "column": "bill_length_mm",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "bill_depth_mm",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "flipper_length_mm",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "body_mass_g",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "code_columns",
+    "text": "Some whole-number columns might be labels rather than amounts (e.g. `year`: 3 distinct values). For labels, bigger numbers don't mean 'more'. Are any of these labels or codes?",
+    "applies_to": [
+     "year"
+    ],
+    "rows_affected": 344,
+    "options": [
+     {
+      "option_id": "all_amounts",
+      "label": "All are amounts",
+      "effect": "Keeps all as numeric amounts in the map",
+      "edits": []
+     }
+    ],
+    "default_option_id": "all_amounts",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "rowid": {
+    "column": "rowid",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (344 distinct values)",
+    "question_id": null
+   },
+   "species": {
+    "column": "species",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "island": {
+    "column": "island",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete text column with 3 categories",
+    "question_id": null
+   },
+   "bill_length_mm": {
+    "column": "bill_length_mm",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": "q1"
+   },
+   "bill_depth_mm": {
+    "column": "bill_depth_mm",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": "q1"
+   },
+   "flipper_length_mm": {
+    "column": "flipper_length_mm",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": "q1"
+   },
+   "body_mass_g": {
+    "column": "body_mass_g",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "2 blanks; no recorded 0; blank on the same rows as 3 other columns (mg1)",
+    "question_id": "q1"
+   },
+   "sex": {
+    "column": "sex",
+    "role": "feature",
+    "impute": {
+     "method": "fill_value",
+     "value": "(blank)"
+    },
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "text column with 2 categories and 11 blanks; blanks become '(blank)' category",
+    "question_id": null
+   },
+   "year": {
+    "column": "year",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (3 distinct values)",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 344,
+   "columns": 9,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 1,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [
+   {
+    "column": "island_Biscoe",
+    "target": "species",
+    "marker_rows": 168,
+    "share_with_target": 1.0,
+    "target_base_rate": 1.0
+   },
+   {
+    "column": "sex_male",
+    "target": "species",
+    "marker_rows": 168,
+    "share_with_target": 1.0,
+    "target_base_rate": 1.0
+   },
+   {
+    "column": "sex_female",
+    "target": "species",
+    "marker_rows": 165,
+    "share_with_target": 1.0,
+    "target_base_rate": 1.0
+   },
+   {
+    "column": "island_Dream",
+    "target": "species",
+    "marker_rows": 124,
+    "share_with_target": 1.0,
+    "target_base_rate": 1.0
+   },
+   {
+    "column": "island_Torgersen",
+    "target": "species",
+    "marker_rows": 52,
+    "share_with_target": 1.0,
+    "target_base_rate": 1.0
+   },
+   {
+    "column": "sex_(blank)",
+    "target": "species",
+    "marker_rows": 11,
+    "share_with_target": 1.0,
+    "target_base_rate": 1.0
+   },
+   {
+    "column": "bill_length_mm_and_3_more_was_missing",
+    "target": "species",
+    "marker_rows": 2,
+    "share_with_target": 1.0,
+    "target_base_rate": 1.0
+   }
+  ],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "species"
+   ],
+   "missing_indicator_groups": {
+    "bill_length_mm_and_3_more": [
+     "bill_length_mm",
+     "bill_depth_mm",
+     "flipper_length_mm",
+     "body_mass_g"
+    ]
+   },
+   "impute": {
+    "bill_length_mm": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "bill_depth_mm": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "flipper_length_mm": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "body_mass_g": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "sex": {
+     "method": "fill_value",
+     "value": "(blank)",
+     "indicator": false
+    }
+   },
+   "encode": {
+    "island": {
+     "method": "one_hot"
+    },
+    "sex": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "60a65711233e",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (60a65711233e)\npreprocessing:\n  drop_columns:\n  - species\n  missing_indicator_groups:\n    bill_length_mm_and_3_more:\n    - bill_length_mm\n    - bill_depth_mm\n    - flipper_length_mm\n    - body_mass_g\n  impute:\n    bill_length_mm:\n      method: fill_median\n      indicator: false\n    bill_depth_mm:\n      method: fill_median\n      indicator: false\n    flipper_length_mm:\n      method: fill_median\n      indicator: false\n    body_mass_g:\n      method: fill_median\n      indicator: false\n    sex:\n      method: fill_value\n      value: (blank)\n      indicator: false\n  encode:\n    island:\n      method: one_hot\n    sex:\n      method: one_hot",
+  "marker_legend": [
+   {
+    "marker_column": "bill_length_mm_and_3_more_was_missing",
+    "columns_preview": [
+     "bill_length_mm",
+     "bill_depth_mm",
+     "flipper_length_mm",
+     "body_mass_g"
+    ],
+    "columns_count": 4
+   }
+  ],
+  "counts": {
+   "columns": 9,
+   "feature_columns": 8,
+   "dropped": 1,
+   "open_entries": 4,
+   "open_questions": 2,
+   "decided_by": {
+    "default": 8,
+    "agent": 1,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 13,
+   "missing_marker_count": 1,
+   "dummy_column_count": 6
+  },
+  "valid": true
+ },
+ "unicode": {
+  "csv": "plan/unicode.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 30,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "na\u00efve": {
+    "column": "na\u00efve",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "4 blanks; blank on the same rows as 1 other column (mg1)",
+    "question_id": null
+   },
+   "\u65e5\u672c": {
+    "column": "\u65e5\u672c",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg1",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "4 blanks; blank on the same rows as 1 other column (mg1)",
+    "question_id": null
+   },
+   "ville": {
+    "column": "ville",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete text column with 3 categories",
+    "question_id": null
+   },
+   "x": {
+    "column": "x",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (30 distinct values)",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 30,
+   "columns": 4,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 0,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [],
+   "missing_indicator_groups": {
+    "na\u00efve_and_1_more": [
+     "na\u00efve",
+     "\u65e5\u672c"
+    ]
+   },
+   "impute": {
+    "na\u00efve": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "\u65e5\u672c": {
+     "method": "fill_median",
+     "indicator": false
+    }
+   },
+   "encode": {
+    "ville": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "1d81bb84eda8",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (1d81bb84eda8)\npreprocessing:\n  drop_columns: []\n  missing_indicator_groups:\n    \"na\\xEFve_and_1_more\":\n    - \"na\\xEFve\"\n    - \"\\u65E5\\u672C\"\n  impute:\n    \"na\\xEFve\":\n      method: fill_median\n      indicator: false\n    \"\\u65E5\\u672C\":\n      method: fill_median\n      indicator: false\n  encode:\n    ville:\n      method: one_hot",
+  "marker_legend": [
+   {
+    "marker_column": "na\u00efve_and_1_more_was_missing",
+    "columns_preview": [
+     "na\u00efve",
+     "\u65e5\u672c"
+    ],
+    "columns_count": 2
+   }
+  ],
+  "counts": {
+   "columns": 4,
+   "feature_columns": 4,
+   "dropped": 0,
+   "open_entries": 0,
+   "open_questions": 1,
+   "decided_by": {
+    "default": 4,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 7,
+   "missing_marker_count": 1,
+   "dummy_column_count": 3
+  },
+  "valid": true
+ },
+ "proxy_event": {
+  "csv": "plan/proxy.csv",
+  "args": {
+   "targets": [
+    "event"
+   ],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "code_columns",
+    "text": "Some whole-number columns might be labels rather than amounts (e.g. `n_ev`: 3 distinct values). For labels, bigger numbers don't mean 'more'. Are any of these labels or codes?",
+    "applies_to": [
+     "n_ev"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "all_amounts",
+      "label": "All are amounts",
+      "effect": "Keeps all as numeric amounts in the map",
+      "edits": []
+     }
+    ],
+    "default_option_id": "all_amounts",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "event": {
+    "column": "event",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "n_ev": {
+    "column": "n_ev",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (3 distinct values)",
+    "question_id": null
+   },
+   "lab": {
+    "column": "lab",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "9 blanks",
+    "question_id": null
+   },
+   "lab2": {
+    "column": "lab2",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "19 blanks",
+    "question_id": null
+   },
+   "lab3": {
+    "column": "lab3",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "21 blanks; blank on the exact rows where n_ev is 0",
+    "question_id": null
+   },
+   "site": {
+    "column": "site",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete text column with 3 categories",
+    "question_id": null
+   },
+   "x": {
+    "column": "x",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 60,
+   "columns": 7,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 0,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [
+   {
+    "column": "site_A",
+    "target": "event",
+    "marker_rows": 16,
+    "share_with_target": 1.0,
+    "target_base_rate": 0.3333
+   },
+   {
+    "column": "lab_was_missing",
+    "target": "event",
+    "marker_rows": 9,
+    "share_with_target": 1.0,
+    "target_base_rate": 0.3333
+   },
+   {
+    "column": "lab2_was_missing",
+    "target": "event",
+    "marker_rows": 19,
+    "share_with_target": 0.3158,
+    "target_base_rate": 0.3333
+   },
+   {
+    "column": "lab3_was_missing",
+    "target": "event",
+    "marker_rows": 21,
+    "share_with_target": 0.2857,
+    "target_base_rate": 0.3333
+   },
+   {
+    "column": "site_C",
+    "target": "event",
+    "marker_rows": 25,
+    "share_with_target": 0.12,
+    "target_base_rate": 0.3333
+   },
+   {
+    "column": "site_B",
+    "target": "event",
+    "marker_rows": 19,
+    "share_with_target": 0.0526,
+    "target_base_rate": 0.3333
+   }
+  ],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "event"
+   ],
+   "impute": {
+    "lab": {
+     "method": "fill_median"
+    },
+    "lab2": {
+     "method": "fill_median"
+    },
+    "lab3": {
+     "method": "fill_median"
+    }
+   },
+   "encode": {
+    "site": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "5471790e34f0",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (5471790e34f0)\npreprocessing:\n  drop_columns:\n  - event\n  impute:\n    lab:\n      method: fill_median\n    lab2:\n      method: fill_median\n    lab3:\n      method: fill_median\n  encode:\n    site:\n      method: one_hot",
+  "marker_legend": [
+   {
+    "marker_column": "lab_was_missing",
+    "columns_preview": [
+     "lab"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "lab2_was_missing",
+    "columns_preview": [
+     "lab2"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "lab3_was_missing",
+    "columns_preview": [
+     "lab3"
+    ],
+    "columns_count": 1
+   }
+  ],
+  "counts": {
+   "columns": 7,
+   "feature_columns": 6,
+   "dropped": 1,
+   "open_entries": 0,
+   "open_questions": 1,
+   "decided_by": {
+    "default": 6,
+    "agent": 1,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 11,
+   "missing_marker_count": 3,
+   "dummy_column_count": 3
+  },
+  "valid": true
+ },
+ "proxy_nev": {
+  "csv": "plan/proxy.csv",
+  "args": {
+   "targets": [
+    "n_ev"
+   ],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {},
+  "entries": {
+   "event": {
+    "column": "event",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete boolean column (2 distinct values)",
+    "question_id": null
+   },
+   "n_ev": {
+    "column": "n_ev",
+    "role": "target",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "agent",
+    "status": "resolved",
+    "reason": "designated as target column",
+    "question_id": null
+   },
+   "lab": {
+    "column": "lab",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "9 blanks",
+    "question_id": null
+   },
+   "lab2": {
+    "column": "lab2",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "19 blanks",
+    "question_id": null
+   },
+   "lab3": {
+    "column": "lab3",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "21 blanks; blank on the exact rows where n_ev is 0",
+    "question_id": null
+   },
+   "site": {
+    "column": "site",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete text column with 3 categories",
+    "question_id": null
+   },
+   "x": {
+    "column": "x",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   }
+  },
+  "cost": {
+   "rows": 60,
+   "columns": 7,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 0,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [
+   {
+    "column": "lab3_was_missing",
+    "target": "n_ev",
+    "marker_rows": 39,
+    "share_with_target": 1.0,
+    "target_base_rate": 0.65
+   },
+   {
+    "column": "site_A",
+    "target": "n_ev",
+    "marker_rows": 16,
+    "share_with_target": 0.8125,
+    "target_base_rate": 0.65
+   },
+   {
+    "column": "lab_was_missing",
+    "target": "n_ev",
+    "marker_rows": 9,
+    "share_with_target": 0.6667,
+    "target_base_rate": 0.65
+   },
+   {
+    "column": "site_C",
+    "target": "n_ev",
+    "marker_rows": 25,
+    "share_with_target": 0.64,
+    "target_base_rate": 0.65
+   },
+   {
+    "column": "lab2_was_missing",
+    "target": "n_ev",
+    "marker_rows": 19,
+    "share_with_target": 0.6316,
+    "target_base_rate": 0.65
+   },
+   {
+    "column": "site_B",
+    "target": "n_ev",
+    "marker_rows": 19,
+    "share_with_target": 0.5263,
+    "target_base_rate": 0.65
+   }
+  ],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "n_ev"
+   ],
+   "impute": {
+    "lab": {
+     "method": "fill_median"
+    },
+    "lab2": {
+     "method": "fill_median"
+    },
+    "lab3": {
+     "method": "fill_median"
+    }
+   },
+   "encode": {
+    "site": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "22c117632b9b",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (22c117632b9b)\npreprocessing:\n  drop_columns:\n  - n_ev\n  impute:\n    lab:\n      method: fill_median\n    lab2:\n      method: fill_median\n    lab3:\n      method: fill_median\n  encode:\n    site:\n      method: one_hot",
+  "marker_legend": [
+   {
+    "marker_column": "lab_was_missing",
+    "columns_preview": [
+     "lab"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "lab2_was_missing",
+    "columns_preview": [
+     "lab2"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "lab3_was_missing",
+    "columns_preview": [
+     "lab3"
+    ],
+    "columns_count": 1
+   }
+  ],
+  "counts": {
+   "columns": 7,
+   "feature_columns": 6,
+   "dropped": 1,
+   "open_entries": 0,
+   "open_questions": 0,
+   "decided_by": {
+    "default": 6,
+    "agent": 1,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 11,
+   "missing_marker_count": 3,
+   "dummy_column_count": 3
+  },
+  "valid": true
+ },
+ "multi_imputation": {
+  "csv": "plan/wide.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {
+   "impute_candidates": {
+    "visits1": [
+     {
+      "method": "fill_mean"
+     },
+     {
+      "method": "fill_median",
+      "indicator": false
+     },
+     {
+      "method": "sample_normal",
+      "seed": 3
+     }
+    ]
+   },
+   "n_imputations": 3
+  },
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "date_columns",
+    "text": "Some columns hold dates (`last_seen` and `when`). Should the map ignore them, or use only whether each date is filled in?",
+    "applies_to": [
+     "last_seen",
+     "when"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "ignore",
+      "label": "Ignore dates",
+      "effect": "Leaves date columns out of the map",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "none"
+       },
+       {
+        "column": "when",
+        "role": "drop",
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_date",
+      "label": "Use whether date is filled in",
+      "effect": "Leaves raw dates out of the map and adds a 0/1 blank marker (note: this marker would repeat `n_events`); 1 date column has no blanks and stays out",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "ignore",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "duplicate_signal",
+    "text": "1 total in this table is an exact sum of other columns (`t_cd` = `c` + `d`). Counting both gives those signals extra weight. Keep everything, keep only the totals, or keep only the parts?",
+    "applies_to": [
+     "t_cd",
+     "c",
+     "d"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_all",
+      "label": "Keep everything",
+      "effect": "Keeps both the total columns and the part columns in the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_totals",
+      "label": "Keep only the totals",
+      "effect": "Keeps `t_cd` and leaves `c` and `d` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "drop"
+       },
+       {
+        "column": "d",
+        "role": "drop"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_parts",
+      "label": "Keep only the parts",
+      "effect": "Keeps `c` and `d` and leaves `t_cd` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "drop"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_all",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q3": {
+    "question_id": "q3",
+    "topic": "duplicate_signal",
+    "text": "2 columns have identical values to another column (e.g. `a_dup` = `a`), so the map counts those signals twice. Keep all of them, or leave out the duplicates?",
+    "applies_to": [
+     "a",
+     "c",
+     "a_dup",
+     "c_dup"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_both",
+      "label": "Keep both",
+      "effect": "Keeps all duplicate columns in the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "feature"
+       },
+       {
+        "column": "c_dup",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_one",
+      "label": "Keep only one",
+      "effect": "Keeps `a` and `c` and leaves duplicate `a_dup` and `c_dup` out of the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "drop"
+       },
+       {
+        "column": "c_dup",
+        "role": "drop"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_both",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q4": {
+    "question_id": "q4",
+    "topic": "mostly_blank",
+    "text": "`sparse4` is blank for 87% of rows (and 3 other columns are blank for more than half of rows, including `sparse1` and `sparse2`), and the data doesn't show why. Leave them out, keep only whether each has a value, or estimate the missing values?",
+    "applies_to": [
+     "sparse4",
+     "sparse1",
+     "sparse2",
+     "sparse3"
+    ],
+    "rows_affected": 52,
+    "options": [
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_value",
+      "label": "Keep only whether value is filled in",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map and adds 0/1 markers for whether values are filled in",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse4"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse3"
+       }
+      ]
+     },
+     {
+      "option_id": "estimate_and_mark",
+      "label": "Fill with median and mark blanks",
+      "effect": "Keeps in the map with blanks filled by the median of observed rows and a 0/1 blank marker (about 70% of these values would be estimates)",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       },
+       {
+        "column": "sparse1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "leave_out",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q5": {
+    "question_id": "q5",
+    "topic": "blank_meaning",
+    "text": "`visits1` and `visits2` never record a 0 (1 other column sometimes does). All 3 are blank for the same 8 rows. They are blank exactly where `n_events` is 0. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "rows_affected": 8,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "All 3 columns get 0 where blank; no extra marker column",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus one shared 0/1 marker column for the blank pattern",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q6": {
+    "question_id": "q6",
+    "topic": "code_columns",
+    "text": "Some whole-number columns might be labels rather than amounts (e.g. `grade`: 5 distinct values, `n_events`: 4 distinct values; 2 columns). For labels, bigger numbers don't mean 'more'. Are any of these labels or codes?",
+    "applies_to": [
+     "grade",
+     "n_events"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "all_amounts",
+      "label": "All are amounts",
+      "effect": "Keeps all as numeric amounts in the map",
+      "edits": []
+     }
+    ],
+    "default_option_id": "all_amounts",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q7": {
+    "question_id": "q7",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "id": {
+    "column": "id",
+    "role": "id",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "unique text value per observed row (60 distinct values)",
+    "question_id": null
+   },
+   "a": {
+    "column": "a",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "b": {
+    "column": "b",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c": {
+    "column": "c",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "d": {
+    "column": "d",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_ab": {
+    "column": "t_ab",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_cd": {
+    "column": "t_cd",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "a_dup": {
+    "column": "a_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c_dup": {
+    "column": "c_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "grade": {
+    "column": "grade",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (5 distinct values)",
+    "question_id": null
+   },
+   "n_events": {
+    "column": "n_events",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (4 distinct values)",
+    "question_id": null
+   },
+   "visits1": {
+    "column": "visits1",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5",
+    "impute_candidates": [
+     {
+      "method": "fill_mean"
+     },
+     {
+      "method": "fill_median",
+      "indicator": false
+     },
+     {
+      "method": "sample_normal",
+      "seed": 3
+     }
+    ]
+   },
+   "visits2": {
+    "column": "visits2",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "visits_zero": {
+    "column": "visits_zero",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "last_seen": {
+    "column": "last_seen",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (52 distinct values; 8 blanks)",
+    "question_id": "q1"
+   },
+   "sparse1": {
+    "column": "sparse1",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q4"
+   },
+   "sparse2": {
+    "column": "sparse2",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; no recorded 0; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q4"
+   },
+   "sparse3": {
+    "column": "sparse3",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "34 blanks",
+    "question_id": "q4"
+   },
+   "sparse4": {
+    "column": "sparse4",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "52 blanks",
+    "question_id": "q4"
+   },
+   "when": {
+    "column": "when",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (60 distinct values; 0 blanks)",
+    "question_id": "q1"
+   }
+  },
+  "cost": {
+   "rows": 60,
+   "columns": 20,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 5,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "id",
+    "last_seen",
+    "sparse1",
+    "sparse2",
+    "sparse3",
+    "sparse4",
+    "when"
+   ],
+   "n_imputations": 3,
+   "missing_indicator_groups": {
+    "visits1_and_2_more": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ]
+   },
+   "impute": {
+    "visits1": [
+     {
+      "method": "fill_mean",
+      "indicator": false
+     },
+     {
+      "method": "fill_median",
+      "indicator": false
+     },
+     {
+      "method": "sample_normal",
+      "seed": 3,
+      "indicator": false
+     }
+    ],
+    "visits2": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "visits_zero": {
+     "method": "fill_median",
+     "indicator": false
+    }
+   }
+  },
+  "fingerprint": "763e073569b3",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (763e073569b3)\npreprocessing:\n  drop_columns:\n  - id\n  - last_seen\n  - sparse1\n  - sparse2\n  - sparse3\n  - sparse4\n  - when\n  n_imputations: 3\n  missing_indicator_groups:\n    visits1_and_2_more:\n    - visits1\n    - visits2\n    - visits_zero\n  impute:\n    visits1:\n    - method: fill_mean\n      indicator: false\n    - method: fill_median\n      indicator: false\n    - method: sample_normal\n      seed: 3\n      indicator: false\n    visits2:\n      method: fill_median\n      indicator: false\n    visits_zero:\n      method: fill_median\n      indicator: false",
+  "marker_legend": [
+   {
+    "marker_column": "visits1_and_2_more_was_missing",
+    "columns_preview": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "columns_count": 3
+   }
+  ],
+  "counts": {
+   "columns": 20,
+   "feature_columns": 13,
+   "dropped": 7,
+   "open_entries": 9,
+   "open_questions": 7,
+   "decided_by": {
+    "default": 20,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 14,
+   "missing_marker_count": 1,
+   "dummy_column_count": 0
+  },
+  "valid": true
+ },
+ "invalid": {
+  "csv": "plan/wide.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {
+   "impute_method": {
+    "visits1": "bogus"
+   }
+  },
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "date_columns",
+    "text": "Some columns hold dates (`last_seen` and `when`). Should the map ignore them, or use only whether each date is filled in?",
+    "applies_to": [
+     "last_seen",
+     "when"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "ignore",
+      "label": "Ignore dates",
+      "effect": "Leaves date columns out of the map",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "none"
+       },
+       {
+        "column": "when",
+        "role": "drop",
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_date",
+      "label": "Use whether date is filled in",
+      "effect": "Leaves raw dates out of the map and adds a 0/1 blank marker (note: this marker would repeat `n_events`); 1 date column has no blanks and stays out",
+      "edits": [
+       {
+        "column": "last_seen",
+        "role": "drop",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "ignore",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "duplicate_signal",
+    "text": "1 total in this table is an exact sum of other columns (`t_cd` = `c` + `d`). Counting both gives those signals extra weight. Keep everything, keep only the totals, or keep only the parts?",
+    "applies_to": [
+     "t_cd",
+     "c",
+     "d"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_all",
+      "label": "Keep everything",
+      "effect": "Keeps both the total columns and the part columns in the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_totals",
+      "label": "Keep only the totals",
+      "effect": "Keeps `t_cd` and leaves `c` and `d` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "drop"
+       },
+       {
+        "column": "d",
+        "role": "drop"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_parts",
+      "label": "Keep only the parts",
+      "effect": "Keeps `c` and `d` and leaves `t_cd` out of the map",
+      "edits": [
+       {
+        "column": "t_cd",
+        "role": "drop"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "d",
+        "role": "feature"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_all",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q3": {
+    "question_id": "q3",
+    "topic": "duplicate_signal",
+    "text": "2 columns have identical values to another column (e.g. `a_dup` = `a`), so the map counts those signals twice. Keep all of them, or leave out the duplicates?",
+    "applies_to": [
+     "a",
+     "c",
+     "a_dup",
+     "c_dup"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "keep_both",
+      "label": "Keep both",
+      "effect": "Keeps all duplicate columns in the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "feature"
+       },
+       {
+        "column": "c_dup",
+        "role": "feature"
+       }
+      ]
+     },
+     {
+      "option_id": "keep_one",
+      "label": "Keep only one",
+      "effect": "Keeps `a` and `c` and leaves duplicate `a_dup` and `c_dup` out of the map",
+      "edits": [
+       {
+        "column": "a",
+        "role": "feature"
+       },
+       {
+        "column": "c",
+        "role": "feature"
+       },
+       {
+        "column": "a_dup",
+        "role": "drop"
+       },
+       {
+        "column": "c_dup",
+        "role": "drop"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "keep_both",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q4": {
+    "question_id": "q4",
+    "topic": "mostly_blank",
+    "text": "`sparse4` is blank for 87% of rows (and 3 other columns are blank for more than half of rows, including `sparse1` and `sparse2`), and the data doesn't show why. Leave them out, keep only whether each has a value, or estimate the missing values?",
+    "applies_to": [
+     "sparse4",
+     "sparse1",
+     "sparse2",
+     "sparse3"
+    ],
+    "rows_affected": 52,
+    "options": [
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "has_value",
+      "label": "Keep only whether value is filled in",
+      "effect": "Leaves `sparse4`, `sparse1`, `sparse2`, and 1 more out of the map and adds 0/1 markers for whether values are filled in",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse4"
+       },
+       {
+        "column": "sparse1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "group:sparse3"
+       }
+      ]
+     },
+     {
+      "option_id": "estimate_and_mark",
+      "label": "Fill with median and mark blanks",
+      "effect": "Keeps in the map with blanks filled by the median of observed rows and a 0/1 blank marker (about 70% of these values would be estimates)",
+      "edits": [
+       {
+        "column": "sparse4",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       },
+       {
+        "column": "sparse1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg1"
+       },
+       {
+        "column": "sparse3",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "leave_out",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q5": {
+    "question_id": "q5",
+    "topic": "blank_meaning",
+    "text": "`visits1` and `visits2` never record a 0 (1 other column sometimes does). All 3 are blank for the same 8 rows. They are blank exactly where `n_events` is 0. Does a blank mean none (zero), or that the value is unknown?",
+    "applies_to": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "rows_affected": 8,
+    "options": [
+     {
+      "option_id": "none",
+      "label": "Blank means zero (none)",
+      "effect": "All 3 columns get 0 where blank; no extra marker column",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_value",
+        "impute_value": 0,
+        "indicator": "none"
+       }
+      ]
+     },
+     {
+      "option_id": "unknown",
+      "label": "Blank means unknown",
+      "effect": "Blanks are filled with the median of observed rows, plus one shared 0/1 marker column for the blank pattern",
+      "edits": [
+       {
+        "column": "visits1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       },
+       {
+        "column": "visits_zero",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "group:mg2"
+       }
+      ]
+     }
+    ],
+    "default_option_id": "unknown",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q6": {
+    "question_id": "q6",
+    "topic": "code_columns",
+    "text": "Some whole-number columns might be labels rather than amounts (e.g. `grade`: 5 distinct values, `n_events`: 4 distinct values; 2 columns). For labels, bigger numbers don't mean 'more'. Are any of these labels or codes?",
+    "applies_to": [
+     "grade",
+     "n_events"
+    ],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "all_amounts",
+      "label": "All are amounts",
+      "effect": "Keeps all as numeric amounts in the map",
+      "edits": []
+     }
+    ],
+    "default_option_id": "all_amounts",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q7": {
+    "question_id": "q7",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 60,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "id": {
+    "column": "id",
+    "role": "id",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "unique text value per observed row (60 distinct values)",
+    "question_id": null
+   },
+   "a": {
+    "column": "a",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "b": {
+    "column": "b",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c": {
+    "column": "c",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "d": {
+    "column": "d",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_ab": {
+    "column": "t_ab",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "t_cd": {
+    "column": "t_cd",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "a_dup": {
+    "column": "a_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "c_dup": {
+    "column": "c_dup",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (60 distinct values)",
+    "question_id": null
+   },
+   "grade": {
+    "column": "grade",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (5 distinct values)",
+    "question_id": null
+   },
+   "n_events": {
+    "column": "n_events",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (4 distinct values)",
+    "question_id": null
+   },
+   "visits1": {
+    "column": "visits1",
+    "role": "feature",
+    "impute": {
+     "method": "bogus"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "visits2": {
+    "column": "visits2",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; no recorded 0; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "visits_zero": {
+    "column": "visits_zero",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "group:mg2",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "8 blanks; blank on the same rows as 3 other columns (mg2); blank on the exact rows where n_events is 0",
+    "question_id": "q5"
+   },
+   "last_seen": {
+    "column": "last_seen",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (52 distinct values; 8 blanks)",
+    "question_id": "q1"
+   },
+   "sparse1": {
+    "column": "sparse1",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q4"
+   },
+   "sparse2": {
+    "column": "sparse2",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "41 blanks; no recorded 0; blank on the same rows as 1 other column (mg1)",
+    "question_id": "q4"
+   },
+   "sparse3": {
+    "column": "sparse3",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "34 blanks",
+    "question_id": "q4"
+   },
+   "sparse4": {
+    "column": "sparse4",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "52 blanks",
+    "question_id": "q4"
+   },
+   "when": {
+    "column": "when",
+    "role": "drop",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "date/time text (60 distinct values; 0 blanks)",
+    "question_id": "q1"
+   }
+  },
+  "cost": {
+   "rows": 60,
+   "columns": 20,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 5,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [
+    "id",
+    "last_seen",
+    "sparse1",
+    "sparse2",
+    "sparse3",
+    "sparse4",
+    "when"
+   ],
+   "missing_indicator_groups": {
+    "visits1_and_2_more": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ]
+   },
+   "impute": {
+    "visits1": {
+     "method": "bogus",
+     "indicator": false
+    },
+    "visits2": {
+     "method": "fill_median",
+     "indicator": false
+    },
+    "visits_zero": {
+     "method": "fill_median",
+     "indicator": false
+    }
+   }
+  },
+  "fingerprint": "bda08278d5dd",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (bda08278d5dd)\npreprocessing:\n  drop_columns:\n  - id\n  - last_seen\n  - sparse1\n  - sparse2\n  - sparse3\n  - sparse4\n  - when\n  missing_indicator_groups:\n    visits1_and_2_more:\n    - visits1\n    - visits2\n    - visits_zero\n  impute:\n    visits1:\n      method: bogus\n      indicator: false\n    visits2:\n      method: fill_median\n      indicator: false\n    visits_zero:\n      method: fill_median\n      indicator: false",
+  "marker_legend": [
+   {
+    "marker_column": "visits1_and_2_more_was_missing",
+    "columns_preview": [
+     "visits1",
+     "visits2",
+     "visits_zero"
+    ],
+    "columns_count": 3
+   }
+  ],
+  "counts": {
+   "columns": 20,
+   "feature_columns": 13,
+   "dropped": 7,
+   "open_entries": 9,
+   "open_questions": 7,
+   "decided_by": {
+    "default": 20,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": null,
+  "valid": false,
+  "error": "Invalid parameter: unknown imputation method 'bogus'; expected one of: sample_normal, sample_categorical, fill_mean, fill_median, fill_mode"
+ },
+ "mixed_one_mostly": {
+  "csv": "plan/mixed_one_mostly.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "mixed_values",
+    "text": "`m` mostly holds numbers but also the value 'x?' (4 rows). Should those values count as their own category, or as unreadable entries treated like blanks?",
+    "applies_to": [
+     "m"
+    ],
+    "rows_affected": 4,
+    "options": [
+     {
+      "option_id": "as_categories",
+      "label": "Treat as categories",
+      "effect": "Each distinct value (including non-numeric text) gets its own 0/1 category column; blanks become '(blank)'",
+      "edits": [
+       {
+        "column": "m",
+        "role": "feature",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": "one_hot"
+       }
+      ]
+     },
+     {
+      "option_id": "as_blank",
+      "label": "Treat non-numeric text as blank",
+      "effect": "4 'x?' entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker",
+      "edits": [
+       {
+        "column": "m",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       }
+      ]
+     },
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `m` out of the map",
+      "edits": [
+       {
+        "column": "m",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       }
+      ]
+     }
+    ],
+    "default_option_id": "as_blank",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 20,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "v": {
+    "column": "v",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (20 distinct values)",
+    "question_id": null
+   },
+   "m": {
+    "column": "m",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'x?' (4 rows; 0 blanks); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": "q1"
+   }
+  },
+  "cost": {
+   "rows": 20,
+   "columns": 2,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 1,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [],
+   "impute": {
+    "m": {
+     "method": "fill_median"
+    }
+   }
+  },
+  "fingerprint": "55ca3f2a9134",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (55ca3f2a9134)\npreprocessing:\n  drop_columns: []\n  impute:\n    m:\n      method: fill_median",
+  "marker_legend": [
+   {
+    "marker_column": "m_was_missing",
+    "columns_preview": [
+     "m"
+    ],
+    "columns_count": 1
+   }
+  ],
+  "counts": {
+   "columns": 2,
+   "feature_columns": 2,
+   "dropped": 0,
+   "open_entries": 1,
+   "open_questions": 2,
+   "decided_by": {
+    "default": 2,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": null,
+  "valid": false,
+  "error": "Column 'm' is configured for numeric imputation (fill_median) but contains non-numeric values. Sample: ['51,736', 'x?', '88,851', '86,496', '38,871']. Clean the data or use a string imputation method."
+ },
+ "mixed_one_minor": {
+  "csv": "plan/mixed_one_minor.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "mixed_values",
+    "text": "`m` holds numbers and the value 'x?' (10 rows). Should those values count as their own category, or as unreadable entries treated like blanks?",
+    "applies_to": [
+     "m"
+    ],
+    "rows_affected": 10,
+    "options": [
+     {
+      "option_id": "as_categories",
+      "label": "Treat as categories",
+      "effect": "Each distinct value (including non-numeric text) gets its own 0/1 category column; blanks become '(blank)'",
+      "edits": [
+       {
+        "column": "m",
+        "role": "feature",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": "one_hot"
+       }
+      ]
+     },
+     {
+      "option_id": "as_blank",
+      "label": "Treat non-numeric text as blank",
+      "effect": "10 'x?' entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker",
+      "edits": [
+       {
+        "column": "m",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       }
+      ]
+     },
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `m` out of the map",
+      "edits": [
+       {
+        "column": "m",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       }
+      ]
+     }
+    ],
+    "default_option_id": "as_blank",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 20,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "v": {
+    "column": "v",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (20 distinct values)",
+    "question_id": null
+   },
+   "m": {
+    "column": "m",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'x?' (10 rows; 0 blanks); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": "q1"
+   }
+  },
+  "cost": {
+   "rows": 20,
+   "columns": 2,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 1,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [],
+   "impute": {
+    "m": {
+     "method": "fill_median"
+    }
+   }
+  },
+  "fingerprint": "55ca3f2a9134",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (55ca3f2a9134)\npreprocessing:\n  drop_columns: []\n  impute:\n    m:\n      method: fill_median",
+  "marker_legend": [
+   {
+    "marker_column": "m_was_missing",
+    "columns_preview": [
+     "m"
+    ],
+    "columns_count": 1
+   }
+  ],
+  "counts": {
+   "columns": 2,
+   "feature_columns": 2,
+   "dropped": 0,
+   "open_entries": 1,
+   "open_questions": 2,
+   "decided_by": {
+    "default": 2,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": null,
+  "valid": false,
+  "error": "Column 'm' is configured for numeric imputation (fill_median) but contains non-numeric values. Sample: ['36,765', 'x?', 'x?', 'x?', 'x?']. Clean the data or use a string imputation method."
+ },
+ "mixed_many_single": {
+  "csv": "plan/mixed_many_single.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "mixed_values",
+    "text": "2 columns hold the number 5 and the value 'x?' (11 entries in total; e.g. `m1`: 6). Should those values count as their own category, or as unreadable entries treated like blanks?",
+    "applies_to": [
+     "m1",
+     "m2"
+    ],
+    "rows_affected": 6,
+    "options": [
+     {
+      "option_id": "as_categories",
+      "label": "Treat as categories",
+      "effect": "Each distinct value (including non-numeric text) gets its own 0/1 category column; blanks become '(blank)'",
+      "edits": [
+       {
+        "column": "m1",
+        "role": "feature",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": "one_hot"
+       },
+       {
+        "column": "m2",
+        "role": "feature",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": "one_hot"
+       }
+      ]
+     },
+     {
+      "option_id": "as_blank",
+      "label": "Treat non-numeric text as blank",
+      "effect": "11 'x?' entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker",
+      "edits": [
+       {
+        "column": "m1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       },
+       {
+        "column": "m2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       }
+      ]
+     },
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `m1` and `m2` out of the map",
+      "edits": [
+       {
+        "column": "m1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       },
+       {
+        "column": "m2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       }
+      ]
+     }
+    ],
+    "default_option_id": "as_categories",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 20,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "v": {
+    "column": "v",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (20 distinct values)",
+    "question_id": null
+   },
+   "m1": {
+    "column": "m1",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'x?' (6 rows; 0 blanks); kept as 2 categories",
+    "question_id": "q1"
+   },
+   "m2": {
+    "column": "m2",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": "one_hot",
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'x?' (5 rows; 0 blanks); kept as 2 categories",
+    "question_id": "q1"
+   }
+  },
+  "cost": {
+   "rows": 20,
+   "columns": 3,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 1,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [],
+   "encode": {
+    "m1": {
+     "method": "one_hot"
+    },
+    "m2": {
+     "method": "one_hot"
+    }
+   }
+  },
+  "fingerprint": "f9922444ea5f",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (f9922444ea5f)\npreprocessing:\n  drop_columns: []\n  encode:\n    m1:\n      method: one_hot\n    m2:\n      method: one_hot",
+  "marker_legend": [],
+  "counts": {
+   "columns": 3,
+   "feature_columns": 3,
+   "dropped": 0,
+   "open_entries": 2,
+   "open_questions": 2,
+   "decided_by": {
+    "default": 3,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": {
+   "feature_count": 5,
+   "missing_marker_count": 0,
+   "dummy_column_count": 4
+  },
+  "valid": true
+ },
+ "mixed_many_minor": {
+  "csv": "plan/mixed_many_minor.csv",
+  "args": {
+   "targets": [],
+   "entity": "",
+   "time": ""
+  },
+  "mutations": {},
+  "questions": {
+   "q1": {
+    "question_id": "q1",
+    "topic": "mixed_values",
+    "text": "2 columns hold numbers and the value 'x?' (20 entries in total; e.g. `m1`: 10). Should those values count as their own category, or as unreadable entries treated like blanks?",
+    "applies_to": [
+     "m1",
+     "m2"
+    ],
+    "rows_affected": 10,
+    "options": [
+     {
+      "option_id": "as_categories",
+      "label": "Treat as categories",
+      "effect": "Each distinct value (including non-numeric text) gets its own 0/1 category column; blanks become '(blank)'",
+      "edits": [
+       {
+        "column": "m1",
+        "role": "feature",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": "one_hot"
+       },
+       {
+        "column": "m2",
+        "role": "feature",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": "one_hot"
+       }
+      ]
+     },
+     {
+      "option_id": "as_blank",
+      "label": "Treat non-numeric text as blank",
+      "effect": "20 'x?' entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker",
+      "edits": [
+       {
+        "column": "m1",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       },
+       {
+        "column": "m2",
+        "role": "feature",
+        "impute_method": "fill_median",
+        "indicator": "own",
+        "encode": null
+       }
+      ]
+     },
+     {
+      "option_id": "leave_out",
+      "label": "Leave out",
+      "effect": "Leaves `m1` and `m2` out of the map",
+      "edits": [
+       {
+        "column": "m1",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       },
+       {
+        "column": "m2",
+        "role": "drop",
+        "impute_method": null,
+        "indicator": "none",
+        "encode": null
+       }
+      ]
+     }
+    ],
+    "default_option_id": "as_blank",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   },
+   "q2": {
+    "question_id": "q2",
+    "topic": "outcome_columns",
+    "text": "Is any column a result you want to explain after the map is drawn (for example a diagnosis, outcome, or survival status)? Columns used to draw the map cannot fairly be used to explain it afterwards.",
+    "applies_to": [],
+    "rows_affected": 20,
+    "options": [
+     {
+      "option_id": "none_of_them",
+      "label": "None of them",
+      "effect": "Keeps all current columns as map inputs",
+      "edits": []
+     }
+    ],
+    "default_option_id": "none_of_them",
+    "stakes": null,
+    "status": "open",
+    "answer": null
+   }
+  },
+  "entries": {
+   "v": {
+    "column": "v",
+    "role": "feature",
+    "impute": null,
+    "indicator": "none",
+    "encode": null,
+    "decided_by": "default",
+    "status": "resolved",
+    "reason": "complete numeric column (20 distinct values)",
+    "question_id": null
+   },
+   "m1": {
+    "column": "m1",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'x?' (10 rows; 0 blanks); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": "q1"
+   },
+   "m2": {
+    "column": "m2",
+    "role": "feature",
+    "impute": {
+     "method": "fill_median"
+    },
+    "indicator": "own",
+    "encode": null,
+    "decided_by": "default",
+    "status": "open",
+    "reason": "mostly numbers with 'x?' (10 rows; 0 blanks); non-numeric text treated as blank with median fill and blank marker",
+    "question_id": "q1"
+   }
+  },
+  "cost": {
+   "rows": 20,
+   "columns": 3,
+   "stakes_ms": 0.0,
+   "stakes_rows_sampled": 0,
+   "stakes_questions_computed": 0,
+   "stakes_questions_skipped": 1,
+   "stakes_questions_failed": 0
+  },
+  "target_proxies": [],
+  "preprocessing_dict": {
+   "drop_columns": [],
+   "impute": {
+    "m1": {
+     "method": "fill_median"
+    },
+    "m2": {
+     "method": "fill_median"
+    }
+   }
+  },
+  "fingerprint": "c394ac8f9fd5",
+  "yaml": "# preprocessing plan pp_fixture revision 1 (c394ac8f9fd5)\npreprocessing:\n  drop_columns: []\n  impute:\n    m1:\n      method: fill_median\n    m2:\n      method: fill_median",
+  "marker_legend": [
+   {
+    "marker_column": "m1_was_missing",
+    "columns_preview": [
+     "m1"
+    ],
+    "columns_count": 1
+   },
+   {
+    "marker_column": "m2_was_missing",
+    "columns_preview": [
+     "m2"
+    ],
+    "columns_count": 1
+   }
+  ],
+  "counts": {
+   "columns": 3,
+   "feature_columns": 3,
+   "dropped": 0,
+   "open_entries": 2,
+   "open_questions": 2,
+   "decided_by": {
+    "default": 3,
+    "agent": 0,
+    "user": 0
+   }
+  },
+  "processed_space": null,
+  "valid": false,
+  "error": "Column 'm1' is configured for numeric imputation (fill_median) but contains non-numeric values. Sample: ['17,292', '13,276', 'x?', '38,367', 'x?']. Clean the data or use a string imputation method."
+ }
+}
