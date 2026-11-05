@@ -63,13 +63,14 @@ impl PulsarServer {
         progress: Option<ProgressTarget>,
     ) -> rmcp::model::CallToolResult {
         let args = params.arguments.unwrap_or_default();
+        let passed = args.clone();
         let result =
             match tools::dispatch(state.clone(), &name, args, CallContext { progress }).await {
                 Ok(result) => result,
                 Err(error) => error.into_result(),
             };
         match state.options.max_response_bytes {
-            Some(limit) => budget::degrade(&name, result, limit),
+            Some(limit) => budget::degrade(&name, Some(&passed), result, limit),
             None => result,
         }
     }

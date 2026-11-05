@@ -12,7 +12,11 @@
 //! A result over the hard limit is never replaced by an error when a
 //! smaller form exists: [`degrade`] trims the largest arrays and strings,
 //! says what it trimmed in `truncation`, and keeps every scalar (the ids a
-//! follow-up call needs). Only when even that cannot fit does the call
+//! follow-up call needs). The gateway's `io.phirewall/summary` goes first:
+//! its `*_omitted` lists shrink (then its `inputs` part goes) before any
+//! agent field is cut, and it is counted once, since a re-rendered JSON
+//! view leaves it out. `truncation.next` names the fields cut and the
+//! arguments that ask for less of them, never one the caller already set. Only when even that cannot fit does the call
 //! return a short (< [`MAX_ERROR_CHARS`]) error, which names any committed
 //! ids so a side effect is never hidden.
 
@@ -105,8 +109,14 @@ pub fn cut_text(text: &str, max: usize) -> &str {
 }
 
 /// Fit a result into `hard` characters (see the module docs). `tool` names
-/// the tool in the notice and in the error.
-pub fn degrade(tool: &str, result: CallToolResult, hard: usize) -> CallToolResult {
+/// the tool in the notice and in the error; `args` are the caller's
+/// arguments, so the notice never suggests one already passed.
+pub fn degrade(
+    tool: &str,
+    args: Option<&Map<String, Value>>,
+    result: CallToolResult,
+    hard: usize,
+) -> CallToolResult {
     if result.is_error == Some(true) {
         return bound_error(result);
     }
@@ -115,7 +125,7 @@ pub fn degrade(tool: &str, result: CallToolResult, hard: usize) -> CallToolResul
         return result;
     }
     let budget = render_budget(Some(hard));
-    match shrink(tool, &result, size, budget) {
+    match shrink(tool, args, &result, size, budget) {
         Some(smaller) => smaller,
         None => too_large(tool, &result, size, hard),
     }
@@ -128,8 +138,84 @@ struct Trim {
     total: usize,
 }
 
+/// Characters `summary` adds to a payload as its [`SUMMARY_KEY`] entry.
+fn summary_chars(summary: Option<&Value>) -> usize {
+    summary.map_or(0, |v| json_chars(v) + chars(SUMMARY_KEY) + 4)
+}
+
+/// The share of a budget the gateway's summary may keep while agent fields
+/// still have to be cut: the questions and warnings are what the agent
+/// called for; the summary is the panel's, and the gateway keeps its last
+/// copy of every part.
+const SUMMARY_SHARE: usize = 4;
+
+/// Shrink the summary's lists that carry an `*_omitted` count (halving the
+/// largest and adding what it cut to the count) while it is over `max`
+/// characters, then drop its `inputs` part. Every other part stays whole:
+/// `grouping.limits` is what Phirewall's `answer_too_large` names.
+fn shrink_summary(summary: &mut Value, max: usize, trims: &mut Vec<Trim>) {
+    let base = format!("/{}", SUMMARY_KEY.replace('/', "~1"));
+    while summary_chars(Some(summary)) > max {
+        let Some((part, list, len)) = largest_omittable(summary) else {
+            break;
+        };
+        let keep = len / 2;
+        let obj = summary[&part].as_object_mut().expect("a part");
+        if let Some(Value::Array(items)) = obj.get_mut(&list) {
+            items.truncate(keep);
+        }
+        let omitted = format!("{list}_omitted");
+        let before = obj.get(&omitted).and_then(Value::as_u64).unwrap_or(0);
+        obj.insert(omitted, json!(before + (len - keep) as u64));
+        let path = format!("{base}/{part}/{list}");
+        match trims.iter_mut().find(|t| t.path == path) {
+            Some(t) => t.shown = keep,
+            None => trims.push(Trim {
+                path,
+                shown: keep,
+                total: len + before as usize,
+            }),
+        }
+    }
+    if summary_chars(Some(summary)) > max
+        && summary
+            .as_object_mut()
+            .and_then(|m| m.remove("inputs"))
+            .is_some()
+    {
+        trims.push(Trim {
+            path: format!("{base}/inputs"),
+            shown: 0,
+            total: 1,
+        });
+    }
+}
+
+/// `(part, list, len)` of the summary's largest non-empty list with an
+/// `*_omitted` sibling.
+fn largest_omittable(summary: &Value) -> Option<(String, String, usize)> {
+    let mut best: Option<(usize, String, String, usize)> = None;
+    for (part, body) in summary.as_object()? {
+        let Some(fields) = body.as_object() else {
+            continue;
+        };
+        for (list, v) in fields {
+            let Value::Array(items) = v else { continue };
+            if items.is_empty() || !fields.contains_key(&format!("{list}_omitted")) {
+                continue;
+            }
+            let size = json_chars(v);
+            if best.as_ref().is_none_or(|b| size > b.0) {
+                best = Some((size, part.clone(), list.clone(), items.len()));
+            }
+        }
+    }
+    best.map(|(_, p, l, n)| (p, l, n))
+}
+
 fn shrink(
     tool: &str,
+    args: Option<&Map<String, Value>>,
     result: &CallToolResult,
     size: usize,
     budget: usize,
@@ -148,30 +234,49 @@ fn shrink(
         .collect::<Vec<_>>()
         .join("\n");
     // A JSON text view is the payload again: re-render it from the trimmed
-    // payload instead of cutting it mid-value.
+    // payload instead of cutting it mid-value. The gateway's summary is
+    // left out of that view (the panel reads it from structured content),
+    // so it is counted once and agent fields twice.
     let json_text = original
         .as_ref()
         .is_some_and(|p| serde_json::from_str::<Value>(&text).ok().as_ref() == Some(p));
-    let next = format!(
-        "Re-call {tool} with a narrower request (detail='summary', lower max_* or preview limits, or a filter), or use a drill-down tool for the omitted part."
-    );
-    let notice_room = 600;
+    let notice_room = 900;
     let mut trims: Vec<Trim> = vec![];
     let payload = match original {
         Some(mut payload) => {
-            let share = if json_text {
-                (budget - notice_room) / 2
+            let (limit, weight) = if json_text {
+                (budget - notice_room, 2)
             } else {
-                (budget - notice_room) * 3 / 5
+                ((budget - notice_room) * 3 / 5, 1)
             };
-            trim_to(&mut payload, share, &mut trims);
-            if structured_chars(&payload) > share {
-                return None;
+            let mut summary = payload.as_object_mut().and_then(|m| m.remove(SUMMARY_KEY));
+            let cost = |agent: &Value, summary: Option<&Value>| {
+                weight * structured_chars(agent) + summary_chars(summary)
+            };
+            if let Some(s) = summary.as_mut() {
+                if cost(&payload, Some(s)) > limit {
+                    shrink_summary(s, limit / SUMMARY_SHARE, &mut trims);
+                }
+            }
+            let room = limit.saturating_sub(summary_chars(summary.as_ref())) / weight;
+            trim_to(&mut payload, room, &mut trims);
+            if cost(&payload, summary.as_ref()) > limit {
+                // Nothing of the agent's is left to cut: the summary goes
+                // whole, never cut further.
+                summary = None;
+                trim_to(&mut payload, limit / weight, &mut trims);
+                if cost(&payload, None) > limit {
+                    return None;
+                }
+            }
+            if let (Some(s), Value::Object(map)) = (summary, &mut payload) {
+                map.insert(SUMMARY_KEY.into(), s);
             }
             Some(payload)
         }
         None => None,
     };
+    let next = next_step(tool, args, &trims);
     let truncation = json!({
         "truncated": true,
         "by": "response_budget",
@@ -193,7 +298,11 @@ fn shrink(
     );
     let room = budget.checked_sub(struct_size + chars(&notice) + 2)?;
     let body = if json_text {
-        let compact = serde_json::to_string(payload.as_ref()?).ok()?;
+        let mut view = payload.clone()?;
+        if let Value::Object(map) = &mut view {
+            map.remove(SUMMARY_KEY);
+        }
+        let compact = serde_json::to_string(&view).ok()?;
         if chars(&compact) > room {
             return None;
         }
@@ -205,6 +314,83 @@ fn shrink(
     let mut out = CallToolResult::success(vec![ContentBlock::text(text)]);
     out.structured_content = payload;
     Some(out)
+}
+
+/// What the notice tells the agent: each agent field cut (shown of total),
+/// and the arguments of `tool` that ask for less of it, leaving out any
+/// the caller already set that way.
+fn next_step(tool: &str, args: Option<&Map<String, Value>>, trims: &[Trim]) -> String {
+    let summary_path = format!("/{}", SUMMARY_KEY.replace('/', "~1"));
+    let cut: Vec<&Trim> = trims
+        .iter()
+        .filter(|t| !t.path.starts_with(&summary_path))
+        .collect();
+    let panel = trims.len() - cut.len();
+    let mut out = String::new();
+    if !cut.is_empty() {
+        let list: Vec<String> = cut
+            .iter()
+            .map(|t| format!("{} ({} of {})", t.path, t.shown, t.total))
+            .collect();
+        out.push_str(&format!("Cut to fit: {}.", list.join(", ")));
+    }
+    if panel > 0 {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str("The panel's summary lists fewer columns (its *_omitted counts the rest).");
+    }
+    if cut.is_empty() && panel > 0 {
+        return out;
+    }
+    if out.is_empty() {
+        out.push_str("The text view was cut to fit.");
+    }
+    let props: Vec<(String, Value)> = crate::tools::catalog()
+        .into_iter()
+        .find(|t| t.name == tool)
+        .and_then(|t| t.input_schema.get("properties").cloned())
+        .and_then(|p| p.as_object().cloned())
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    let passed = |name: &str| args.and_then(|a| a.get(name));
+    let fields: Vec<String> = cut
+        .iter()
+        .filter_map(|t| t.path.split('/').nth(1))
+        .map(|f| f.trim_end_matches('s').to_owned())
+        .filter(|f| f.len() > 2)
+        .collect();
+    let mut asks = vec![];
+    for (name, schema) in &props {
+        let narrows = name.starts_with("max_") || name.ends_with("_limit") || name == "limit";
+        if name == "detail" {
+            let offers = schema["enum"]
+                .as_array()
+                .is_some_and(|e| e.iter().any(|v| v == "summary"));
+            if offers && passed(name).is_none_or(|v| v != "summary") {
+                asks.push("detail='summary'".to_owned());
+            }
+        } else if narrows && fields.iter().any(|f| name.contains(f.as_str())) {
+            asks.push(match passed(name) {
+                Some(v) => format!("{name} below {v}"),
+                None => format!("a lower {name}"),
+            });
+        }
+    }
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    if asks.is_empty() {
+        out.push_str(&format!(
+            "No argument of {tool} narrows these further; use a drill-down tool for the omitted part."
+        ));
+    } else {
+        out.push_str(&format!(
+            "Re-call {tool} with {} to receive less of it, or use a drill-down tool for the omitted part.",
+            asks.join(" or ")
+        ));
+    }
+    out
 }
 
 /// Trim `value` (largest arrays and strings first) until it fits `max`
@@ -411,7 +597,7 @@ mod tests {
         let rows: Vec<Value> = (0..5_000).map(|i| json!({"row": i, "v": "abc"})).collect();
         let payload = json!({"status": "ok", "run_id": "run_1", "rows": rows});
         let result = ok_result(payload, None);
-        let out = degrade("t", result, 45_000);
+        let out = degrade("t", None, result, 45_000);
         assert_eq!(out.is_error, Some(false));
         assert!(visible_chars(&out) <= render_budget(Some(45_000)));
         let s = out.structured_content.unwrap();
@@ -431,8 +617,116 @@ mod tests {
         let rows: Vec<Value> = (0..5_000).map(|i| json!({"row": i})).collect();
         let summary = json!({"version": 1, "grouping": {"groups": vec![json!({"n": 1}); 50]}});
         let payload = json!({"rows": rows, SUMMARY_KEY: summary.clone()});
-        let out = degrade("t", ok_result(payload, None), 45_000);
+        let out = degrade("t", None, ok_result(payload, None), 45_000);
         assert_eq!(out.structured_content.unwrap()[SUMMARY_KEY], summary);
+    }
+
+    /// A plan answer on a wide table: a ~24k summary (one `inputs` line per
+    /// column) beside 8 questions and their warnings, sent with its JSON
+    /// mirror, as the MI run's `draft_preprocessing_plan` was.
+    fn wide_plan_answer() -> Value {
+        let line = |i: usize| {
+            json!({"feature": i, "column": format!("lab_value_column_{i:03}"),
+                   "missing_fraction": 0.12, "decided_by": "default", "indicator": "own"})
+        };
+        let imputed = |i: usize| {
+            json!({"feature": i, "column": format!("lab_value_column_{i:03}"),
+                   "method": "fill_median", "missing_fraction": 0.12})
+        };
+        let questions: Vec<Value> = (0..8)
+            .map(|i| {
+                json!({"question_id": format!("q{i}"), "topic": "blank_meaning",
+                       "text": "x".repeat(900), "options": ["a", "b", "c"]})
+            })
+            .collect();
+        let warnings: Vec<Value> = (0..6)
+            .map(|i| json!({"code": format!("W{i}"), "message": "w".repeat(250)}))
+            .collect();
+        json!({
+            "status": "ok",
+            "plan_id": "plan_0123456789ab",
+            "questions": questions,
+            "warnings": warnings,
+            SUMMARY_KEY: {
+                "version": 1, "row_floor": 8,
+                "run": {"dataset_id": "ds_0123456789ab", "rows": 1700},
+                "inputs": {
+                    "revision": 1, "input_columns": 124, "output_features": 130,
+                    "counts": {"kept": 116, "dropped": 8, "encoded": 4, "imputed": 105},
+                    "kept": (0..116).map(line).collect::<Vec<_>>(), "kept_omitted": 0,
+                    "dropped": [], "dropped_omitted": 0,
+                    "encoded": [], "encoded_omitted": 0,
+                    "imputed": (0..105).map(imputed).collect::<Vec<_>>(), "imputed_omitted": 0,
+                    "open_questions": [], "open_questions_omitted": 0,
+                    "changes_from_previous": [], "changes_from_previous_omitted": 0,
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn a_large_summary_is_shrunk_before_the_questions() {
+        let payload = wide_plan_answer();
+        let summary_size = json_chars(&payload[SUMMARY_KEY]);
+        assert!((22_000..26_000).contains(&summary_size), "{summary_size}");
+        let mut args = Map::new();
+        args.insert("detail".into(), json!("summary"));
+        let out = degrade(
+            "draft_preprocessing_plan",
+            Some(&args),
+            ok_result(payload, None),
+            45_000,
+        );
+        assert_eq!(out.is_error, Some(false));
+        assert!(visible_chars(&out) <= render_budget(Some(45_000)));
+        let s = out.structured_content.clone().unwrap();
+        assert_eq!(s["questions"].as_array().unwrap().len(), 8);
+        assert_eq!(s["warnings"].as_array().unwrap().len(), 6);
+        // The summary stays schema-shaped: what it no longer lists, it counts.
+        let inputs = &s[SUMMARY_KEY]["inputs"];
+        for list in ["kept", "imputed"] {
+            let listed = inputs[list].as_array().unwrap().len() as u64;
+            let omitted = inputs[format!("{list}_omitted")].as_u64().unwrap();
+            assert_eq!(json!(listed + omitted), inputs["counts"][list], "{list}");
+        }
+        let t = &s["truncation"];
+        assert!(t["trimmed"].as_array().unwrap().iter().all(|t| t["path"]
+            .as_str()
+            .unwrap()
+            .starts_with("/io.phirewall~1summary")));
+        assert_eq!(
+            t["next"],
+            "The panel's summary lists fewer columns (its *_omitted counts the rest)."
+        );
+        // The JSON view carries the agent's fields once; the summary is the panel's.
+        let text = match &out.content[0] {
+            ContentBlock::Text(t) => t.text.clone(),
+            _ => unreachable!(),
+        };
+        assert!(!text.contains(SUMMARY_KEY));
+    }
+
+    #[test]
+    fn the_notice_names_the_cut_field_and_skips_an_argument_already_passed() {
+        let mut payload = wide_plan_answer();
+        payload["questions"] = json!((0..80)
+            .map(|i| json!({"question_id": format!("q{i}"), "text": "x".repeat(900)}))
+            .collect::<Vec<_>>());
+        let mut args = Map::new();
+        args.insert("detail".into(), json!("summary"));
+        args.insert("question_limit".into(), json!(80));
+        let out = degrade(
+            "draft_preprocessing_plan",
+            Some(&args),
+            ok_result(payload, None),
+            45_000,
+        );
+        let s = out.structured_content.unwrap();
+        let next = s["truncation"]["next"].as_str().unwrap();
+        assert!(next.starts_with("Cut to fit: /questions ("), "{next}");
+        assert!(next.contains(" of 80)"), "{next}");
+        assert!(next.contains("question_limit below 80"), "{next}");
+        assert!(!next.contains("detail='summary'"), "{next}");
     }
 
     #[test]
@@ -441,7 +735,12 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let out = degrade("t", ok_result(json!({"plan_id": "p"}), Some(text)), 20_000);
+        let out = degrade(
+            "t",
+            None,
+            ok_result(json!({"plan_id": "p"}), Some(text)),
+            20_000,
+        );
         assert_eq!(out.is_error, Some(false));
         assert!(visible_chars(&out) <= render_budget(Some(20_000)));
     }
@@ -449,7 +748,12 @@ mod tests {
     #[test]
     fn with_no_room_the_error_is_short_and_names_what_was_committed() {
         let payload = json!({"cluster_assignment_id": "ca_1", "rows": vec![1; 1000]});
-        let out = degrade("generate_cluster_dossier", ok_result(payload, None), 200);
+        let out = degrade(
+            "generate_cluster_dossier",
+            None,
+            ok_result(payload, None),
+            200,
+        );
         assert_eq!(out.is_error, Some(true));
         assert!(visible_chars(&out) < MAX_ERROR_CHARS);
         let s = out.structured_content.unwrap();
@@ -465,7 +769,7 @@ mod tests {
     fn a_large_error_is_bounded() {
         let error = ToolError::new("t", "X", "r".repeat(20_000), "do this")
             .detail("diag", json!(vec!["d".repeat(50); 400]));
-        let out = degrade("t", error.into_result(), 45_000);
+        let out = degrade("t", None, error.into_result(), 45_000);
         assert!(
             visible_chars(&out) < MAX_ERROR_CHARS,
             "{}",
