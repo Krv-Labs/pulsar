@@ -29,6 +29,8 @@ use pulsar_data::Key;
 use pulsar_pipeline::{CosmicTrajectory, EntityIds};
 use pulsar_store::{DatasetSource, LongitudinalId, Representation};
 use rmcp::model::CallToolResult;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::characterize::load;
@@ -292,7 +294,7 @@ fn weight_dist_schema() -> Value {
 
 // ---- build_longitudinal_graph ------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RepresentationParam {
     #[default]
@@ -319,7 +321,7 @@ impl RepresentationParam {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MissingParam {
     #[default]
@@ -338,7 +340,7 @@ impl MissingParam {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Detail {
     #[default]
@@ -826,7 +828,7 @@ fn build_markdown(payload: &Value) -> String {
 
 // ---- diagnose_longitudinal_graph ----------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfaceParam {
     #[default]
@@ -1286,7 +1288,7 @@ fn archetypes_markdown(payload: &Value) -> String {
 
 // ---- get_cross_time_neighbors -------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectionParam {
     #[default]
@@ -1556,7 +1558,7 @@ fn neighbors_markdown(payload: &Value) -> String {
 
 // ---- classify_trajectories ----------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassifyMethod {
     #[default]

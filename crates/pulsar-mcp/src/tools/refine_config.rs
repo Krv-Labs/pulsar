@@ -9,6 +9,7 @@ use pulsar_analysis::config_overrides::{check_overrides, parse_yaml_mapping, Ove
 use pulsar_analysis::plan::py_json_dumps;
 use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::config::strip_fences;
@@ -22,7 +23,7 @@ pub const NAME: &str = "refine_config";
 const SPARSIFY_MESSAGE: &str = "Spectral sparsification is enabled (cosmic_graph.sparsify: true). It is SLOW on large datasets \u{2014} a Spielman-Srivastava sparsifier that solves a preconditioned-CG system per JL sketch row \u{2014} and it runs after the already-sparse cosmic graph is built, so it is pure additional construction cost with no downstream speedup.";
 const SPARSIFY_SUGGESTION: &str = "Set cosmic_graph.sparsify: false unless you specifically need a spectrum/effective-resistance-preserving graph for downstream spectral analysis on a small graph. It is not a structural-analysis or performance tool.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefineFormat {
     #[default]

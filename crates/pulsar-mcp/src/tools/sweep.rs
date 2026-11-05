@@ -33,7 +33,17 @@ pub const COMPARE: &str = "compare_sweeps";
 /// The persisted full sweep response (`runs/<id>/response.json`).
 const RESPONSE_BLOB: &str = "response.json";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Deserialize,
+    serde::Serialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Execution {
     /// Wait for the fit and return the sweep result (a task handle on clients that support MCP tasks).
@@ -913,7 +923,17 @@ pub async fn wait_job(state: &ServerState, p: WaitParams) -> Result<CallToolResu
 
 // ------------------------------------------------------------------ history
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Deserialize,
+    serde::Serialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryDetail {
     #[default]
@@ -1012,8 +1032,7 @@ pub async fn history(state: &ServerState, p: HistoryParams) -> Result<CallToolRe
 
 // ------------------------------------------------------------------ compare
 
-#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct CompareParams {
     /// First run_id, as returned by run_topological_sweep (persisted runs only).
     pub run_a: String,
