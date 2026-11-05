@@ -144,4 +144,15 @@ impl DataError {
             _ => None,
         }
     }
+
+    /// Format the error, omitting raw cell samples when `phirewall_release` is active.
+    pub fn display_for(&self, phirewall_release: bool) -> String {
+        match (self, phirewall_release) {
+            (Self::CoercionFailed { column, method, .. }, true) => format!(
+                "column {column:?} is configured for numeric imputation ({method}) but contains \
+                 non-numeric values. Clean the data or use a string imputation method."
+            ),
+            _ => self.to_string(),
+        }
+    }
 }

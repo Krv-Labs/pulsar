@@ -25,6 +25,7 @@ pub mod guide;
 pub mod jobs;
 pub mod markdown;
 pub mod phirewall;
+pub mod release;
 pub mod schema;
 pub mod server;
 pub mod state;

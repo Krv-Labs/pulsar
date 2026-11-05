@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CancelTaskParams, CreateTaskResult, GetTaskParams,
-    GetTaskResult, Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
-    ServerConfig, Tool, UpdateTaskParams,
+    GetTaskResult, Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool, UpdateTaskParams,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::task_manager::{TaskExit, TaskOptions};
@@ -88,6 +88,16 @@ impl ServerHandler for PulsarServer {
         info.server_info = implementation;
         info.instructions = Some(INSTRUCTIONS.to_owned());
         info
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        self.state.session().phirewall_release = crate::release::declared_by(&request.capabilities);
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
     }
 
     async fn list_tools(

@@ -264,57 +264,122 @@ pub fn preprocess(
         };
         frame.names.remove(idx);
         let work = frame.cols.remove(idx);
-        let labels: Vec<Option<String>> = match &work {
-            Work::Text(v) => v.clone(),
-            Work::Num { values, int_like } => values
-                .iter()
-                .map(|&x| (!x.is_nan()).then(|| category_label(x, *int_like)))
-                .collect(),
-        };
-        let categories: Vec<String> = match vocab.and_then(|v| v.get(col)) {
-            Some(fixed) => fixed.clone(),
-            None => match &work {
-                Work::Num { values, int_like } => {
-                    let mut u: Vec<f64> = values.iter().copied().filter(|x| !x.is_nan()).collect();
-                    u.sort_by(|a, b| a.total_cmp(b));
-                    u.dedup();
-                    u.into_iter()
-                        .map(|x| category_label(x, *int_like))
-                        .collect()
-                }
-                Work::Text(v) => {
-                    let mut u: Vec<String> = v.iter().flatten().cloned().collect();
-                    u.sort();
-                    u.dedup();
-                    u
-                }
-            },
-        };
-        if let Some(max) = spec.max_categories {
-            if categories.len() as u64 > max {
-                return Err(DataError::TooManyCategories {
-                    column: col.clone(),
-                    n_categories: categories.len(),
-                    max,
-                });
-            }
-        }
-        for cat in &categories {
-            let values = labels
-                .iter()
-                .map(|l| {
-                    if l.as_deref() == Some(cat.as_str()) {
-                        1.0
-                    } else {
-                        0.0
+        match work {
+            Work::Num { values, int_like } => {
+                let mut seen_bits: HashSet<u64> = HashSet::new();
+                for &x in &values {
+                    if !x.is_nan() {
+                        seen_bits.insert(x.to_bits());
                     }
-                })
-                .collect();
-            frame.names.push(format!("{col}_{cat}"));
-            frame.cols.push(Work::Num {
-                values,
-                int_like: false,
-            });
+                }
+                let categories: Vec<String> = match vocab.and_then(|v| v.get(col)) {
+                    Some(fixed) => fixed.clone(),
+                    None => {
+                        let mut u: Vec<f64> =
+                            seen_bits.iter().map(|&b| f64::from_bits(b)).collect();
+                        u.sort_by(|a, b| a.total_cmp(b));
+                        u.dedup();
+                        if let Some(max) = spec.max_categories {
+                            if u.len() as u64 > max {
+                                return Err(DataError::TooManyCategories {
+                                    column: col.clone(),
+                                    n_categories: u.len(),
+                                    max,
+                                });
+                            }
+                        }
+                        u.into_iter().map(|x| category_label(x, int_like)).collect()
+                    }
+                };
+                if let Some(max) = spec.max_categories {
+                    if categories.len() as u64 > max {
+                        return Err(DataError::TooManyCategories {
+                            column: col.clone(),
+                            n_categories: categories.len(),
+                            max,
+                        });
+                    }
+                }
+                let label_by_bits: Vec<(u64, String)> = seen_bits
+                    .into_iter()
+                    .map(|b| (b, category_label(f64::from_bits(b), int_like)))
+                    .collect();
+                for cat in &categories {
+                    let matching: Vec<u64> = label_by_bits
+                        .iter()
+                        .filter(|(_, l)| l == cat)
+                        .map(|&(b, _)| b)
+                        .collect();
+                    let indicator = match matching.as_slice() {
+                        [] => vec![0.0; values.len()],
+                        &[b0] => values
+                            .iter()
+                            .map(|&x| if x.to_bits() == b0 { 1.0 } else { 0.0 })
+                            .collect(),
+                        many => values
+                            .iter()
+                            .map(|&x| {
+                                if many.contains(&x.to_bits()) {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .collect(),
+                    };
+                    frame.names.push(format!("{col}_{cat}"));
+                    frame.cols.push(Work::Num {
+                        values: indicator,
+                        int_like: false,
+                    });
+                }
+            }
+            Work::Text(v) => {
+                let categories: Vec<String> = match vocab.and_then(|v| v.get(col)) {
+                    Some(fixed) => fixed.clone(),
+                    None => {
+                        let seen: HashSet<&str> = v.iter().flatten().map(String::as_str).collect();
+                        if let Some(max) = spec.max_categories {
+                            if seen.len() as u64 > max {
+                                return Err(DataError::TooManyCategories {
+                                    column: col.clone(),
+                                    n_categories: seen.len(),
+                                    max,
+                                });
+                            }
+                        }
+                        let mut u: Vec<String> = seen.into_iter().map(str::to_owned).collect();
+                        u.sort();
+                        u
+                    }
+                };
+                if let Some(max) = spec.max_categories {
+                    if categories.len() as u64 > max {
+                        return Err(DataError::TooManyCategories {
+                            column: col.clone(),
+                            n_categories: categories.len(),
+                            max,
+                        });
+                    }
+                }
+                for cat in &categories {
+                    let indicator = v
+                        .iter()
+                        .map(|l| {
+                            if l.as_deref() == Some(cat.as_str()) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    frame.names.push(format!("{col}_{cat}"));
+                    frame.cols.push(Work::Num {
+                        values: indicator,
+                        int_like: false,
+                    });
+                }
+            }
         }
         if let Some(v) = vocab {
             if let Some(fixed) = v.get(col) {
