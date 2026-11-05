@@ -54,10 +54,14 @@ function fail(message) {
 
 const child = spawn(resolveBinary(), process.argv.slice(2), { stdio: "inherit" });
 child.on("error", (err) => fail(`could not start the binary: ${err.message}`));
+const FORWARDED = ["SIGINT", "SIGTERM", "SIGHUP"];
 child.on("exit", (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  else process.exit(code ?? 1);
+  if (signal) {
+    // Drop the forwarders first, or they swallow the re-raise and Node exits 0.
+    for (const sig of FORWARDED) process.removeAllListeners(sig);
+    process.kill(process.pid, signal);
+  } else process.exit(code ?? 1);
 });
-for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+for (const sig of FORWARDED) {
   process.on(sig, () => child.kill(sig));
 }
