@@ -8,7 +8,8 @@
 //!   jobs/<run_id>.json                  job state and progress
 //!   runs/<run_id>/record.json           the run, written last
 //!   runs/<run_id>/graph.arrow           constructed graph edges
-//!   runs/<run_id>/affinity.arrow        full weighted affinity edges
+//!   runs/<run_id>/affinity.arrow        full weighted affinity edges, absent
+//!                                       when identical to graph.arrow
 //!   cluster_assignments/<id>.json + <id>.labels.arrow
 //!   longitudinal/<id>.json
 //! ```
@@ -47,6 +48,9 @@ const RECORD_JSON: &str = "record.json";
 const GRAPH_ARROW: &str = "graph.arrow";
 const AFFINITY_ARROW: &str = "affinity.arrow";
 const UTF8_BOM: [u8; 3] = [0xef, 0xbb, 0xbf];
+/// Environment override for [`StoreOptions::run_retention`].
+pub const ENV_RUN_RETENTION: &str = "PULSAR_STORE_RUN_RETENTION";
+const DEFAULT_RUN_RETENTION: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct StoreOptions {
@@ -54,6 +58,9 @@ pub struct StoreOptions {
     pub progress_flush_interval: Duration,
     /// Temp files older than this are removed when the store opens.
     pub orphan_max_age: Duration,
+    /// Completed runs kept per dataset; older ones are deleted after each
+    /// save. `0` keeps every run. Default `$PULSAR_STORE_RUN_RETENTION`, else 20.
+    pub run_retention: usize,
 }
 
 impl Default for StoreOptions {
@@ -61,6 +68,10 @@ impl Default for StoreOptions {
         Self {
             progress_flush_interval: Duration::from_millis(200),
             orphan_max_age: Duration::from_secs(3600),
+            run_retention: std::env::var(ENV_RUN_RETENTION)
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(DEFAULT_RUN_RETENTION),
         }
     }
 }
@@ -517,7 +528,11 @@ impl Store {
         let dir = self.run_dir(&record.run_id);
         fs::create_dir_all(&dir).map_err(io("create", &dir))?;
         sidecar::write_edges(&dir.join(GRAPH_ARROW), &artifacts.graph)?;
-        sidecar::write_edges(&dir.join(AFFINITY_ARROW), &artifacts.affinity)?;
+        // When the threshold sits below every positive weight the two edge
+        // sets are the same; the reader falls back to graph.arrow.
+        if artifacts.affinity != artifacts.graph {
+            sidecar::write_edges(&dir.join(AFFINITY_ARROW), &artifacts.affinity)?;
+        }
         // The record goes last: a visible record implies complete sidecars.
         write_json(&dir.join(RECORD_JSON), record, true)
     }
@@ -549,7 +564,60 @@ impl Store {
     /// an interpretation threshold without a refit.
     pub fn run_affinity(&self, id: &RunId) -> Result<Graph, StoreError> {
         self.get_run(id)?;
-        sidecar::read_edges(&self.run_dir(id).join(AFFINITY_ARROW))
+        let dir = self.run_dir(id);
+        let affinity = dir.join(AFFINITY_ARROW);
+        if affinity.try_exists().map_err(io("stat", &affinity))? {
+            sidecar::read_edges(&affinity)
+        } else {
+            sidecar::read_edges(&dir.join(GRAPH_ARROW))
+        }
+    }
+
+    /// Bytes on disk under a run's directory (record, sidecars, blobs).
+    pub fn run_disk_bytes(&self, id: &RunId) -> Result<u64, StoreError> {
+        let dir = self.run_dir(id);
+        let mut total = 0;
+        for entry in fs::read_dir(&dir).map_err(io("read", &dir))? {
+            let entry = entry.map_err(io("read", &dir))?;
+            total += entry.metadata().map_err(io("stat", entry.path()))?.len();
+        }
+        Ok(total)
+    }
+
+    /// Delete the oldest completed runs of `kept`'s dataset beyond
+    /// [`StoreOptions::run_retention`], never `kept` itself nor a run whose
+    /// job is still queued or running. Removing `record.json` first hides
+    /// the run; removing its job record makes the handle `RUN_ID_UNKNOWN`.
+    /// Returns the pruned ids.
+    pub(crate) fn prune_runs(&self, kept: &RunRecord) -> Result<Vec<RunId>, StoreError> {
+        let cap = self.inner.options.run_retention;
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+        let others: Vec<RunRecord> = self
+            .list_runs(None)?
+            .runs
+            .into_iter()
+            .filter(|r| r.dataset_id == kept.dataset_id && r.run_id != kept.run_id)
+            .filter(|r| !matches!(self.get_job(&r.run_id), Ok(j) if !j.state.is_terminal()))
+            .collect();
+        // `kept` takes one slot; `others` is oldest first.
+        let excess = others.len().saturating_sub(cap - 1);
+        let mut pruned = Vec::with_capacity(excess);
+        for run in others.into_iter().take(excess) {
+            let dir = self.run_dir(&run.run_id);
+            let record = dir.join(RECORD_JSON);
+            fs::remove_file(&record).map_err(io("remove", &record))?;
+            let job = self.job_path(&run.run_id);
+            if let Err(e) = fs::remove_file(&job) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(io("remove", &job)(e));
+                }
+            }
+            fs::remove_dir_all(&dir).map_err(io("remove", &dir))?;
+            pruned.push(run.run_id);
+        }
+        Ok(pruned)
     }
 
     /// Completed runs, oldest first, optionally only those of one dataset.

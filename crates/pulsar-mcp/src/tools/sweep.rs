@@ -129,6 +129,7 @@ pub fn sweep_spec() -> ToolSpec {
                 ("pca_cached", s::boolean()),
                 ("pca_cache_status", s::any()),
                 ("memory_usage_mb", s::number()),
+                ("run_disk_mb", s::nullable(s::number())),
                 ("config_advisory", s::string()),
                 ("config_yaml_included", s::boolean()),
                 ("config_yaml_available_via", s::string()),
@@ -458,7 +459,7 @@ async fn execute(
         .list_runs(record.dataset_id.as_ref())
         .map(|l| l.runs.len() + 1)
         .unwrap_or(1);
-    let response = build_response(
+    let mut response = build_response(
         &live,
         &record,
         previous.as_ref(),
@@ -471,6 +472,13 @@ async fn execute(
     );
     job.complete(&record, &artifacts)
         .map_err(|e| ToolError::from_store(SWEEP, e))?;
+    // Persisted record + sidecars, before the response blob is attached.
+    // Null if the directory cannot be read, as for runs saved before this field.
+    response["run_disk_mb"] = state
+        .store
+        .run_disk_bytes(&live.run_id)
+        .map(|bytes| json!((bytes as f64 / (1024.0 * 1024.0) * 100.0).round() / 100.0))
+        .unwrap_or(Value::Null);
     state
         .store
         .write_run_json(&live.run_id, RESPONSE_BLOB, &response)
@@ -780,10 +788,11 @@ pub fn summary_payload(
         "pca_cached": response["pca_cached"],
         "pca_cache_status": response["pca_cache_status"],
         "memory_usage_mb": response["memory_usage_mb"],
+        "run_disk_mb": response["run_disk_mb"],
         "config_advisory": response["config_advisory"],
         "config_yaml_included": include_config_yaml,
         "config_yaml_available_via": "get_runtime_context",
-        "next_tools": ["diagnose_cosmic_graph", "get_sweep_history", "get_threshold_stability_curve"],
+        "next_tools": ["diagnose_cosmic_graph", "generate_cluster_dossier", "get_sweep_history", "get_threshold_stability_curve"],
     });
     let obj = payload.as_object_mut().expect("object");
     if include_config_yaml {
