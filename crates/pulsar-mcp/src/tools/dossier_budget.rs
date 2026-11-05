@@ -22,6 +22,8 @@ use crate::phirewall;
 use crate::release;
 use crate::state::ServerState;
 
+use super::dossier_render;
+
 /// The drill-down tool every `next` names.
 pub const DETAIL_TOOL: &str = "get_cluster_detail";
 
@@ -161,43 +163,60 @@ pub fn cap_sections(entry: &mut Value, cap: usize) {
         return;
     };
     let mut trimmed = Map::new();
-    for key in LIST_SECTIONS {
-        let drop_all = key == "central_rows" && cap < 3;
-        if let Some(Value::Array(items)) = map.get_mut(key) {
-            let keep = if drop_all { 0 } else { cap };
-            if items.len() > keep {
-                trimmed.insert(key.into(), json!({"shown": keep, "total": items.len()}));
-                items.truncate(keep);
-            }
-        }
-    }
-    for key in ["numeric_tiers", "categorical_tiers"] {
-        if let Some(Value::Object(tiers)) = map.get_mut(key) {
-            for (tier, rows) in tiers.iter_mut() {
-                if let Value::Array(items) = rows {
-                    if items.len() > cap {
-                        trimmed.insert(
-                            format!("{key}.{tier}"),
-                            json!({"shown": cap, "total": items.len()}),
-                        );
-                        items.truncate(cap);
-                    }
-                }
-            }
-        }
-    }
-    if let Some(Value::Array(preview)) = map.get("feature_preview") {
-        let n = preview.len();
-        if let Some(t) = trimmed.get("feature_preview") {
-            let cut = t["total"].as_u64().unwrap_or(0) as usize - n;
-            let omitted = map["features_omitted"].as_u64().unwrap_or(0) as usize + cut;
-            map.insert("features_previewed".into(), json!(n));
-            map.insert("features_omitted".into(), json!(omitted));
-        }
-    }
+    cap_lists(map, cap, &mut trimmed);
+    cap_tiers(map, cap, &mut trimmed);
+    count_preview_cut(map, &trimmed);
     if !trimmed.is_empty() {
         map.insert("sections_trimmed".into(), Value::Object(trimmed));
     }
+}
+
+/// Keep the first `keep` of `items`, recording a cut under `name`.
+fn cut(items: &mut Vec<Value>, keep: usize, name: String, trimmed: &mut Map<String, Value>) {
+    if items.len() > keep {
+        trimmed.insert(name, json!({"shown": keep, "total": items.len()}));
+        items.truncate(keep);
+    }
+}
+
+fn cap_lists(map: &mut Map<String, Value>, cap: usize, trimmed: &mut Map<String, Value>) {
+    for key in LIST_SECTIONS {
+        let keep = if key == "central_rows" && cap < 3 {
+            0
+        } else {
+            cap
+        };
+        if let Some(Value::Array(items)) = map.get_mut(key) {
+            cut(items, keep, key.into(), trimmed);
+        }
+    }
+}
+
+fn cap_tiers(map: &mut Map<String, Value>, cap: usize, trimmed: &mut Map<String, Value>) {
+    for key in ["numeric_tiers", "categorical_tiers"] {
+        let Some(Value::Object(tiers)) = map.get_mut(key) else {
+            continue;
+        };
+        for (tier, rows) in tiers.iter_mut() {
+            if let Value::Array(items) = rows {
+                cut(items, cap, format!("{key}.{tier}"), trimmed);
+            }
+        }
+    }
+}
+
+/// A cut preview moves its rows into `features_omitted`.
+fn count_preview_cut(map: &mut Map<String, Value>, trimmed: &Map<String, Value>) {
+    let (Some(Value::Array(preview)), Some(t)) =
+        (map.get("feature_preview"), trimmed.get("feature_preview"))
+    else {
+        return;
+    };
+    let n = preview.len();
+    let cut = t["total"].as_u64().unwrap_or(0) as usize - n;
+    let omitted = map["features_omitted"].as_u64().unwrap_or(0) as usize + cut;
+    map.insert("features_previewed".into(), json!(n));
+    map.insert("features_omitted".into(), json!(omitted));
 }
 
 /// The `get_cluster_detail` call that continues at `cursor` (an offset in
@@ -275,139 +294,6 @@ pub fn truncation_line(t: &Value) -> String {
     }
 }
 
-fn fmt_num(v: &Value, dp: usize) -> String {
-    v.as_f64()
-        .map_or_else(|| "?".into(), |x| format!("{x:.dp$}"))
-}
-
-fn feature_line(row: &Value) -> String {
-    let tier = row["signal_tier"].as_str().unwrap_or("?");
-    if row.get("value").is_some_and(|v| !v.is_null()) {
-        format!(
-            "{}={} ({tier}, lift {})",
-            row["column"].as_str().unwrap_or("?"),
-            row["value"]
-                .as_str()
-                .map_or_else(|| row["value"].to_string(), str::to_owned),
-            fmt_num(&row["lift"], 2)
-        )
-    } else {
-        let z = if row["z_score"].is_number() {
-            format!(", z {}", fmt_num(&row["z_score"], 2))
-        } else {
-            String::new()
-        };
-        format!(
-            "{}: {} ({tier}{z})",
-            row["column"].as_str().unwrap_or("?"),
-            row["direction"].as_str().unwrap_or("mixed"),
-        )
-    }
-}
-
-/// Markdown of one cluster section.
-pub fn section_markdown(c: &Value) -> String {
-    let mut lines = vec![
-        format!(
-            "### Cluster {}: {}",
-            c["cluster_id"],
-            c["semantic_name"].as_str().unwrap_or("")
-        ),
-        format!("- Size: {} ({}%)", c["size"], fmt_num(&c["size_pct"], 1)),
-    ];
-    if let Some(n) = c["topological_neighbors"]
-        .as_array()
-        .filter(|n| !n.is_empty())
-    {
-        let list: Vec<String> = n
-            .iter()
-            .map(|x| {
-                format!(
-                    "{} ({})",
-                    x["cluster_id"],
-                    fmt_num(&x["bridge_strength"], 2)
-                )
-            })
-            .collect();
-        lines.push(format!("- Neighbours: {}", list.join(", ")));
-    }
-    for (key, title) in [
-        ("feature_preview", "Feature preview"),
-        ("numeric_features", "Numeric features"),
-        ("categorical_features", "Categorical features"),
-    ] {
-        if let Some(rows) = c[key].as_array().filter(|r| !r.is_empty()) {
-            lines.push(format!("- {title}:"));
-            lines.extend(rows.iter().map(|r| format!("  - {}", feature_line(r))));
-        }
-    }
-    if let Some(rows) = c["central_rows"].as_array().filter(|r| !r.is_empty()) {
-        lines.push(format!(
-            "- Central rows: {} (structured content)",
-            rows.len()
-        ));
-    }
-    if let Some(t) = c["sections_trimmed"].as_object() {
-        let cut: Vec<String> = t
-            .iter()
-            .map(|(k, v)| format!("{k} {}/{}", v["shown"], v["total"]))
-            .collect();
-        lines.push(format!("- Shortened: {}", cut.join(", ")));
-    }
-    lines.join("\n")
-}
-
-/// Markdown of a cluster index.
-pub fn index_markdown(index: &Value) -> String {
-    let mut lines = vec![
-        format!("## Cluster Index ({} clusters)", index["total"]),
-        String::new(),
-    ];
-    for c in index["clusters"].as_array().into_iter().flatten() {
-        let label = c["label"]
-            .as_str()
-            .map(|l| format!(": {l}"))
-            .unwrap_or_default();
-        lines.push(format!("- {} (n={}){label}", c["cluster_id"], c["size"]));
-    }
-    for g in index["grouped"].as_array().into_iter().flatten() {
-        lines.push(format!(
-            "- {} clusters of size {}: {}",
-            g["count"],
-            g["size"],
-            g["cluster_ids"].as_str().unwrap_or("")
-        ));
-    }
-    lines.join("\n")
-}
-
-/// The dossier header in Markdown, from the payload.
-fn dossier_header(p: &Value) -> String {
-    [
-        "# Cluster Dossier".to_owned(),
-        String::new(),
-        format!(
-            "- cluster_assignment_id: `{}` (the session's live labels)",
-            p["cluster_assignment_id"].as_str().unwrap_or("")
-        ),
-        format!("- run_id: `{}`", p["run_id"].as_str().unwrap_or("")),
-        format!(
-            "- Method: {}; clusters: {}; interpretation threshold {} (construction {})",
-            p["method_applied"].as_str().unwrap_or("?"),
-            p["cluster_count"],
-            fmt_num(&p["interpretation_edge_weight_threshold_applied"], 4),
-            fmt_num(&p["construction_threshold"], 4),
-        ),
-        format!(
-            "- Readiness: {}",
-            p["cluster_result"]["interpretation_readiness"]["status"]
-                .as_str()
-                .unwrap_or("unknown")
-        ),
-    ]
-    .join("\n")
-}
-
 /// Keys of a dossier payload that are bulk, not header: trimmed before any
 /// cluster section is dropped.
 const DOSSIER_BULK: [&str; 9] = [
@@ -422,6 +308,9 @@ const DOSSIER_BULK: [&str; 9] = [
     "cluster_result",
     "cluster_selection",
 ];
+
+/// Section list caps tried in turn before sections are dropped.
+const SECTION_CAPS: [usize; 3] = [5, 3, 1];
 
 /// Fit a finished dossier `(payload, text)` whose assignment has been
 /// published: the clustering's sizes and labels come from the session (or,
@@ -462,6 +351,10 @@ pub fn fit_published(state: &ServerState, payload: Value, text: Option<String>) 
 /// characters. `meta` is the clustering's `cluster_result_payload` (the
 /// payload only keeps a bounded size summary); `evidence` labels the
 /// index. `text` is the Markdown view, or `None` for JSON.
+///
+/// The pipeline: rank the sections, measure the dossier as rendered, then
+/// shrink sections, drop clusters from the end, and finally keep only the
+/// header, the index and the truncation.
 pub fn fit_dossier(
     mut payload: Value,
     text: Option<String>,
@@ -470,13 +363,42 @@ pub fn fit_dossier(
     budget: usize,
 ) -> CallToolResult {
     let order = size_order_of_meta(meta);
-    let total = order.len();
-    let assignment_id = payload["cluster_assignment_id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    // Sections in canonical order: the longest prefix of it the dossier
-    // rendered, so the next cursor is exact.
+    let mut sections = rank_sections(&mut payload, &order);
+    let labels = labels_of(evidence);
+    // The index is in both views; it gets an eighth of the budget per view.
+    payload["cluster_index"] = cluster_index(&order, &labels, budget / 8);
+    let fit = Fit {
+        order: &order,
+        assignment_id: payload["cluster_assignment_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        markdown: text.is_some(),
+        budget,
+    };
+
+    // 1. As rendered, with the index.
+    if let Some(r) =
+        fit.within(fit.render(&payload, &sections, sections.len(), false, text.as_deref()))
+    {
+        return r;
+    }
+    // 2. Bulk keys trimmed, then shorter sections, then fewer of them.
+    trim_bulk(&mut payload, budget);
+    if let Some(r) = fit.shrink_sections(&payload, &mut sections) {
+        return r;
+    }
+    if let Some(r) = fit.drop_clusters(&payload, &sections) {
+        return r;
+    }
+    // 3. Header and index only, the index grouped harder.
+    payload["cluster_index"] = cluster_index(&order, &labels, budget / 16);
+    fit.header_only(&payload, &sections)
+}
+
+/// The rendered sections in canonical order: the longest prefix of it the
+/// dossier rendered, so the next cursor is exact.
+fn rank_sections(payload: &mut Value, order: &[(i64, usize)]) -> Vec<Value> {
     let mut by_id: BTreeMap<i64, Value> = payload["clusters"]
         .as_array_mut()
         .map(std::mem::take)
@@ -484,123 +406,145 @@ pub fn fit_dossier(
         .into_iter()
         .filter_map(|c| Some((c["cluster_id"].as_i64()?, c)))
         .collect();
-    let sections: Vec<Value> = order.iter().map_while(|(id, _)| by_id.remove(id)).collect();
-    let labels = labels_of(evidence);
-    // The index is in both views; it gets an eighth of the budget per view.
-    payload["cluster_index"] = cluster_index(&order, &labels, budget / 8);
+    order.iter().map_while(|(id, _)| by_id.remove(id)).collect()
+}
 
-    let render =
-        |payload: &Value, sections: &[Value], n: usize, trimmed: bool, original: Option<&str>| {
-            let mut p = payload.clone();
-            p["clusters"] = json!(sections[..n]);
-            p["clusters_returned"] = json!(n);
-            p["clusters_omitted"] = json!(total - n);
-            let omitted: Vec<i64> = order[n..].iter().map(|(id, _)| *id).collect();
-            let next = if n < total {
-                Some(next_page(&assignment_id, n, &Map::new()))
-            } else if trimmed && n > 0 {
-                let ids: Vec<i64> = order[..n.min(8)].iter().map(|(id, _)| *id).collect();
-                Some(next_ids(&assignment_id, &ids, &Map::new()))
-            } else {
-                None
-            };
-            let t = truncation(n, total, &omitted, trimmed, budget, next);
-            let line = truncation_line(&t);
-            p["truncation"] = t;
-            let text = match (&text, original) {
-                (Some(_), Some(original)) => {
-                    format!(
-                        "{original}\n\n{}\n\n{line}",
-                        index_markdown(&p["cluster_index"])
-                    )
-                }
-                (Some(_), None) => {
-                    let body: Vec<String> = p["clusters"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(section_markdown)
-                        .collect();
-                    format!(
-                        "{}\n\n{line}\n\n{}\n\n## Clusters\n\n{}",
-                        dossier_header(&p),
-                        index_markdown(&p["cluster_index"]),
-                        body.join("\n\n")
-                    )
-                }
-                (None, _) => serde_json::to_string(&p).unwrap_or_default(),
-            };
-            (p, text)
-        };
-
-    // 1. As rendered, with the index.
-    let n_all = sections.len();
-    let (p, t) = render(&payload, &sections, n_all, false, text.as_deref());
-    if pair_chars(&p, &t) <= budget {
-        return ok_result(p, Some(t));
-    }
-    // 2. Bulk keys trimmed, then shorter sections, then fewer of them.
+/// Trim the dossier's bulk keys to a fortieth of the budget each.
+fn trim_bulk(payload: &mut Value, budget: usize) {
     for key in DOSSIER_BULK {
         if let Some(v) = payload.get_mut(key) {
             budget::trim_value(v, budget / 40);
         }
     }
-    let mut trimmed_sections = sections.clone();
-    for cap in [5, 3, 1] {
-        for s in &mut trimmed_sections {
-            cap_sections(s, cap);
-        }
-        let (p, t) = render(&payload, &trimmed_sections, n_all, true, None);
-        if pair_chars(&p, &t) <= budget {
-            return ok_result(p, Some(t));
-        }
-    }
-    let (mut lo, mut hi) = (0, n_all);
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        let (p, t) = render(&payload, &trimmed_sections, mid, true, None);
-        if pair_chars(&p, &t) <= budget {
-            lo = mid;
+}
+
+/// One dossier being fitted: what every rendering of it shares.
+struct Fit<'a> {
+    order: &'a [(i64, usize)],
+    assignment_id: String,
+    markdown: bool,
+    budget: usize,
+}
+
+impl Fit<'_> {
+    /// The dossier with its first `n` sections, its truncation attached,
+    /// and its text view (`original` kept when given).
+    fn render(
+        &self,
+        payload: &Value,
+        sections: &[Value],
+        n: usize,
+        trimmed: bool,
+        original: Option<&str>,
+    ) -> (Value, String) {
+        let total = self.order.len();
+        let mut p = payload.clone();
+        p["clusters"] = json!(sections[..n]);
+        p["clusters_returned"] = json!(n);
+        p["clusters_omitted"] = json!(total - n);
+        let t = self.truncation(n, trimmed);
+        let line = truncation_line(&t);
+        p["truncation"] = t;
+        let text = if self.markdown {
+            dossier_render::dossier_markdown(&p, &line, original)
         } else {
-            hi = mid - 1;
-        }
+            serde_json::to_string(&p).unwrap_or_default()
+        };
+        (p, text)
     }
-    let (p, t) = render(&payload, &trimmed_sections, lo, true, None);
-    if pair_chars(&p, &t) <= budget {
-        return ok_result(p, Some(t));
+
+    /// The `truncation` of a rendering that keeps `n` sections.
+    fn truncation(&self, n: usize, trimmed: bool) -> Value {
+        let omitted: Vec<i64> = self.order[n..].iter().map(|(id, _)| *id).collect();
+        let next = if n < self.order.len() {
+            Some(next_page(&self.assignment_id, n, &Map::new()))
+        } else if trimmed && n > 0 {
+            let ids: Vec<i64> = self.order[..n.min(8)].iter().map(|(id, _)| *id).collect();
+            Some(next_ids(&self.assignment_id, &ids, &Map::new()))
+        } else {
+            None
+        };
+        truncation(n, self.order.len(), &omitted, trimmed, self.budget, next)
     }
-    // 3. Header and index only, the index grouped harder; then whatever
-    //    else is left is trimmed (the middleware is the last backstop).
-    payload["cluster_index"] = cluster_index(&order, &labels, budget / 16);
-    let (mut p, _) = render(&payload, &trimmed_sections, 0, true, None);
-    let keep = budget / 2 - 200;
-    if budget::structured_chars(&p) > keep {
-        for (k, v) in p.as_object_mut().into_iter().flatten() {
-            if !matches!(
-                k.as_str(),
-                "truncation" | "cluster_index" | release::KEY | phirewall::KEY
-            ) {
-                budget::trim_value(v, budget / 40);
+
+    /// The result, if the rendering fits the budget.
+    fn within(&self, (p, t): (Value, String)) -> Option<CallToolResult> {
+        (pair_chars(&p, &t) <= self.budget).then(|| ok_result(p, Some(t)))
+    }
+
+    /// Cap every section harder in turn; the first rendering that fits.
+    fn shrink_sections(&self, payload: &Value, sections: &mut [Value]) -> Option<CallToolResult> {
+        for cap in SECTION_CAPS {
+            for s in sections.iter_mut() {
+                cap_sections(s, cap);
+            }
+            let fitted = self.within(self.render(payload, sections, sections.len(), true, None));
+            if fitted.is_some() {
+                return fitted;
             }
         }
+        None
     }
-    let (mut p, mut t) = render(&p, &trimmed_sections, 0, true, None);
-    if pair_chars(&p, &t) > budget {
-        // Only the truncation is sacred now; the middleware stays the
-        // backstop for anything still over.
+
+    /// The most sections that fit, if any count does.
+    fn drop_clusters(&self, payload: &Value, sections: &[Value]) -> Option<CallToolResult> {
+        let (mut lo, mut hi) = (0, sections.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            let (p, t) = self.render(payload, sections, mid, true, None);
+            if pair_chars(&p, &t) <= self.budget {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        self.within(self.render(payload, sections, lo, true, None))
+    }
+
+    /// Header, index and truncation only; whatever else is left is trimmed
+    /// (the middleware is the last backstop).
+    fn header_only(&self, payload: &Value, sections: &[Value]) -> CallToolResult {
+        let (mut p, _) = self.render(payload, sections, 0, true, None);
+        let keep = self.budget / 2 - 200;
+        if budget::structured_chars(&p) > keep {
+            trim_all_but_sacred(&mut p, self.budget);
+        }
+        let (mut p, mut t) = self.render(&p, sections, 0, true, None);
+        if pair_chars(&p, &t) > self.budget {
+            t = self.last_resort(&mut p);
+        }
+        ok_result(p, Some(t))
+    }
+
+    /// Only the truncation is sacred now; the middleware stays the backstop
+    /// for anything still over. Returns the text view.
+    fn last_resort(&self, p: &mut Value) -> String {
         let truncation = p["truncation"].clone();
-        budget::trim_value(&mut p, budget / 3);
+        budget::trim_value(p, self.budget / 3);
         p["truncation"] = truncation;
-        t = match &text {
-            Some(_) => format!(
+        if self.markdown {
+            format!(
                 "{}\n\n{}",
-                dossier_header(&p),
+                dossier_render::dossier_header(p),
                 truncation_line(&p["truncation"])
-            ),
-            None => serde_json::to_string(&p).unwrap_or_default(),
-        };
+            )
+        } else {
+            serde_json::to_string(p).unwrap_or_default()
+        }
     }
-    ok_result(p, Some(t))
+}
+
+/// Trim every key of a rendered dossier but the truncation, the index and
+/// the Phirewall blocks.
+fn trim_all_but_sacred(p: &mut Value, budget: usize) {
+    for (k, v) in p.as_object_mut().into_iter().flatten() {
+        if !matches!(
+            k.as_str(),
+            "truncation" | "cluster_index" | release::KEY | phirewall::KEY
+        ) {
+            budget::trim_value(v, budget / 40);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ pub mod config;
 pub mod create_config;
 pub mod diagnostics;
 pub mod dossier_budget;
+pub mod dossier_render;
 pub mod export;
 pub mod ingest;
 pub mod longitudinal;

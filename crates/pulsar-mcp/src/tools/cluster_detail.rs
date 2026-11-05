@@ -24,9 +24,9 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Map, Value};
 
 use super::dossier_budget::{
-    self, cap_sections, next_ids, next_page, section_markdown, size_order_of_labels, truncation,
-    truncation_line,
+    self, cap_sections, next_ids, next_page, size_order_of_labels, truncation, truncation_line,
 };
+use super::dossier_render::section_markdown;
 use super::params::Format;
 use super::{clustering, ToolSpec};
 use crate::budget::{self, pair_chars};
