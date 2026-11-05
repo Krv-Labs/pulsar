@@ -144,8 +144,10 @@ carry `error_code` plus `agent_action`: act on `agent_action` before retrying.
 weighted affinity are persisted in the store (`get_runtime_context` shows `cache_dir`), so
 every model-reading tool accepts any completed `run_id`, on any transport, across server
 restarts. Omit `run_id` to use the session's latest run. A run that is still `queued` or
-`running` returns `RUN_NOT_COMPLETE` with its job state; an unknown id returns
-`RUN_ID_UNKNOWN`. The in-memory model cache keeps the last `PULSAR_MCP_MODEL_CACHE_SIZE`
+`running` returns `RUN_NOT_COMPLETE` with its job state; a well-formed but unknown id returns
+`RUN_ID_UNKNOWN` and a malformed one returns `INVALID_HANDLE`. The store keeps the last
+`PULSAR_STORE_RUN_RETENTION` completed runs per dataset (default 20, `0` keeps all); older
+run_ids return `RUN_ID_UNKNOWN`. The sweep reports each run's size as `run_disk_mb`. The in-memory model cache keeps the last `PULSAR_MCP_MODEL_CACHE_SIZE`
 fitted models (default 3) for faster reads; evicted runs are reloaded from disk.
 
 ## GRID GEOMETRY & EXPERT AGENT AUTONOMY
