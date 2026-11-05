@@ -361,31 +361,31 @@ fn json_format() -> Format {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct BuildParams {
-    /// Required. From ingest_dataset or sample_longitudinal_entities: long-format panel, one row per (entity, time step), numeric features.
+    /// Required. From ingest_dataset or sample_longitudinal_entities: long-format panel, one row per (entity, time step).
     #[serde(default)]
     pub dataset_id: String,
     /// Column identifying the tracked entity (e.g. an id). Required.
     #[serde(default)]
     pub entity_column: String,
-    /// Column holding the discrete, orderable time step. Required; continuous timestamps must be binned before ingest.
+    /// Column holding the discrete, orderable time step. Required; bin continuous timestamps before ingest.
     #[serde(default)]
     pub time_column: String,
-    /// Numeric columns to embed. Omit to use every numeric column except the entity/time keys and any preprocessing.drop_columns.
+    /// Numeric columns to embed. Omit for every numeric column except entity/time keys and preprocessing.drop_columns.
     #[serde(default)]
     pub feature_columns: Option<Vec<String>>,
-    /// 'trajectory' (default): sparse graph over (entity, time) observations; edges may cross time steps. 'temporal': dense (n, n, T) entity tensor, memory-guarded. 'both': build each.
+    /// 'trajectory' (default): sparse graph over (entity, time) observations, edges may cross time. 'temporal': dense (n, n, T) tensor, memory-guarded. 'both': build each.
     #[serde(default)]
     pub representation: RepresentationParam,
     /// Pulsar params YAML from create_config. Omit to reuse the session's active config. Excess projection dimensions are dropped (see config_adaptation).
     #[serde(default)]
     pub config_yaml: String,
-    /// Entities missing at some time step: 'drop_entity' removes them, 'forward_fill' carries values forward, 'allow_ragged' keeps them (trajectory only).
+    /// Entities missing a time step: 'drop_entity' removes them, 'forward_fill' carries values forward, 'allow_ragged' keeps them (trajectory only).
     #[serde(default)]
     pub on_missing: MissingParam,
-    /// Construction-time floor (>= 0) on the weight of trajectory edges (similarity between two (entity, time) observations); edges below it are never built. 0 keeps all. Interpretation thresholds on later tools filter on top of this.
+    /// Construction floor (>= 0) on trajectory edge weights (similarity between two observations); lower edges are never built. 0 keeps all. Later interpretation thresholds filter on top.
     #[serde(default)]
     pub similarity_threshold: f64,
-    /// 'summary' (default): panel shape, build cost and graph surface. 'full': also the normalized config_yaml and the list of time labels.
+    /// 'summary' (default): panel shape, build cost and graph surface. 'full': also normalized config_yaml and time labels.
     #[serde(default)]
     pub detail: Detail,
     /// Text view: 'json' (default) or 'markdown' table. structured_content is identical.
@@ -405,7 +405,7 @@ pub fn build_spec() -> ToolSpec {
     ToolSpec {
         name: BUILD,
         title: "Build Longitudinal Graph",
-        description: "Pivot a long-format dataset into a panel and build longitudinal graphs. Returns a longitudinal_id handle, panel shape and alignment report, build cost, and graph surface. Does not touch the static sweep/cluster state. Use before diagnose_longitudinal_graph, get_trajectory_archetypes, get_cross_time_neighbors or classify_trajectories.",
+        description: "Pivot a long-format dataset into a panel and build longitudinal graphs. Returns a longitudinal_id handle, panel shape and alignment report, build cost and graph surface. Does not touch static sweep/cluster state. Use before diagnose_longitudinal_graph, get_trajectory_archetypes, get_cross_time_neighbors or classify_trajectories.",
         input_schema: input_schema::<BuildParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -1137,7 +1137,7 @@ pub struct ArchetypesParams {
     /// Example entity ids listed per archetype (>= 0).
     #[serde(default = "five")]
     pub max_entities_per_archetype: usize,
-    /// 'summary' and 'full' return the same bounded payload (the value is only echoed); widen with max_archetypes / max_entities_per_archetype.
+    /// 'summary' and 'full' return the same bounded payload; widen with max_archetypes / max_entities_per_archetype.
     #[serde(default)]
     pub detail: Detail,
     /// Text view: 'markdown' (default) or 'json'. structured_content is identical.
@@ -1340,7 +1340,7 @@ pub fn neighbors_spec() -> ToolSpec {
     ToolSpec {
         name: NEIGHBORS,
         title: "Cross-Time Neighbors",
-        description: "Rank observations from other time steps that resemble one observation (\"who does this entity at this time look like at a different time?\"). Needs the trajectory representation. Identify the source by observation_id or by entity_id plus t; the response gives both time_label and the positional t index.",
+        description: "Rank observations from other time steps that resemble one observation (\"who does this entity at this time look like elsewhere?\"). Needs the trajectory representation. Identify the source by observation_id or entity_id plus t; the response gives time_label and the positional t index.",
         input_schema: input_schema::<NeighborsParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -1600,7 +1600,7 @@ pub struct ClassifyParams {
     /// From build_longitudinal_graph. Omit for the most recent panel.
     #[serde(default)]
     pub longitudinal_id: String,
-    /// 'complexity': entropy and transition count. 'transition': Markov self-retention. 'sequence': path shape. 'levenshtein'/'dtw': complete-linkage clustering of pairwise distance into 4 cohorts (O(n^2)).
+    /// 'complexity': entropy and transition count. 'transition': Markov self-retention. 'sequence': path shape. 'levenshtein'/'dtw': complete-linkage clustering into 4 cohorts (O(n^2)).
     #[serde(default)]
     pub method: ClassifyMethod,
     /// Interpretation filter (>= 0) on CO_SIMILAR edges that defines the clusters whose per-entity sequences are classified.
@@ -1619,7 +1619,7 @@ pub fn classify_spec() -> ToolSpec {
     ToolSpec {
         name: CLASSIFY,
         title: "Classify Trajectories",
-        description: "Classify each entity's cluster path through time into trajectory classes. Returns a per-class summary plus a bounded entity preview (all entities with detail=\"full\"). Needs the trajectory representation. Use get_trajectory_archetypes to group by exact sequence; this tool gives rule- or distance-based classes.",
+        description: "Classify each entity's cluster path through time into trajectory classes. Returns a per-class summary plus a bounded entity preview (all entities with detail='full'). Needs the trajectory representation. Use get_trajectory_archetypes for exact sequences; this gives rule- or distance-based classes.",
         input_schema: input_schema::<ClassifyParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -1692,19 +1692,70 @@ pub async fn classify(state: &ServerState, p: ClassifyParams) -> Result<CallTool
     payload["status"] = json!("ok");
     payload["longitudinal_id"] = json!(artifact.longitudinal_id);
     payload["detail"] = json!(p.detail.as_str());
-    payload["entities_returned"] = json!(if is_full { full.len() } else { preview.len() });
-    payload["entities_omitted"] = json!(if is_full {
-        0
-    } else {
-        full.len() - preview.len()
-    });
     payload["classification_preview"] = Value::Object(preview);
+    let preview_len = payload["classification_preview"]
+        .as_object()
+        .map_or(0, |m| m.len());
     if is_full {
-        payload["classification"] = Value::Object(full);
+        // One entry per entity: halve the map (sorted keys) until the result
+        // fits the budget, the way the dossier fits itself. The class
+        // summary and the preview always stay; `truncation` reports the rest.
+        let total = full.len();
+        let budget = crate::budget::render_budget(state.options.max_response_bytes);
+        let mut keep = total;
+        loop {
+            let mut candidate = payload.clone();
+            candidate["classification"] = Value::Object(
+                full.iter()
+                    .take(keep)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            );
+            candidate["entities_returned"] = json!(keep);
+            candidate["entities_omitted"] = json!(total - keep);
+            if keep < total {
+                candidate["truncation"] = json!({
+                    "truncated": true,
+                    "budget_chars": budget,
+                    "entities_returned": keep,
+                    "entities_omitted": total - keep,
+                    "next": "classify_trajectories(detail='summary') for the per-class summary and preview",
+                });
+            }
+            let result = render(candidate, p.response_format, |v| {
+                classification_markdown(v, method)
+            });
+            if crate::budget::visible_chars(&result) <= budget || keep == 0 {
+                return Ok(capped_text(result, total, keep, budget));
+            }
+            keep /= 2;
+        }
     }
+    payload["entities_returned"] = json!(preview_len);
+    payload["entities_omitted"] = json!(full.len() - preview_len);
     Ok(render(payload, p.response_format, |v| {
         classification_markdown(v, method)
     }))
+}
+
+/// Name a capped `classify_trajectories` result in one text line, mirroring
+/// its `truncation`.
+fn capped_text(
+    mut result: CallToolResult,
+    total: usize,
+    keep: usize,
+    budget: usize,
+) -> CallToolResult {
+    if keep >= total {
+        return result;
+    }
+    if let Some(rmcp::model::ContentBlock::Text(t)) = result.content.first_mut() {
+        t.text = format!(
+            "Truncated: classification capped from {total} to {keep} entities to fit the {budget}-character budget. Next: classify_trajectories(detail='summary').\n\n{}",
+            t.text
+        );
+    }
+    result
 }
 
 fn classification_markdown(payload: &Value, method: ClassifyMethod) -> String {

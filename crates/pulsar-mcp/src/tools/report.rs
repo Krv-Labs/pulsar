@@ -5,10 +5,11 @@
 //! Known divergences from Python: none in the tool; the figure's layout for
 //! graphs of 500+ nodes is documented in `pulsar_report::layout`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pulsar_analysis::dossier::build_dossier;
+use pulsar_analysis::dossier::{build_dossier, build_dossier_with_central_rows};
 use pulsar_analysis::feature_evidence::build_feature_evidence_index;
 use pulsar_analysis::GraphAnalysis;
 use pulsar_report::{dossier_to_html, ReportGraph};
@@ -152,28 +153,75 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     let config_yaml = view.record.config_yaml.clone();
     let (n_ball_maps, minhash_d) = (view.record.n_ball_maps, view.minhash_d());
     let names = p.cluster_names.clone();
+    let graph_cache = state.graph_cache_for_live(&live, &view.record);
     let worker_clusters = Arc::clone(&clusters);
     let html = tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
         let fitted = &live.fitted;
         let labels = &worker_clusters.labels;
         let mut sorted_exclude = exclude.clone();
         sorted_exclude.sort();
-        let evidence = if sorted_exclude == worker_clusters.evidence_key.exclude_columns {
-            worker_clusters.evidence.clone()
-        } else {
-            Arc::new(
-                build_feature_evidence_index(&live.table, labels, &fitted.graph.edges, &exclude, None)
-                    .map_err(|e| failed(e.to_string()))?,
-            )
-        };
-        let affinity = fitted.weighted_edges(Some(0.0));
-        let metrics = GraphAnalysis::new(&fitted.graph)
-            .ok()
-            .map(|a| a.metrics(fitted.construction_threshold, n_ball_maps, Some(&affinity), minhash_d))
+        let metrics = graph_cache
+            .metrics
+            .clone()
+            .or_else(|| {
+                GraphAnalysis::new(&fitted.graph).ok().map(|a| {
+                    a.metrics(
+                        fitted.construction_threshold,
+                        n_ball_maps,
+                        Some(&graph_cache.affinity.edges),
+                        minhash_d,
+                    )
+                })
+            })
             .and_then(|m| serde_json::to_value(m).ok())
             .unwrap_or_else(|| json!({}));
-        let mut dossier = build_dossier(&evidence, &live.table, labels, &fitted.graph.edges, "full", metrics)
+        let mut dossier = if sorted_exclude == worker_clusters.evidence_key.exclude_columns {
+            let mut guard = worker_clusters
+                .dossiers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(cached_full) = guard.get("full") {
+                cached_full.clone()
+            } else {
+                let existing_central: Option<HashMap<i64, Vec<Value>>> =
+                    guard.values().next().map(|d| {
+                        d.clusters
+                            .iter()
+                            .map(|c| (c.cluster_id, c.central_rows.clone()))
+                            .collect()
+                    });
+                let built = build_dossier_with_central_rows(
+                    &worker_clusters.evidence,
+                    &live.table,
+                    labels,
+                    &fitted.graph.edges,
+                    "full",
+                    metrics,
+                    existing_central.as_ref(),
+                )
+                .map_err(|e| failed(e.to_string()))?;
+                guard.insert("full".to_owned(), built.clone());
+                built
+            }
+        } else {
+            let evidence = build_feature_evidence_index(
+                &live.table,
+                labels,
+                &fitted.graph.edges,
+                &exclude,
+                None,
+            )
             .map_err(|e| failed(e.to_string()))?;
+            build_dossier(
+                &evidence,
+                &live.table,
+                labels,
+                &fitted.graph.edges,
+                "full",
+                metrics,
+            )
+            .map_err(|e| failed(e.to_string()))?
+        };
         let valid: Vec<i64> = dossier.clusters.iter().map(|c| c.cluster_id).collect();
         let normalized = normalize_cluster_names(&names.unwrap_or_default(), &valid, false).map_err(|reason| {
             ToolError::new(
@@ -190,8 +238,11 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         }
         let graph = ReportGraph {
             graph: &fitted.graph,
-            affinity: &affinity,
-            stability: fitted.stability.as_ref(),
+            affinity: graph_cache.threshold_graph.edges(),
+            stability: fitted
+                .stability
+                .as_ref()
+                .or(graph_cache.stability.as_deref()),
             resolved_threshold: fitted.construction_threshold,
         };
         Ok(dossier_to_html(&dossier, labels, Some(&graph), Some(&config_yaml)))

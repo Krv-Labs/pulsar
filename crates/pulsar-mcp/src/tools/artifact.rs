@@ -55,10 +55,10 @@ fn yes() -> bool {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct Params {
-    /// Artifact type. 'spectral_sparsifier' builds an edge-sparsified approximation of the weighted graph (the only supported kind).
+    /// Artifact type. 'spectral_sparsifier' edge-sparsifies the weighted graph (the only supported kind).
     #[serde(default = "spectral_sparsifier")]
     pub kind: String,
-    /// Run to use, from run_topological_sweep. Omit for the latest run. Any stored run works with estimate_only=True (a pure read); building publishes into the session, so it must be the latest run (else SESSION_REVISION_CONFLICT).
+    /// Run to use, from run_topological_sweep. Omit for the latest. Any stored run works with estimate_only=True; building publishes into the session, so it must be the latest run.
     #[serde(default)]
     pub run_id: String,
     /// Sparsifier accuracy in (0, inf). Smaller is more faithful and costs roughly 1/epsilon^2 more time and edges. Default 1.0.
@@ -89,7 +89,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Graph Artifact",
-        description: "Estimate or build a spectral-sparsifier graph artifact (estimates for any stored run; builds for the latest). Expensive by design: estimate_only defaults true. A built artifact gets an artifact_id usable with diagnose_cosmic_graph and get_topological_skeleton (surface='artifact'). It never changes the fitted graph.",
+        description: "Estimate or build a spectral-sparsifier graph artifact (estimates for any stored run; builds for the latest). Expensive by design: estimate_only defaults true. A built artifact gets an artifact_id usable with diagnose_cosmic_graph and get_topological_skeleton (surface='artifact'); it never changes the fitted graph.",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[

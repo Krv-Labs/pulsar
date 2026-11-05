@@ -21,9 +21,7 @@ use serde_json::{json, Map, Value};
 
 use crate::envelope::ToolError;
 use crate::phirewall::KEY as SUMMARY_KEY;
-
-/// Structured-content key the gateway removes before the agent sees it.
-pub const RELEASE_KEY: &str = "io.phirewall/release";
+use crate::release;
 
 /// Default hard limit, in characters.
 pub const DEFAULT_HARD_LIMIT: usize = 45_000;
@@ -57,9 +55,9 @@ pub fn json_chars(value: &Value) -> usize {
 /// Characters of structured content the agent sees (without the release key).
 pub fn structured_chars(value: &Value) -> usize {
     match value {
-        Value::Object(map) if map.contains_key(RELEASE_KEY) => {
+        Value::Object(map) if map.contains_key(release::KEY) => {
             let mut visible = map.clone();
-            visible.remove(RELEASE_KEY);
+            visible.remove(release::KEY);
             json_chars(&Value::Object(visible))
         }
         other => json_chars(other),
@@ -78,7 +76,7 @@ fn text_chars(result: &CallToolResult) -> usize {
 }
 
 /// Agent-visible characters of a result: text plus structured content,
-/// excluding [`RELEASE_KEY`].
+/// excluding [`release::KEY`].
 pub fn visible_chars(result: &CallToolResult) -> usize {
     text_chars(result)
         + result
@@ -292,7 +290,7 @@ fn largest(v: &Value, path: &str) -> Option<(String, usize)> {
             Value::Object(map) => {
                 for (k, child) in map {
                     if path.is_empty()
-                        && (k == RELEASE_KEY || k == SUMMARY_KEY || k == "truncation")
+                        && (k == release::KEY || k == SUMMARY_KEY || k == "truncation")
                     {
                         continue;
                     }
@@ -395,7 +393,7 @@ mod tests {
     fn the_release_block_is_not_counted() {
         let small = ok_result(json!({"a": 1}), Some("x".into()));
         let with = ok_result(
-            json!({"a": 1, RELEASE_KEY: {"rows": "x".repeat(10_000)}}),
+            json!({"a": 1, release::KEY: {"rows": "x".repeat(10_000)}}),
             Some("x".into()),
         );
         assert_eq!(visible_chars(&small), visible_chars(&with));

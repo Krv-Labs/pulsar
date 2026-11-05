@@ -14,6 +14,7 @@ pub mod dossier_budget;
 pub mod export;
 pub mod ingest;
 pub mod longitudinal;
+pub mod merge_small_groups;
 pub mod meta;
 pub mod plan;
 pub mod refine_config;
@@ -85,6 +86,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         artifact::spec(),
         clustering::spec(),
         cluster_detail::spec(),
+        merge_small_groups::spec(),
         longitudinal::build_spec(),
         longitudinal::diagnose_spec(),
         longitudinal::archetypes_spec(),
@@ -157,11 +159,19 @@ pub async fn dispatch(
         diagnostics::SKELETON => {
             diagnostics::skeleton(&state, parse_params(diagnostics::SKELETON, args)?).await
         }
-        clustering::NAME => clustering::call(&state, parse_params(clustering::NAME, args)?).await,
+        clustering::NAME => {
+            let mut result =
+                clustering::call(&state, parse_params(clustering::NAME, args)?).await?;
+            crate::release::attach_dossier(&state, &mut result);
+            Ok(result)
+        }
         cluster_detail::NAME => {
             cluster_detail::call(&state, parse_params(cluster_detail::NAME, args)?).await
         }
         artifact::NAME => artifact::call(&state, parse_params(artifact::NAME, args)?).await,
+        merge_small_groups::NAME => {
+            merge_small_groups::call(&state, parse_params(merge_small_groups::NAME, args)?).await
+        }
         cluster_evidence::PROFILE => {
             cluster_evidence::profile(&state, parse_params(cluster_evidence::PROFILE, args)?).await
         }

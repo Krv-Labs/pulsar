@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A dossier over the response limit no longer reports failure after it had already published new live labels (the agent never saw the new `cluster_assignment_id`, and the next cluster read failed with an unknown cluster id).
 - A sweep whose `save_config` file write fails says that the run completed, is now the session's latest run and cleared the cluster labels; `create_config` validates its config before storing the drafted plan.
+- Phirewall disclosure mode (`PULSAR_MCP_DISCLOSURE`, set by the Phirewall gateway with its own `MIN_PATIENTS` and `COUNT_ROUNDING`): every tool result releases counts only, each of at least k distinct patients (Phirewall tokens, else rows) and rounded, with secondary suppression; no cell values, means, medians, deviations, extremes or quantiles; per-row lists and patient tokens withheld; `get_cross_time_neighbors`, `export_html_report` and `export_dataset_bundle` refused. Results carry a `disclosure` block; `initialize` advertises `io.phirewall/disclosure`. Off by default, with results unchanged.
 
 ## [0.7.0] - 2026-10-28
 

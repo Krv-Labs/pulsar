@@ -20,7 +20,7 @@ pub fn guide_spec() -> ToolSpec {
     ToolSpec {
         name: GUIDE,
         title: "Workflow guide",
-        description: "Return the recommended end-to-end Pulsar workflow as markdown. Call once at the start of a session for the procedure (ingest, calibrate, run, diagnose, interpret). Structured content is {\"guide\": <markdown>}; the text view is the same markdown.",
+        description: "Return the recommended end-to-end Pulsar workflow as markdown. Call once at session start for the procedure (ingest, calibrate, run, diagnose, interpret). Structured content is {\"guide\"}; text is the same markdown.",
         input_schema: input_schema::<NoParams>(),
         output_schema: s::as_object(s::object(&[("guide", s::string())], &["guide"], false)),
         read_only: true,
@@ -41,7 +41,7 @@ pub fn runtime_spec() -> ToolSpec {
     ToolSpec {
         name: RUNTIME,
         title: "Runtime context",
-        description: "Report the server's runtime context: paths, session handles, transport, model cache. Returns cwd, cache_dir, session_id, latest handles, active config, transport, cached runs (model_cache) and path guidance. Call before file operations or when a handle seems stale.",
+        description: "Report the server's runtime context: paths, session handles, transport, model cache. Returns cwd, cache_dir, session_id, latest handles, active config, cached runs (model_cache) and path guidance. Call before file operations or when a handle seems stale.",
         input_schema: input_schema::<NoParams>(),
         output_schema: s::as_object(s::object(
             &[

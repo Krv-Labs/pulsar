@@ -4,11 +4,14 @@
 /// The terse tool map every client sees in `initialize`.
 pub const INSTRUCTIONS: &str = "Manifold discovery and topological data analysis for tabular datasets. Call \
 `get_workflow_guide` once for the end-to-end procedure and tool map.\n\
-Shared params across tools: `detail` ('summary' default; 'full' for audit/debug) and \
-`response_format` ('json' for structured payloads; 'markdown' where a readable rendering is supported).\n\
+`detail` ('summary' default; 'full' for the audit view) is a parameter of draft_preprocessing_plan, \
+create_config (yaml text), run_topological_sweep, diagnose_cosmic_graph, get_threshold_stability_curve, \
+get_topological_skeleton, get_sweep_history, generate_cluster_dossier and the longitudinal tools; each \
+tool's schema lists its own values.\n\
 Results carry structured content; errors set the MCP error flag with a JSON envelope \
-(error_code, agent_action). Long sweeps: run_topological_sweep(execution='async') returns a run_id \
-immediately; poll it with wait_job.";
+(error_code, agent_action). A long run_topological_sweep may return a task handle on clients that \
+support MCP tasks, which the client follows; clients that expose `execution` can pass 'async' to get a \
+run_id and poll it with wait_job / get_job.";
 
 pub const WORKFLOW_PROMPT: &str = r#"# Pulsar Topological Analysis Workflow
 
@@ -69,12 +72,13 @@ Reveal the dataset's topology; do not force convenient clusters.
 ## PHASE II: EXECUTE & VALIDATE
 4. Run: `run_topological_sweep(config_yaml, dataset_id)`. The response carries `run_id`, key
    metrics, the construction threshold, a threshold-stability summary and a finalization gate.
-   - Default `execution='sync'` waits for the fit. On clients that support the MCP tasks
-     extension the server returns a task handle instead and the client polls it transparently.
-   - `execution='async'` returns `{status: "running", run_id}` at once; poll with
-     `wait_job(run_id)` (blocks up to `timeout_s`, then reports progress) or `get_job(run_id)`.
-     The completed sweep response is persisted, so `wait_job` returns the same payload the
-     synchronous call would have.
+   - The call waits for the fit by default. On clients that support the MCP tasks extension
+     the server returns a task handle instead and the client follows it.
+   - If your client exposes `execution`, `execution='async'` returns `{status: "running", run_id}`
+     at once; `wait_job(run_id)` (blocks up to `timeout_s`, then reports progress) and
+     `get_job(run_id)` then read the job. The completed sweep response is persisted, so
+     `wait_job` returns the same payload the synchronous call would have. Where these are not
+     listed, the call returns when the fit ends, or hands the client a task handle that it follows.
 5. Validate: `diagnose_cosmic_graph`. Read it as graph-state measurement, not a directive. Use
    `scale`, `component_morphology`, `sweep_support`, `observed_patterns` and `risk_factors`
    to judge the graph against the user's objective.

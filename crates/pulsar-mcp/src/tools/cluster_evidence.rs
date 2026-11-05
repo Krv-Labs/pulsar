@@ -30,6 +30,7 @@ use super::params::Format;
 use super::ToolSpec;
 use crate::budget;
 use crate::envelope::{ok_result, ToolError};
+use crate::release;
 use crate::schema::{self as s, input_schema};
 use crate::state::{ClusterState, ServerState};
 
@@ -141,7 +142,7 @@ fn ok_enum() -> Value {
 pub struct ProfileParams {
     /// Integer cluster ID as listed by generate_cluster_dossier (cluster_selection.shown_ids). IDs are stable within one dossier.
     pub cluster_id: i64,
-    /// 'summary': headline features. 'standard' (default): ranked numeric and categorical evidence up to max_features. 'full': lossless evidence plus size telemetry.
+    /// 'summary': headline features. 'standard' (default): ranked numeric/categorical evidence. 'full': lossless evidence plus size telemetry.
     #[serde(default = "standard")]
     pub detail: DossierDetail,
     /// Maximum feature rows returned for this cluster (>= 1). Default 16.
@@ -150,10 +151,10 @@ pub struct ProfileParams {
     /// Text view: 'markdown' (default) or 'json'. structured_content is identical.
     #[serde(default)]
     pub response_format: Format,
-    /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
+    /// Optional provenance check: the run_id the session's cluster labels must come from; returns CLUSTERS_STALE otherwise. Omit to skip the check.
     #[serde(default)]
     pub run_id: String,
-    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge). Omit for the live labels.
     #[serde(default)]
     pub cluster_assignment_id: Option<String>,
 }
@@ -175,6 +176,7 @@ pub fn profile_spec() -> ToolSpec {
                 ("cluster", s::open_object()),
                 ("surface_labels_ref", s::string()),
                 ("surface_labels", s::open_object()),
+                (release::KEY, s::open_object()),
             ],
             &["status", "clusters_run_id", "cluster_result", "detail", "cluster"],
             false,
@@ -240,7 +242,11 @@ pub async fn profile(state: &ServerState, p: ProfileParams) -> Result<CallToolRe
         };
         Ok(ok_result(payload, text))
     };
-    fit_knob(state, "max_features", p.max_features, render, |_, _| None)
+    let mut result = fit_knob(state, "max_features", p.max_features, render, |_, _| None)?;
+    if let Some(payload) = result.structured_content.as_mut() {
+        release::attach_profile(state, &clusters, payload);
+    }
+    Ok(result)
 }
 
 /// Re-render with `knob` halved until the result fits the response budget
@@ -329,7 +335,7 @@ pub struct SignalParams {
     /// Restrict to these cluster IDs. Omit to use the top max_clusters clusters ranked by signal.
     #[serde(default)]
     pub cluster_ids: Option<Vec<i64>>,
-    /// 'summary' (default): core and supporting-tier features only, compact statistics. 'standard': also context-tier features; core/supporting rows carry every statistic. 'full': every feature with every statistic, plus full cluster sizes and surface_labels.
+    /// 'summary' (default): core/supporting features, compact statistics. 'standard': adds context-tier features; core/supporting rows carry every statistic. 'full': every feature/statistic plus full cluster sizes and surface_labels.
     #[serde(default)]
     pub detail: DossierDetail,
     /// Show at most this many clusters, ranked by signal (>= 1). Default 8.
@@ -338,10 +344,10 @@ pub struct SignalParams {
     /// Text view: 'markdown' (default) or 'json'. structured_content is identical.
     #[serde(default)]
     pub response_format: Format,
-    /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
+    /// Optional provenance check: the run_id the session's cluster labels must come from; returns CLUSTERS_STALE otherwise. Omit to skip the check.
     #[serde(default)]
     pub run_id: String,
-    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge). Omit for the live labels.
     #[serde(default)]
     pub cluster_assignment_id: Option<String>,
 }
@@ -362,6 +368,7 @@ pub fn signal_spec() -> ToolSpec {
                 ("signals", s::open_object()),
                 ("surface_labels_ref", s::string()),
                 ("surface_labels", s::open_object()),
+                (release::KEY, s::open_object()),
             ],
             &[
                 "status",
@@ -419,35 +426,39 @@ pub async fn signal(state: &ServerState, p: SignalParams) -> Result<CallToolResu
     );
     base.insert("feature_names".into(), json!(p.feature_names));
     base.insert("detail".into(), json!(p.detail.as_str()));
-    fit_knob(
+    let mut result = fit_knob(
         state,
         "max_clusters",
         p.max_clusters,
         render,
         |payload, k| next_clusters(SIGNAL, payload, k, &base, p.cluster_ids.as_deref()),
-    )
+    )?;
+    if let Some(payload) = result.structured_content.as_mut() {
+        release::attach_signal(state, &clusters, payload);
+    }
+    Ok(result)
 }
 
 // ---- get_cluster_signal_matrix ---------------------------------------------------------
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct MatrixParams {
-    /// Restrict the matrix to these cluster IDs. Omit for all clusters, truncated to max_clusters by signal.
+    /// Restrict to these cluster IDs; otherwise all clusters, truncated to max_clusters by signal.
     #[serde(default)]
     pub cluster_ids: Option<Vec<i64>>,
-    /// False (default) shows only core and supporting signal tiers. True also includes weaker 'context' tier rows.
+    /// False (default) shows only core and supporting tiers; true adds weaker 'context' rows.
     #[serde(default)]
     pub include_context_tier: bool,
-    /// Show at most this many clusters, ranked by signal (>= 1). Presentation-only truncation. Default 8.
+    /// Clusters shown, ranked by signal (>= 1); presentation-only. Default 8.
     #[serde(default = "eight")]
     pub max_clusters: usize,
-    /// True (default): markdown matrix text (z-scores for numeric, prevalence percent for categorical). False: JSON text.
+    /// True (default): markdown matrix text. False: JSON text.
     #[serde(default = "yes")]
     pub return_markdown: bool,
-    /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
+    /// Optional provenance check: the run_id the session's cluster labels must come from; returns CLUSTERS_STALE otherwise. Omit to skip the check.
     #[serde(default)]
     pub run_id: String,
-    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge). Omit for the live labels.
     #[serde(default)]
     pub cluster_assignment_id: Option<String>,
 }
@@ -479,12 +490,13 @@ pub fn matrix_spec() -> ToolSpec {
                             ("numeric_features_omitted", s::integer()),
                             ("categorical_features_omitted", s::integer()),
                             ("numeric_rows", s::array(open.clone())),
-                            ("categorical_rows", s::array(open)),
+                            ("categorical_rows", s::array(open.clone())),
                         ],
                         &["clusters_returned", "clusters_omitted"],
                         true,
                     ),
                 ),
+                (release::KEY, open),
             ],
             &[
                 "status",
@@ -559,13 +571,17 @@ pub async fn matrix(state: &ServerState, p: MatrixParams) -> Result<CallToolResu
         json!(clusters.cluster_assignment_id),
     );
     base.insert("include_context_tier".into(), json!(p.include_context_tier));
-    fit_knob(
+    let mut result = fit_knob(
         state,
         "max_clusters",
         p.max_clusters,
         render,
         |payload, k| next_clusters(MATRIX, payload, k, &base, ids),
-    )
+    )?;
+    if let Some(payload) = result.structured_content.as_mut() {
+        release::attach_matrix(state, &clusters, payload);
+    }
+    Ok(result)
 }
 
 // ---- compare_clusters ------------------------------------------------------------------
@@ -579,10 +595,10 @@ pub struct CompareParams {
     /// Return at most this many numeric features, ranked by |Cohen's d| (>= 1); features_omitted reports the rest. Default 20.
     #[serde(default = "twenty")]
     pub max_features: usize,
-    /// Optional provenance check: the run_id (from run_topological_sweep) the session's cluster labels must have been built from; returns CLUSTERS_STALE otherwise. Omit to use the current labels unchecked.
+    /// Optional provenance check: the run_id the session's cluster labels must come from; returns CLUSTERS_STALE otherwise. Omit to skip the check.
     #[serde(default)]
     pub run_id: String,
-    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge, while its run is loaded). Omit for the live labels.
+    /// Persisted cluster_assignment_id to read (an earlier dossier or a merge). Omit for the live labels.
     #[serde(default)]
     pub cluster_assignment_id: Option<String>,
 }
@@ -618,6 +634,7 @@ pub fn compare_spec() -> ToolSpec {
                         false,
                     )),
                 ),
+                (release::KEY, s::open_object()),
             ],
             &[
                 "status",
@@ -680,36 +697,44 @@ pub async fn compare(state: &ServerState, p: CompareParams) -> Result<CallToolRe
         .detail("cluster_a", json!(a))
         .detail("cluster_b", json!(b)));
     }
-    let shown = &results[..p.max_features.min(results.len())];
-    let omitted = results.len() - shown.len();
-    let rows: Vec<Value> = shown
-        .iter()
-        .map(|r| {
-            json!({
-                "column": r.column,
-                "mean_a": finite_or_null(r.mean_a),
-                "mean_b": finite_or_null(r.mean_b),
-                "p_val_t": finite_or_null(r.p_val_t),
-                "p_val_ks": finite_or_null(r.p_val_ks),
-                "cohens_d": finite_or_null(r.cohens_d),
+    let total = results.len();
+    let render = |max_features: usize| -> Result<CallToolResult, ToolError> {
+        let shown = &results[..max_features.min(total)];
+        let omitted = total - shown.len();
+        let rows: Vec<Value> = shown
+            .iter()
+            .map(|r| {
+                json!({
+                    "column": r.column,
+                    "mean_a": finite_or_null(r.mean_a),
+                    "mean_b": finite_or_null(r.mean_b),
+                    "p_val_t": finite_or_null(r.p_val_t),
+                    "p_val_ks": finite_or_null(r.p_val_ks),
+                    "cohens_d": finite_or_null(r.cohens_d),
+                })
             })
-        })
-        .collect();
-    let payload = json!({
-        "status": "ok",
-        "clusters_run_id": clusters.run_id,
-        "cluster_assignment_id": clusters.cluster_assignment_id,
-        "cluster_a": a,
-        "cluster_b": b,
-        "features_compared": results.len(),
-        "features_omitted": omitted,
-        "results": rows,
-    });
-    let mut text = comparison_to_markdown(a, b, shown);
-    if omitted > 0 {
-        text.push_str(&format!(
-            "\n\n_{omitted} further features omitted; raise max_features to see them._"
-        ));
-    }
-    Ok(ok_result(payload, Some(text)))
+            .collect();
+        let mut payload = json!({
+            "status": "ok",
+            "clusters_run_id": clusters.run_id,
+            "cluster_assignment_id": clusters.cluster_assignment_id,
+            "cluster_a": a,
+            "cluster_b": b,
+            "features_compared": total,
+            "features_omitted": omitted,
+            "results": rows,
+        });
+        // Label the sliced rows, so the release paths match the results.
+        release::attach_compare(state, &clusters, a, b, &mut payload);
+        let mut text = comparison_to_markdown(a, b, shown);
+        if omitted > 0 {
+            text.push_str(&format!(
+                "\n\n_{omitted} further features omitted; raise max_features to see them._"
+            ));
+        }
+        Ok(ok_result(payload, Some(text)))
+    };
+    // Wide tables compare O(features) rows: halve the knob until the result
+    // fits the budget, the way the dossier fits itself.
+    fit_knob(state, "max_features", p.max_features, render, |_, _| None)
 }

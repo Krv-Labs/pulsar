@@ -411,3 +411,408 @@ async fn an_oversized_result_is_trimmed_with_a_notice_not_failed() {
     assert!(text(&result).starts_with("[truncated:"));
     client.cancel().await.unwrap();
 }
+
+/// The sweep carries a compact diagnose_cosmic_graph summary (headline facts
+/// plus the call for the full view) and says plainly when the active config
+/// was not saved, all within the response budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn sweep_carries_a_compact_diagnose_summary_and_names_the_unsaved_config() {
+    let root = TempRoot::new("sweep-summary");
+    let client = connect(&root.0, Some(HARD)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    swept(&client, &tools, &root.0).await;
+
+    let result = call(
+        &client,
+        "run_topological_sweep",
+        json!({"response_format": "markdown"}),
+    )
+    .await;
+    let sweep = checked(&tools, "run_topological_sweep", &result);
+    let size = visible_chars(&result);
+    eprintln!(
+        "sweep summary with diagnose summary: {size} chars (render budget {})",
+        render_budget(Some(HARD))
+    );
+    assert!(size <= render_budget(Some(HARD)), "sweep is {size} chars");
+
+    let summary = &sweep["diagnose_summary"];
+    assert!(summary.is_object(), "{summary}");
+    assert_eq!(summary["full_view"], "diagnose_cosmic_graph");
+    assert!(summary["component_count"].as_u64().unwrap() > 0);
+    assert!(!summary["top_component_sizes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(summary["observed_patterns"].as_array().is_some());
+    assert!(summary["risk_factors"].as_array().is_some());
+    assert_eq!(sweep["next_required_check"], "diagnose_cosmic_graph");
+
+    let advisory = sweep["config_advisory"].as_str().unwrap();
+    assert!(advisory.contains("was not saved"), "{advisory}");
+
+    let body = text(&result);
+    assert!(
+        body.contains("## Diagnose Summary"),
+        "{}",
+        &body[..body.len().min(600)]
+    );
+    assert!(body.contains("diagnose_cosmic_graph(run_id="), "{body}");
+    assert!(body.contains("was not saved"), "{body}");
+    client.cancel().await.unwrap();
+}
+
+/// Two well-separated blobs over many numeric columns: `compare_clusters`
+/// compares O(features) rows.
+fn wide_two_blob(dir: &Path) -> PathBuf {
+    let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+    let mut noise = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let header: Vec<String> = (0..120).map(|j| format!("f{j:03}")).collect();
+    let mut csv = header.join(",") + "\n";
+    for i in 0..48 {
+        let group = if i < 24 { 0.0 } else { 10.0 };
+        let row: Vec<String> = (0..120)
+            .map(|_| format!("{:.4}", group + noise() * 2.0))
+            .collect();
+        csv += &(row.join(",") + "\n");
+    }
+    let path = dir.join("wide.csv");
+    std::fs::write(&path, csv).unwrap();
+    path
+}
+
+async fn swept_wide(client: &Client, tools: &[rmcp::model::Tool], root: &Path) -> Value {
+    let csv = wide_two_blob(root);
+    let ingested = ok(
+        client,
+        tools,
+        "ingest_dataset",
+        json!({"path": csv.display().to_string()}),
+    )
+    .await;
+    let dataset_id = ingested["dataset_id"].clone();
+    // A minimal config keeps the sweep summary small, so a mid-size limit
+    // binds the 120-feature comparison but not the sweep or the dossier.
+    ok(
+        client,
+        tools,
+        "run_topological_sweep",
+        json!({"dataset_id": dataset_id, "config_yaml": WIDE_YAML, "response_format": "json"}),
+    )
+    .await;
+    let dossier = ok(
+        client,
+        tools,
+        "generate_cluster_dossier",
+        json!({"response_format": "json"}),
+    )
+    .await;
+    dossier
+}
+
+const WIDE_YAML: &str = r#"
+version: 1
+run:
+  name: wide
+sweep:
+  projection:
+    method: jl
+    dimensions: [2]
+    seed: [42]
+  ball_mapper:
+    epsilon: [0.5, 1.0]
+"#;
+
+/// `compare_clusters` fits itself to the budget by halving `max_features`,
+/// the way the dossier fits itself, instead of failing over it.
+#[tokio::test(flavor = "multi_thread")]
+async fn compare_clusters_fits_itself_to_the_budget() {
+    // A mid-size hard limit binds the 120-feature comparison but not the
+    // sweep or the dossier, so the tool's own knob has to move.
+    let root = TempRoot::new("compare-fit");
+    let client = connect(&root.0, Some(18_000)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let dossier = swept_wide(&client, &tools, &root.0).await;
+    // The index lists every cluster; the sections may stop early.
+    let ids = ids_of(&dossier["cluster_index"]["clusters"]);
+    assert!(ids.len() >= 2, "two blobs cluster apart: {dossier}");
+    let (a, b) = (ids[0], ids[1]);
+
+    let result = call(
+        &client,
+        "compare_clusters",
+        json!({"cluster_a": a, "cluster_b": b, "max_features": 1000}),
+    )
+    .await;
+    let payload = checked(&tools, "compare_clusters", &result);
+    let size = visible_chars(&result);
+    eprintln!(
+        "compare_clusters capped: {size} chars (render budget {})",
+        render_budget(Some(18_000))
+    );
+    assert!(
+        size <= render_budget(Some(18_000)),
+        "compare is {size} chars"
+    );
+    // The tool's own knob moved, not the middleware's trimmer.
+    assert_eq!(
+        payload["truncation"]["reduced"]["parameter"],
+        "max_features"
+    );
+    assert!(
+        payload["truncation"]["reduced"]["applied"]
+            .as_u64()
+            .unwrap()
+            < payload["truncation"]["reduced"]["asked"].as_u64().unwrap()
+    );
+    assert_eq!(payload["features_compared"], 120);
+    assert!(payload["features_omitted"].as_u64().unwrap() > 0);
+    assert!(
+        text(&result).contains("raise max_features"),
+        "{}",
+        &text(&result)[..200.min(text(&result).len())]
+    );
+    client.cancel().await.unwrap();
+
+    // At the default budget all 120 features fit whole, with no truncation.
+    let root = TempRoot::new("compare-whole");
+    let client = connect(&root.0, Some(HARD)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let dossier = swept_wide(&client, &tools, &root.0).await;
+    let ids = ids_of(&dossier["cluster_index"]["clusters"]);
+    let result = call(
+        &client,
+        "compare_clusters",
+        json!({"cluster_a": ids[0], "cluster_b": ids[1], "max_features": 1000}),
+    )
+    .await;
+    let payload = checked(&tools, "compare_clusters", &result);
+    let size = visible_chars(&result);
+    eprintln!(
+        "compare_clusters whole: {size} chars (render budget {})",
+        render_budget(Some(HARD))
+    );
+    assert!(size <= render_budget(Some(HARD)));
+    assert!(
+        payload.get("truncation").is_none(),
+        "{}",
+        payload["truncation"]
+    );
+    assert_eq!(payload["features_omitted"], 0);
+    client.cancel().await.unwrap();
+}
+
+/// A long-format panel: `n` entities x 3 visits over three drifting features.
+fn panel_csv(dir: &Path, n: usize) -> PathBuf {
+    let mut csv = String::from("patient,visit,a,b,c\n");
+    for e in 0..n {
+        for t in 1..=3 {
+            let g = (e % 3) as f64;
+            csv.push_str(&format!(
+                "p{e:04},{t},{:.4},{:.4},{:.4}\n",
+                g * 2.0 + t as f64 * 0.3,
+                -g + t as f64 * 0.1,
+                g * 0.5 + t as f64 * 0.05,
+            ));
+        }
+    }
+    let path = dir.join("panel.csv");
+    std::fs::write(&path, csv).unwrap();
+    path
+}
+
+const PANEL_YAML: &str = "run:\n  name: panel\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [2, 3]\n    seed:\n      values: [42]\n  ball_mapper:\n    epsilon:\n      values: [0.5, 1.0]\ncosmic_graph:\n  construction: exact\n";
+
+/// `classify_trajectories(detail='full')` is O(entities): the per-entity map
+/// is capped to the budget with a truncation note, while the class summary
+/// and the preview always stay.
+#[tokio::test(flavor = "multi_thread")]
+async fn classify_full_is_capped_to_the_budget() {
+    let root = TempRoot::new("classify-cap");
+    let client = connect(&root.0, Some(HARD)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let csv = panel_csv(&root.0, 400);
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        json!({"path": csv.display().to_string()}),
+    )
+    .await;
+    ok(
+        &client,
+        &tools,
+        "build_longitudinal_graph",
+        json!({"dataset_id": ingested["dataset_id"], "entity_column": "patient", "time_column": "visit", "config_yaml": PANEL_YAML}),
+    )
+    .await;
+
+    let result = call(
+        &client,
+        "classify_trajectories",
+        json!({"detail": "full", "response_format": "json"}),
+    )
+    .await;
+    let payload = checked(&tools, "classify_trajectories", &result);
+    let size = visible_chars(&result);
+    eprintln!(
+        "classify full on 400 entities: {size} chars, omitted={} (render budget {})",
+        payload["entities_omitted"],
+        render_budget(Some(HARD))
+    );
+    assert!(
+        size <= render_budget(Some(HARD)),
+        "classify is {size} chars"
+    );
+    assert!(payload["entities_omitted"].as_u64().unwrap() > 0);
+    assert_eq!(payload["truncation"]["truncated"], true);
+    assert!(payload["classes_summary"].is_object());
+    assert_eq!(
+        payload["classification_preview"].as_object().unwrap().len(),
+        25
+    );
+
+    // The summary shape still fits whole, with no truncation.
+    let summary = ok(
+        &client,
+        &tools,
+        "classify_trajectories",
+        json!({"response_format": "json"}),
+    )
+    .await;
+    assert!(summary.get("truncation").is_none());
+    assert!(summary.get("classification").is_none());
+    client.cancel().await.unwrap();
+}
+
+/// Budget audit of the tools the response-budget work had not probed yet:
+/// the exports land in files (only a small receipt reaches the agent) and
+/// the longitudinal tools stay bounded on the fixtures.
+#[tokio::test(flavor = "multi_thread")]
+async fn unprobed_tools_fit_the_budget_on_fixtures() {
+    let root = TempRoot::new("audit");
+    let client = connect(&root.0, Some(HARD)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    swept(&client, &tools, &root.0).await;
+    let dossier = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        json!({"response_format": "json"}),
+    )
+    .await;
+    let assignment = dossier["cluster_assignment_id"].clone();
+
+    // Every cluster id, paging through the detail pages.
+    let mut ids = vec![];
+    let mut next = Value::Null;
+    loop {
+        let args = if next.is_null() {
+            json!({"cluster_assignment_id": assignment})
+        } else {
+            next["arguments"].clone()
+        };
+        let result = call(&client, "get_cluster_detail", args).await;
+        let page = checked(&tools, "get_cluster_detail", &result);
+        ids.extend(ids_of(&page["clusters"]));
+        next = page["truncation"]["next_call"].clone();
+        if next.is_null() {
+            break;
+        }
+    }
+    assert!(!ids.is_empty());
+    let names: serde_json::Map<String, Value> = ids
+        .iter()
+        .map(|id| (id.to_string(), Value::String(format!("Cohort {id}"))))
+        .collect();
+
+    let out = root.0.join("labeled.csv");
+    let result = call(
+        &client,
+        "export_labeled_data",
+        json!({"cluster_assignment_id": assignment, "cluster_names": names, "output_path": out.display().to_string()}),
+    )
+    .await;
+    checked(&tools, "export_labeled_data", &result);
+    eprintln!("export_labeled_data: {} chars", visible_chars(&result));
+    assert!(visible_chars(&result) <= render_budget(Some(HARD)));
+
+    let result = call(
+        &client,
+        "export_dataset_bundle",
+        json!({"output_dir": root.0.display().to_string(), "slug": "audit_bundle"}),
+    )
+    .await;
+    checked(&tools, "export_dataset_bundle", &result);
+    eprintln!("export_dataset_bundle: {} chars", visible_chars(&result));
+    assert!(visible_chars(&result) <= render_budget(Some(HARD)));
+
+    // The report lands next to the dataset file (in the temp root) when a
+    // dataset_id is passed; without one it lands in the process cwd.
+    let runtime = ok(&client, &tools, "get_runtime_context", json!({})).await;
+    let result = call(
+        &client,
+        "export_html_report",
+        json!({"dataset_id": runtime["latest_dataset_id"]}),
+    )
+    .await;
+    checked(&tools, "export_html_report", &result);
+    eprintln!("export_html_report: {} chars", visible_chars(&result));
+    assert!(visible_chars(&result) <= render_budget(Some(HARD)));
+
+    let csv = panel_csv(&root.0, 30);
+    let ingested = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        json!({"path": csv.display().to_string()}),
+    )
+    .await;
+    let ds = ingested["dataset_id"].clone();
+    let result = call(
+        &client,
+        "sample_longitudinal_entities",
+        json!({"dataset_id": ds, "entity_column": "patient", "max_entities": 12}),
+    )
+    .await;
+    checked(&tools, "sample_longitudinal_entities", &result);
+    assert!(visible_chars(&result) <= render_budget(Some(HARD)));
+    let result = call(
+        &client,
+        "build_longitudinal_graph",
+        json!({"dataset_id": ds, "entity_column": "patient", "time_column": "visit", "config_yaml": PANEL_YAML, "representation": "both", "detail": "full"}),
+    )
+    .await;
+    checked(&tools, "build_longitudinal_graph", &result);
+    eprintln!(
+        "build_longitudinal_graph full: {} chars",
+        visible_chars(&result)
+    );
+    assert!(visible_chars(&result) <= render_budget(Some(HARD)));
+    for (name, args) in [
+        ("diagnose_longitudinal_graph", json!({"detail": "full"})),
+        (
+            "get_trajectory_archetypes",
+            json!({"max_archetypes": 100, "max_entities_per_archetype": 100}),
+        ),
+        (
+            "get_cross_time_neighbors",
+            json!({"observation_id": 0, "max_neighbors": 1000}),
+        ),
+        ("classify_trajectories", json!({})),
+    ] {
+        let result = call(&client, name, args).await;
+        checked(&tools, name, &result);
+        eprintln!("{name}: {} chars", visible_chars(&result));
+        assert!(
+            visible_chars(&result) <= render_budget(Some(HARD)),
+            "{name}"
+        );
+    }
+    client.cancel().await.unwrap();
+}

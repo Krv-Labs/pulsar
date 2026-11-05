@@ -10,18 +10,15 @@ use pulsar_analysis::disclosure::row_fraction;
 use pulsar_analysis::plan::{
     build_preprocessing_summary, plan_matches_preprocessing, PreprocessingPlan, Role,
 };
-use pulsar_analysis::{
-    agent_threshold_options, finalization_gate, GraphAnalysis, Policy, ThresholdGraph,
-};
+use pulsar_analysis::{agent_threshold_options, finalization_gate, Policy};
 use pulsar_config::{PulsarConfig, Threshold};
-use pulsar_core::{find_stable_thresholds_from_edges, DEFAULT_NUM_BINS};
 use pulsar_pipeline::projection_fingerprint;
 use pulsar_store::{summarize_history, JobState, RunId, RunRecord};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Map, Value};
 
 use super::config::{parse_config, resolve_dataset};
-use super::diagnostics::threshold_table;
+use super::diagnostics::{diagnose_summary, threshold_table};
 use super::params::{Detail, Format};
 use super::{CallContext, ToolSpec};
 use crate::envelope::{ok_result, ToolError};
@@ -29,7 +26,7 @@ use crate::jobs::{run_sweep, submit, ProgressTarget, SweepRequest};
 use crate::markdown;
 use crate::phirewall;
 use crate::schema::{self as s, input_schema};
-use crate::state::{LiveRun, ServerState};
+use crate::state::{LiveRun, RunGraphCache, ServerState};
 
 pub const SWEEP: &str = "run_topological_sweep";
 pub const GET_JOB: &str = "get_job";
@@ -46,30 +43,30 @@ pub enum Execution {
     /// Wait for the fit and return the sweep result (a task handle on clients that support MCP tasks).
     #[default]
     Sync,
-    /// Return `{status: "running", run_id}` at once; poll with wait_job / get_job.
+    /// Return `{status: "running", run_id}` at once; poll with wait_job / get_job when those tools are listed.
     Async,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SweepParams {
-    /// Host-visible absolute path to a *.yaml/*.yml config file. Used only when config_yaml is empty.
+    /// Host-visible absolute path to a *.yaml/*.yml config. Used only when config_yaml is empty.
     pub config_path: String,
-    /// Full Pulsar config as raw YAML (preferred). If this and config_path are empty, the session's active config is used.
+    /// Full Pulsar config as raw YAML (preferred). If empty with config_path, the session's active config is used.
     pub config_yaml: String,
-    /// Dataset handle from ingest_dataset; overrides run.data in the config. Empty uses the config's run.data.
+    /// Dataset handle from ingest_dataset; overrides run.data. Empty uses the config's run.data.
     pub dataset_id: String,
-    /// If true, also write the resolved config to <run name>_params.yaml next to the data for reproducibility.
+    /// If true, also write the resolved config to <run name>_params.yaml next to the data.
     pub save_config: bool,
-    /// 'summary' = compact decision packet (key metrics, bounded component preview); 'full' = the complete raw response including all metrics.
+    /// 'summary' = compact decision packet (key metrics, bounded component preview); 'full' = complete raw response.
     pub detail: Detail,
-    /// Text rendering only: 'markdown' or 'json'. structured_content is identical in both.
+    /// Text rendering only: 'markdown' or 'json'; structured_content is identical.
     pub response_format: Format,
-    /// Summary detail only: include the normalized config YAML in the payload.
+    /// Summary detail only: include the normalized config YAML.
     pub include_config_yaml: bool,
-    /// Summary detail only: how many component sizes to preview (largest first); the rest are counted as omitted. Must be >= 1.
+    /// Summary detail only: component sizes to preview, largest first (>= 1); the rest are counted as omitted.
     pub component_limit: usize,
-    /// 'sync' (default) waits for the fit; 'async' returns the run_id immediately for wait_job / get_job polling.
+    /// 'sync' (default) waits for the fit; 'async' returns the run_id at once, to poll with wait_job / get_job.
     pub execution: Execution,
 }
 
@@ -94,7 +91,7 @@ pub fn sweep_spec() -> ToolSpec {
     ToolSpec {
         name: SWEEP,
         title: "Run Topological Sweep",
-        description: "Run the Pulsar topological sweep (project, ball-map grid, cosmic graph) and persist the run. Returns run_id, key graph metrics, threshold and a finalization gate; follow with diagnose_cosmic_graph. Prefer inline config_yaml; otherwise the active session config is used. execution='async' returns the run_id immediately for wait_job polling.",
+        description: "Run the Pulsar topological sweep (project, ball-map grid, cosmic graph) and persist the run. Returns run_id, key graph metrics, threshold and a finalization gate; follow with diagnose_cosmic_graph. Prefer inline config_yaml; otherwise the active session config is used. A long fit may return a task handle on clients that support MCP tasks; if `execution` is available, 'async' returns run_id at once for wait_job polling.",
         input_schema: input_schema::<SweepParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -105,6 +102,7 @@ pub fn sweep_spec() -> ToolSpec {
                 ("data_shape", s::array(s::integer())),
                 ("construction_threshold", s::number()),
                 ("graph_health", s::any()),
+                ("diagnose_summary", open.clone()),
                 ("analysis_status", s::string()),
                 ("next_required_check", s::string()),
                 ("finalization_gate", s::any()),
@@ -202,7 +200,7 @@ pub fn wait_job_spec() -> ToolSpec {
     ToolSpec {
         name: WAIT_JOB,
         title: "Wait For Job",
-        description: "Block until a sweep job completes or `timeout_s` elapses, then return its state. A completed job returns the same sweep summary run_topological_sweep would have; a failed job returns its error envelope; a timeout returns the current progress so you can call wait_job again.",
+        description: "Block until a sweep job completes or `timeout_s` elapses, then return its state. A completed job returns run_topological_sweep's summary; a failed job its error envelope; a timeout returns current progress so you can call wait_job again.",
         input_schema: input_schema::<WaitParams>(),
         output_schema: s::as_object(job_schema()),
         read_only: true,
@@ -506,9 +504,11 @@ async fn execute(
         .dataset_id
         .as_ref()
         .and_then(|_| history.iter().rev().find(|r| r.run_id != record.run_id));
+    let graph_cache = state.graph_cache_for_live(&live, &record);
     let mut response = build_response(
         &live,
         &record,
+        &graph_cache,
         previous.as_ref(),
         on_dataset,
         &normalized_yaml,
@@ -638,6 +638,7 @@ fn sweep_diff(
 fn build_response(
     live: &LiveRun,
     record: &RunRecord,
+    graph_cache: &RunGraphCache,
     previous: Option<&RunRecord>,
     on_dataset: Option<&RunRecord>,
     normalized_yaml: &str,
@@ -648,38 +649,20 @@ fn build_response(
     sweep_count: usize,
 ) -> Value {
     let fitted = &live.fitted;
-    let affinity = fitted.weighted_edges(Some(0.0));
-    let minhash_d = match fitted.config.cosmic_graph.construction {
-        pulsar_config::Construction::Minhash => Some(fitted.config.cosmic_graph.minhash_d as usize),
-        pulsar_config::Construction::Exact => None,
-    };
-    let metrics = GraphAnalysis::new(&fitted.graph)
-        .map(|a| {
-            a.metrics(
-                fitted.construction_threshold,
-                fitted.ball_maps.len(),
-                Some(&affinity),
-                minhash_d,
-            )
-        })
-        .ok();
+    let metrics = graph_cache.metrics.as_ref();
     let metrics_value = metrics
-        .as_ref()
         .and_then(|m| serde_json::to_value(m).ok())
         .unwrap_or(json!({}));
-    let (health, is_connected) = metrics
-        .as_ref()
-        .map(graph_health)
-        .unwrap_or(("empty", true));
-    let threshold_graph = ThresholdGraph::from_edges(fitted.n, &affinity);
+    let (health, is_connected) = metrics.map(graph_health).unwrap_or(("empty", true));
+    let threshold_graph = &graph_cache.threshold_graph;
     let full_affinity_connected = fitted.n > 0 && threshold_graph.component_count_at(0.0) <= 1;
 
     let n_features = fitted.layout.feature_names.len();
-    let gate = match (&metrics, &fitted.stability) {
+    let gate = match (metrics, &fitted.stability) {
         (Some(m), Some(stability)) => {
             let plateaus: Vec<_> = stability.plateaus.iter().take(10).cloned().collect();
             let options = agent_threshold_options(
-                &threshold_graph,
+                threshold_graph,
                 &plateaus,
                 &stability.thresholds,
                 &stability.component_counts,
@@ -708,7 +691,7 @@ fn build_response(
 
     let config_advisory = match saved_path {
         Some(path) => format!("Config changes persisted to host at: {path}"),
-        None => "Config changes are in-memory (session-only). Set save_config=True to persist to params.yaml.".to_owned(),
+        None => "Active config was not saved (save_config=false); it lives only in this session. Set save_config=True to persist to params.yaml.".to_owned(),
     };
     let mut response = Map::new();
     response.insert("status".into(), json!("ok"));
@@ -753,6 +736,9 @@ fn build_response(
     response.insert("graph_health".into(), json!(health));
     response.insert("analysis_status".into(), json!("diagnostics_required"));
     response.insert("next_required_check".into(), json!("diagnose_cosmic_graph"));
+    if let Some(m) = metrics {
+        response.insert("diagnose_summary".into(), diagnose_summary(m));
+    }
     response.insert("finalization_gate".into(), gate);
     response.insert(
         "construction_threshold".into(),
@@ -761,18 +747,16 @@ fn build_response(
     if let Some(summary) = &record.threshold_stability_summary {
         response.insert("threshold_stability_summary".into(), json!(summary));
     }
-    // A fixed-threshold run has no fitted stability; one union-find pass over
-    // the affinity already in hand gives the same curve the curve tool reads.
-    let scanned = match &fitted.stability {
-        Some(_) => None,
-        None => find_stable_thresholds_from_edges(fitted.n, &affinity, DEFAULT_NUM_BINS).ok(),
-    };
     let mut parts = vec![];
-    if let Some(stability) = fitted.stability.as_ref().or(scanned.as_ref()) {
+    if let Some(stability) = fitted
+        .stability
+        .as_ref()
+        .or(graph_cache.stability.as_deref())
+    {
         parts.push((
             "thresholds",
             threshold_table(
-                &threshold_graph,
+                threshold_graph,
                 stability,
                 fitted.construction_threshold,
                 phirewall::ROW_FLOOR,
@@ -935,6 +919,7 @@ pub fn summary_payload(
         "data_shape": response["data_shape"],
         "construction_threshold": response["construction_threshold"],
         "graph_health": response["graph_health"],
+        "diagnose_summary": response.get("diagnose_summary").cloned().unwrap_or(Value::Null),
         "analysis_status": response["analysis_status"],
         "next_required_check": response["next_required_check"],
         "finalization_gate": response["finalization_gate"],
@@ -1129,7 +1114,7 @@ pub fn history_spec() -> ToolSpec {
     ToolSpec {
         name: HISTORY,
         title: "Sweep History",
-        description: "List the persisted sweeps with graph metrics per run. Use after several run_topological_sweep calls to see how epsilon and projection dimensions moved nodes, edges, components and giant fraction; detail='summary' synthesizes patterns across runs. Reads the store, so it covers every completed run.",
+        description: "List persisted sweeps with graph metrics per run. Use after several run_topological_sweep calls to see how epsilon and projection dimensions moved nodes, edges, components and giant fraction; detail='summary' synthesizes patterns across runs. Reads the store, so covers every completed run.",
         input_schema: input_schema::<HistoryParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -1242,7 +1227,7 @@ pub fn compare_spec() -> ToolSpec {
     ToolSpec {
         name: COMPARE,
         title: "Compare Sweeps",
-        description: "Compare two persisted sweeps side by side by config and graph metrics. Returns each run's projection dimensions, epsilon, construction threshold, nodes, edges, components, giant fraction and weight p95; the text view is a markdown table. Measurement only: it does not rank the runs.",
+        description: "Compare two persisted sweeps by config and graph metrics: each run's projection dimensions, epsilon, construction threshold, nodes, edges, components, giant fraction and weight p95; text is a markdown table. Measurement only; it does not rank runs.",
         input_schema: input_schema::<CompareParams>(),
         output_schema: s::as_object(s::object(
             &[("status", s::string()), ("run_a", side.clone()), ("run_b", side)],

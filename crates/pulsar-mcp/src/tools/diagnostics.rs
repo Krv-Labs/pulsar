@@ -6,8 +6,9 @@ use std::sync::Arc;
 use pulsar_analysis::disclosure::RowCount;
 use pulsar_analysis::pyround::round_to;
 use pulsar_analysis::thresholds::{
-    component_mass_profile, mass_profile_hint, significant_component_sizes,
-    threshold_morphology_profile, useful_component_size_floor, Breakpoint, Candidate,
+    component_mass_profile, component_mass_profiles, mass_profile_hint,
+    significant_component_sizes, threshold_morphology_profiles, useful_component_size_floor,
+    Breakpoint, Candidate, ComponentMassProfile,
 };
 use pulsar_analysis::{
     agent_threshold_options, skeleton_payload, structural_breakpoints, GraphAnalysis, GraphMetrics,
@@ -71,7 +72,7 @@ pub fn diagnose_spec() -> ToolSpec {
     ToolSpec {
         name: DIAGNOSE,
         title: "Diagnose Cosmic Graph",
-        description: "Graph-state observables for a fitted cosmic graph. Returns scale, component morphology, weight distribution, sweep support, observed patterns and risk factors (plus MinHash weight accuracy when used). Measurement only, no recommended action. Use after run_topological_sweep; use get_threshold_stability_curve to compare construction thresholds.",
+        description: "Graph-state observables for a fitted cosmic graph: scale, component morphology, weight distribution, sweep support, observed patterns and risk factors (plus MinHash weight accuracy when used). Measurement only. Use after run_topological_sweep; use get_threshold_stability_curve to compare construction thresholds.",
         input_schema: input_schema::<DiagnoseParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -303,17 +304,40 @@ fn risk_factors(m: &GraphMetrics) -> Vec<Value> {
     out
 }
 
-/// Metrics of a run's constructed graph (one component pass).
+/// The compact headline facts about a fitted graph that the sweep result
+/// carries, so agents see the next required check's facts without a second
+/// call. Built from the same pieces as the full diagnosis
+/// (`component_morphology`, `observed_patterns`, `risk_factors`), not a
+/// second copy of them; `full_view` names the tool rendering the full view.
+pub(crate) fn diagnose_summary(m: &GraphMetrics) -> Value {
+    let morph = component_morphology(m, Detail::Summary);
+    json!({
+        "component_count": m.component_count,
+        "top_component_sizes": morph["top_component_sizes"],
+        "largest_component_fraction": m.giant_fraction,
+        "singleton_fraction": m.singleton_fraction,
+        "density": m.density,
+        "grid_adequacy_status": m.grid_adequacy_status,
+        "observed_patterns": observed_patterns(m, &morph),
+        "risk_factors": risk_factors(m),
+        "full_view": "diagnose_cosmic_graph",
+    })
+}
+
+/// Metrics of a run's constructed graph (cached per `run_id`).
 fn run_metrics(tool: &'static str, view: &RunView) -> Result<GraphMetrics, ToolError> {
-    let graph = view.graph().map_err(|e| ToolError::from_store(tool, e))?;
-    let affinity = view
-        .affinity()
+    let cache = view
+        .graph_cache()
         .map_err(|e| ToolError::from_store(tool, e))?;
+    if let Some(m) = &cache.metrics {
+        return Ok(m.clone());
+    }
+    let graph = view.graph().map_err(|e| ToolError::from_store(tool, e))?;
     let analysis = GraphAnalysis::new(&graph).map_err(|e| ToolError::from_analysis(tool, e))?;
     Ok(analysis.metrics(
         view.record.resolved_construction_threshold,
         view.record.n_ball_maps,
-        Some(&affinity.edges),
+        Some(&cache.affinity.edges),
         view.minhash_d(),
     ))
 }
@@ -491,11 +515,11 @@ impl From<PolicyParam> for Policy {
 pub struct CurveParams {
     /// 'summary' (default): bounded decision packet. 'full': adds plateaus, a curve sample and raw O(thresholds) arrays.
     pub detail: Detail,
-    /// Run to read, from run_topological_sweep. Omit for the latest run. Any completed run works: the curve is recomputed from the persisted affinity.
+    /// Run to read, from run_topological_sweep. Omit for the latest; any completed run works since the curve is recomputed from its persisted affinity.
     pub run_id: String,
-    /// 'persisted' (default) or 'live'; both recompute the curve, 'live' only differs in reading the cached model.
+    /// 'persisted' (default) or 'live'; both recompute, 'live' just reads the cached model.
     pub source: CurveSource,
-    /// Lens for ranking candidates (not a score): 'balanced' (default), 'report_ready' (few large components), 'detail_seeking' (finer splits), 'outlier_mining' (singleton tails).
+    /// Lens for ranking candidates (not a score): 'balanced' (default), 'report_ready' (few large), 'detail_seeking' (finer splits), 'outlier_mining' (singleton tails).
     pub threshold_candidate_policy: PolicyParam,
     /// Text view: 'markdown' (default) or 'json'. structured_content is identical.
     pub response_format: Format,
@@ -506,7 +530,7 @@ pub fn curve_spec() -> ToolSpec {
     ToolSpec {
         name: CURVE,
         title: "Threshold Stability Curve",
-        description: "Threshold morphology and candidate lenses along the H0 component-stability curve. Compares the fitted construction threshold with H0 plateaus and structural breakpoints. Use to judge or choose a construction threshold before editing the config; use diagnose_cosmic_graph for the graph already built.",
+        description: "Threshold morphology and candidate lenses along the H0 component-stability curve, comparing the fitted construction threshold with H0 plateaus and structural breakpoints. Use to judge or choose a construction threshold before editing the config; use diagnose_cosmic_graph for the graph already built.",
         input_schema: input_schema::<CurveParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -660,14 +684,12 @@ fn agent_readout(selected: Option<&Value>, breakpoints: &[Breakpoint]) -> String
 }
 
 fn plateau_row(
-    graph: &ThresholdGraph,
     n: usize,
-    edges: &[(usize, usize, f64)],
     p: &Plateau,
-    with_profile: bool,
+    singleton_count: usize,
+    profile: Option<ComponentMassProfile>,
 ) -> Value {
     let midpoint = p.midpoint();
-    let singleton_count = singleton_counts(n, edges, &[midpoint])[0];
     let mut row = json!({
         "start": p.start_threshold,
         "end": p.end_threshold,
@@ -677,8 +699,7 @@ fn plateau_row(
         "singleton_count": singleton_count,
         "singleton_fraction": round_to(singleton_count as f64 / n.max(1) as f64, 4),
     });
-    if with_profile {
-        let profile = component_mass_profile(graph, midpoint, 8, 0.01);
+    if let Some(profile) = profile {
         row["interpretation_hint"] = json!(mass_profile_hint(&profile));
         row["component_mass_profile"] = json!(profile);
     }
@@ -727,6 +748,17 @@ pub fn threshold_table(
     selected: f64,
     row_floor: usize,
 ) -> Value {
+    let breakpoints = curve_breakpoints(graph, stability);
+    threshold_table_with_breakpoints(graph, stability, &breakpoints, selected, row_floor)
+}
+
+fn threshold_table_with_breakpoints(
+    graph: &ThresholdGraph,
+    stability: &StabilityResult,
+    breakpoints: &[Breakpoint],
+    selected: f64,
+    row_floor: usize,
+) -> Value {
     let range_of = |t: f64| -> (f64, f64) {
         stability
             .plateaus
@@ -738,49 +770,72 @@ pub fn threshold_table(
             .find(|&(lo, hi)| lo <= t && t <= hi)
             .unwrap_or((t, t))
     };
-    let row = |kind: &str, cutoff: f64| -> Value {
-        let (lo, hi) = range_of(cutoff);
-        let profile = component_mass_profile(graph, cutoff, TABLE_TOP_SIZES, 0.01);
-        let top_sizes: Vec<RowCount> = profile
-            .top_component_sizes
-            .iter()
-            .map(|&n| RowCount::of(n, row_floor))
-            .collect();
-        json!({
-            "cutoff": cutoff,
-            "range": [lo, hi],
-            "groups": profile.component_count,
-            "top_sizes": top_sizes,
-            // A singleton is one row, so their count is a row count.
-            "singletons": RowCount::of(profile.singleton_count, row_floor),
-            "kind": kind,
-            "selected": false,
-        })
-    };
-    let holds = |row: &Value, t: f64| {
-        row["range"][0].as_f64() <= Some(t) && Some(t) <= row["range"][1].as_f64()
-    };
-
-    let mut rows: Vec<Value> = stability
+    struct CutSpec {
+        kind: &'static str,
+        cutoff: f64,
+        range: (f64, f64),
+        selected: bool,
+    }
+    let mut specs: Vec<CutSpec> = stability
         .plateaus
         .iter()
         .take(SUMMARY_PLATEAUS)
-        .map(|p| row("plateau", p.midpoint()))
+        .map(|p| {
+            let cutoff = p.midpoint();
+            CutSpec {
+                kind: "plateau",
+                cutoff,
+                range: range_of(cutoff),
+                selected: false,
+            }
+        })
         .collect();
-    match rows.iter_mut().find(|r| holds(r, selected)) {
-        Some(r) => r["selected"] = json!(true),
-        None => {
-            let mut r = row("selected", selected);
-            r["selected"] = json!(true);
-            rows.push(r);
+    match specs
+        .iter_mut()
+        .find(|s| s.range.0 <= selected && selected <= s.range.1)
+    {
+        Some(s) => s.selected = true,
+        None => specs.push(CutSpec {
+            kind: "selected",
+            cutoff: selected,
+            range: range_of(selected),
+            selected: true,
+        }),
+    }
+    for b in summary_breakpoints(breakpoints) {
+        let range = range_of(b.threshold);
+        if !specs.iter().any(|x| x.range == range) {
+            specs.push(CutSpec {
+                kind: "breakpoint",
+                cutoff: b.threshold,
+                range,
+                selected: false,
+            });
         }
     }
-    for b in summary_breakpoints(&curve_breakpoints(graph, stability)) {
-        let r = row("breakpoint", b.threshold);
-        if !rows.iter().any(|x| x["range"] == r["range"]) {
-            rows.push(r);
-        }
-    }
+    let cutoffs: Vec<f64> = specs.iter().map(|s| s.cutoff).collect();
+    let profiles = component_mass_profiles(graph, &cutoffs, TABLE_TOP_SIZES, 0.01);
+    let mut rows: Vec<Value> = specs
+        .into_iter()
+        .zip(profiles)
+        .map(|(spec, profile)| {
+            let top_sizes: Vec<RowCount> = profile
+                .top_component_sizes
+                .iter()
+                .map(|&n| RowCount::of(n, row_floor))
+                .collect();
+            json!({
+                "cutoff": spec.cutoff,
+                "range": [spec.range.0, spec.range.1],
+                "groups": profile.component_count,
+                "top_sizes": top_sizes,
+                // A singleton is one row, so their count is a row count.
+                "singletons": RowCount::of(profile.singleton_count, row_floor),
+                "kind": spec.kind,
+                "selected": spec.selected,
+            })
+        })
+        .collect();
     rows.sort_by(|a, b| {
         let key = |r: &Value| r["cutoff"].as_f64().unwrap_or(0.0);
         key(a).total_cmp(&key(b))
@@ -798,24 +853,49 @@ pub fn curve_payload(
     detail: Detail,
     policy: Policy,
 ) -> Value {
+    let breakpoints = curve_breakpoints(graph, stability);
+    curve_payload_with_breakpoints(
+        n,
+        affinity,
+        graph,
+        resolved_construction_threshold,
+        stability,
+        &breakpoints,
+        detail,
+        policy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn curve_payload_with_breakpoints(
+    n: usize,
+    affinity: &[(usize, usize, f64)],
+    graph: &ThresholdGraph,
+    resolved_construction_threshold: f64,
+    stability: &StabilityResult,
+    breakpoints: &[Breakpoint],
+    detail: Detail,
+    policy: Policy,
+) -> Value {
     let thresholds = &stability.thresholds;
     let counts = &stability.component_counts;
     let optimal = stability.optimal_threshold;
     let matches_current =
         (resolved_construction_threshold - optimal).abs() <= 1e-8 + 1e-5 * optimal.abs();
-    let breakpoints = curve_breakpoints(graph, stability);
-    let current_morph = threshold_morphology_profile(graph, resolved_construction_threshold, 10);
-    let plateau_morph = threshold_morphology_profile(graph, optimal, 10);
+    let mut header_morphs =
+        threshold_morphology_profiles(graph, &[resolved_construction_threshold, optimal], 10);
+    let plateau_morph = header_morphs.pop().unwrap();
+    let current_morph = header_morphs.pop().unwrap();
     let profile_rows = |max_points: Option<usize>| -> Vec<Value> {
         let indices = match max_points {
             Some(m) => linspace_indices(thresholds.len(), m),
             None => (0..thresholds.len()).collect(),
         };
         let top_k = if max_points.is_none() { 3 } else { 10 };
-        indices
+        let query_thresholds: Vec<f64> = indices.iter().map(|&i| thresholds[i]).collect();
+        threshold_morphology_profiles(graph, &query_thresholds, top_k)
             .into_iter()
-            .map(|i| {
-                let row = threshold_morphology_profile(graph, thresholds[i], top_k);
+            .map(|row| {
                 if max_points.is_none() {
                     json!({
                         "threshold": round_to(row.threshold, 6),
@@ -832,11 +912,14 @@ pub fn curve_payload(
             .collect()
     };
     let candidate_rows = |candidates: &[Candidate]| -> Vec<Value> {
+        let candidate_thresholds: Vec<f64> = candidates.iter().map(Candidate::threshold).collect();
+        let morphologies = threshold_morphology_profiles(graph, &candidate_thresholds, 10);
         candidates
             .iter()
-            .map(|c| {
+            .zip(morphologies)
+            .map(|(c, morph)| {
                 let mut row = compact_candidate(c);
-                row["morphology"] = json!(threshold_morphology_profile(graph, c.threshold(), 10));
+                row["morphology"] = json!(morph);
                 row
             })
             .collect()
@@ -855,7 +938,7 @@ pub fn curve_payload(
         let options = agent_threshold_options(graph, &ten, thresholds, counts, policy, 7);
         let candidates = candidate_rows(&options.candidates[..options.candidates.len().min(3)]);
         let profiles = profile_rows(Some(10));
-        let summary_bps: Vec<&Breakpoint> = summary_breakpoints(&breakpoints).collect();
+        let summary_bps: Vec<&Breakpoint> = summary_breakpoints(breakpoints).collect();
         return json!({
             "status": "ok",
             "detail": "summary",
@@ -865,7 +948,7 @@ pub fn curve_payload(
             "matches_current_threshold": matches_current,
             "current_threshold_morphology": current_morph,
             "h0_longest_plateau_morphology": plateau_morph,
-            "h0_plateau_readout": agent_readout(selected.as_ref(), &breakpoints),
+            "h0_plateau_readout": agent_readout(selected.as_ref(), breakpoints),
             "threshold_candidate_policy": policy.as_str(),
             "selection_strategy": options.selection_strategy,
             "threshold_candidates": candidates,
@@ -883,13 +966,22 @@ pub fn curve_payload(
         });
     }
 
-    let singletons = singleton_counts(n, affinity, thresholds);
+    let plateau_slice: Vec<&Plateau> = stability.plateaus.iter().take(10).collect();
+    let plateau_midpoints: Vec<f64> = plateau_slice.iter().map(|p| p.midpoint()).collect();
+    let mut all_singleton_thresholds =
+        Vec::with_capacity(thresholds.len() + plateau_midpoints.len());
+    all_singleton_thresholds.extend_from_slice(thresholds);
+    all_singleton_thresholds.extend_from_slice(&plateau_midpoints);
+    let mut all_singletons = singleton_counts(n, affinity, &all_singleton_thresholds);
+    let plateau_singletons = all_singletons.split_off(thresholds.len());
+    let singletons = all_singletons;
     let profiles = profile_rows(None);
-    let plateaus: Vec<Value> = stability
-        .plateaus
-        .iter()
-        .take(10)
-        .map(|p| plateau_row(graph, n, affinity, p, true))
+    let plateau_profiles = component_mass_profiles(graph, &plateau_midpoints, 8, 0.01);
+    let plateaus: Vec<Value> = plateau_slice
+        .into_iter()
+        .zip(plateau_singletons)
+        .zip(plateau_profiles)
+        .map(|((p, sc), prof)| plateau_row(n, p, sc, Some(prof)))
         .collect();
     let selected = plateaus
         .first()
@@ -919,7 +1011,7 @@ pub fn curve_payload(
         } else {
             "H0 longest plateau differs from the current constructed graph; treat it as a rerun candidate, not a change to the fitted graph."
         },
-        "h0_plateau_readout": agent_readout(selected.as_ref(), &breakpoints),
+        "h0_plateau_readout": agent_readout(selected.as_ref(), breakpoints),
         "threshold_candidate_policy": policy.as_str(),
         "agent_threshold_options": audit,
         "threshold_candidates": enriched,
@@ -940,9 +1032,6 @@ pub fn curve_payload(
 
 pub async fn curve(state: &ServerState, p: CurveParams) -> Result<CallToolResult, ToolError> {
     let view = state.resolve_run(CURVE, &p.run_id)?;
-    let affinity = view
-        .affinity()
-        .map_err(|e| ToolError::from_store(CURVE, e))?;
     let resolved = view.record.resolved_construction_threshold;
     let policy: Policy = p.threshold_candidate_policy.into();
     let detail = p.detail;
@@ -950,29 +1039,45 @@ pub async fn curve(state: &ServerState, p: CurveParams) -> Result<CallToolResult
     let (dataset_id, n_rows) = (view.record.dataset_id.clone(), view.record.n_rows);
     let live = view.live.is_some();
     let (mut payload, thresholds) = tokio::task::spawn_blocking(move || -> Result<_, ToolError> {
-        let stability =
-            find_stable_thresholds_from_edges(affinity.n, &affinity.edges, DEFAULT_NUM_BINS)
-                .map_err(|e| {
-                    ToolError::new(
-                        CURVE,
-                        "THRESHOLD_CURVE_FAILED",
-                        e.to_string(),
-                        "Check get_runtime_context for the session state, then retry.",
-                    )
-                })?;
-        let graph = ThresholdGraph::from_edges(affinity.n, &affinity.edges);
-        let payload = curve_payload(
+        let cache = view
+            .graph_cache()
+            .map_err(|e| ToolError::from_store(CURVE, e))?;
+        let affinity = &cache.affinity;
+        let stability = match &cache.stability {
+            Some(s) => s.clone(),
+            None => Arc::new(
+                find_stable_thresholds_from_edges(affinity.n, &affinity.edges, DEFAULT_NUM_BINS)
+                    .map_err(|e| {
+                        ToolError::new(
+                            CURVE,
+                            "THRESHOLD_CURVE_FAILED",
+                            e.to_string(),
+                            "Check get_runtime_context for the session state, then retry.",
+                        )
+                    })?,
+            ),
+        };
+        let graph = &cache.threshold_graph;
+        let breakpoints = curve_breakpoints(graph, &stability);
+        let payload = curve_payload_with_breakpoints(
             affinity.n,
             &affinity.edges,
-            &graph,
+            graph,
             resolved,
             &stability,
+            &breakpoints,
             detail,
             policy,
         );
         Ok((
             payload,
-            threshold_table(&graph, &stability, resolved, phirewall::ROW_FLOOR),
+            threshold_table_with_breakpoints(
+                graph,
+                &stability,
+                &breakpoints,
+                resolved,
+                phirewall::ROW_FLOOR,
+            ),
         ))
     })
     .await
@@ -1024,7 +1129,7 @@ impl SkeletonDetail {
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SkeletonParams {
-    /// Run to read, from run_topological_sweep. Omit for the latest run. Reads the persisted run, so any stored run works on any transport.
+    /// Run to read, from run_topological_sweep. Omit for the latest; any stored run works.
     pub run_id: String,
     /// 'constructed' (default): the run's persisted cosmic graph. 'artifact': a create_graph_artifact graph; artifact_id is then required.
     pub surface: Surface,
@@ -1055,7 +1160,7 @@ pub fn skeleton_spec() -> ToolSpec {
     ToolSpec {
         name: SKELETON,
         title: "Topological Skeleton",
-        description: "Connectivity structure (components, nodes, edges) of a run's persisted graph. Summary-first: raw nodes and edges are capped by max_nodes / max_edges. Reads the stored run, not the live model. Use diagnose_cosmic_graph for risk-oriented measurements instead.",
+        description: "Connectivity structure (components, nodes, edges) of a run's persisted graph, capped by max_nodes / max_edges. Reads the stored run, not the live model. Use diagnose_cosmic_graph for risk-oriented measurements instead.",
         input_schema: input_schema::<SkeletonParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -1125,12 +1230,22 @@ pub async fn skeleton(state: &ServerState, p: SkeletonParams) -> Result<CallTool
         return Ok(ok_result(payload, None));
     }
     let view = state.resolve_run(SKELETON, &p.run_id)?;
-    let graph = view
-        .graph()
+    let cache = view
+        .graph_cache()
         .map_err(|e| ToolError::from_store(SKELETON, e))?;
-    let summary = GraphAnalysis::new(&graph)
-        .map_err(|e| ToolError::from_analysis(SKELETON, e))?
-        .summary(view.record.resolved_construction_threshold);
+    let summary = match &cache.summary {
+        Some(s) => s.clone(),
+        None => {
+            let graph = view
+                .graph()
+                .map_err(|e| ToolError::from_store(SKELETON, e))?;
+            Arc::new(
+                GraphAnalysis::new(&graph)
+                    .map_err(|e| ToolError::from_analysis(SKELETON, e))?
+                    .summary(view.record.resolved_construction_threshold),
+            )
+        }
+    };
     let record = &view.record;
     let mut payload = json!({
         "run_id": record.run_id,

@@ -8,14 +8,14 @@
 //! merged assignment with method `merged:<orig>`). Evidence is built only for
 //! the clusters of the page. Nothing here writes the session's live labels.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use pulsar_analysis::characterization::GROUP_SUMMARY_DEFAULTS;
 use pulsar_analysis::cluster_payloads::{
     build_evidence_payload, build_summary_evidence_payload, cluster_result_payload,
 };
-use pulsar_analysis::dossier::build_dossier;
+use pulsar_analysis::dossier::{build_dossier, build_dossier_with_central_rows};
 use pulsar_analysis::feature_evidence::{
     build_feature_evidence_index, build_feature_evidence_index_for_clusters, FeatureEvidenceIndex,
 };
@@ -31,6 +31,7 @@ use super::params::Format;
 use super::{clustering, ToolSpec};
 use crate::budget::{self, pair_chars};
 use crate::envelope::{ok_result, ToolError};
+use crate::release;
 use crate::schema::{self as s, input_schema};
 use crate::state::{ClusterState, EvidenceKey, LiveRun, ServerState};
 
@@ -254,6 +255,8 @@ pub(crate) async fn resolve(
         },
         group_summary: Value::Null,
         summary_thresholds: GROUP_SUMMARY_DEFAULTS,
+        resolution: None,
+        dossiers: Mutex::new(HashMap::new()),
     });
     state.session().persisted_clusters = Some(clusters.clone());
     Ok(clusters)
@@ -373,11 +376,11 @@ impl Section {
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]
 #[serde(default)]
 pub struct DetailParams {
-    /// Persisted assignment to read (from generate_cluster_dossier or a merge). Omit for the session's live labels.
+    /// Persisted assignment to read (from generate_cluster_dossier or a merge). Omit for the live labels.
     pub cluster_assignment_id: Option<String>,
-    /// Clusters to show, in this order. Omit to page through all clusters by size with cursor.
+    /// Clusters to show, in this order. Omit to page all clusters by size with cursor.
     pub cluster_ids: Option<Vec<i64>>,
-    /// Continue paging here: the cursor in a previous truncation.next. Omit to start at the largest cluster.
+    /// Continue here: the cursor in a previous truncation.next. Omit to start at the largest cluster.
     pub cursor: Option<String>,
     /// Sections per cluster, at the dossier's clusters[] paths. Default: topological_neighbors, tier_counts, numeric_features, categorical_features.
     pub sections: Option<Vec<Section>>,
@@ -392,7 +395,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Cluster Detail",
-        description: "Per-cluster evidence for any persisted cluster assignment (default: the live labels), paged largest first within the response budget. Call the truncation.next of generate_cluster_dossier or of a previous page to continue; cluster_ids picks clusters. Read-only: never changes the live labels.",
+        description: "Per-cluster evidence for any persisted cluster assignment, including merged ones (default: the live labels), paged largest first within the response budget. Continue a dossier or page via its `truncation.next` cursor; cluster_ids picks clusters. Read-only: never changes the live labels.",
         input_schema: input_schema::<DetailParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -405,8 +408,9 @@ pub fn spec() -> ToolSpec {
                 ("total_clusters", s::integer()),
                 ("cursor", s::nullable(s::integer())),
                 ("sections", s::array(s::string())),
-                ("clusters", s::array(open)),
+                ("clusters", s::array(open.clone())),
                 ("truncation", s::truncation()),
+                (release::KEY, open),
             ],
             &[
                 "status",
@@ -439,14 +443,25 @@ fn entries(
 ) -> Result<Vec<Value>, String> {
     let run = &loaded.live_run;
     let edges = &run.fitted.graph.edges;
-    let evidence = build_feature_evidence_index_for_clusters(
-        &run.table,
-        &loaded.labels,
-        edges,
-        &loaded.exclude_columns,
-        ids,
-    )
-    .map_err(|e| e.to_string())?;
+    let reuse_live = loaded.live.as_ref().filter(|c| {
+        ids.len() == c.evidence.cluster_bundles.len()
+            && ids
+                .iter()
+                .all(|id| c.evidence.cluster_bundles.contains_key(id))
+    });
+    let evidence = match reuse_live {
+        Some(c) => c.evidence.clone(),
+        None => Arc::new(
+            build_feature_evidence_index_for_clusters(
+                &run.table,
+                &loaded.labels,
+                edges,
+                &loaded.exclude_columns,
+                ids,
+            )
+            .map_err(|e| e.to_string())?,
+        ),
+    };
     let meta = meta_of(&loaded.record, &loaded.labels);
     let summary =
         build_summary_evidence_payload(&evidence, &meta, &json!({}), None, max_features, 0);
@@ -457,15 +472,43 @@ fn entries(
         .filter_map(|c| Some((c["cluster_id"].as_i64()?, c.as_object()?.clone())))
         .collect();
     if sections.iter().any(|s| s.standard()) {
-        let dossier = build_dossier(
-            &evidence,
-            &run.table,
-            &loaded.labels,
-            edges,
-            "standard",
-            json!({}),
-        )
-        .map_err(|e| e.to_string())?;
+        let dossier = match reuse_live {
+            Some(c) => {
+                let mut guard = c.dossiers.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(d) = guard.get("standard") {
+                    d.clone()
+                } else {
+                    let existing_central: Option<HashMap<i64, Vec<Value>>> =
+                        guard.values().next().map(|d| {
+                            d.clusters
+                                .iter()
+                                .map(|cl| (cl.cluster_id, cl.central_rows.clone()))
+                                .collect()
+                        });
+                    let built = build_dossier_with_central_rows(
+                        &evidence,
+                        &run.table,
+                        &loaded.labels,
+                        edges,
+                        "standard",
+                        json!({}),
+                        existing_central.as_ref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    guard.insert("standard".to_owned(), built.clone());
+                    built
+                }
+            }
+            None => build_dossier(
+                &evidence,
+                &run.table,
+                &loaded.labels,
+                edges,
+                "standard",
+                json!({}),
+            )
+            .map_err(|e| e.to_string())?,
+        };
         let standard = build_evidence_payload(&dossier, &meta, "standard", None, max_features);
         for c in standard["clusters"].as_array().into_iter().flatten() {
             if let (Some(id), Some(map)) = (c["cluster_id"].as_i64(), c.as_object()) {
@@ -540,6 +583,8 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
                     },
                     group_summary: Value::Null,
                     summary_thresholds: GROUP_SUMMARY_DEFAULTS,
+                    resolution: None,
+                    dossiers: Mutex::new(HashMap::new()),
                 };
                 return Err(unknown_cluster(state, NAME, first, &clusters)
                     .detail("unknown_cluster_ids", json!(missing)));
@@ -639,11 +684,16 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
     };
     let fits = |pair: &(Value, String)| pair_chars(&pair.0, &pair.1) <= budget;
 
+    let finish = |(mut payload, text): (Value, String)| {
+        release::attach_detail(state, &loaded.live_run.run_id, &loaded.labels, &mut payload);
+        Ok(ok_result(payload, Some(text)))
+    };
+
     let mut list = built;
     let n = list.len();
     let full = render(&list, n, false);
     if fits(&full) {
-        return Ok(ok_result(full.0, Some(full.1)));
+        return finish(full);
     }
     for cap in [3, 1] {
         for c in &mut list {
@@ -651,7 +701,7 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
         }
         let pair = render(&list, n, true);
         if fits(&pair) {
-            return Ok(ok_result(pair.0, Some(pair.1)));
+            return finish(pair);
         }
     }
     // Fewer clusters; at least one, so paging always moves.
@@ -668,6 +718,5 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
     if n == 1 && !fits(&render(&list, 1, true)) {
         budget::trim_value(&mut list[0], budget / 3);
     }
-    let pair = render(&list, n, true);
-    Ok(ok_result(pair.0, Some(pair.1)))
+    finish(render(&list, n, true))
 }

@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 
+use pulsar_analysis::disclosure::label;
 use pulsar_analysis::feature_evidence::FeatureEvidenceIndex;
 use pulsar_store::ClusterAssignmentId;
 use rmcp::model::CallToolResult;
@@ -18,6 +19,7 @@ use serde_json::{json, Map, Value};
 use crate::budget::{self, json_chars, pair_chars};
 use crate::envelope::ok_result;
 use crate::phirewall;
+use crate::release;
 use crate::state::ServerState;
 
 /// The drill-down tool every `next` names.
@@ -36,16 +38,11 @@ pub const LIST_SECTIONS: [&str; 5] = [
 /// reached through `next`).
 const OMITTED_LISTED: usize = 50;
 
-/// Longest one-line label in the cluster index.
-const LABEL_CHARS: usize = 80;
-
 /// `(cluster_id, size)` largest first, ties by id.
 pub fn size_order_of_labels(labels: &[i64]) -> Vec<(i64, usize)> {
-    let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
-    for &l in labels {
-        *counts.entry(l).or_default() += 1;
-    }
-    let mut order: Vec<(i64, usize)> = counts.into_iter().collect();
+    let mut order: Vec<(i64, usize)> = pulsar_analysis::clustering::merge::label_sizes(labels)
+        .into_iter()
+        .collect();
     order.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     order
 }
@@ -67,13 +64,7 @@ pub fn labels_of(evidence: &FeatureEvidenceIndex) -> BTreeMap<i64, String> {
     evidence
         .cluster_bundles
         .iter()
-        .map(|(id, b)| {
-            let mut label: String = b.semantic_name.chars().take(LABEL_CHARS).collect();
-            if b.semantic_name.chars().count() > LABEL_CHARS {
-                label.push('…');
-            }
-            (*id, label)
-        })
+        .map(|(id, b)| (*id, label(&b.semantic_name).0))
         .collect()
 }
 
@@ -587,7 +578,7 @@ pub fn fit_dossier(
         for (k, v) in p.as_object_mut().into_iter().flatten() {
             if !matches!(
                 k.as_str(),
-                "truncation" | "cluster_index" | budget::RELEASE_KEY | phirewall::KEY
+                "truncation" | "cluster_index" | release::KEY | phirewall::KEY
             ) {
                 budget::trim_value(v, budget / 40);
             }
