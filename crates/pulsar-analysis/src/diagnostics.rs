@@ -588,6 +588,24 @@ pub fn skeleton_payload(
     if include_edges {
         obj.insert("edges".into(), json!(edges));
     }
+    if !include_nodes && !include_edges {
+        obj.insert(
+            "more".into(),
+            json!(format!(
+                "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes ({} in the graph), detail='edges' up to max_edges raw edges ({}), detail='full' both plus the config YAML.",
+                summary.node_count, summary.edge_count
+            )),
+        );
+    }
+    if summary.node_count > 0 && summary.edge_count * 10 < summary.node_count {
+        obj.insert(
+            "connectivity_note".into(),
+            json!(format!(
+                "{} edges over {} nodes ({} components): the graph is nearly disconnected at this threshold. get_threshold_stability_curve shows which thresholds hold larger components.",
+                summary.edge_count, summary.node_count, summary.component_count
+            )),
+        );
+    }
     payload
 }
 
@@ -778,6 +796,26 @@ mod tests {
         assert!(payload.get("nodes").is_none());
         let nodes = skeleton_payload(&s, "nodes", 2, 10);
         assert!(nodes["topological_summary"]["bridges"].is_array());
+        // Counts-only levels say which detail returns nodes and edges.
+        assert_eq!(
+            nodes["more"],
+            "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes (6 in the graph), detail='edges' up to max_edges raw edges (5), detail='full' both plus the config YAML."
+        );
+        assert!(skeleton_payload(&s, "summary", 2, 10).get("more").is_some());
+        assert!(payload.get("more").is_none());
+        assert!(skeleton_payload(&s, "full", 2, 10).get("more").is_none());
+        assert!(payload.get("connectivity_note").is_none());
+        // 1 edge over 20 nodes: nearly disconnected.
+        let sparse = GraphAnalysis::new(&Graph {
+            n: 20,
+            edges: vec![(0, 1, 0.5)],
+        })
+        .unwrap()
+        .summary(0.5);
+        assert_eq!(
+            skeleton_payload(&sparse, "summary", 2, 10)["connectivity_note"],
+            "1 edges over 20 nodes (19 components): the graph is nearly disconnected at this threshold. get_threshold_stability_curve shows which thresholds hold larger components."
+        );
 
         let empty = Graph {
             n: 3,

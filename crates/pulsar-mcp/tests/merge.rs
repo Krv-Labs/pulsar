@@ -129,13 +129,25 @@ async fn merging_a_small_cluster_then_the_dossier_on_the_merged_assignment() {
     let merges = merged["merges"].as_array().unwrap();
     assert!(!merges.is_empty(), "{merged}");
     for m in merges {
-        assert!(m["from"].is_i64() && m["into"].is_i64() && m["group"].is_i64());
         assert!(["edge_weight", "isolated"].contains(&m["linkage"].as_str().unwrap()));
-        let share = m["weight_share"].as_f64().unwrap();
-        assert!((0.0..=1.0).contains(&share));
+        if m["from"].is_array() {
+            // A collapsed run of isolated merges.
+            assert_eq!(m["linkage"], "isolated");
+            assert_eq!(
+                m["count"].as_u64(),
+                m["from"].as_array().map(|f| f.len() as u64)
+            );
+        } else {
+            assert!(m["from"].is_i64() && m["into"].is_i64() && m["group"].is_i64());
+            let share = m["weight_share"].as_f64().unwrap();
+            assert!((0.0..=1.0).contains(&share));
+        }
     }
     assert!(
-        merges.iter().any(|m| m["from"].as_i64() == Some(far)),
+        merges.iter().any(|m| m["from"].as_i64() == Some(far)
+            || m["from"]
+                .as_array()
+                .is_some_and(|f| f.iter().any(|v| v.as_i64() == Some(far)))),
         "the 9-row, 2-patient blob was not merged: {merged}"
     );
     assert_eq!(merged["merged_from"], original);
@@ -162,7 +174,10 @@ async fn merging_a_small_cluster_then_the_dossier_on_the_merged_assignment() {
     assert!(errors.is_empty(), "{errors:#?}");
     let grouping = &summary["grouping"];
     assert_eq!(grouping["merged_from"], original);
-    assert_eq!(grouping["merges"].as_array().unwrap().len(), merges.len());
+    assert!(
+        grouping.get("merges").is_none(),
+        "the merges are listed once: {grouping}"
+    );
     assert_eq!(grouping["group_count"].as_u64().unwrap(), n);
     let rel = release_of(&merged, "merge_small_groups");
     assert_eq!(rel["groups"].as_array().unwrap().len() as u64, n);

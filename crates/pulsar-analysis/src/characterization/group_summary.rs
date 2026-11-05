@@ -184,6 +184,58 @@ pub struct GroupSummary {
     pub not_used_for_grouping_omitted: usize,
 }
 
+/// The auto name of a group, from the traits the summary shows for it, so the
+/// name and the summary say the same thing: up to two leading traits, a level
+/// as `<level> <column>` and a number as `High`/`Low <column>`, under an
+/// `[Auto]` prefix. `None` for a group with no trait.
+pub fn auto_name(traits: &[Trait]) -> Option<String> {
+    let parts: Vec<String> = traits
+        .iter()
+        .take(2)
+        .map(|t| {
+            let direction = if t.sd >= 0.0 { "High" } else { "Low" };
+            match (&t.level, t.sd >= 0.0) {
+                (Some(level), true) => format!("{level} {}", t.column),
+                (Some(level), false) => format!("Low {level} {}", t.column),
+                (None, _) => format!("{direction} {}", t.column),
+            }
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("[Auto] {}", parts.join(", ")))
+}
+
+/// [`auto_name`] for each group of a serialized [`GroupSummary`], by group id.
+pub fn auto_names(summary: &serde_json::Value) -> std::collections::HashMap<i64, String> {
+    let mut names = std::collections::HashMap::new();
+    let Some(groups) = summary.get("groups").and_then(|g| g.as_array()) else {
+        return names;
+    };
+    for group in groups {
+        let (Some(id), Some(traits)) = (
+            group.get("id").and_then(|i| i.as_i64()),
+            group.get("traits").and_then(|t| t.as_array()),
+        ) else {
+            continue;
+        };
+        let traits: Vec<Trait> = traits
+            .iter()
+            .filter_map(|t| {
+                Some(Trait {
+                    feature: 0,
+                    column: t.get("column")?.as_str()?.to_owned(),
+                    level: t.get("level").and_then(|l| l.as_str()).map(str::to_owned),
+                    sd: t.get("sd")?.as_f64()?,
+                    truncated: false,
+                })
+            })
+            .collect();
+        if let Some(name) = auto_name(&traits) {
+            names.insert(id, name);
+        }
+    }
+    names
+}
+
 /// One standardized axis of a column: the column itself (numeric) or one
 /// level's 0/1 indicator.
 struct Axis {
@@ -660,6 +712,34 @@ pub fn group_summary(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_group_is_named_from_the_traits_the_summary_shows() {
+        let t = |column: &str, level: Option<&str>, sd: f64| Trait {
+            feature: 0,
+            column: column.to_owned(),
+            level: level.map(str::to_owned),
+            sd,
+            truncated: false,
+        };
+        assert_eq!(auto_name(&[]), None);
+        assert_eq!(
+            auto_name(&[
+                t("STATE", Some("TX"), 1.4),
+                t("age", None, -0.9),
+                t("x", None, 2.0)
+            ])
+            .as_deref(),
+            Some("[Auto] TX STATE, Low age")
+        );
+        let summary = serde_json::json!({"groups": [
+            {"id": 3, "size": 20, "traits": [{"column": "STATE", "level": "GA", "sd": 1.1}]},
+            {"id": 4, "size": 20, "traits": []},
+        ]});
+        let names = auto_names(&summary);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[&3], "[Auto] GA STATE");
+    }
+
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json::Value;
 

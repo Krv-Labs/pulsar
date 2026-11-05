@@ -987,6 +987,21 @@ pub struct FeatureEvidenceIndex {
     pub categorical_columns_gated: Vec<GatedColumn>,
 }
 
+impl FeatureEvidenceIndex {
+    /// Replace the auto names with `names` (by cluster id); a cluster without
+    /// one keeps its name. Returns whether any name changed.
+    pub fn rename(&mut self, names: &HashMap<i64, String>) -> bool {
+        let mut changed = false;
+        for (id, bundle) in &mut self.cluster_bundles {
+            if let Some(name) = names.get(id).filter(|n| **n != bundle.semantic_name) {
+                bundle.semantic_name = name.clone();
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 fn auto_semantic_name(
     numeric: &[NumericRow],
     categorical: &[CategoricalRow],

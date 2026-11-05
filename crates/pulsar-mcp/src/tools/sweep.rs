@@ -944,7 +944,7 @@ pub fn summary_payload(
         "config_advisory": response["config_advisory"],
         "config_yaml_included": include_config_yaml,
         "config_yaml_available_via": "get_runtime_context",
-        "next_tools": ["diagnose_cosmic_graph", "get_sweep_history", "get_threshold_stability_curve"],
+        "next_tools": ["diagnose_cosmic_graph", "get_sweep_history", "get_threshold_stability_curve", "refine_config"],
     });
     let obj = payload.as_object_mut().expect("object");
     if include_config_yaml {

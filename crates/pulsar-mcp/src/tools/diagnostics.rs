@@ -1160,7 +1160,7 @@ pub fn skeleton_spec() -> ToolSpec {
     ToolSpec {
         name: SKELETON,
         title: "Topological Skeleton",
-        description: "Connectivity structure (components, nodes, edges) of a run's persisted graph, capped by max_nodes / max_edges. Reads the stored run, not the live model. Use diagnose_cosmic_graph for risk-oriented measurements instead.",
+        description: "Connectivity structure (components, nodes, edges) of a run's persisted graph, capped by max_nodes / max_edges. detail: 'summary' (default) and 'nodes' return counts and components only ('nodes' adds the hub/bridge summary); 'full_nodes' returns raw nodes, 'edges' raw edges, 'full' both plus the config YAML. Reads the stored run, not the live model. Use diagnose_cosmic_graph for risk-oriented measurements instead.",
         input_schema: input_schema::<SkeletonParams>(),
         output_schema: s::as_object(s::object(
             &[

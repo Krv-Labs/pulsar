@@ -46,7 +46,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Refine Config",
-        description: "Apply constrained overrides to a Pulsar config and return normalized YAML plus a diff. With no config_yaml it edits the session's active config in place. Deletion via overrides={\"remove_keys\": [...]} is idempotent and shows as removed:true in the diff. Use between sweeps to concentrate or shift the grid.",
+        description: "Apply constrained overrides to a Pulsar config and return normalized YAML plus a diff. With no config_yaml it edits the session's active config in place. Deletion via overrides={\"remove_keys\": [...]} is idempotent and shows as removed:true in the diff. Use between sweeps to concentrate or shift the grid, or to fix the threshold: overrides={\"construction_threshold\": 0.025} replaces \"auto\" (candidate values: a sweep's threshold_stability_summary.top_plateaus midpoints, or get_threshold_stability_curve).",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[

@@ -561,6 +561,35 @@ fn compute(job: Job) -> Result<(Computed, Staging), ToolError> {
         ),
     };
 
+    // The key holds the method, cut-off and hidden columns; the dropped
+    // columns are the run's, so only the thresholds can still differ.
+    let group_summary = match evidence_hit.filter(|c| c.evidence_key == evidence_key) {
+        Some(c) if c.summary_thresholds == job.summary_thresholds => c.group_summary.clone(),
+        _ => serde_json::to_value(group_summary(
+            table,
+            &labels,
+            &job.exclude_columns,
+            &job.dropped,
+            // The summary's method is a code word: `merged:x` is `merged_x`.
+            &result.method_used.replace(':', "_"),
+            result.threshold_applied,
+            &job.summary_thresholds,
+        ))
+        .map_err(|e| failed(e.to_string()))?,
+    };
+
+    // The groups are named from the traits the summary shows for them, so the
+    // name in a profile and the trait in the summary cannot disagree.
+    let mut evidence = evidence;
+    let names = pulsar_analysis::characterization::auto_names(&group_summary);
+    if !names.is_empty() && !evidence.cluster_bundles.is_empty() {
+        let mut renamed = (*evidence).clone();
+        if renamed.rename(&names) {
+            evidence = Arc::new(renamed);
+            dossiers.clear();
+        }
+    }
+
     // Python logs and degrades to an empty block when diagnosis fails.
     let metrics = job.graph_cache.metrics.clone().or_else(|| {
         GraphAnalysis::new(&fitted.graph).ok().map(|a| {
@@ -611,23 +640,6 @@ fn compute(job: Job) -> Result<(Computed, Staging), ToolError> {
         let sizes = metrics.map(|m| m.component_sizes).unwrap_or_default();
         map.insert("component_sizes_summary".into(), size_summary(&sizes, 20));
     }
-
-    // The key holds the method, cut-off and hidden columns; the dropped
-    // columns are the run's, so only the thresholds can still differ.
-    let group_summary = match evidence_hit.filter(|c| c.evidence_key == evidence_key) {
-        Some(c) if c.summary_thresholds == job.summary_thresholds => c.group_summary.clone(),
-        _ => serde_json::to_value(group_summary(
-            table,
-            &labels,
-            &job.exclude_columns,
-            &job.dropped,
-            // The summary's method is a code word: `merged:x` is `merged_x`.
-            &result.method_used.replace(':', "_"),
-            result.threshold_applied,
-            &job.summary_thresholds,
-        ))
-        .map_err(|e| failed(e.to_string()))?,
-    };
 
     let staged = match job.given {
         Some(record) => Staging::Existing(record),

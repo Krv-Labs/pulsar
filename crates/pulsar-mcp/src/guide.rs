@@ -93,9 +93,10 @@ Reveal the dataset's topology; do not force convenient clusters.
    `get_sweep_history(detail='summary')` distills patterns across persisted runs (which
    projection dimensions collapsed structure, where singletons spiked); you still own the
    next-config decision. Prefer 2-3 deliberate sweeps over one brittle perfect-looking run.
-7. Inspect payloads summary-first. `get_topological_skeleton(detail='nodes')` gives the
-   compact hub/bridge summary; `detail='edges'` capped raw edges; `detail='full'` nodes,
-   edges and the config YAML.
+7. Inspect payloads summary-first. `get_topological_skeleton` default `detail='summary'` gives counts
+   and components only; `detail='nodes'` adds the compact hub/bridge summary;
+   `detail='full_nodes'` capped raw nodes; `detail='edges'` capped raw edges;
+   `detail='full'` nodes, edges and the config YAML.
 
 ## PHASE III: INTERPRET
 8. Cluster: `generate_cluster_dossier(detail='summary')` for routine exploration; treat

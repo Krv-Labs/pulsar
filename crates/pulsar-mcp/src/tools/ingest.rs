@@ -11,9 +11,10 @@ use crate::state::ServerState;
 pub const NAME: &str = "ingest_dataset";
 
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Params {
-    /// Absolute path to a CSV or Parquet file on the machine running this server (host-visible; sandbox-only paths fail).
+    /// Absolute path to a CSV or Parquet file on the machine running this server (host-visible; sandbox-only paths fail). `csv_path` is accepted as an alias.
+    #[serde(alias = "csv_path")]
     pub path: String,
 }
 
@@ -46,7 +47,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         return Err(ToolError::invalid_argument(
             NAME,
             "path is required.",
-            "Pass the absolute, host-visible path of a CSV or Parquet file.",
+            "Pass the absolute, host-visible path of a CSV or Parquet file as `path` (or `csv_path`).",
         ));
     }
     let store = state.store.clone();

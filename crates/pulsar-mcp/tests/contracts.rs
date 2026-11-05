@@ -488,6 +488,11 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
         )
         .await;
         assert_eq!(skel["graph"]["detail"], detail);
+        assert_eq!(
+            skel["graph"].get("more").is_some(),
+            matches!(detail, "summary" | "nodes"),
+            "{skel}"
+        );
         if detail == "edges" {
             assert_eq!(skel["graph"]["edges_returned"], 5);
         }
@@ -569,6 +574,28 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
     )
     .await;
     assert_eq!(e["error_code"], "HOST_PATH_NOT_VISIBLE");
+    // `csv_path` is an alias, not "path is required".
+    let e = err(
+        &client,
+        "ingest_dataset",
+        args(&[("csv_path", json!("/home/claude/data.csv"))]),
+    )
+    .await;
+    assert_eq!(e["error_code"], "HOST_PATH_NOT_VISIBLE");
+    // An unknown key names itself and the accepted keys.
+    let e = err(
+        &client,
+        "ingest_dataset",
+        args(&[("file", json!("/data/x.csv"))]),
+    )
+    .await;
+    assert_eq!(e["error_code"], "INVALID_ARGUMENT");
+    assert!(
+        e["reason"]
+            .as_str()
+            .is_some_and(|m| m.contains("unknown field `file`, expected `csv_path` or `path`")),
+        "{e}"
+    );
     let e = err(
         &client,
         "validate_config",
