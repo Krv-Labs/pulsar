@@ -194,18 +194,20 @@ impl StabilitySummary {
         singleton_fraction: f64,
         top_plateaus: &[PlateauSummary],
     ) -> Option<String> {
-        if n_edges == 0 {
-            Some(
-                "Auto threshold landed in an empty-graph regime. Pick a lower plateau midpoint \
-                 and re-run, or fix construction_threshold."
-                    .to_owned(),
-            )
-        } else if singleton_fraction > 0.8 {
-            let pct = (singleton_fraction * 100.0).round();
+        if n_edges == 0 || singleton_fraction > 0.8 {
+            let lead = if n_edges == 0 {
+                "Auto threshold landed in an empty-graph regime (100% of nodes are singletons)"
+                    .to_owned()
+            } else {
+                format!(
+                    "Auto threshold left {}% of nodes as singletons",
+                    (singleton_fraction * 100.0).round()
+                )
+            };
             let better = top_plateaus.iter().find(|p| p.singleton_fraction <= 0.5);
             Some(match better {
                 Some(p) => format!(
-                    "Auto threshold left {pct}% of nodes as singletons. top_plateaus has a plateau \
+                    "{lead}. top_plateaus has a plateau \
                      at {:.4} with {} components and {}% singletons; to build there call \
                      refine_config(overrides={{\"construction_threshold\": {:.4}}}) and sweep again.",
                     p.midpoint,
@@ -214,7 +216,7 @@ impl StabilitySummary {
                     p.midpoint
                 ),
                 None => format!(
-                    "Auto threshold left {pct}% of nodes as singletons, and none of top_plateaus \
+                    "{lead}, and none of top_plateaus \
                      is below 50% singletons. get_threshold_stability_curve lists more \
                      thresholds; set one with refine_config(overrides={{\"construction_threshold\": ...}})."
                 ),
@@ -447,6 +449,17 @@ mod tests {
                 "Auto threshold left 90% of nodes as singletons, and none of top_plateaus"
             ),
             "{w}"
+        );
+        assert_eq!(
+            StabilitySummary::warning(0, 1.0, &plateaus).as_deref(),
+            Some("Auto threshold landed in an empty-graph regime (100% of nodes are singletons). top_plateaus has a plateau at 0.0254 with 107 components and 20% singletons; to build there call refine_config(overrides={\"construction_threshold\": 0.0254}) and sweep again.")
+        );
+        let empty_none_better = StabilitySummary::warning(0, 1.0, &none_better).unwrap();
+        assert!(
+            empty_none_better.starts_with(
+                "Auto threshold landed in an empty-graph regime (100% of nodes are singletons), and none of top_plateaus"
+            ),
+            "{empty_none_better}"
         );
         assert_eq!(StabilitySummary::warning(10, 0.5, &plateaus), None);
     }

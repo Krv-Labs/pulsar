@@ -574,7 +574,28 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
     )
     .await;
     assert_eq!(e["error_code"], "HOST_PATH_NOT_VISIBLE");
-    // `csv_path` is an alias, not "path is required".
+    // `csv_path` is in the advertised input_schema and works as an alias.
+    let ingest_input_schema = Value::Object(
+        (*tools
+            .iter()
+            .find(|t| t.name == "ingest_dataset")
+            .unwrap()
+            .input_schema)
+            .clone(),
+    );
+    let csv_call = json!({"csv_path": golden("blobs", "input.csv").display().to_string()});
+    common::validate_schema(&ingest_input_schema, &csv_call, "ingest_dataset(csv_path)");
+    let via_alias = ok(
+        &client,
+        &tools,
+        "ingest_dataset",
+        args(&[(
+            "csv_path",
+            json!(golden("blobs", "input.csv").display().to_string()),
+        )]),
+    )
+    .await;
+    assert_eq!(via_alias["dataset_id"], dataset_id);
     let e = err(
         &client,
         "ingest_dataset",
@@ -593,7 +614,7 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
     assert!(
         e["reason"]
             .as_str()
-            .is_some_and(|m| m.contains("unknown field `file`, expected `csv_path` or `path`")),
+            .is_some_and(|m| m.contains("unknown field `file`, expected `path` or `csv_path`")),
         "{e}"
     );
     let e = err(
@@ -3725,14 +3746,13 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
     let root = TempRoot::new("threshold-table");
     let client = connect(root.path(), test_options(), ()).await;
     let tools = client.list_all_tools().await.unwrap();
+    let csv = root.path().join("penguins.csv");
+    std::fs::copy(golden("penguins", "input.csv"), &csv).unwrap();
     let ingested = ok(
         &client,
         &tools,
         "ingest_dataset",
-        args(&[(
-            "path",
-            json!(golden("penguins", "input.csv").display().to_string()),
-        )]),
+        args(&[("path", json!(csv.display().to_string()))]),
     )
     .await;
     let sweep = ok(
@@ -3864,6 +3884,73 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
         "penguins grouping: {}",
         serde_json::to_string_pretty(summary).unwrap()
     );
+    let split_id = split_dossier["cluster_assignment_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name_of = |payload: &Value, id: i64| -> String {
+        payload["clusters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["cluster_id"].as_i64() == Some(id))
+            .and_then(|c| c["semantic_name"].as_str())
+            .unwrap()
+            .to_owned()
+    };
+    let top_id = summary["groups"][0]["id"].as_i64().unwrap();
+    let second_id = summary["groups"][1]["id"].as_i64().unwrap();
+    let top_summary_name = name_of(&split_dossier, top_id);
+    let second_summary_name = name_of(&split_dossier, second_id);
+    assert!(
+        !top_summary_name.contains("species") && !second_summary_name.contains("species"),
+        "summary names never use dropped columns: {top_summary_name}, {second_summary_name}"
+    );
+
+    // Lowering summary_max_groups to 1 hides the second group from the
+    // summary; its cached evidence must reset to the feature-evidence fallback
+    // name instead of retaining the previous summary-derived name.
+    let one_group = ok(
+        &client,
+        &tools,
+        "generate_cluster_dossier",
+        args(&[
+            ("method", json!("components")),
+            ("interpretation_edge_weight_threshold", json!(split)),
+            ("summary_max_groups", json!(1)),
+            ("detail", json!("standard")),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert_eq!(name_of(&one_group, top_id), top_summary_name);
+    let second_fallback_name = name_of(&one_group, second_id);
+    assert_ne!(
+        second_fallback_name, second_summary_name,
+        "cluster beyond summary_max_groups must not keep old summary name"
+    );
+    assert!(
+        second_fallback_name.contains("species"),
+        "cluster beyond summary_max_groups falls back to feature-evidence name: {second_fallback_name}"
+    );
+
+    // export_html_report with a different exclude_columns rebuilds evidence
+    // and still applies summary-derived names.
+    let report = ok(
+        &client,
+        &tools,
+        "export_html_report",
+        args(&[
+            ("dataset_id", ingested["dataset_id"].clone()),
+            ("exclude_columns", json!(["year"])),
+        ]),
+    )
+    .await;
+    let html = std::fs::read_to_string(report["report_path"].as_str().unwrap()).unwrap();
+    assert!(
+        html.contains(&top_summary_name),
+        "HTML report with different exclude_columns must use summary name {top_summary_name}"
+    );
 
     let overrides = args(&[
         ("response_format", json!("json")),
@@ -3889,6 +3976,39 @@ async fn the_sweep_answers_a_threshold_table_and_the_dossier_names_its_grouping(
     let asked = json!({"max_groups": 500, "max_features": 500, "min_sd": 0.5, "min_rows": 8, "max_traits": 500});
     let summary = checked_group_summary(&huge, applied(&huge, asked));
     assert!(summary["limits"]["max_groups"].as_u64().unwrap() < 500);
+
+    // Now huge (auto method) is the live assignment, so split_id is non-live.
+    // Reading split_id via get_cluster_detail and get_cluster_profile must
+    // still apply summary-derived names.
+    let detail_non_live = ok(
+        &client,
+        &tools,
+        "get_cluster_detail",
+        args(&[
+            ("cluster_assignment_id", json!(split_id)),
+            ("cluster_ids", json!([top_id, second_id])),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert_eq!(detail_non_live["live"], false);
+    assert_eq!(name_of(&detail_non_live, top_id), top_summary_name);
+    assert_eq!(name_of(&detail_non_live, second_id), second_summary_name);
+    let profile_non_live = ok(
+        &client,
+        &tools,
+        "get_cluster_profile",
+        args(&[
+            ("cluster_assignment_id", json!(split_id)),
+            ("cluster_id", json!(second_id)),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        profile_non_live["cluster"]["semantic_name"],
+        second_summary_name
+    );
     for (name, value) in [
         ("summary_min_rows", json!(3)),
         ("summary_max_groups", json!(0)),

@@ -221,14 +221,27 @@ pub(crate) async fn resolve(
     }
     let (labels, table) = (loaded.labels.clone(), loaded.live_run.clone());
     let exclude = loaded.exclude_columns.clone();
-    let evidence = tokio::task::spawn_blocking(move || {
-        build_feature_evidence_index(
+    let method = loaded.record.method.clone();
+    let cut_off = loaded.record.interpretation_edge_weight_threshold;
+    let (evidence, group_summary) = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let mut evidence = build_feature_evidence_index(
             &table.table,
             &labels,
             &table.fitted.graph.edges,
             &exclude,
             Some(CHARACTERIZE_MAX),
         )
+        .map_err(|e| e.to_string())?;
+        let summary = clustering::apply_summary_names(
+            &mut evidence,
+            &table,
+            &labels,
+            &exclude,
+            &method,
+            cut_off,
+            &GROUP_SUMMARY_DEFAULTS,
+        )?;
+        Ok((evidence, summary))
     })
     .await
     .map_err(|e| ToolError::worker_stopped(tool, "EVIDENCE_FAILED", &e))?
@@ -236,7 +249,7 @@ pub(crate) async fn resolve(
         ToolError::new(
             tool,
             "EVIDENCE_FAILED",
-            e.to_string(),
+            e,
             "Check the assignment, then retry.",
         )
     })?;
@@ -253,7 +266,7 @@ pub(crate) async fn resolve(
             exclude_columns: loaded.exclude_columns,
             max_clusters_to_characterize: CHARACTERIZE_MAX,
         },
-        group_summary: Value::Null,
+        group_summary,
         summary_thresholds: GROUP_SUMMARY_DEFAULTS,
         resolution: None,
         dossiers: Mutex::new(HashMap::new()),
@@ -277,16 +290,34 @@ pub(crate) async fn evidence_for(
     let run = state.cache.get(&clusters.run_id)?;
     let labels = clusters.labels.clone();
     let exclude = clusters.evidence_key.exclude_columns.clone();
+    let summary = clusters.group_summary.clone();
+    let thresholds = clusters.summary_thresholds;
+    let method = clusters.evidence_key.method.clone();
+    let cut_off = clusters.evidence_key.interpretation_edge_weight_threshold;
     let ids = cluster_ids.to_vec();
     tokio::task::spawn_blocking(move || {
-        build_feature_evidence_index_for_clusters(
+        let mut evidence = build_feature_evidence_index_for_clusters(
             &run.table,
             &labels,
             &run.fitted.graph.edges,
             &exclude,
             &ids,
         )
-        .ok()
+        .ok()?;
+        if summary.is_null() {
+            let _ = clustering::apply_summary_names(
+                &mut evidence,
+                &run,
+                &labels,
+                &exclude,
+                &method,
+                cut_off,
+                &thresholds,
+            );
+        } else {
+            evidence.rename(&pulsar_analysis::characterization::auto_names(&summary));
+        }
+        Some(evidence)
     })
     .await
     .ok()
@@ -451,16 +482,35 @@ fn entries(
     });
     let evidence = match reuse_live {
         Some(c) => c.evidence.clone(),
-        None => Arc::new(
-            build_feature_evidence_index_for_clusters(
+        None => {
+            let mut evidence = build_feature_evidence_index_for_clusters(
                 &run.table,
                 &loaded.labels,
                 edges,
                 &loaded.exclude_columns,
                 ids,
             )
-            .map_err(|e| e.to_string())?,
-        ),
+            .map_err(|e| e.to_string())?;
+            match &loaded.live {
+                Some(c) => {
+                    evidence.rename(&pulsar_analysis::characterization::auto_names(
+                        &c.group_summary,
+                    ));
+                }
+                None => {
+                    clustering::apply_summary_names(
+                        &mut evidence,
+                        run,
+                        &loaded.labels,
+                        &loaded.exclude_columns,
+                        &loaded.record.method,
+                        loaded.record.interpretation_edge_weight_threshold,
+                        &GROUP_SUMMARY_DEFAULTS,
+                    )?;
+                }
+            }
+            Arc::new(evidence)
+        }
     };
     let meta = meta_of(&loaded.record, &loaded.labels);
     let summary =

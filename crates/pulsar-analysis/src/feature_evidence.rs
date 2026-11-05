@@ -988,13 +988,20 @@ pub struct FeatureEvidenceIndex {
 }
 
 impl FeatureEvidenceIndex {
-    /// Replace the auto names with `names` (by cluster id); a cluster without
-    /// one keeps its name. Returns whether any name changed.
+    /// Set each cluster's `semantic_name` from `names` (by cluster id). A
+    /// cluster absent from `names` (beyond `summary_max_groups`, under
+    /// `summary_min_rows`, or with no trait above `summary_min_sd`) is reset
+    /// to its feature-evidence [`auto_semantic_name`]. Returns whether any
+    /// name changed.
     pub fn rename(&mut self, names: &HashMap<i64, String>) -> bool {
         let mut changed = false;
         for (id, bundle) in &mut self.cluster_bundles {
-            if let Some(name) = names.get(id).filter(|n| **n != bundle.semantic_name) {
-                bundle.semantic_name = name.clone();
+            let next = names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| auto_semantic_name(&bundle.numeric, &bundle.categorical, *id));
+            if next != bundle.semantic_name {
+                bundle.semantic_name = next;
                 changed = true;
             }
         }

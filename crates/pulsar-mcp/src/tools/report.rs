@@ -18,7 +18,7 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Map, Value};
 
 use super::export::normalize_cluster_names;
-use super::ToolSpec;
+use super::{clustering, ToolSpec};
 use crate::envelope::{ok_result, ToolError};
 use crate::schema::{self as s, input_schema};
 use crate::state::ServerState;
@@ -204,7 +204,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 built
             }
         } else {
-            let evidence = build_feature_evidence_index(
+            let mut evidence = build_feature_evidence_index(
                 &live.table,
                 labels,
                 &fitted.graph.edges,
@@ -212,6 +212,16 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 None,
             )
             .map_err(|e| failed(e.to_string()))?;
+            clustering::apply_summary_names(
+                &mut evidence,
+                &live,
+                labels,
+                &exclude,
+                &worker_clusters.evidence_key.method,
+                worker_clusters.evidence_key.interpretation_edge_weight_threshold,
+                &worker_clusters.summary_thresholds,
+            )
+            .map_err(failed)?;
             build_dossier(
                 &evidence,
                 &live.table,

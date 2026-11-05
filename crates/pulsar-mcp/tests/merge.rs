@@ -174,10 +174,18 @@ async fn merging_a_small_cluster_then_the_dossier_on_the_merged_assignment() {
     assert!(errors.is_empty(), "{errors:#?}");
     let grouping = &summary["grouping"];
     assert_eq!(grouping["merged_from"], original);
-    assert!(
-        grouping.get("merges").is_none(),
-        "the merges are listed once: {grouping}"
-    );
+    let summary_merges = grouping["merges"].as_array().unwrap();
+    let total_merged: usize = merges
+        .iter()
+        .map(|m| m["count"].as_u64().unwrap_or(1) as usize)
+        .sum();
+    assert_eq!(summary_merges.len(), total_merged, "{grouping}");
+    for m in summary_merges {
+        assert!(m["from"].is_i64() && m["into"].is_i64() && m["group"].is_i64());
+        assert!(["edge_weight", "isolated"].contains(&m["linkage"].as_str().unwrap()));
+        let share = m["weight_share"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&share));
+    }
     assert_eq!(grouping["group_count"].as_u64().unwrap(), n);
     let rel = release_of(&merged, "merge_small_groups");
     assert_eq!(rel["groups"].as_array().unwrap().len() as u64, n);
@@ -296,11 +304,32 @@ async fn the_floor_and_the_missing_token_column_are_explained() {
 
     // Higher values are honoured: every group (20, 20 and 2 patients) is
     // under 25, so the merge chains into one group of the 42 patients.
-    let high = ok(&client, "merge_small_groups", json!({"min_patients": 25})).await;
+    let high_res = call(&client, "merge_small_groups", json!({"min_patients": 25})).await;
+    assert_eq!(high_res.is_error, Some(false));
+    let high_text = high_res.content[0].as_text().unwrap().text.as_str();
+    let high = high_res.structured_content.as_ref().unwrap();
     assert_eq!(high["min_patients"], 25);
     assert_eq!(high["n_clusters"], 1);
     assert_eq!(high["cluster_sizes"].as_array().unwrap().len(), 1);
-    assert!(!high["merges"].as_array().unwrap().is_empty());
+    let top_merges = high["merges"].as_array().unwrap();
+    assert_eq!(
+        top_merges.len(),
+        1,
+        "consecutive isolated merges collapse: {top_merges:?}"
+    );
+    let real_merges = top_merges[0]["count"].as_u64().unwrap() as usize;
+    assert!(real_merges >= 2);
+    assert_eq!(
+        high[SUMMARY]["grouping"]["merges"]
+            .as_array()
+            .unwrap()
+            .len(),
+        real_merges
+    );
+    assert!(
+        high_text.contains(&format!("{real_merges} cluster(s) merged into 1 groups")),
+        "markdown must count real merges ({real_merges}), not collapsed entries: {high_text}"
+    );
 
     // method='assignment' with an id that is not in the store is refused.
     let bogus = call(

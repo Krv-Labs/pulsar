@@ -205,6 +205,10 @@ pub fn auto_name(traits: &[Trait]) -> Option<String> {
 }
 
 /// [`auto_name`] for each group of a serialized [`GroupSummary`], by group id.
+/// Groups absent from `summary["groups"]` (beyond `summary_max_groups` or
+/// under `summary_min_rows`) and groups with no trait above `summary_min_sd`
+/// are omitted from the map so `FeatureEvidenceIndex::rename` keeps their
+/// feature-evidence `auto_semantic_name`.
 pub fn auto_names(summary: &serde_json::Value) -> std::collections::HashMap<i64, String> {
     let mut names = std::collections::HashMap::new();
     let Some(groups) = summary.get("groups").and_then(|g| g.as_array()) else {

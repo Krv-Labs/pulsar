@@ -272,6 +272,48 @@ pub(crate) fn excluded_columns(live: &LiveRun, requested: &[String]) -> Vec<Stri
     out
 }
 
+/// Build the serialized [`GroupSummary`] for `labels` on `live`.
+pub(crate) fn build_group_summary(
+    live: &LiveRun,
+    labels: &[i64],
+    exclude_columns: &[String],
+    method: &str,
+    cut_off: f64,
+    thresholds: &GroupSummaryThresholds,
+) -> Result<Value, String> {
+    serde_json::to_value(group_summary(
+        &live.table,
+        labels,
+        exclude_columns,
+        &live.fitted.config.preprocessing.drop_columns,
+        // The summary's method is a code word: `merged:x` is `merged_x`.
+        &method.replace(':', "_"),
+        cut_off,
+        thresholds,
+    ))
+    .map_err(|e| e.to_string())
+}
+
+/// Build the [`GroupSummary`] for `labels` on `live` and apply its
+/// trait-derived [`auto_names`](pulsar_analysis::characterization::auto_names)
+/// to `evidence`. Clusters beyond `summary_max_groups`, under
+/// `summary_min_rows`, or without a trait above `summary_min_sd` keep their
+/// feature-evidence `auto_semantic_name`.
+pub(crate) fn apply_summary_names(
+    evidence: &mut FeatureEvidenceIndex,
+    live: &LiveRun,
+    labels: &[i64],
+    exclude_columns: &[String],
+    method: &str,
+    cut_off: f64,
+    thresholds: &GroupSummaryThresholds,
+) -> Result<Value, String> {
+    let summary = build_group_summary(live, labels, exclude_columns, method, cut_off, thresholds)?;
+    let names = pulsar_analysis::characterization::auto_names(&summary);
+    evidence.rename(&names);
+    Ok(summary)
+}
+
 /// The group_summary thresholds: the defaults with the requested overrides.
 fn summary_thresholds(p: &Params) -> Result<GroupSummaryThresholds, ToolError> {
     let d = GROUP_SUMMARY_DEFAULTS;
@@ -394,8 +436,6 @@ struct Job {
     n_ball_maps: usize,
     minhash_d: Option<usize>,
     exclude_columns: Vec<String>,
-    /// Columns the preprocessing dropped: profiled but not used for grouping.
-    dropped: Vec<String>,
     summary_thresholds: GroupSummaryThresholds,
     max_clusters_to_characterize: usize,
     detail: DossierDetail,
@@ -565,24 +605,23 @@ fn compute(job: Job) -> Result<(Computed, Staging), ToolError> {
     // columns are the run's, so only the thresholds can still differ.
     let group_summary = match evidence_hit.filter(|c| c.evidence_key == evidence_key) {
         Some(c) if c.summary_thresholds == job.summary_thresholds => c.group_summary.clone(),
-        _ => serde_json::to_value(group_summary(
-            table,
+        _ => build_group_summary(
+            &job.live,
             &labels,
             &job.exclude_columns,
-            &job.dropped,
-            // The summary's method is a code word: `merged:x` is `merged_x`.
-            &result.method_used.replace(':', "_"),
+            &result.method_used,
             result.threshold_applied,
             &job.summary_thresholds,
-        ))
-        .map_err(|e| failed(e.to_string()))?,
+        )
+        .map_err(failed)?,
     };
 
     // The groups are named from the traits the summary shows for them, so the
-    // name in a profile and the trait in the summary cannot disagree.
+    // name in a profile and the trait in the summary cannot disagree; groups
+    // absent from the summary reset to their feature-evidence name.
     let mut evidence = evidence;
     let names = pulsar_analysis::characterization::auto_names(&group_summary);
-    if !names.is_empty() && !evidence.cluster_bundles.is_empty() {
+    if !evidence.cluster_bundles.is_empty() {
         let mut renamed = (*evidence).clone();
         if renamed.rename(&names) {
             evidence = Arc::new(renamed);
@@ -911,7 +950,6 @@ pub(crate) async fn run(
         n_ball_maps: view.record.n_ball_maps,
         minhash_d: view.minhash_d(),
         exclude_columns,
-        dropped: dropped.clone(),
         summary_thresholds,
         // Only characterize the largest clusters so a shattered graph
         // cannot stall the O(clusters x features) evidence pass.

@@ -43,7 +43,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Merge Small Groups",
-        description: "Merge clusters under min_patients patients (default 8; can only be raised) into their most-connected neighbour by the run's full edge weights; a merged group still under the floor merges again, and a cluster with no edge joins the largest. Patients are counted distinct via the dataset's patient token column; tables without one are refused. Publishes a new cluster_assignment_id (method 'merged:<original>') and returns merges [{from, into, linkage, weight_share}] in the original ids, once (the summary's grouping carries only merged_from), with a run of isolated merges into the same group collapsed to {into, linkage:'isolated', from:[...], count}; sizes are rounded and groups renumbered by first row when anything merges. Call when generate_cluster_dossier reports a small cluster, then pass the new id to generate_cluster_dossier (method='assignment') for full evidence, or to other cluster tools and exports.",
+        description: "Merge clusters under min_patients patients (default 8; can only be raised) into their most-connected neighbour by the run's full edge weights; a merged group still under the floor merges again, and a cluster with no edge joins the largest. Patients are counted distinct via the dataset's patient token column; tables without one are refused. Publishes a new cluster_assignment_id (method 'merged:<original>') and returns merges [{from, into, linkage, weight_share}] in the original ids, with a run of isolated merges into the same group collapsed to {into, linkage:'isolated', from:[...], count} (the summary's grouping.merges keeps one entry per merge); sizes are rounded and groups renumbered by first row when anything merges. Call when generate_cluster_dossier reports a small cluster, then pass the new id to generate_cluster_dossier (method='assignment') for full evidence, or to other cluster tools and exports.",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
@@ -115,6 +115,24 @@ fn merges_json(merges: &[Merge]) -> Vec<Value> {
     }
     flush(&mut run, &mut out);
     out
+}
+
+fn render_text(
+    n_merged: usize,
+    n_clusters: usize,
+    k: usize,
+    new_id: &ClusterAssignmentId,
+    id: &ClusterAssignmentId,
+) -> String {
+    if n_merged == 0 {
+        format!(
+            "## Merge small groups\n\nEvery cluster already has at least {k} patients; nothing was merged. `cluster_assignment_id`: `{new_id}`.\n"
+        )
+    } else {
+        format!(
+            "## Merge small groups\n\n{n_merged} cluster(s) merged into {n_clusters} groups of at least {k} patients each. `cluster_assignment_id`: `{new_id}` (from `{id}`). Run `generate_cluster_dossier` with `method='assignment'` and this id for the full evidence.\n"
+        )
+    }
 }
 
 fn failed(code: &str, reason: impl Into<String>, action: impl Into<String>) -> ToolError {
@@ -244,22 +262,15 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         .collect();
 
     let mut summary = dossier[phirewall::KEY].clone();
-    if !merges.is_empty() {
+    if !merged.merges.is_empty() {
+        let full_merges: Vec<Value> = merged.merges.iter().map(merge_json).collect();
         if let Some(Value::Object(grouping)) = summary.get_mut("grouping") {
             grouping.insert("merged_from".into(), json!(id));
+            grouping.insert("merges".into(), json!(full_merges));
         }
     }
     let n_clusters = merged.groups.len();
-    let text = if merges.is_empty() {
-        format!(
-            "## Merge small groups\n\nEvery cluster already has at least {k} patients; nothing was merged. `cluster_assignment_id`: `{new_id}`.\n"
-        )
-    } else {
-        format!(
-            "## Merge small groups\n\n{} cluster(s) merged into {n_clusters} groups of at least {k} patients each. `cluster_assignment_id`: `{new_id}` (from `{id}`). Run `generate_cluster_dossier` with `method='assignment'` and this id for the full evidence.\n",
-            merges.len()
-        )
-    };
+    let text = render_text(merged.merges.len(), n_clusters, k, &new_id, &id);
     let mut payload = json!({
         "status": "ok",
         "cluster_assignment_id": new_id,
@@ -323,5 +334,13 @@ mod tests {
         // A lone isolated merge keeps the plain shape.
         assert_eq!(out[3]["from"], 6);
         assert_eq!(out[3]["linkage"], "isolated");
+
+        let new_id = ClusterAssignmentId::parse("ca_111111111111").unwrap();
+        let old_id = ClusterAssignmentId::parse("ca_000000000000").unwrap();
+        let text = render_text(merges.len(), 2, 8, &new_id, &old_id);
+        assert!(
+            text.contains("6 cluster(s) merged into 2 groups"),
+            "markdown must count real merges, not collapsed entries: {text}"
+        );
     }
 }

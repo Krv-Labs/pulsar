@@ -1135,11 +1135,11 @@ pub struct SkeletonParams {
     pub surface: Surface,
     /// Artifact handle; only used when surface='artifact'.
     pub artifact_id: String,
-    /// 'summary' (default): counts and components. 'nodes': per-node summary. 'edges': capped raw edges. 'full_nodes': capped raw nodes. 'full': nodes, edges and config YAML.
+    /// 'summary' (default): counts and components only. 'nodes': adds hub/bridge topological_summary (no raw nodes). 'full_nodes': capped raw nodes. 'edges': capped raw edges. 'full': raw nodes, raw edges and (on 'constructed') config YAML.
     pub detail: SkeletonDetail,
     /// Cap on edges returned in 'edges'/'full' detail (>= 1).
     pub max_edges: usize,
-    /// Cap on nodes returned in 'nodes'/'full_nodes'/'full' detail (>= 1).
+    /// Cap on nodes returned in 'full_nodes'/'full' detail (>= 1).
     pub max_nodes: usize,
 }
 
@@ -1160,7 +1160,7 @@ pub fn skeleton_spec() -> ToolSpec {
     ToolSpec {
         name: SKELETON,
         title: "Topological Skeleton",
-        description: "Connectivity structure (components, nodes, edges) of a run's persisted graph, capped by max_nodes / max_edges. detail: 'summary' (default) and 'nodes' return counts and components only ('nodes' adds the hub/bridge summary); 'full_nodes' returns raw nodes, 'edges' raw edges, 'full' both plus the config YAML. Reads the stored run, not the live model. Use diagnose_cosmic_graph for risk-oriented measurements instead.",
+        description: "Connectivity structure (components, nodes, edges) of a run's persisted graph, capped by max_nodes / max_edges. detail: 'summary' (default) and 'nodes' return counts and components only ('nodes' adds the hub/bridge summary); 'full_nodes' returns raw nodes, 'edges' raw edges, 'full' both (plus config YAML on 'constructed'). Reads the stored run, not the live model. Use diagnose_cosmic_graph for risk-oriented measurements instead.",
         input_schema: input_schema::<SkeletonParams>(),
         output_schema: s::as_object(s::object(
             &[

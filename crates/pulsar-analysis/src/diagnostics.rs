@@ -592,12 +592,12 @@ pub fn skeleton_payload(
         obj.insert(
             "more".into(),
             json!(format!(
-                "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes ({} in the graph), detail='edges' up to max_edges raw edges ({}), detail='full' both plus the config YAML.",
+                "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes ({} in the graph), detail='edges' up to max_edges raw edges ({}), detail='full' both (plus the config YAML on surface='constructed'; no config YAML on 'artifact').",
                 summary.node_count, summary.edge_count
             )),
         );
     }
-    if summary.node_count > 0 && summary.edge_count * 10 < summary.node_count {
+    if summary.node_count > 1 && summary.edge_count * 10 < summary.node_count {
         obj.insert(
             "connectivity_note".into(),
             json!(format!(
@@ -799,7 +799,7 @@ mod tests {
         // Counts-only levels say which detail returns nodes and edges.
         assert_eq!(
             nodes["more"],
-            "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes (6 in the graph), detail='edges' up to max_edges raw edges (5), detail='full' both plus the config YAML."
+            "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes (6 in the graph), detail='edges' up to max_edges raw edges (5), detail='full' both (plus the config YAML on surface='constructed'; no config YAML on 'artifact')."
         );
         assert!(skeleton_payload(&s, "summary", 2, 10).get("more").is_some());
         assert!(payload.get("more").is_none());
@@ -816,6 +816,16 @@ mod tests {
             skeleton_payload(&sparse, "summary", 2, 10)["connectivity_note"],
             "1 edges over 20 nodes (19 components): the graph is nearly disconnected at this threshold. get_threshold_stability_curve shows which thresholds hold larger components."
         );
+        // A 1-node graph is trivially connected, not disconnected.
+        let one_node = GraphAnalysis::new(&Graph {
+            n: 1,
+            edges: vec![],
+        })
+        .unwrap()
+        .summary(0.5);
+        assert!(skeleton_payload(&one_node, "summary", 2, 10)
+            .get("connectivity_note")
+            .is_none());
 
         let empty = Graph {
             n: 3,
