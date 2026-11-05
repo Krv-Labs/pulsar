@@ -1810,12 +1810,10 @@ fn assert_summary_matches_yaml(created: &Value, columns: &[String]) {
         summary["output_features"],
         created["processed_feature_count"]
     );
-    for list in ["dropped", "encoded", "imputed"] {
-        assert_eq!(
-            json!(summary[list].as_array().unwrap().len()),
-            counts[list],
-            "{list}"
-        );
+    for list in ["kept", "dropped", "encoded", "imputed"] {
+        let listed = summary[list].as_array().unwrap().len() as u64;
+        let omitted = summary[format!("{list}_omitted")].as_u64().unwrap();
+        assert_eq!(json!(listed + omitted), counts[list], "{list}");
     }
     let dropped: Vec<&str> = summary["dropped"]
         .as_array()
@@ -4369,8 +4367,10 @@ async fn every_summary_tool_answers_the_phirewall_contract_on_a_wide_table() {
     let cut: String = WIDE_LONG_NAME.chars().take(80).collect();
     assert_eq!(long["column"], format!("{cut}…"), "{long}");
     assert_eq!(long["truncated"], true, "{long}");
-    // One blank in 240 rows is a nonzero share: never shown as 0.
-    assert_eq!(find("imputed", 5)["missing_fraction"], 0.01);
+    // Wide default-treated columns are counted, not listed.
+    assert_eq!(inputs["kept"], json!([]), "{inputs}");
+    assert_eq!(inputs["kept_omitted"], inputs["counts"]["kept"]);
+    assert_eq!(inputs["imputed_omitted"], inputs["counts"]["imputed"]);
 }
 
 #[tokio::test]

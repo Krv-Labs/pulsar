@@ -222,6 +222,16 @@ fn common(
     out
 }
 
+/// True iff a column's [`common`] fields say nothing beyond the default
+/// rules: decided by them, with no settled decision, open question or 0/1
+/// partner. Such a line repeats what `counts` already says.
+fn is_default(fields: &Value) -> bool {
+    fields["decided_by"] == "default"
+        && ["decision", "question", "partner"]
+            .iter()
+            .all(|k| fields.get(k).is_none())
+}
+
 /// `column` with `fields` added.
 fn entry(plan: &PreprocessingPlan, col: &str, fields: Value) -> Value {
     let mut out = column(plan, col).expect("an entry of the plan");
@@ -288,7 +298,11 @@ fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value>
 /// `feature_names` are the processed features when the plan applies to the
 /// data; without them `output_features` and `levels` are null.
 /// `changes_from_previous` compares against `previous`, the revision this
-/// one replaced, and is empty without one. Every list is whole, so each
+/// one replaced, and is empty without one. `kept` and `imputed` list only
+/// columns that differ from the default treatment (see [`is_default`]);
+/// `kept_omitted` and `imputed_omitted` count the rest, and `counts` stay
+/// exact. A wide table otherwise sends one line per column twice, which
+/// alone can fill an answer. The other lists are whole, so their
 /// `*_omitted` is 0; an open question's `rows_affected` is a row count
 /// disclosed under `row_floor`.
 pub fn build_preprocessing_summary(
@@ -337,9 +351,14 @@ pub fn build_preprocessing_summary(
             entry(plan, &e.column, json!({"method": method, "levels": n}))
         })
         .collect();
-    let imputed: Vec<Value> = features
+    let imputed_all: Vec<(&&PlanEntry, &str)> = features
         .iter()
         .filter_map(|e| Some((e, e.impute_method()?)))
+        .collect();
+    let imputed_count = imputed_all.len();
+    let imputed: Vec<Value> = imputed_all
+        .into_iter()
+        .filter(|(e, _)| !is_default(&common(plan, &ev_by_col, e)))
         .map(|(e, method)| {
             let fraction = blank_share(&ev_by_col, &e.column);
             entry(
@@ -349,14 +368,17 @@ pub fn build_preprocessing_summary(
             )
         })
         .collect();
-    // Every feature, with its blank share and blank marker: with `dropped`,
-    // one line per input column.
+    // Features treated otherwise than by default, with their blank share and
+    // blank marker.
     let kept: Vec<Value> = features
         .iter()
-        .map(|e| {
+        .filter_map(|e| {
             let mut fields = common(plan, &ev_by_col, e);
+            if is_default(&fields) {
+                return None;
+            }
             fields["indicator"] = json!(indicator_code(&e.indicator));
-            entry(plan, &e.column, fields)
+            Some(entry(plan, &e.column, fields))
         })
         .collect();
     let open_questions: Vec<Value> = plan
@@ -389,16 +411,16 @@ pub fn build_preprocessing_summary(
             "kept": features.len(),
             "dropped": dropped.len(),
             "encoded": encoded.len(),
-            "imputed": imputed.len(),
+            "imputed": imputed_count,
         },
+        "kept_omitted": features.len() - kept.len(),
         "kept": kept,
-        "kept_omitted": 0,
         "dropped": dropped,
         "dropped_omitted": 0,
         "encoded": encoded,
         "encoded_omitted": 0,
+        "imputed_omitted": imputed_count - imputed.len(),
         "imputed": imputed,
-        "imputed_omitted": 0,
         "open_questions": open_questions,
         "open_questions_omitted": 0,
         "changes_from_previous": changes_from_previous,
@@ -502,6 +524,10 @@ mod tests {
             ])
         );
         assert_eq!(s["output_features"], json!(names.len()));
+        // Only score, which an open question decides, differs from the
+        // default rules; the omitted counts carry the rest.
+        assert_eq!(s["kept_omitted"], 3);
+        assert_eq!(s["imputed_omitted"], 1);
         // score is blank in 8 of 36 rows: 0.22 to 2 dp.
         let score = s["imputed"]
             .as_array()
@@ -511,10 +537,10 @@ mod tests {
             .unwrap();
         assert_eq!(score["feature"], 4);
         assert_eq!(score["missing_fraction"], 0.22);
-        // With `dropped`, one line per input column; each kept one carries
-        // its blank share and marker.
+        // Each kept line carries its blank share and marker.
         let kept = s["kept"].as_array().unwrap();
-        assert_eq!(kept.len() + s["dropped"].as_array().unwrap().len(), 7);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["question"], "q1");
         let kept_score = kept.iter().find(|e| e["column"] == "score").unwrap();
         assert_eq!(kept_score["missing_fraction"], 0.22);
         assert!(kept_score["indicator"].is_string(), "{kept_score}");
@@ -621,7 +647,8 @@ mod tests {
         let death_age = lines.iter().find(|e| e["column"] == "death_age").unwrap();
         assert_eq!(death_age["partner"]["column"], "died", "{death_age}");
         assert_eq!(death_age["relation"], "missing_when_partner_zero");
-        let score = lines.iter().find(|e| e["column"] == "score").unwrap();
-        assert!(score.get("partner").is_none(), "{score}");
+        // died and score follow the default rules: counted, not listed.
+        assert!(lines.iter().all(|e| e["column"] != "score"));
+        assert_eq!(s["kept_omitted"], 2);
     }
 }
