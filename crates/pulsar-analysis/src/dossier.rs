@@ -195,28 +195,31 @@ fn top_columns(numeric: &[Value], categorical: &[Value]) -> Vec<String> {
     columns
 }
 
-fn central_rows(
+fn central_rows_from_partition(
     table: &Table,
-    clusters: &[i64],
-    edges: &[(usize, usize, f64)],
-    cluster_id: i64,
+    n_rows: usize,
+    members: Vec<usize>,
+    cluster_edges: &[(usize, usize, f64)],
+    local: &mut [usize],
     columns: &[String],
 ) -> Vec<Value> {
-    let members: Vec<usize> = (0..clusters.len())
-        .filter(|&i| clusters[i] == cluster_id)
-        .collect();
     // networkx iterates a subgraph's nodes in the order of a set of the member
     // ids when that is under half the graph, else in graph order.
-    let nodes = if 2 * members.len() < clusters.len() {
+    let nodes = if 2 * members.len() < n_rows {
         cpython_set_order(&members)
     } else {
         members
     };
-    let local: HashMap<usize, usize> = nodes.iter().enumerate().map(|(k, &n)| (n, k)).collect();
-    let sub_edges: Vec<(usize, usize, f64)> = edges
+    for (k, &n) in nodes.iter().enumerate() {
+        local[n] = k;
+    }
+    let sub_edges: Vec<(usize, usize, f64)> = cluster_edges
         .iter()
-        .filter_map(|&(s, t, w)| Some((*local.get(&s)?, *local.get(&t)?, w)))
+        .map(|&(s, t, w)| (local[s], local[t], w))
         .collect();
+    for &n in &nodes {
+        local[n] = usize::MAX;
+    }
     let chosen: Vec<usize> = match pagerank(nodes.len(), &sub_edges) {
         Some(scores) => {
             let mut order: Vec<usize> = (0..nodes.len()).collect();
@@ -247,6 +250,20 @@ pub fn build_dossier(
     detail: &str,
     graph_metrics: Value,
 ) -> Result<TopologicalDossier, DossierError> {
+    build_dossier_with_central_rows(index, table, clusters, edges, detail, graph_metrics, None)
+}
+
+/// Build a tiered dossier reusing precomputed per-cluster `central_rows` when
+/// available (so switching between `"standard"` and `"full"` skips PageRank).
+pub fn build_dossier_with_central_rows(
+    index: &FeatureEvidenceIndex,
+    table: &Table,
+    clusters: &[i64],
+    edges: &[(usize, usize, f64)],
+    detail: &str,
+    graph_metrics: Value,
+    cached_central_rows: Option<&HashMap<i64, Vec<Value>>>,
+) -> Result<TopologicalDossier, DossierError> {
     if !matches!(detail, "summary" | "standard" | "full") {
         return Err(DossierError::Detail);
     }
@@ -267,6 +284,27 @@ pub fn build_dossier(
         index.working_columns.clone()
     };
 
+    let need_pagerank = cached_central_rows
+        .is_none_or(|m| index.cluster_bundles.keys().any(|cid| !m.contains_key(cid)));
+    let mut members_by_cluster: HashMap<i64, Vec<usize>> = HashMap::new();
+    let mut edges_by_cluster: HashMap<i64, Vec<(usize, usize, f64)>> = HashMap::new();
+    let mut local = Vec::new();
+    if need_pagerank {
+        for (row, &cid) in clusters.iter().enumerate() {
+            if index.cluster_bundles.contains_key(&cid) {
+                members_by_cluster.entry(cid).or_default().push(row);
+            }
+        }
+        for &(s, t, w) in edges {
+            if let (Some(&cs), Some(&ct)) = (clusters.get(s), clusters.get(t)) {
+                if cs == ct && index.cluster_bundles.contains_key(&cs) {
+                    edges_by_cluster.entry(cs).or_default().push((s, t, w));
+                }
+            }
+        }
+        local.resize(clusters.len(), usize::MAX);
+    }
+
     let mut profiles = vec![];
     for (&cluster_id, bundle) in &index.cluster_bundles {
         let numeric_rows = to_values(&bundle.numeric);
@@ -284,6 +322,23 @@ pub fn build_dossier(
         if top.is_empty() {
             top = working.iter().take(10).cloned().collect();
         }
+        let central = match cached_central_rows.and_then(|m| m.get(&cluster_id)) {
+            Some(rows) => rows.clone(),
+            None => {
+                let members = members_by_cluster.remove(&cluster_id).unwrap_or_default();
+                let c_edges = edges_by_cluster
+                    .get(&cluster_id)
+                    .map_or(&[][..], Vec::as_slice);
+                central_rows_from_partition(
+                    table,
+                    clusters.len(),
+                    members,
+                    c_edges,
+                    &mut local,
+                    &top,
+                )
+            }
+        };
         profiles.push(ClusterProfile {
             cluster_id,
             size: bundle.size,
@@ -291,7 +346,7 @@ pub fn build_dossier(
             semantic_name: bundle.semantic_name.clone(),
             numeric_features: detail_numeric_rows(&numeric_rows, detail),
             categorical_features: detail_categorical_rows(&categorical_rows, detail),
-            central_rows: central_rows(table, clusters, edges, cluster_id, &top),
+            central_rows: central,
             numeric_tiers: tiers(&numeric_rows),
             categorical_tiers: tiers(&categorical_rows),
             topological_neighbors: bundle.topological_neighbors.clone(),

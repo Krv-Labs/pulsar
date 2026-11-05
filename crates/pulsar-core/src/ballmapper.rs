@@ -3,11 +3,19 @@ use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use std::collections::HashSet;
 
-/// Squared Euclidean distance between two equal-length slices.
-/// Using squared distance avoids sqrt, which is sufficient for comparisons.
+/// Compare squared distance without changing the summation order. Every term
+/// is nonnegative, so a partial sum above the threshold cannot later fall
+/// back within it.
 #[inline(always)]
-fn l2_sq(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
+fn within_eps_sq(a: &[f64], b: &[f64], eps_sq: f64) -> bool {
+    let mut sum = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        sum += (x - y) * (x - y);
+        if sum > eps_sq {
+            return false;
+        }
+    }
+    sum <= eps_sq
 }
 
 /// Core Ball Mapper algorithm optimized for large datasets.
@@ -39,7 +47,7 @@ pub fn fit_inner(points: ArrayView2<f64>, eps: f64) -> (Vec<Vec<usize>>, Vec<(us
         let pi = points.row(i).to_slice().unwrap();
         for &c in &center_indices {
             let pc = points.row(c).to_slice().unwrap();
-            if l2_sq(pi, pc) <= eps_sq {
+            if within_eps_sq(pi, pc, eps_sq) {
                 continue 'outer;
             }
         }
@@ -91,13 +99,13 @@ fn fit_inner_linear(
 ) -> Vec<Vec<usize>> {
     let n = points.nrows();
     center_indices
-        .iter()
+        .par_iter()
         .map(|&c| {
             let pc = points.row(c).to_slice().unwrap();
             (0..n)
                 .filter(|&i| {
                     let pi = points.row(i).to_slice().unwrap();
-                    l2_sq(pi, pc) <= eps_sq
+                    within_eps_sq(pi, pc, eps_sq)
                 })
                 .collect()
         })
@@ -211,7 +219,7 @@ mod tests {
             let pi = points.row(i).to_slice().unwrap();
             if !centers
                 .iter()
-                .any(|&c| l2_sq(pi, points.row(c).to_slice().unwrap()) <= eps_sq)
+                .any(|&c| within_eps_sq(pi, points.row(c).to_slice().unwrap(), eps_sq))
             {
                 centers.push(i);
             }

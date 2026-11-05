@@ -83,6 +83,19 @@ fn value_at_sparse_upper_index(sorted: &[f64], zero_count: usize, index: usize) 
     sorted.get(index - zero_count).copied().unwrap_or(0.0)
 }
 
+fn sparse_upper_percentile_sorted(sorted: &[f64], total_pairs: usize, percentile: f64) -> f64 {
+    if total_pairs == 0 {
+        return 0.0;
+    }
+    let zero_count = total_pairs.saturating_sub(sorted.len());
+    let pos = (total_pairs - 1) as f64 * (percentile / 100.0);
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let lo_v = value_at_sparse_upper_index(sorted, zero_count, lo);
+    let hi_v = value_at_sparse_upper_index(sorted, zero_count, hi);
+    lo_v + (hi_v - lo_v) * (pos - lo as f64)
+}
+
 /// Percentile of the weight distribution over *all* node pairs, where the
 /// pairs without an edge count as zeros (`_sparse_upper_percentile`).
 pub fn sparse_upper_percentile(weights: &[f64], total_pairs: usize, percentile: f64) -> f64 {
@@ -91,27 +104,17 @@ pub fn sparse_upper_percentile(weights: &[f64], total_pairs: usize, percentile: 
     }
     let mut sorted: Vec<f64> = weights.iter().copied().filter(|&w| w > 0.0).collect();
     sorted.sort_by(f64::total_cmp);
-    let zero_count = total_pairs.saturating_sub(sorted.len());
-    let pos = (total_pairs - 1) as f64 * (percentile / 100.0);
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    let lo_v = value_at_sparse_upper_index(&sorted, zero_count, lo);
-    let hi_v = value_at_sparse_upper_index(&sorted, zero_count, hi);
-    lo_v + (hi_v - lo_v) * (pos - lo as f64)
+    sparse_upper_percentile_sorted(&sorted, total_pairs, percentile)
 }
 
-/// A bounded sample of the pair-weight distribution: up to 512 zeros plus
-/// up to 1536 evenly spaced positive weights (`_sparse_upper_sample`).
-pub fn sparse_upper_sample(weights: &[f64], total_pairs: usize) -> Vec<f64> {
+fn sparse_upper_sample_sorted(sorted: &[f64], total_pairs: usize) -> Vec<f64> {
     if total_pairs == 0 {
         return Vec::new();
     }
-    let mut sorted: Vec<f64> = weights.iter().copied().filter(|&w| w > 0.0).collect();
-    sorted.sort_by(f64::total_cmp);
     let zero_count = total_pairs.saturating_sub(sorted.len());
     let mut out = vec![0.0; zero_count.min(512)];
     if sorted.len() <= 1536 {
-        out.extend_from_slice(&sorted);
+        out.extend_from_slice(sorted);
     } else {
         let num = 1536;
         let step = (sorted.len() - 1) as f64 / (num - 1) as f64;
@@ -125,6 +128,17 @@ pub fn sparse_upper_sample(weights: &[f64], total_pairs: usize) -> Vec<f64> {
         }
     }
     out
+}
+
+/// A bounded sample of the pair-weight distribution: up to 512 zeros plus
+/// up to 1536 evenly spaced positive weights (`_sparse_upper_sample`).
+pub fn sparse_upper_sample(weights: &[f64], total_pairs: usize) -> Vec<f64> {
+    if total_pairs == 0 {
+        return Vec::new();
+    }
+    let mut sorted: Vec<f64> = weights.iter().copied().filter(|&w| w > 0.0).collect();
+    sorted.sort_by(f64::total_cmp);
+    sparse_upper_sample_sorted(&sorted, total_pairs)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -355,16 +369,19 @@ impl<'a> GraphAnalysis<'a> {
         let singleton_count = self.sizes.iter().filter(|&&s| s == 1).count();
         let singleton_fraction = singleton_count as f64 / n as f64;
 
-        let weights: Vec<f64> = match full_weight_edges {
-            Some(edges) => edges.iter().map(|e| e.2).collect(),
-            None => self.graph.edges.iter().map(|e| e.2).collect(),
-        };
+        let edge_slice = full_weight_edges.unwrap_or(&self.graph.edges);
         let nonzero_fraction = if max_pairs > 0 {
-            weights.len() as f64 / max_pairs as f64
+            edge_slice.len() as f64 / max_pairs as f64
         } else {
             0.0
         };
-        let sample = sparse_upper_sample(&weights, max_pairs);
+        let mut sorted_weights: Vec<f64> = edge_slice
+            .iter()
+            .map(|e| e.2)
+            .filter(|&w| w > 0.0)
+            .collect();
+        sorted_weights.sort_by(f64::total_cmp);
+        let sample = sparse_upper_sample_sorted(&sorted_weights, max_pairs);
         let (status, note) = grid_adequacy(n_ball_maps);
         GraphMetrics {
             n_nodes: n,
@@ -377,9 +394,9 @@ impl<'a> GraphAnalysis<'a> {
             component_count: self.sizes.len(),
             resolved_construction_threshold,
             nonzero_fraction,
-            weight_p25: sparse_upper_percentile(&weights, max_pairs, 25.0),
-            weight_p50: sparse_upper_percentile(&weights, max_pairs, 50.0),
-            weight_p95: sparse_upper_percentile(&weights, max_pairs, 95.0),
+            weight_p25: sparse_upper_percentile_sorted(&sorted_weights, max_pairs, 25.0),
+            weight_p50: sparse_upper_percentile_sorted(&sorted_weights, max_pairs, 50.0),
+            weight_p95: sparse_upper_percentile_sorted(&sorted_weights, max_pairs, 95.0),
             weight_distribution_sparkline: distribution_sparkline(&sample, 10),
             component_sizes: self.sizes.clone(),
             n_ball_maps,
@@ -411,14 +428,18 @@ impl<'a> GraphAnalysis<'a> {
                 weight: w,
             })
             .collect();
-        edges.sort_by(|a, b| {
+        let edge_cmp = |a: &EdgeSummary, b: &EdgeSummary| {
             b.weight
                 .total_cmp(&a.weight)
                 .then_with(|| (a.source, a.target).cmp(&(b.source, b.target)))
-        });
+        };
         let total_edges = edges.len();
         let truncated = total_edges > MAX_EDGES_IN_SUMMARY;
-        edges.truncate(MAX_EDGES_IN_SUMMARY);
+        if truncated {
+            edges.select_nth_unstable_by(MAX_EDGES_IN_SUMMARY - 1, edge_cmp);
+            edges.truncate(MAX_EDGES_IN_SUMMARY);
+        }
+        edges.sort_by(edge_cmp);
 
         let n_components = self.sizes.len();
         let mut key_hubs = Vec::new();
@@ -840,5 +861,55 @@ mod tests {
         );
         let m2 = GraphAnalysis::new(&g).unwrap().metrics(0.1, 50, None, None);
         assert_eq!(finalization_gate(&m2, 3, &[2], 0, None)["status"], "ok");
+    }
+
+    #[test]
+    fn skeleton_top_k_matches_full_sort_on_random_graphs() {
+        let edge_cmp = |a: &EdgeSummary, b: &EdgeSummary| {
+            b.weight
+                .total_cmp(&a.weight)
+                .then_with(|| (a.source, a.target).cmp(&(b.source, b.target)))
+        };
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next_u64 = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        for &(n, n_edges, weight_levels) in &[
+            (80usize, 120usize, 1000u64),
+            (120, 500, 20),
+            (200, 1500, 15),
+            (300, 4000, 500),
+        ] {
+            let mut edges = Vec::with_capacity(n_edges);
+            for _ in 0..n_edges {
+                let u = (next_u64() as usize) % n;
+                let mut v = (next_u64() as usize) % (n - 1);
+                if v >= u {
+                    v += 1;
+                }
+                let (i, j) = if u < v { (u, v) } else { (v, u) };
+                // Quantized weights force many weight ties broken by (source, target).
+                let w = ((next_u64() % weight_levels) + 1) as f64 / weight_levels as f64;
+                edges.push((i, j, w));
+            }
+            let g = Graph { n, edges };
+            let summary = GraphAnalysis::new(&g).unwrap().summary(0.1);
+            let mut full_sorted: Vec<EdgeSummary> = g
+                .edges
+                .iter()
+                .map(|&(i, j, w)| EdgeSummary {
+                    source: i,
+                    target: j,
+                    weight: w,
+                })
+                .collect();
+            full_sorted.sort_by(edge_cmp);
+            full_sorted.truncate(MAX_EDGES_IN_SUMMARY);
+            assert_eq!(summary.edges, full_sorted);
+            assert_eq!(summary.edges_truncated, n_edges > MAX_EDGES_IN_SUMMARY);
+        }
     }
 }

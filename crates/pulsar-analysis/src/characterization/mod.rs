@@ -34,7 +34,7 @@
 mod group_summary;
 mod payload;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ndarray::{Array2, ArrayView2};
 use pulsar_data::preprocess::py_float_repr;
@@ -478,76 +478,101 @@ fn gram_of_rows(a: ArrayView2<f64>) -> nalgebra::DMatrix<f64> {
 
 // ---- columns ---------------------------------------------------------------------
 
-/// A column's non-missing values as display strings, with their type.
-struct Observed {
-    /// `str(v)` of each non-missing value, in row order.
-    text: Vec<String>,
-    /// The same values as numbers, for numeric columns.
-    numbers: Option<Vec<f64>>,
-    dtype: &'static str,
-    is_numeric: bool,
-    n_rows: usize,
-}
-
-fn observed(column: &Column) -> Observed {
-    match column {
-        Column::Float(v) => {
-            let numbers: Vec<f64> = v.iter().copied().filter(|x| !x.is_nan()).collect();
-            Observed {
-                text: numbers.iter().map(|&x| py_float_repr(x)).collect(),
-                numbers: Some(numbers),
-                dtype: "float64",
-                is_numeric: true,
-                n_rows: v.len(),
-            }
-        }
-        Column::Int(v) => Observed {
-            text: v.iter().map(i64::to_string).collect(),
-            numbers: Some(v.iter().map(|&x| x as f64).collect()),
-            dtype: "int64",
-            is_numeric: true,
-            n_rows: v.len(),
-        },
-        Column::Bool(v) => {
-            let has_blank = v.iter().any(Option::is_none);
-            let present: Vec<bool> = v.iter().flatten().copied().collect();
-            Observed {
-                text: present
-                    .iter()
-                    .map(|&b| if b { "True" } else { "False" }.to_string())
-                    .collect(),
-                // With blanks pandas stores the column as `object`, which is not numeric.
-                numbers: (!has_blank)
-                    .then(|| present.iter().map(|&b| f64::from(u8::from(b))).collect()),
-                dtype: if has_blank { "object" } else { "bool" },
-                is_numeric: !has_blank,
-                n_rows: v.len(),
-            }
-        }
-        Column::Text(v) => Observed {
-            text: v.iter().flatten().cloned().collect(),
-            numbers: None,
-            dtype: "str",
-            is_numeric: false,
-            n_rows: v.len(),
-        },
-    }
-}
-
 /// Distinct values in order of first appearance, with their counts.
-fn counts_in_order(text: &[String]) -> Vec<(String, usize)> {
-    let mut index: HashMap<&str, usize> = HashMap::new();
-    let mut out: Vec<(String, usize)> = Vec::new();
-    for t in text {
-        match index.get(t.as_str()) {
+fn counts_in_order_by<T: Copy, K: Eq + std::hash::Hash>(
+    values: impl IntoIterator<Item = T>,
+    mut key: impl FnMut(T) -> K,
+) -> Vec<(T, usize)> {
+    let mut index: HashMap<K, usize> = HashMap::new();
+    let mut out: Vec<(T, usize)> = Vec::new();
+    for v in values {
+        let k = key(v);
+        match index.get(&k) {
             Some(&i) => out[i].1 += 1,
             None => {
-                index.insert(t, out.len());
-                out.push((t.clone(), 1));
+                index.insert(k, out.len());
+                out.push((v, 1));
             }
         }
     }
     out
+}
+
+/// Format only the sample values and (when needed) top-10 frequency entries.
+fn sample_and_top<T: Copy>(
+    counts: &[(T, usize)],
+    max_sample: usize,
+    need_top: bool,
+    mut fmt: impl FnMut(T) -> String,
+) -> (Vec<String>, Option<Vec<(String, usize)>>) {
+    let sample = counts
+        .iter()
+        .take(max_sample)
+        .map(|&(v, _)| fmt(v))
+        .collect();
+    // value_counts: most frequent first, ties in order of first appearance.
+    let top = need_top.then(|| {
+        let mut c: Vec<(T, usize)> = counts.to_vec();
+        c.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        c.truncate(10);
+        c.into_iter().map(|(v, n)| (fmt(v), n)).collect()
+    });
+    (sample, top)
+}
+
+fn column_counts(column: &Column) -> (&'static str, bool, usize, usize) {
+    match column {
+        Column::Float(v) => {
+            let mut seen: HashSet<u64> = HashSet::new();
+            let mut n_missing = 0;
+            for &x in v {
+                if x.is_nan() {
+                    n_missing += 1;
+                } else {
+                    seen.insert(x.to_bits());
+                }
+            }
+            ("float64", true, n_missing, seen.len())
+        }
+        Column::Int(v) => {
+            let seen: HashSet<i64> = v.iter().copied().collect();
+            ("int64", true, 0, seen.len())
+        }
+        Column::Bool(v) => {
+            let mut n_missing = 0;
+            let mut seen_true = false;
+            let mut seen_false = false;
+            for b in v {
+                match b {
+                    Some(true) => seen_true = true,
+                    Some(false) => seen_false = true,
+                    None => n_missing += 1,
+                }
+            }
+            let has_blank = n_missing > 0;
+            let n_unique = usize::from(seen_true) + usize::from(seen_false);
+            // With blanks pandas stores the column as `object`, which is not numeric.
+            (
+                if has_blank { "object" } else { "bool" },
+                !has_blank,
+                n_missing,
+                n_unique,
+            )
+        }
+        Column::Text(v) => {
+            let mut seen: HashSet<&str> = HashSet::new();
+            let mut n_missing = 0;
+            for s in v {
+                match s.as_deref() {
+                    Some(s) => {
+                        seen.insert(s);
+                    }
+                    None => n_missing += 1,
+                }
+            }
+            ("str", false, n_missing, seen.len())
+        }
+    }
 }
 
 /// A cheap profile of every column (the "map" view): counts only, none of
@@ -559,13 +584,12 @@ fn profile_columns(table: &Table) -> Vec<ColumnProfile> {
         .iter()
         .zip(&table.columns)
         .map(|(name, col)| {
-            let obs = observed(col);
-            let n_missing = n_rows - obs.text.len();
+            let (dtype, is_numeric, n_missing, n_unique) = column_counts(col);
             ColumnProfile {
                 name: name.clone(),
-                dtype: obs.dtype.into(),
-                is_numeric: obs.is_numeric,
-                n_unique: counts_in_order(&obs.text).len(),
+                dtype: dtype.into(),
+                is_numeric,
+                n_unique,
                 n_missing,
                 missing_pct: if n_rows > 0 {
                     round_to(n_missing as f64 / n_rows as f64 * 100.0, 2)
@@ -590,26 +614,78 @@ pub fn profile_column_details(
     max_sample: usize,
 ) -> Option<ColumnProfile> {
     let col = table.column(name)?;
-    let obs = observed(col);
-    let counts = counts_in_order(&obs.text);
-    let n_missing = obs.n_rows - obs.text.len();
-    let n_unique = counts.len();
-    let sample_values: Vec<String> = counts
-        .iter()
-        .take(max_sample)
-        .map(|(v, _)| v.clone())
-        .collect();
-    // value_counts: most frequent first, ties in order of first appearance.
-    let top = |limit: usize| -> Vec<(String, usize)> {
-        let mut c = counts.clone();
-        c.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-        c.truncate(limit);
-        c
+    let n_rows = table.n_rows();
+    let (dtype, is_numeric, n_missing, n_unique, sample_values, mut top_values, numbers) = match col
+    {
+        Column::Float(v) => {
+            let numbers: Vec<f64> = v.iter().copied().filter(|x| !x.is_nan()).collect();
+            let counts = counts_in_order_by(numbers.iter().copied(), f64::to_bits);
+            let n_unique = counts.len();
+            let n_missing = v.len() - numbers.len();
+            let (sample, top) = sample_and_top(
+                &counts,
+                max_sample,
+                !numbers.is_empty() && n_unique <= 20,
+                py_float_repr,
+            );
+            (
+                "float64",
+                true,
+                n_missing,
+                n_unique,
+                sample,
+                top,
+                Some(numbers),
+            )
+        }
+        Column::Int(v) => {
+            let numbers: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+            let counts = counts_in_order_by(v.iter().copied(), |x| x);
+            let n_unique = counts.len();
+            let (sample, top) = sample_and_top(
+                &counts,
+                max_sample,
+                !numbers.is_empty() && n_unique <= 20,
+                |x| x.to_string(),
+            );
+            ("int64", true, 0, n_unique, sample, top, Some(numbers))
+        }
+        Column::Bool(v) => {
+            let has_blank = v.iter().any(Option::is_none);
+            let present: Vec<bool> = v.iter().flatten().copied().collect();
+            let counts = counts_in_order_by(present.iter().copied(), |b| b);
+            let n_unique = counts.len();
+            let n_missing = v.len() - present.len();
+            let is_numeric = !has_blank;
+            let need_top = !is_numeric || (!present.is_empty() && n_unique <= 20);
+            let (sample, top) = sample_and_top(&counts, max_sample, need_top, |b| {
+                if b { "True" } else { "False" }.to_string()
+            });
+            let numbers =
+                is_numeric.then(|| present.iter().map(|&b| f64::from(u8::from(b))).collect());
+            (
+                if has_blank { "object" } else { "bool" },
+                is_numeric,
+                n_missing,
+                n_unique,
+                sample,
+                top,
+                numbers,
+            )
+        }
+        Column::Text(v) => {
+            let counts = counts_in_order_by(v.iter().flatten().map(String::as_str), |s| s);
+            let n_present = v.iter().flatten().count();
+            let n_unique = counts.len();
+            let n_missing = v.len() - n_present;
+            let (sample, top) = sample_and_top(&counts, max_sample, true, str::to_owned);
+            ("str", false, n_missing, n_unique, sample, top, None)
+        }
     };
 
-    let (mut m, mut std, mut lo, mut hi, mut top_values) = (None, None, None, None, None);
-    match (&obs.numbers, obs.is_numeric) {
-        (Some(nums), true) if !nums.is_empty() => {
+    let (mut m, mut std, mut lo, mut hi) = (None, None, None, None);
+    if let (Some(nums), true) = (&numbers, is_numeric) {
+        if !nums.is_empty() {
             let avg = mean(nums);
             m = Some(round_to(avg, 4));
             std = (nums.len() > 1).then(|| {
@@ -625,22 +701,20 @@ pub fn profile_column_details(
                 nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                 4,
             ));
-            if n_unique <= 20 {
-                top_values = Some(top(10));
+            if n_unique > 20 {
+                top_values = None;
             }
         }
-        (_, false) => top_values = Some(top(10)),
-        _ => {}
     }
 
     Some(ColumnProfile {
         name: name.to_string(),
-        dtype: obs.dtype.into(),
-        is_numeric: obs.is_numeric,
+        dtype: dtype.into(),
+        is_numeric,
         n_unique,
         n_missing,
-        missing_pct: if obs.n_rows > 0 {
-            round_to(n_missing as f64 / obs.n_rows as f64 * 100.0, 2)
+        missing_pct: if n_rows > 0 {
+            round_to(n_missing as f64 / n_rows as f64 * 100.0, 2)
         } else {
             0.0
         },

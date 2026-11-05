@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::envelope::ToolError;
-use crate::state::{LiveRun, ServerState};
+use crate::state::{LiveRun, RunGraphCache, ServerState};
 
 /// `_meta` key for the Phirewall structured progress contract (`io.phirewall/progress` v1).
 pub const PHIREWALL_PROGRESS_META_KEY: &str = "io.phirewall/progress";
@@ -307,15 +307,18 @@ pub async fn run_sweep(
         projection_fingerprint,
         identifier_columns,
     });
+    let graph_cache = Arc::new(RunGraphCache::from_live(&live, &record));
     state.cache.put(run_id.clone(), live.clone());
-    {
+    let replaced = {
         let mut session = state.session();
-        session.latest_run_id = Some(run_id);
+        let prev = session.latest_run_id.replace(run_id);
         session.clusters = None;
         if let Some(ds) = &live.dataset_id {
             session.latest_dataset_id = Some(ds.clone());
         }
-    }
+        prev
+    };
+    state.set_run_graph_cache(replaced.as_ref(), graph_cache);
     Ok((live, record, artifacts))
 }
 

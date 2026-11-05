@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use pulsar_analysis::dossier::{ClusterProfile, TopologicalDossier};
 use pulsar_analysis::pyround::round_to;
 use pulsar_analysis::thresholds::{
-    agent_threshold_options, component_mass_profile, structural_breakpoints, Policy,
+    agent_threshold_options, component_mass_profiles, structural_breakpoints, Policy,
 };
 use pulsar_analysis::ThresholdGraph;
 use pulsar_core::{find_stable_thresholds_from_edges, StabilityResult, DEFAULT_NUM_BINS};
@@ -365,31 +365,48 @@ fn render_summary(d: &TopologicalDossier, gm: &Value) -> String {
 /// lists in insertion order.
 struct NxGraph {
     adj: Vec<Vec<(usize, f64)>>,
+    deg: Vec<usize>,
 }
 
 impl NxGraph {
     fn new(graph: &Graph) -> Self {
         let mut adj: Vec<Vec<(usize, f64)>> = vec![vec![]; graph.n];
-        let mut index: Vec<HashMap<usize, usize>> = vec![HashMap::new(); graph.n];
-        let mut add =
-            |u: usize, v: usize, w: f64, adj: &mut Vec<Vec<(usize, f64)>>| match index[u].get(&v) {
-                Some(&k) => adj[u][k].1 = w,
-                None => {
-                    index[u].insert(v, adj[u].len());
-                    adj[u].push((v, w));
-                }
-            };
         for &(i, j, w) in &graph.edges {
-            add(i, j, w, &mut adj);
+            adj[i].push((j, w));
             if i != j {
-                add(j, i, w, &mut adj);
+                adj[j].push((i, w));
             }
         }
-        Self { adj }
+        let mut slot = vec![usize::MAX; graph.n];
+        let mut deg = vec![0usize; graph.n];
+        for (u, row) in adj.iter_mut().enumerate() {
+            let mut write = 0usize;
+            let mut self_loops = 0usize;
+            for idx in 0..row.len() {
+                let (v, w) = row[idx];
+                match slot[v] {
+                    usize::MAX => {
+                        slot[v] = write;
+                        row[write] = (v, w);
+                        write += 1;
+                        if v == u {
+                            self_loops += 1;
+                        }
+                    }
+                    k => row[k].1 = w,
+                }
+            }
+            row.truncate(write);
+            for &(v, _) in row.iter() {
+                slot[v] = usize::MAX;
+            }
+            deg[u] = write + self_loops;
+        }
+        Self { adj, deg }
     }
 
     fn degree(&self, u: usize) -> usize {
-        self.adj[u].len() + self.adj[u].iter().filter(|(v, _)| *v == u).count()
+        self.deg[u]
     }
 }
 
@@ -557,11 +574,13 @@ fn threshold_payload(rg: &ReportGraph<'_>) -> Option<ThresholdPayload> {
     };
     let thresholds = &stability.thresholds;
     let counts = &stability.component_counts;
-    let plateaus = stability
-        .plateaus
-        .iter()
-        .take(3)
-        .map(|p| {
+    let top3: Vec<_> = stability.plateaus.iter().take(3).collect();
+    let top3_mids: Vec<f64> = top3.iter().map(|p| p.midpoint()).collect();
+    let top3_profiles = component_mass_profiles(&tgraph, &top3_mids, 5, 0.01);
+    let plateaus = top3
+        .into_iter()
+        .zip(top3_profiles)
+        .map(|(p, profile)| {
             let mid = p.midpoint();
             json!({
                 "midpoint": mid,
@@ -569,7 +588,7 @@ fn threshold_payload(rg: &ReportGraph<'_>) -> Option<ThresholdPayload> {
                 "end": p.end_threshold,
                 "component_count": p.component_count,
                 "length": p.length(),
-                "mass_profile": serde_json::to_value(component_mass_profile(&tgraph, mid, 5, 0.01)).unwrap_or(Value::Null),
+                "mass_profile": serde_json::to_value(profile).unwrap_or(Value::Null),
             })
         })
         .collect();
