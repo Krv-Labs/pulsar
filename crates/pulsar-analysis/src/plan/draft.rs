@@ -13,7 +13,8 @@ use rand::Rng;
 use serde_json::{json, Map};
 
 use super::defaults::{populate_default_entries, validate_role_designations, DraftContext};
-use super::model::{PendingQuestion, PlanEditError, PlanQuestion, QuestionTopic};
+use super::imported::ImportedDecisions;
+use super::model::{DecidedBy, PendingQuestion, PlanEditError, PlanQuestion, QuestionTopic, Role};
 use super::plan::PreprocessingPlan;
 use super::proxies::dry_run_processed_space;
 use super::questions::build_pending_questions;
@@ -38,6 +39,10 @@ pub struct DraftOptions {
     /// Give row-index columns the identifier role (see
     /// [`DraftContext::row_index_ids`]); off reproduces Python's plans.
     pub row_index_ids: bool,
+    /// Data-meaning decisions imported from a Phirewall sidecar.
+    pub imported: Option<ImportedDecisions>,
+    /// Client declared experimental `io.phirewall/release` v1.
+    pub phirewall_release: bool,
 }
 
 impl Default for DraftOptions {
@@ -54,6 +59,8 @@ impl Default for DraftOptions {
             stakes_max_questions: 16,
             seed: 0,
             row_index_ids: true,
+            imported: None,
+            phirewall_release: false,
         }
     }
 }
@@ -168,12 +175,14 @@ pub fn draft_plan(
     )?;
     let evidence = measure_preprocessing_evidence(table, &EvidenceOptions::default())?;
 
-    let (entries, missing_groups, mut pending) = {
+    let (entries, missing_groups, imported, mut pending) = {
         let mut ctx = DraftContext::new(table, &evidence, &targets, &entity, &time);
         ctx.row_index_ids = opts.row_index_ids;
+        ctx.imported = opts.imported.clone();
+        ctx.phirewall_release = opts.phirewall_release;
         populate_default_entries(&mut ctx);
         let pending = build_pending_questions(&mut ctx);
-        (ctx.entries, ctx.missing_groups, pending)
+        (ctx.entries, ctx.missing_groups, ctx.imported, pending)
     };
     order_pending(&mut pending);
     // Provisional ids while stakes are computed; final `q1..qN` ids follow.
@@ -220,6 +229,8 @@ pub fn draft_plan(
         cost,
         target_proxies: vec![],
         n_imputations: 1,
+        imported,
+        phirewall_release: opts.phirewall_release,
     };
     if opts.stakes && !eligible.is_empty() && opts.stakes_max_questions > 0 {
         let budget: Vec<usize> = eligible
@@ -275,6 +286,81 @@ pub fn draft_plan(
     finalize(&mut plan, pending);
     dry_run_processed_space(table, &mut plan);
     Ok(plan)
+}
+
+impl PreprocessingPlan {
+    /// Re-apply the current sidecar (`imported`) to an existing plan so that
+    /// column entries, open questions, and provenance always reflect the current
+    /// sidecar on disk (or its removal) while preserving explicit agent/user edits.
+    pub fn sync_imported(
+        &mut self,
+        table: &Table,
+        imported: Option<ImportedDecisions>,
+    ) -> Result<bool, DraftError> {
+        if self.imported.is_none() && imported.is_none() {
+            return Ok(false);
+        }
+        let targets: Vec<String> = self
+            .entries
+            .values()
+            .filter(|e| {
+                e.role == Role::Target && matches!(e.decided_by, DecidedBy::Agent | DecidedBy::User)
+            })
+            .map(|e| e.column.clone())
+            .collect();
+        let entity = self
+            .entries
+            .values()
+            .find(|e| {
+                e.role == Role::Entity && matches!(e.decided_by, DecidedBy::Agent | DecidedBy::User)
+            })
+            .map(|e| e.column.clone())
+            .unwrap_or_default();
+        let time = self
+            .entries
+            .values()
+            .find(|e| {
+                e.role == Role::Time && matches!(e.decided_by, DecidedBy::Agent | DecidedBy::User)
+            })
+            .map(|e| e.column.clone())
+            .unwrap_or_default();
+
+        let manual: IndexMap<String, _> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| matches!(e.decided_by, DecidedBy::Agent | DecidedBy::User))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let (mut entries, missing_groups, synced_imported, mut pending) = {
+            let mut ctx = DraftContext::new(table, &self.evidence, &targets, &entity, &time);
+            ctx.imported = imported;
+            ctx.phirewall_release = self.phirewall_release;
+            populate_default_entries(&mut ctx);
+            for (col, old) in &manual {
+                let mut preserved = old.clone();
+                preserved.question_id = None;
+                ctx.entries.insert(col.clone(), preserved);
+            }
+            let pending = build_pending_questions(&mut ctx);
+            (ctx.entries, ctx.missing_groups, ctx.imported, pending)
+        };
+        for (col, old) in &manual {
+            let mut preserved = old.clone();
+            preserved.question_id = None;
+            entries.insert(col.clone(), preserved);
+        }
+        pending.retain(|(q, _)| {
+            q.applies_to.is_empty() || !q.applies_to.iter().all(|c| manual.contains_key(c))
+        });
+        order_pending(&mut pending);
+        self.entries = entries;
+        self.missing_groups = missing_groups;
+        self.imported = synced_imported;
+        finalize(self, pending);
+        dry_run_processed_space(table, self);
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use super::model::{DecidedBy, PlanEntry, QuestionStatus, Role};
+use super::model::{DecidedBy, EntryStatus, PlanEntry, QuestionStatus, Role};
 use super::plan::PreprocessingPlan;
 use crate::disclosure::{label, row_fraction, RowCount};
 use crate::evidence::{ColumnEvidence, ColumnKind};
@@ -37,7 +37,30 @@ pub const DROP_REASONS: [&str; 10] = [
 /// than half of them (`missing`), one value, unique text per row, date/time
 /// text, blank exactly where a 0/1 partner has one value (`conditional`), or
 /// more text categories than `sqrt(rows)`.
+fn summary_decided_by(plan: &PreprocessingPlan, e: &PlanEntry) -> &'static str {
+    match e.decided_by {
+        DecidedBy::Default => "default",
+        DecidedBy::Agent => "agent",
+        DecidedBy::User => "user",
+        DecidedBy::Phirewall => {
+            if e.status == EntryStatus::Open {
+                "default"
+            } else if plan
+                .imported
+                .as_ref()
+                .and_then(|imp| imp.column(&e.column))
+                .is_some_and(|c| c.decided_by == "clinician")
+            {
+                "user"
+            } else {
+                "agent"
+            }
+        }
+    }
+}
+
 fn drop_reason(
+    plan: &PreprocessingPlan,
     entry: &PlanEntry,
     ev_by_col: &HashMap<&str, &ColumnEvidence>,
     cat_threshold: f64,
@@ -45,9 +68,27 @@ fn drop_reason(
     if matches!(entry.role, Role::Entity | Role::Time | Role::Target) {
         return "designated";
     }
+    if entry.role == Role::Id && entry.decided_by == DecidedBy::Phirewall {
+        return "identifier";
+    }
     match entry.decided_by {
         DecidedBy::User => return "user",
         DecidedBy::Agent => return "agent",
+        DecidedBy::Phirewall if entry.status == EntryStatus::Resolved => {
+            return summary_decided_by(plan, entry);
+        }
+        DecidedBy::Phirewall => {
+            if plan
+                .imported
+                .as_ref()
+                .and_then(|imp| imp.column(&entry.column))
+                .is_some_and(|c| {
+                    c.meaning.as_deref() == Some("date") || c.op.as_deref() == Some("date_format")
+                })
+            {
+                return "datetime";
+            }
+        }
         DecidedBy::Default => {}
     }
     if entry.role == Role::Id {
@@ -163,8 +204,15 @@ fn common(
 ) -> Value {
     let mut out = json!({
         "missing_fraction": blank_share(ev_by_col, &e.column),
-        "decided_by": e.decided_by,
+        "decided_by": summary_decided_by(plan, e),
     });
+    if let Some(decision) = plan
+        .imported
+        .as_ref()
+        .and_then(|imp| imp.summary_decision(&e.column))
+    {
+        out["decision"] = decision;
+    }
     if let Some(id) = open_question(plan, e) {
         out["question"] = json!(id);
     }
@@ -221,7 +269,7 @@ fn changes(previous: &PreprocessingPlan, plan: &PreprocessingPlan) -> Vec<Value>
                 out.push(entry(
                     plan,
                     col,
-                    json!({"field": field, "to": shown, "by": new.decided_by}),
+                    json!({"field": field, "to": shown, "by": summary_decided_by(plan, new)}),
                 ));
             }
         }
@@ -273,7 +321,7 @@ pub fn build_preprocessing_summary(
         .values()
         .filter(|e| e.role != Role::Feature)
         .map(|e| {
-            let reason = drop_reason(e, &ev_by_col, cat_threshold);
+            let reason = drop_reason(plan, e, &ev_by_col, cat_threshold);
             let mut fields = common(plan, &ev_by_col, e);
             fields["reason"] = json!(reason);
             fields["role"] = json!(e.role);

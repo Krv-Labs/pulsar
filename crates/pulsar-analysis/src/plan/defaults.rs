@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use pulsar_data::{Column, Table};
 use serde_json::{json, Map, Value};
 
+use super::imported::ImportedDecisions;
 use super::model::{DecidedBy, EntryStatus, ImputeSpec, PlanEditError, PlanEntry, Role};
 use super::text::{condition, format_missing_reason, plural, py_repr, py_repr_list, thousands};
 use crate::evidence::{ColumnEvidence, ColumnKind, PreprocessingEvidence};
@@ -38,6 +39,8 @@ pub struct DraftContext<'a> {
     /// Give row-index columns ([`row_index_like`]) the identifier role.
     /// Python kept them as features; on by default.
     pub row_index_ids: bool,
+    pub imported: Option<ImportedDecisions>,
+    pub phirewall_release: bool,
 }
 
 impl<'a> DraftContext<'a> {
@@ -74,6 +77,8 @@ impl<'a> DraftContext<'a> {
             rule7b_cols: Vec::new(),
             grouped_7b: IndexMap::new(),
             row_index_ids: true,
+            imported: None,
+            phirewall_release: false,
         }
     }
 }
@@ -420,6 +425,10 @@ pub fn populate_default_entries(ctx: &mut DraftContext) {
     for ev in &evidence.columns {
         let entry = default_entry(&ev.name, ev, ctx);
         ctx.entries.insert(ev.name.clone(), entry);
+    }
+    if let Some(mut imported) = ctx.imported.take() {
+        imported.apply_to_context(ctx);
+        ctx.imported = Some(imported);
     }
     for col in ctx.rule7b_cols.clone() {
         let gid = ctx.ev_by_col[col.as_str()]

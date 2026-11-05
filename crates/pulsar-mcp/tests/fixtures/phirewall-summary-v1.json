@@ -52,6 +52,19 @@
       "description": "Who set the treatment: a default rule, the agent or the user.",
       "enum": ["default", "agent", "user"]
     },
+    "decision": {
+      "description": "A settled data decision on a column (data-decisions v1 `columnDecision`): what the column or its values mean and the repair applied, as codes. `decided_by` is who settled it (agent or clinician), independent of the line's own `decided_by` for the server's treatment. `version` is the dataset version it belongs to: a prepared version's name, or the source data_version.",
+      "type": "object",
+      "required": ["source", "decided_by", "version"],
+      "properties": {
+        "source": { "enum": ["phirewall", "pulsar"] },
+        "meaning": { "$ref": "#/$defs/code" },
+        "op": { "$ref": "#/$defs/code" },
+        "decided_by": { "enum": ["agent", "clinician"] },
+        "version": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": true
+    },
     "code": {
       "description": "A fixed machine word (a method, reason, metric or question code), never data.",
       "type": "string",
@@ -156,6 +169,10 @@
               "relation": {
                 "description": "Where the column is blank, relative to `partner`.",
                 "enum": ["missing_when_partner_zero", "missing_when_partner_nonzero"]
+              },
+              "decision": {
+                "description": "The settled data decision behind this column, when there is one: Phirewall's (shared, from data-decisions v1) or the server's own. Open decisions are not here; they stay `open_questions`.",
+                "$ref": "#/$defs/decision"
               }
             }
           }
@@ -188,6 +205,10 @@
               "relation": {
                 "description": "Where the column is blank, relative to `partner`.",
                 "enum": ["missing_when_partner_zero", "missing_when_partner_nonzero"]
+              },
+              "decision": {
+                "description": "The settled data decision behind this column, when there is one: Phirewall's (shared, from data-decisions v1) or the server's own. Open decisions are not here; they stay `open_questions`.",
+                "$ref": "#/$defs/decision"
               }
             }
           }
@@ -385,7 +406,27 @@
           "type": "array",
           "items": { "$ref": "#/$defs/column" }
         },
-        "not_used_for_grouping_omitted": { "$ref": "#/$defs/omitted" }
+        "not_used_for_grouping_omitted": { "$ref": "#/$defs/omitted" },
+        "merged_from": {
+          "description": "Optional. Present when the groups come from merging the clusters of the assignment with this id: the id of that assignment.",
+          "$ref": "#/$defs/id"
+        },
+        "merges": {
+          "description": "Optional, with merged_from. One entry per merge, in order, in the original assignment's cluster ids (`group` is the new id of the group it ended in). Never a size.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "into", "linkage", "weight_share"],
+            "properties": {
+              "from": { "description": "The cluster that was merged away.", "type": "integer" },
+              "into": { "description": "The cluster it joined.", "type": "integer" },
+              "group": { "description": "The id, in this grouping, of the group it ended in.", "type": "integer" },
+              "linkage": { "description": "`edge_weight`: the neighbour with the most edge weight; `isolated`: no edge to any other cluster, joined the largest.", "$ref": "#/$defs/code" },
+              "weight_share": { "description": "The share of the cluster's edge weight to other clusters that went to `into`, to 2 decimals; 0 when isolated.", "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "additionalProperties": true
+          }
+        }
       },
       "additionalProperties": true
     },

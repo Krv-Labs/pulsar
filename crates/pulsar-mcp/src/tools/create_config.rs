@@ -13,8 +13,8 @@ use pulsar_analysis::config_build::{
 };
 use pulsar_analysis::plan::{
     build_preprocessing_summary, calibrate_processed_space, draft_plan, plan_fingerprint,
-    processed_feature_names, summarize_plan_counts, DraftOptions, PreprocessingPlan,
-    QuestionStatus,
+    processed_feature_names, summarize_plan_counts, DraftOptions, ImportedDecisions,
+    PreprocessingPlan, QuestionStatus,
 };
 use pulsar_analysis::pyround::round_to;
 use pulsar_store::PlanId;
@@ -41,11 +41,26 @@ const PREVIEW: usize = 3;
 pub struct Params {
     /// Dataset handle returned by ingest_dataset.
     pub dataset_id: String,
-    /// Optional short run name (e.g. 'baseline') stored as run.name in the config. Defaults to 'initial_sweep'.
+    /// Optional short run name (e.g. 'baseline') stored as run.name. Defaults to 'initial_sweep'.
     pub intent: String,
-    /// Optional preprocessing plan handle from draft_preprocessing_plan. If omitted, baseline defaults are drafted and stored automatically.
+    /// Optional plan handle from draft_preprocessing_plan. Omit to draft and store baseline defaults.
     pub plan_id: String,
+    /// 'full' (default) returns `config_yaml`. 'summary' omits it; the YAML is still the session's active config for run_topological_sweep (without config_yaml), refine_config and get_runtime_context.
+    pub detail: ConfigDetail,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigDetail {
+    #[default]
+    Full,
+    Summary,
+}
+
+/// A processed space above this multiple of the raw feature count draws a warning.
+const EXPANSION_WARN_RATIO: f64 = 1.5;
+/// Expanding columns named in that warning.
+const EXPANSION_TOP: usize = 5;
 
 pub fn spec() -> ToolSpec {
     let warning = s::object(
@@ -118,12 +133,13 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Create Config",
-        description: "Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset. Epsilon and dimensions are calibrated in the processed feature space under the preprocessing plan (or baseline defaults if plan_id is omitted, with a warning when open questions remain). Stores the YAML as the session's active config.",
+        description: "Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset. Epsilon and dimensions are calibrated in the processed feature space under the preprocessing plan (or baseline defaults if plan_id is omitted, warning on open questions). Stores the YAML as the session's active config; detail='summary' omits the YAML text. Warns when processed features exceed 1.5x raw, naming the widest one-hot columns.",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
                 ("status", s::string()),
                 ("config_yaml", s::string()),
+                ("config_yaml_note", s::string()),
                 ("calibration_space", s::enumeration(&["processed", "raw"])),
                 ("preprocessing_plan", provenance),
                 (phirewall::KEY, s::open_object()),
@@ -134,7 +150,7 @@ pub fn spec() -> ToolSpec {
                 ("knn_distance_percentiles", s::open_object()),
                 ("calibration_note", s::string()),
             ],
-            &["status", "config_yaml", "calibration_space", "preprocessing_plan", "sweep_strategy", "calibration_note"],
+            &["status", "calibration_space", "preprocessing_plan", "sweep_strategy", "calibration_note"],
             false,
         )),
         read_only: false,
@@ -235,27 +251,43 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     };
 
     let table = load(NAME, &path).await?;
+    let (imported, sidecar_warnings) =
+        ImportedDecisions::load_for_table(std::path::Path::new(&path), &table);
     let (dataset, data_path) = (p.dataset_id.clone(), path.clone());
     let run_name = Some(p.intent.trim())
         .filter(|n| !n.is_empty())
         .unwrap_or("initial_sweep")
         .to_owned();
+    let phirewall_release = state.phirewall_release();
     let built = tokio::task::spawn_blocking(move || -> Result<_, ToolError> {
-        let plan = match given {
-            Some(plan) => plan,
-            None => {
-                let opts = DraftOptions {
-                    stakes: true,
-                    stakes_max_questions: STAKES_QUESTIONS,
-                    ..DraftOptions::default()
-                };
-                draft_plan(&table, &dataset, &opts).map_err(|e| {
+        let (plan, synced_existing) = match given {
+            Some(mut plan) => {
+                plan.phirewall_release = phirewall_release;
+                let synced = plan.sync_imported(&table, imported).map_err(|e| {
                     failed(
                         "CONFIG_CREATION_FAILED",
                         e.to_string(),
                         "Check the dataset is valid and the data is readable, then retry.",
                     )
-                })?
+                })?;
+                (plan, synced)
+            }
+            None => {
+                let opts = DraftOptions {
+                    stakes: true,
+                    stakes_max_questions: STAKES_QUESTIONS,
+                    imported,
+                    phirewall_release,
+                    ..DraftOptions::default()
+                };
+                let plan = draft_plan(&table, &dataset, &opts).map_err(|e| {
+                    failed(
+                        "CONFIG_CREATION_FAILED",
+                        e.to_string(),
+                        "Check the dataset is valid and the data is readable, then retry.",
+                    )
+                })?;
+                (plan, false)
             }
         };
         let geo = characterize_dataset(&table, 1000, 42, PcaProbes::DataRelative)
@@ -275,17 +307,26 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             processed_feature_names(&table, &plan).ok().as_deref(),
             phirewall::ROW_FLOOR,
         );
-        Ok((plan, geo, processed, yaml, summary, table.n_rows()))
+        Ok((
+            plan,
+            synced_existing,
+            geo,
+            processed,
+            yaml,
+            summary,
+            table.n_rows(),
+        ))
     })
     .await
     .map_err(|e| ToolError::worker_stopped(NAME, "CONFIG_CREATION_FAILED", &e))??;
-    let (plan, geo, processed, config_yaml, summary, n_rows) = built;
+    let (plan, synced_existing, geo, processed, config_yaml, summary, n_rows) = built;
     let (cumulative, n_features, n_rows_profiled) =
         calibration_curve(&geo, processed.as_ref().ok());
     let ceiling = grid_ceiling(cumulative, n_features, n_rows_profiled);
     let ceiling_note = ceiling_description(&ceiling, cumulative, n_features, n_rows_profiled);
 
-    // A freshly drafted plan is stored so `edit_preprocessing_plan` can refine it.
+    // A freshly drafted plan (or one synced with an updated sidecar) is stored
+    // so `edit_preprocessing_plan` can refine it.
     let plan_handle = PlanId::parse(&plan.plan_id).map_err(|e| ToolError::from_store(NAME, e))?;
     // Checked before anything is stored, so a failure stores nothing.
     let config = parse_config(NAME, &config_yaml)?;
@@ -293,6 +334,11 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         state
             .store
             .save_plan(&plan_handle, &p.dataset_id, plan.revision, plan.to_value())
+            .map_err(|e| ToolError::from_store(NAME, e))?;
+    } else if synced_existing {
+        state
+            .store
+            .update_plan(&plan_handle, plan.revision, plan.revision, plan.to_value())
             .map_err(|e| ToolError::from_store(NAME, e))?;
     }
 
@@ -352,6 +398,14 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     });
 
     let mut warnings = vec![];
+    for w in &sidecar_warnings {
+        warnings.push(w.to_config_warning());
+    }
+    if let Some(imp) = &plan.imported {
+        for w in &imp.warnings {
+            warnings.push(w.to_config_warning());
+        }
+    }
     if let Some(edited) = &edited_plan {
         let decisions = counts_decisions(edited);
         warnings.push(json!({
@@ -380,6 +434,36 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     match &processed {
         Ok(m) => {
             payload["processed_feature_count"] = json!(m.n_features);
+            let ratio = m.n_features as f64 / geo.n_features.max(1) as f64;
+            if ratio > EXPANSION_WARN_RATIO {
+                let mut top: Vec<(&str, u64)> = summary["encoded"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| Some((e["column"].as_str()?, e["levels"].as_u64()?)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                top.sort_by_key(|e| std::cmp::Reverse(e.1));
+                let named: Vec<String> = top
+                    .iter()
+                    .take(EXPANSION_TOP)
+                    .map(|(c, n)| format!("`{c}` ({n} levels)"))
+                    .collect();
+                let warning = json!({
+                    "code": "PROCESSED_FEATURES_EXPANDED",
+                    "message": format!(
+                        "The plan turns {} raw features into {} processed features ({ratio:.1}x). Largest one-hot expansions: {}. Distances in the map are measured over all processed features, so wide encodings weigh heavily; edit_preprocessing_plan can drop a column (role 'drop') or treat it as numeric (omit encode).",
+                        geo.n_features,
+                        m.n_features,
+                        named.join(", ")
+                    ),
+                });
+                match payload.get_mut("warnings").and_then(Value::as_array_mut) {
+                    Some(list) => list.push(warning),
+                    None => payload["warnings"] = json!([warning]),
+                }
+            }
             payload["raw_to_processed_expansion_ratio"] = json!(round_to(
                 m.n_features as f64 / geo.n_features.max(1) as f64,
                 2
@@ -402,6 +486,17 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         }
     }
 
+    if p.detail == ConfigDetail::Summary {
+        let obj = payload.as_object_mut().expect("payload is an object");
+        obj.remove("config_yaml");
+        obj.insert(
+            "config_yaml_note".into(),
+            json!(format!(
+                "config_yaml ({} chars) is stored as the session's active config; run_topological_sweep without config_yaml, refine_config and get_runtime_context read it. Pass detail='full' to receive the text.",
+                config_yaml.chars().count()
+            )),
+        );
+    }
     payload[phirewall::KEY] = phirewall::summary(
         None,
         Some(dataset_id.to_string()),

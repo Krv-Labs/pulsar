@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::imported::ImportedDecisions;
 use super::model::{PlanEntry, PlanQuestion};
 use crate::evidence::PreprocessingEvidence;
 
@@ -36,6 +37,10 @@ pub struct PreprocessingPlan {
     pub cost: Map<String, Value>,
     pub target_proxies: Vec<TargetProxy>,
     pub n_imputations: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<ImportedDecisions>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub phirewall_release: bool,
 }
 
 impl PreprocessingPlan {

@@ -339,7 +339,14 @@ pub fn build_draft_plan_payload(
         "evidence".into(),
         Value::Object(evidence_lists(plan, ev_cap, col_cap)),
     );
-    p.insert("warnings".into(), Value::Array(target_proxy_warnings(plan)));
+    let mut warnings = target_proxy_warnings(plan);
+    if let Some(imp) = &plan.imported {
+        for w in &imp.warnings {
+            warnings.push(w.to_plan_warning());
+        }
+        p.insert("imported_decisions".into(), json!(imp.fact_line()));
+    }
+    p.insert("warnings".into(), Value::Array(warnings));
     let mut hints = Map::new();
     capped_simple(&mut hints, "event_flag_columns", partners, ev_cap);
     hints.insert("description".into(), json!(EVENT_FLAG_HINT_DESCRIPTION));
@@ -446,7 +453,14 @@ pub fn build_edit_plan_payload(
         "evidence".into(),
         Value::Object(target_proxy_fields(plan, ev_cap)),
     );
-    p.insert("warnings".into(), Value::Array(target_proxy_warnings(plan)));
+    let mut warnings = target_proxy_warnings(plan);
+    if let Some(imp) = &plan.imported {
+        for w in &imp.warnings {
+            warnings.push(w.to_plan_warning());
+        }
+        p.insert("imported_decisions".into(), json!(imp.fact_line()));
+    }
+    p.insert("warnings".into(), Value::Array(warnings));
     p.insert(
         "validation".into(),
         json!({"valid": validation.valid, "error": validation.error}),
@@ -592,6 +606,9 @@ pub fn draft_plan_payload_to_markdown(payload: &Value) -> String {
             int(&proc["dummy_column_count"])
         ));
     }
+    if let Some(fact) = payload.get("imported_decisions").and_then(Value::as_str) {
+        lines.push(format!("- {fact}"));
+    }
     lines.extend(warning_lines(payload));
     lines.extend(open_questions_markdown(payload));
 
@@ -695,6 +712,9 @@ pub fn edit_plan_payload_to_markdown(payload: &Value) -> String {
     }
     if let Some(err) = val["error"].as_str().filter(|e| !e.is_empty()) {
         lines.push(format!("- Validation error: `{err}`"));
+    }
+    if let Some(fact) = payload.get("imported_decisions").and_then(Value::as_str) {
+        lines.push(format!("- {fact}"));
     }
     lines.extend(warning_lines(payload));
 

@@ -79,6 +79,7 @@ fn source_str(source: DecidedBy) -> &'static str {
         DecidedBy::Default => "default",
         DecidedBy::Agent => "agent",
         DecidedBy::User => "user",
+        DecidedBy::Phirewall => "phirewall",
     }
 }
 
@@ -978,6 +979,94 @@ pub fn apply_answers_and_edits(
     edits: &[Value],
     source: DecidedBy,
 ) -> Result<PreprocessingPlan, PlanEditError> {
+    apply_inner(plan, answers, edits, source, None).map(|(plan, _)| plan)
+}
+
+/// A one-hot encoding the guard left out of an edit or answer: the column has
+/// more levels than the plan's categorical threshold (sqrt of the row count)
+/// and was not named in `confirmed`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldOneHot {
+    pub column: String,
+    /// Distinct values the column would encode.
+    pub levels: usize,
+    /// The plan's threshold: sqrt(n_rows).
+    pub threshold: usize,
+    /// Net feature columns the encoding would add (levels, less the one the column
+    /// already contributes when it is a feature now).
+    pub features_added: usize,
+    /// `question_id` when an answer was held; None for a direct edit.
+    pub question_id: Option<String>,
+}
+
+/// Like [`apply_answers_and_edits`], but an answer or edit that would one-hot a
+/// column above the categorical threshold leaves that column unchanged and is
+/// returned in the held list, unless the column is named in `confirmed`
+/// (applied, with the confirmation recorded in the entry's reason). A held
+/// answer is held whole, so the question stays open.
+pub fn apply_answers_and_edits_guarded(
+    plan: &PreprocessingPlan,
+    answers: &[Value],
+    edits: &[Value],
+    source: DecidedBy,
+    confirmed: &[String],
+) -> Result<(PreprocessingPlan, Vec<HeldOneHot>), PlanEditError> {
+    apply_inner(plan, answers, edits, source, Some(confirmed))
+}
+
+/// Columns whose encoding this step newly set to one-hot above the threshold.
+fn new_big_one_hots(
+    before: &Entries,
+    after: &Entries,
+    evidence: &Evidence,
+    threshold: f64,
+) -> Vec<HeldOneHot> {
+    after
+        .iter()
+        .filter(|(c, e)| {
+            e.role == Role::Feature
+                && e.encode.as_deref() == Some("one_hot")
+                && before.get(*c).is_none_or(|b| {
+                    !(b.role == Role::Feature && b.encode.as_deref() == Some("one_hot"))
+                })
+        })
+        .filter_map(|(c, _)| {
+            let levels = evidence.get(c.as_str())?.n_unique;
+            (levels as f64 > threshold).then(|| HeldOneHot {
+                column: c.clone(),
+                levels,
+                threshold: threshold as usize,
+                features_added: levels
+                    - usize::from(before.get(c).is_some_and(|b| b.role == Role::Feature)),
+                question_id: None,
+            })
+        })
+        .collect()
+}
+
+/// Partition any newly added above-threshold one-hot encodings into confirmed
+/// (recorded in the entry's reason) and unconfirmed (returned to be held).
+fn confirm_or_hold(
+    old_entries: &Entries,
+    entries: &mut Entries,
+    evidence: &Evidence,
+    threshold: f64,
+    confirmed: &[String],
+) -> Vec<HeldOneHot> {
+    let big = new_big_one_hots(old_entries, entries, evidence, threshold);
+    let (ok, unconfirmed): (Vec<_>, Vec<_>) =
+        big.into_iter().partition(|h| confirmed.contains(&h.column));
+    note_confirmed(entries, &ok);
+    unconfirmed
+}
+
+fn apply_inner(
+    plan: &PreprocessingPlan,
+    answers: &[Value],
+    edits: &[Value],
+    source: DecidedBy,
+    confirmed: Option<&[String]>,
+) -> Result<(PreprocessingPlan, Vec<HeldOneHot>), PlanEditError> {
     if source == DecidedBy::Default {
         return Err(err(
             format!(
@@ -1016,7 +1105,10 @@ pub fn apply_answers_and_edits(
         })
         .collect();
 
+    let threshold = (plan.evidence.n_rows.max(1) as f64).sqrt();
+    let mut held: Vec<HeldOneHot> = Vec::new();
     for ans in answers {
+        let snapshot = confirmed.map(|_| (entries.clone(), questions.clone()));
         apply_single_answer(
             ans,
             &mut questions,
@@ -1026,29 +1118,69 @@ pub fn apply_answers_and_edits(
             &plan.missing_groups,
             &evidence,
         )?;
+        if let (Some(confirmed), Some((old_entries, old_questions))) = (confirmed, snapshot) {
+            let unconfirmed =
+                confirm_or_hold(&old_entries, &mut entries, &evidence, threshold, confirmed);
+            if !unconfirmed.is_empty() {
+                entries = old_entries;
+                questions = old_questions;
+                let qid = ans
+                    .get("question_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                held.extend(unconfirmed.into_iter().map(|mut h| {
+                    h.question_id.clone_from(&qid);
+                    h
+                }));
+            }
+        }
     }
     let mut target_role_added = false;
     for edit in edits {
+        let snapshot = confirmed.map(|_| entries.clone());
         apply_single_edit(&mut entries, edit, source, &plan.missing_groups, &evidence)?;
+        if let (Some(confirmed), Some(old_entries)) = (confirmed, snapshot) {
+            for h in confirm_or_hold(&old_entries, &mut entries, &evidence, threshold, confirmed) {
+                entries.insert(h.column.clone(), old_entries[&h.column].clone());
+                held.push(h);
+            }
+        }
         if edit.get("role").is_some_and(|r| r == "target") {
             target_role_added = true;
         }
     }
     sync_question_statuses(&mut questions, &entries, target_role_added, source);
 
-    Ok(PreprocessingPlan {
-        plan_id: plan.plan_id.clone(),
-        dataset_id: plan.dataset_id.clone(),
-        revision: plan.revision + 1,
-        entries,
-        questions,
-        missing_groups: plan.missing_groups.clone(),
-        evidence: plan.evidence.clone(),
-        created_at: plan.created_at.clone(),
-        cost: plan.cost.clone(),
-        target_proxies: plan.target_proxies.clone(),
-        n_imputations: plan.n_imputations,
-    })
+    Ok((
+        PreprocessingPlan {
+            plan_id: plan.plan_id.clone(),
+            dataset_id: plan.dataset_id.clone(),
+            revision: plan.revision + 1,
+            entries,
+            questions,
+            missing_groups: plan.missing_groups.clone(),
+            evidence: plan.evidence.clone(),
+            created_at: plan.created_at.clone(),
+            cost: plan.cost.clone(),
+            target_proxies: plan.target_proxies.clone(),
+            n_imputations: plan.n_imputations,
+            imported: plan.imported.clone(),
+            phirewall_release: plan.phirewall_release,
+        },
+        held,
+    ))
+}
+
+/// Record, in the entry's reason, that a one-hot above the threshold was confirmed.
+fn note_confirmed(entries: &mut Entries, confirmed: &[HeldOneHot]) {
+    for h in confirmed {
+        if let Some(e) = entries.get_mut(&h.column) {
+            e.reason = format!(
+                "one_hot confirmed above threshold: {} levels exceed sqrt(n_rows) = {}; {}",
+                h.levels, h.threshold, e.reason
+            );
+        }
+    }
 }
 
 // ---- diff --------------------------------------------------------------------

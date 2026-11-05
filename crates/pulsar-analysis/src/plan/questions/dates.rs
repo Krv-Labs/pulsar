@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::group_or;
 use crate::plan::defaults::DraftContext;
+use crate::plan::imported::Decides;
 use crate::plan::model::{edit, PendingQuestion, PlanQuestion, QuestionOption, QuestionTopic};
 use crate::plan::text::format_col_list;
 
@@ -40,7 +41,12 @@ fn has_date_effect(with_blanks: &[String], n_complete: usize, partners: &[String
 }
 
 pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
-    let date_cols = ctx.date_cols.clone();
+    let date_cols: Vec<String> = ctx
+        .date_cols
+        .iter()
+        .filter(|c| !ctx.imported.decides(c, QuestionTopic::DateColumns))
+        .cloned()
+        .collect();
     if date_cols.is_empty() {
         return vec![];
     }

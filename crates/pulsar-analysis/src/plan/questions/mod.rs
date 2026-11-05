@@ -25,6 +25,9 @@ pub fn build_pending_questions(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
     pending.extend(duplicates::build(ctx));
     pending.extend(code_columns::build(ctx));
     pending.extend(outcome::build(ctx));
+    if let Some(imported) = ctx.imported.clone() {
+        pending.extend(imported.open_questions(ctx));
+    }
     pending
 }
 

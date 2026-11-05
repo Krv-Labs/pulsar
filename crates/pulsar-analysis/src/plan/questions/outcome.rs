@@ -1,10 +1,11 @@
 //! `outcome_columns`: the framing question asked when no target was named.
 
 use crate::plan::defaults::DraftContext;
+use crate::plan::imported::Decides;
 use crate::plan::model::{PendingQuestion, PlanQuestion, QuestionOption, QuestionTopic};
 
 pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
-    if !ctx.target_set.is_empty() {
+    if !ctx.target_set.is_empty() || ctx.imported.decides("", QuestionTopic::OutcomeColumns) {
         return vec![];
     }
     let question = PlanQuestion::new(

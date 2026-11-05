@@ -296,13 +296,14 @@ pub fn plan_to_preprocessing_yaml(plan: &PreprocessingPlan, include_header: bool
 
 /// Column, role and provenance counts for the plan header.
 pub fn summarize_plan_counts(plan: &PreprocessingPlan) -> Value {
-    let (mut default, mut agent, mut user) = (0, 0, 0);
+    let (mut default, mut agent, mut user, mut phirewall) = (0, 0, 0, 0);
     let (mut features, mut dropped, mut open_entries) = (0, 0, 0);
     for entry in plan.entries.values() {
         match entry.decided_by {
             DecidedBy::Default => default += 1,
             DecidedBy::Agent => agent += 1,
             DecidedBy::User => user += 1,
+            DecidedBy::Phirewall => phirewall += 1,
         }
         if entry.role == Role::Feature {
             features += 1;
@@ -318,13 +319,17 @@ pub fn summarize_plan_counts(plan: &PreprocessingPlan) -> Value {
         .values()
         .filter(|q| q.status == super::model::QuestionStatus::Open)
         .count();
+    let mut decided_by = json!({"default": default, "agent": agent, "user": user});
+    if phirewall > 0 || plan.imported.is_some() {
+        decided_by["phirewall"] = json!(phirewall);
+    }
     json!({
         "columns": plan.entries.len(),
         "feature_columns": features,
         "dropped": dropped,
         "open_entries": open_entries,
         "open_questions": open_questions,
-        "decided_by": {"default": default, "agent": agent, "user": user},
+        "decided_by": decided_by,
     })
 }
 

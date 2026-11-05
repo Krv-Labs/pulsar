@@ -251,7 +251,7 @@ pub fn calibrate_processed_space(
     let processed = preprocess(table, &variant.preprocessing, None, None).map_err(|e| {
         CalibrationFallback::Preprocess {
             code: e.code(),
-            message: e.to_string(),
+            message: e.display_for(plan.phirewall_release),
         }
     })?;
     let (n, k) = processed.matrix.dim();
@@ -287,20 +287,22 @@ pub fn processed_feature_names(
     let variant = variants
         .first()
         .ok_or("the plan yields no preprocessing variant")?;
-    let processed =
-        preprocess(table, &variant.preprocessing, None, None).map_err(|e| e.to_string())?;
+    let processed = preprocess(table, &variant.preprocessing, None, None)
+        .map_err(|e| e.display_for(plan.phirewall_release))?;
     Ok(processed.layout.feature_names)
 }
 
 fn run(table: &Table, plan: &mut PreprocessingPlan) -> Result<ProcessedSpace, String> {
     let config = plan_config(plan, "dry_run")?;
+    let phirewall_release = plan.phirewall_release;
 
     let variants = config.preprocessing_variants();
-    let first =
-        preprocess(table, &variants[0].preprocessing, None, None).map_err(|e| e.to_string())?;
+    let first = preprocess(table, &variants[0].preprocessing, None, None)
+        .map_err(|e| e.display_for(phirewall_release))?;
     // Every variant must be applicable, not just the first.
     for variant in &variants[1..] {
-        preprocess(table, &variant.preprocessing, None, None).map_err(|e| e.to_string())?;
+        preprocess(table, &variant.preprocessing, None, None)
+            .map_err(|e| e.display_for(phirewall_release))?;
     }
 
     let names = first.feature_names();

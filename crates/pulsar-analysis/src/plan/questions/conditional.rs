@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use super::group_or;
 use crate::plan::defaults::DraftContext;
+use crate::plan::imported::Decides;
 use crate::plan::model::{PendingQuestion, PlanQuestion, QuestionOption, QuestionTopic};
 use crate::plan::text::format_col_list;
 
@@ -70,6 +71,13 @@ fn edit_from(pairs: Vec<(&'static str, Value)>) -> crate::plan::model::Edit {
 pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
     let mut pending = Vec::new();
     for (partner, cols) in ctx.conditional_by_partner.clone() {
+        let cols: Vec<String> = cols
+            .into_iter()
+            .filter(|c| !ctx.imported.decides(c, QuestionTopic::ConditionalColumn))
+            .collect();
+        if cols.is_empty() {
+            continue;
+        }
         let first = ctx.ev_by_col[cols[0].as_str()]
             .mask_dependency
             .as_ref()
@@ -81,7 +89,26 @@ pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
             format!("when `{partner}` is 0")
         };
         let preview = format_col_list(&cols, 3);
-        let text = if cols.len() == 1 {
+        let settled_not_applicable = cols.iter().any(|c| {
+            ctx.imported
+                .as_ref()
+                .and_then(|imp| imp.column(c))
+                .and_then(|ic| ic.meaning.as_deref())
+                == Some("not_applicable")
+        });
+        let text = if settled_not_applicable {
+            if cols.len() == 1 {
+                format!(
+                    "`{}` is not applicable except {when} (settled in Phirewall). Leave it out, set blanks to 0, or fill with the median and mark blanks?",
+                    cols[0]
+                )
+            } else {
+                format!(
+                    "{} columns ({preview}) are not applicable except {when} (settled in Phirewall). Leave them out, set blanks to 0, or fill with the median and mark blanks?",
+                    cols.len()
+                )
+            }
+        } else if cols.len() == 1 {
             format!(
                 "`{}` only has a value {when} \u{2014} it is blank for everyone else. Should the map use it?",
                 cols[0]

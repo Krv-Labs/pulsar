@@ -7,6 +7,7 @@
 mod defaults;
 mod draft;
 mod edits;
+pub mod imported;
 mod model;
 mod payload;
 #[allow(clippy::module_inception)]
@@ -23,8 +24,12 @@ pub use defaults::{
 };
 pub use draft::{draft_plan, DraftError, DraftOptions};
 pub use edits::{
-    apply_answers_and_edits, diff_plan_entries, VALID_ENCODE_METHODS, VALID_IMPUTE_METHODS,
-    VALID_ROLES,
+    apply_answers_and_edits, apply_answers_and_edits_guarded, diff_plan_entries, HeldOneHot,
+    VALID_ENCODE_METHODS, VALID_IMPUTE_METHODS, VALID_ROLES,
+};
+pub use imported::{
+    compute_dataset_version, Decides, ImportedColumn, ImportedDecisions, ImportedOpen,
+    ImportedWarning, PreparedVersion,
 };
 pub use model::{
     edit, DecidedBy, Edit, EntryStatus, ImputeSpec, PendingQuestion, PlanEditError, PlanEntry,

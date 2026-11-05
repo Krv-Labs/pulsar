@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use super::group_or;
 use crate::evidence::kind::{strip_thousands, to_numeric};
 use crate::plan::defaults::DraftContext;
+use crate::plan::imported::Decides;
 use crate::plan::model::{edit, PendingQuestion, PlanQuestion, QuestionOption, QuestionTopic};
 use crate::plan::text::{format_col_list, plural, py_repr, thousands};
 
@@ -47,10 +48,30 @@ struct Facts<'a> {
     total_non_num: usize,
     single_num: Option<f64>,
     mostly_num_all: bool,
+    phirewall_release: bool,
 }
 
 fn question_text(f: &Facts) -> String {
     let ask = "Should those values count as their own category, or as unreadable entries treated like blanks?";
+    let n = f.cols.len();
+    if f.phirewall_release {
+        if n == 1 {
+            let lead = match (f.single_num.is_some(), f.mostly_num_all) {
+                (true, _) => format!("`{}` holds a single number, with some text values", f.c_top),
+                (false, true) => {
+                    format!("`{}` holds mostly numbers, with some text values", f.c_top)
+                }
+                (false, false) => format!("`{}` holds numbers and text values", f.c_top),
+            };
+            return format!("{lead}. {ask}");
+        }
+        let lead = match (f.single_num.is_some(), f.mostly_num_all) {
+            (true, _) => format!("{n} columns hold a single number, with some text values"),
+            (false, true) => format!("{n} columns hold mostly numbers, with some text values"),
+            (false, false) => format!("{n} columns hold numbers and text values"),
+        };
+        return format!("{lead} (e.g. `{}`). {ask}", f.c_top);
+    }
     let val = py_repr(f.top_val);
     let num = f.single_num.map(|v| {
         if v.fract() == 0.0 {
@@ -59,7 +80,6 @@ fn question_text(f: &Facts) -> String {
             py_float_repr(v)
         }
     });
-    let n = f.cols.len();
     if n == 1 {
         let rows = format!("{} {}", thousands(f.top_n), plural(f.top_n, "row", "rows"));
         let lead = match (&num, f.mostly_num_all) {
@@ -92,11 +112,20 @@ fn options(
     total_non_num: usize,
     top_val: &str,
 ) -> Vec<QuestionOption> {
-    let entry_word = plural(total_non_num, "entry", "entries");
-    let verb = if total_non_num == 1 {
-        "becomes a blank and is estimated"
+    let as_blank_effect = if ctx.phirewall_release {
+        "Non-numeric text entries become blanks and are estimated with the median of observed numbers, plus a 0/1 blank marker".to_string()
     } else {
-        "become blanks and are estimated"
+        let entry_word = plural(total_non_num, "entry", "entries");
+        let verb = if total_non_num == 1 {
+            "becomes a blank and is estimated"
+        } else {
+            "become blanks and are estimated"
+        };
+        format!(
+            "{} {} {entry_word} {verb} with the median of observed numbers, plus a 0/1 blank marker",
+            thousands(total_non_num),
+            py_repr(top_val)
+        )
     };
     let as_categories = cols
         .iter()
@@ -156,11 +185,7 @@ fn options(
         QuestionOption::new(
             "as_blank",
             "Treat non-numeric text as blank",
-            format!(
-                "{} {} {entry_word} {verb} with the median of observed numbers, plus a 0/1 blank marker",
-                thousands(total_non_num),
-                py_repr(top_val)
-            ),
+            as_blank_effect,
             as_blank,
         ),
         QuestionOption::new(
@@ -173,7 +198,12 @@ fn options(
 }
 
 pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
-    let cols = ctx.mixed_value_cols.clone();
+    let cols: Vec<String> = ctx
+        .mixed_value_cols
+        .iter()
+        .filter(|c| !ctx.imported.decides(c, QuestionTopic::MixedValues))
+        .cloned()
+        .collect();
     if cols.is_empty() {
         return vec![];
     }
@@ -204,6 +234,7 @@ pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
         total_non_num,
         single_num: single_numeric_value(ctx, &cols),
         mostly_num_all,
+        phirewall_release: ctx.phirewall_release,
     };
     let rows_affected = cols
         .iter()
