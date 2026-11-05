@@ -4759,10 +4759,13 @@ fn write_sidecar_test_csv(path: &Path) {
     std::fs::write(path, csv).unwrap();
 }
 
-fn sidecar_dataset_version(csv_path: &Path) -> String {
-    let bytes = std::fs::read(csv_path).unwrap();
-    let table = pulsar_data::read_table(csv_path).unwrap();
-    pulsar_analysis::plan::compute_dataset_version(&bytes, &table.names)
+/// Phirewall's `dataset_version` hashes its registered source, not the twin
+/// the sidecar sits beside, so to Pulsar it is an opaque token.
+const SOURCE_VERSION: &str = "9f2c4e1a7b3d5f60";
+
+/// The sidecar's `twin_sha256`: the hex SHA-256 of the CSV bytes.
+fn twin_sha256(csv_path: &Path) -> String {
+    pulsar_analysis::plan::hex_sha256(&std::fs::read(csv_path).unwrap())
 }
 
 #[tokio::test]
@@ -4770,11 +4773,9 @@ async fn phirewall_sidecar_imports_semantic_decisions_open_items_summary_and_war
     let root = TempRoot::new("phirewall-sidecar");
     let csv_a = root.path().join("no_sidecar.csv");
     let csv_b = root.path().join("patients_v1.csv");
-    let csv_parent = root.path().join("patients.csv");
     let csv_bad = root.path().join("bad_sidecar.csv");
     write_sidecar_test_csv(&csv_a);
     write_sidecar_test_csv(&csv_b);
-    write_sidecar_test_csv(&csv_parent);
     write_sidecar_test_csv(&csv_bad);
 
     let client = connect(root.path(), test_options(), ()).await;
@@ -4816,12 +4817,12 @@ async fn phirewall_sidecar_imports_semantic_decisions_open_items_summary_and_war
     assert_eq!(baseline["entries"]["n_visits"]["decided_by"], "default");
 
     // 2. With a valid sidecar validated against phirewall-data-decisions-sidecar-v1.json.
-    let ds_ver = sidecar_dataset_version(&csv_b);
     let sidecar = json!({
         "contract": "io.phirewall/data-decisions",
         "version": 1,
         "dataset": "patients_v1",
-        "dataset_version": ds_ver,
+        "dataset_version": SOURCE_VERSION,
+        "twin_sha256": twin_sha256(&csv_b),
         "prepared": {
             "name": "patients_v1",
             "parent": "patients",
@@ -5029,7 +5030,6 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
     // --- Fix 1: create_config with plan_id re-reads and APPLIES the current sidecar (or its removal) ---
     let csv_sync = root.path().join("sync_cohort.csv");
     write_sidecar_test_csv(&csv_sync);
-    let sync_ver = sidecar_dataset_version(&csv_sync);
     let ds_sync = ingest(&client, &tools, &csv_sync).await;
 
     // Draft BEFORE any sidecar exists.
@@ -5058,7 +5058,7 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
         "contract": "io.phirewall/data-decisions",
         "version": 1,
         "dataset": "sync_cohort",
-        "dataset_version": sync_ver,
+        "dataset_version": SOURCE_VERSION,
         "columns": [
             {
                 "column": "n_visits",
@@ -5193,12 +5193,11 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
         ));
     }
     std::fs::write(&csv_rich, &rich_text).unwrap();
-    let rich_ver = sidecar_dataset_version(&csv_rich);
     let rich_sidecar = json!({
         "contract": "io.phirewall/data-decisions",
         "version": 1,
         "dataset": "rich",
-        "dataset_version": rich_ver,
+        "dataset_version": SOURCE_VERSION,
         "columns": [
             {
                 "column": "dose",
@@ -5286,7 +5285,7 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
     // Fix 4: "imported N" counts only applied decisions on existing columns (5: dose, visit_count, zero_col, na_col, admit_dt; notes is free_text so not imported; 2 absent columns skipped).
     assert_eq!(
         rich_draft["imported_decisions"],
-        "imported 5 Phirewall decisions (version ".to_owned() + &rich_ver + ")"
+        format!("imported 5 Phirewall decisions (version {SOURCE_VERSION})")
     );
     let rich_warnings = rich_draft["warnings"].as_array().unwrap();
     let absent_warn = rich_warnings
@@ -5378,14 +5377,16 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
     assert!(!sanitized_text.contains("##"), "{sanitized_text}");
     assert!(!sanitized_text.contains("<script>"), "{sanitized_text}");
 
-    // --- Fix 5: dataset_version / dataset mismatch is rejected with PHIREWALL_SIDECAR_INVALID ---
+    // --- Fix 5: a twin_sha256 the file does not hash to is rejected with PHIREWALL_SIDECAR_INVALID ---
     let csv_stale = root.path().join("stale.csv");
     write_sidecar_test_csv(&csv_stale);
     let stale_sidecar = json!({
         "contract": "io.phirewall/data-decisions",
         "version": 1,
         "dataset": "stale",
-        "dataset_version": "000000000000",
+        "dataset_version": SOURCE_VERSION,
+        "twin_sha256": "0".repeat(64),
+        "open": [],
         "columns": [
             {
                 "column": "n_visits",
@@ -5414,25 +5415,25 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
     )
     .await;
     assert!(stale_draft.get("imported_decisions").is_none());
-    assert!(
-        stale_draft["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w["code"] == "PHIREWALL_SIDECAR_INVALID"),
-        "{}",
-        stale_draft["warnings"]
+    let stale_warning = stale_draft["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "PHIREWALL_SIDECAR_INVALID")
+        .unwrap_or_else(|| panic!("{}", stale_draft["warnings"]));
+    assert_eq!(
+        stale_warning["message"],
+        "Phirewall's decisions file could not be matched to this CSV (its 'twin_sha256' is not this file's SHA-256; the file changed after Phirewall wrote it), so its decisions were not applied; questions below may already be answered in Phirewall."
     );
 
     // --- Fix 8: when `prepared` is present, ops already applied by the recipe (blank_to_value) are not re-applied ---
     let csv_prep = root.path().join("prep_v1.csv");
     write_sidecar_test_csv(&csv_prep);
-    let prep_ver = sidecar_dataset_version(&csv_prep);
     let prep_sidecar = json!({
         "contract": "io.phirewall/data-decisions",
         "version": 1,
         "dataset": "prep_v1",
-        "dataset_version": prep_ver,
+        "dataset_version": SOURCE_VERSION,
         "prepared": {
             "name": "prep_v1",
             "parent": "prep",

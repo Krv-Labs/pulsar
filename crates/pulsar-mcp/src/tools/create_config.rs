@@ -251,8 +251,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
     };
 
     let table = load(NAME, &path).await?;
-    let (imported, sidecar_warnings) =
-        ImportedDecisions::load_for_table(std::path::Path::new(&path), &table);
+    let (imported, sidecar_warnings) = ImportedDecisions::load(std::path::Path::new(&path));
     let (dataset, data_path) = (p.dataset_id.clone(), path.clone());
     let run_name = Some(p.intent.trim())
         .filter(|n| !n.is_empty())

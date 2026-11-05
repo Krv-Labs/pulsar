@@ -26,6 +26,11 @@
       "minLength": 1,
       "maxLength": 128
     },
+    "twin_sha256": {
+      "description": "Optional. Lowercase hex SHA-256 of the exact CSV bytes this sidecar sits beside. A reader that finds the file's bytes hash otherwise ignores the sidecar; without it, `dataset` is the match and `dataset_version` is provenance only.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "prepared": {
       "description": "Present only for prepared versions. Their ops are already applied to the twin, so a reader must not re-apply them.",
       "type": "object",

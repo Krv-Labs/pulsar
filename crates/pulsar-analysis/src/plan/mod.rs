@@ -28,8 +28,8 @@ pub use edits::{
     VALID_ENCODE_METHODS, VALID_IMPUTE_METHODS, VALID_ROLES,
 };
 pub use imported::{
-    compute_dataset_version, Decides, ImportedColumn, ImportedDecisions, ImportedOpen,
-    ImportedWarning, PreparedVersion,
+    hex_sha256, Decides, ImportedColumn, ImportedDecisions, ImportedOpen, ImportedWarning,
+    PreparedVersion,
 };
 pub use model::{
     edit, DecidedBy, Edit, EntryStatus, ImputeSpec, PendingQuestion, PlanEditError, PlanEntry,

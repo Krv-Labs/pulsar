@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 
-use pulsar_data::Table;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -23,6 +22,10 @@ use crate::evidence::{ColumnEvidence, ColumnKind};
 
 pub const CONTRACT: &str = "io.phirewall/data-decisions";
 pub const VERSION: u64 = 1;
+
+/// What an unusable sidecar means for the plan, said after its reason.
+const NOT_APPLIED: &str =
+    "Phirewall's decisions were not applied; questions below may already be answered in Phirewall.";
 
 const KNOWN_ROLES: &[&str] = &["time", "outcome", "group"];
 
@@ -124,45 +127,12 @@ pub fn sanitize_sidecar_text(raw: &str, max_chars: usize) -> String {
     }
 }
 
-/// Compute Phirewall's 16-hex-character `dataset_version` for a CSV file and its
-/// column names: the first 8 bytes of `SHA-256(hex(SHA-256(csv_bytes)) || (\0 || col)*)`.
-pub fn compute_dataset_version(csv_bytes: &[u8], columns: &[String]) -> String {
-    let file_hex = hex_sha256(csv_bytes);
-    let mut h = Sha256::new();
-    h.update(file_hex.as_bytes());
-    for col in columns {
-        h.update([0u8]);
-        h.update(col.as_bytes());
-    }
-    h.finalize()
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
+/// Lowercase hex SHA-256 of `bytes`: the form of the sidecar's `twin_sha256`.
+pub fn hex_sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-fn csv_header_columns(path: &Path) -> Vec<String> {
-    pulsar_data::read_table(path)
-        .map(|t| t.names)
-        .unwrap_or_default()
-}
-
-fn version_matches_bytes(version: &str, csv_bytes: &[u8], columns: &[String]) -> bool {
-    let expected = compute_dataset_version(csv_bytes, columns);
-    if version == expected || (version.len() >= 8 && expected.starts_with(version)) {
-        return true;
-    }
-    let file_hex = hex_sha256(csv_bytes);
-    version.len() >= 8
-        && version.chars().all(|c| c.is_ascii_hexdigit())
-        && file_hex.starts_with(&version.to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,11 +172,25 @@ pub struct ImportedWarning {
 }
 
 impl ImportedWarning {
-    pub fn invalid_sidecar(message: impl Into<String>) -> Self {
+    /// A sidecar that could not be read or parsed: `reason`, then what that
+    /// means for the plan.
+    pub fn invalid_sidecar(reason: impl Into<String>) -> Self {
+        Self::dropped_sidecar(format!("{} {NOT_APPLIED}", reason.into()))
+    }
+
+    /// A well-formed sidecar that belongs to another file: `reason`, after
+    /// the consequence.
+    pub fn unmatched_sidecar(reason: &str) -> Self {
+        Self::dropped_sidecar(format!(
+            "Phirewall's decisions file could not be matched to this CSV ({reason}), so its decisions were not applied; questions below may already be answered in Phirewall."
+        ))
+    }
+
+    fn dropped_sidecar(message: String) -> Self {
         Self {
             code: "PHIREWALL_SIDECAR_INVALID".into(),
             target: "sidecar".into(),
-            message: message.into(),
+            message,
             columns: Vec::new(),
         }
     }
@@ -253,7 +237,14 @@ impl ImportedWarning {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportedDecisions {
     pub dataset: String,
+    /// Phirewall's own provenance token for the data the decisions were
+    /// made on. Opaque here: it hashes Phirewall's registered source, not
+    /// the twin this sidecar sits beside.
     pub dataset_version: String,
+    /// Lowercase hex SHA-256 of the exact CSV bytes the sidecar sits beside,
+    /// when Phirewall wrote one: the only content check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twin_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared: Option<PreparedVersion>,
     pub columns: Vec<ImportedColumn>,
@@ -277,20 +268,9 @@ impl ImportedDecisions {
         PathBuf::from(format!("{}.decisions.json", data_path.display()))
     }
 
-    /// Load and validate `<data_path>.decisions.json` against the CSV file and `table`.
-    pub fn load_for_table(data_path: &Path, table: &Table) -> (Option<Self>, Vec<ImportedWarning>) {
-        Self::load_inner(data_path, Some(&table.names))
-    }
-
-    /// Load and validate `<data_path>.decisions.json` against the CSV file on disk.
-    pub fn load_for_data_path(data_path: &Path) -> (Option<Self>, Vec<ImportedWarning>) {
-        Self::load_inner(data_path, None)
-    }
-
-    fn load_inner(
-        data_path: &Path,
-        table_cols: Option<&[String]>,
-    ) -> (Option<Self>, Vec<ImportedWarning>) {
+    /// Load `<data_path>.decisions.json` and check it belongs to the CSV
+    /// file at `data_path`.
+    pub fn load(data_path: &Path) -> (Option<Self>, Vec<ImportedWarning>) {
         let path = Self::sidecar_path(data_path);
         let raw = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -308,18 +288,18 @@ impl ImportedDecisions {
             Ok(imp) => imp,
             Err(w) => return (None, vec![w]),
         };
-        if let Err(w) = imp.validate_against_csv(data_path, table_cols) {
+        if let Err(w) = imp.validate_against_csv(data_path) {
             return (None, vec![w]);
         }
         (Some(imp), Vec::new())
     }
 
-    /// Check `dataset` and `dataset_version` against the CSV file path and contents.
-    pub fn validate_against_csv(
-        &self,
-        data_path: &Path,
-        table_cols: Option<&[String]>,
-    ) -> Result<(), ImportedWarning> {
+    /// Check the sidecar belongs to the CSV file at `data_path`: its
+    /// `dataset` (or prepared name or parent) names the file, and when it
+    /// carries `twin_sha256`, that is the file's SHA-256. `dataset_version`
+    /// is Phirewall's provenance token and is not checked: it hashes the
+    /// registered source, which the twin is not.
+    pub fn validate_against_csv(&self, data_path: &Path) -> Result<(), ImportedWarning> {
         if let Some(p) = &self.prepared {
             if p.name != self.dataset {
                 return Err(ImportedWarning::invalid_sidecar(
@@ -347,39 +327,22 @@ impl ImportedDecisions {
                 .as_ref()
                 .is_some_and(|p| matches_name(&p.name) || matches_name(&p.parent));
         if !dataset_matches {
-            return Err(ImportedWarning::invalid_sidecar(
-                "Phirewall sidecar 'dataset' does not match the CSV dataset.",
+            return Err(ImportedWarning::unmatched_sidecar(
+                "its 'dataset' names another file",
             ));
         }
 
+        let Some(expected) = &self.twin_sha256 else {
+            return Ok(());
+        };
         let Ok(csv_bytes) = std::fs::read(data_path) else {
             return Err(ImportedWarning::invalid_sidecar(
-                "Could not read CSV file to verify Phirewall sidecar 'dataset_version'.",
+                "Could not read the CSV file to check Phirewall sidecar 'twin_sha256'.",
             ));
         };
-        let owned_cols;
-        let cols: &[String] = match table_cols {
-            Some(c) => c,
-            None => {
-                owned_cols = csv_header_columns(data_path);
-                &owned_cols
-            }
-        };
-
-        let mut version_ok = version_matches_bytes(&self.dataset_version, &csv_bytes, cols);
-        if !version_ok {
-            if let Some(p) = &self.prepared {
-                let parent_csv = data_path.with_file_name(format!("{}.csv", p.parent));
-                if let Ok(parent_bytes) = std::fs::read(&parent_csv) {
-                    let parent_cols = csv_header_columns(&parent_csv);
-                    version_ok =
-                        version_matches_bytes(&self.dataset_version, &parent_bytes, &parent_cols);
-                }
-            }
-        }
-        if !version_ok {
-            return Err(ImportedWarning::invalid_sidecar(
-                "Phirewall sidecar 'dataset_version' does not match the CSV file.",
+        if hex_sha256(&csv_bytes) != *expected {
+            return Err(ImportedWarning::unmatched_sidecar(
+                "its 'twin_sha256' is not this file's SHA-256; the file changed after Phirewall wrote it",
             ));
         }
         Ok(())
@@ -440,6 +403,20 @@ impl ImportedDecisions {
                 "Phirewall sidecar 'dataset' and 'dataset_version' must not contain control characters.",
             ));
         }
+
+        let twin_sha256 = match obj.get("twin_sha256") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(h))
+                if h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+            {
+                Some(h.clone())
+            }
+            Some(_) => {
+                return Err(ImportedWarning::invalid_sidecar(
+                    "Phirewall sidecar 'twin_sha256' must be 64 lowercase hex characters.",
+                ))
+            }
+        };
 
         let prepared = match obj.get("prepared") {
             None | Some(Value::Null) => None,
@@ -623,6 +600,7 @@ impl ImportedDecisions {
         Ok(Self {
             dataset: dataset.to_string(),
             dataset_version: dataset_version.to_string(),
+            twin_sha256,
             prepared,
             columns,
             open,
@@ -1397,6 +1375,92 @@ mod tests {
         assert!(!q.contains('#'));
         assert!(!q.contains('`'));
         assert!(!q.contains('<'));
+    }
+
+    /// A twin `<dir>/<stem>.g2.csv` (a source hash would not match its bytes)
+    /// with `sidecar` beside it; returns the twin's path.
+    fn twin_with_sidecar(stem: &str, sidecar: &Value) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pulsar-sidecar-{stem}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join(format!("{stem}.g2.csv"));
+        std::fs::write(&csv, "a,b\n1,2\n3,4\n").unwrap();
+        std::fs::write(
+            ImportedDecisions::sidecar_path(&csv),
+            serde_json::to_string(sidecar).unwrap(),
+        )
+        .unwrap();
+        csv
+    }
+
+    fn sidecar(dataset: &str, twin_sha256: Option<&str>) -> Value {
+        let mut v = json!({
+            "contract": CONTRACT,
+            "version": 1,
+            "dataset": dataset,
+            // Phirewall's token hashes its registered source, never the twin.
+            "dataset_version": "9f2c4e1a7b3d5f60",
+            "columns": [{"column": "a", "meaning": "count", "decided_by": "agent", "state": "agent_decided"}],
+            "open": []
+        });
+        if let Some(h) = twin_sha256 {
+            v["twin_sha256"] = json!(h);
+        }
+        v
+    }
+
+    #[test]
+    fn an_opaque_dataset_version_is_accepted_on_the_dataset_name() {
+        let csv = twin_with_sidecar("cohort", &sidecar("cohort", None));
+        let (imp, warnings) = ImportedDecisions::load(&csv);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let imp = imp.expect("applied");
+        assert_eq!(imp.dataset_version, "9f2c4e1a7b3d5f60");
+        assert_eq!(imp.columns.len(), 1);
+    }
+
+    #[test]
+    fn twin_sha256_is_checked_against_the_file_bytes() {
+        let probe = twin_with_sidecar("hashed", &sidecar("hashed", None));
+        let digest = hex_sha256(&std::fs::read(&probe).unwrap());
+        let csv = twin_with_sidecar("hashed", &sidecar("hashed", Some(&digest)));
+        let (imp, warnings) = ImportedDecisions::load(&csv);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(imp.is_some());
+
+        let wrong = "0".repeat(64);
+        let csv = twin_with_sidecar("hashed", &sidecar("hashed", Some(&wrong)));
+        let (imp, warnings) = ImportedDecisions::load(&csv);
+        assert!(imp.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "PHIREWALL_SIDECAR_INVALID");
+        assert_eq!(
+            warnings[0].message,
+            "Phirewall's decisions file could not be matched to this CSV (its 'twin_sha256' is not this file's SHA-256; the file changed after Phirewall wrote it), so its decisions were not applied; questions below may already be answered in Phirewall."
+        );
+    }
+
+    #[test]
+    fn another_dataset_name_is_not_matched() {
+        let csv = twin_with_sidecar("mine", &sidecar("theirs", None));
+        let (imp, warnings) = ImportedDecisions::load(&csv);
+        assert!(imp.is_none());
+        assert_eq!(
+            warnings[0].message,
+            "Phirewall's decisions file could not be matched to this CSV (its 'dataset' names another file), so its decisions were not applied; questions below may already be answered in Phirewall."
+        );
+    }
+
+    #[test]
+    fn a_malformed_twin_sha256_is_refused() {
+        let err = ImportedDecisions::from_sidecar_value(&sidecar("x", Some("ABC"))).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Phirewall sidecar 'twin_sha256' must be 64 lowercase hex characters. Phirewall's decisions were not applied; questions below may already be answered in Phirewall."
+        );
     }
 
     #[test]

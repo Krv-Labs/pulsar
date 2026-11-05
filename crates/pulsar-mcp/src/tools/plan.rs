@@ -211,8 +211,7 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
     let (dataset_id, path) = resolve_dataset(state, DRAFT, &p.dataset_id)?
         .expect("a non-empty dataset_id always resolves or errors");
     let table = read_table(DRAFT, &path).await?;
-    let (imported, sidecar_warnings) =
-        ImportedDecisions::load_for_table(std::path::Path::new(&path), &table);
+    let (imported, sidecar_warnings) = ImportedDecisions::load(std::path::Path::new(&path));
 
     let opts = DraftOptions {
         target_columns: p.target_columns.clone().unwrap_or_default(),
