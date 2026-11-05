@@ -1009,11 +1009,12 @@ fn job_payload(state: &ServerState, run_id: &RunId) -> Result<(Value, JobState),
         "response_available": response.is_some(),
     });
     if let Some(r) = response {
-        payload["sweep"] = summary_payload(&r, 20, false);
+        let mut sweep = summary_payload(&r, 20, false);
         // The gateway reads the contract at the top level only.
-        if let Some(summary) = r.get(phirewall::KEY) {
-            payload[phirewall::KEY] = summary.clone();
+        if let Some(summary) = sweep.as_object_mut().and_then(|m| m.remove(phirewall::KEY)) {
+            payload[phirewall::KEY] = summary;
         }
+        payload["sweep"] = sweep;
     }
     if !job.state.is_terminal() {
         payload["poll_with"] = json!("wait_job");

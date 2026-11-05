@@ -676,7 +676,7 @@ async fn async_sweeps_are_polled_through_the_job_model_and_survive_a_new_client(
         // The contract sits at the top level, where the gateway looks.
         let summary = summary_of(&waited, "wait_job");
         assert_eq!(summary["run"]["run_id"], run_id);
-        assert_eq!(summary, &waited["sweep"][SUMMARY]);
+        assert!(waited["sweep"].get(SUMMARY).is_none());
         assert!(summary.get("thresholds").is_some(), "{summary}");
         assert_eq!(waited["job"]["state"], "complete");
         assert_eq!(waited["job"]["progress"], 1.0);
@@ -703,6 +703,7 @@ async fn async_sweeps_are_polled_through_the_job_model_and_survive_a_new_client(
     .await;
     assert_eq!(job["response_available"], true);
     assert_eq!(summary_of(&job, "get_job")["run"]["run_id"], run_id);
+    assert!(job["sweep"].get(SUMMARY).is_none());
     let curve = ok(
         &client,
         &tools,
@@ -4373,6 +4374,93 @@ async fn every_summary_tool_answers_the_phirewall_contract_on_a_wide_table() {
     assert_eq!(inputs["imputed_omitted"], inputs["counts"]["imputed"]);
 }
 
+/// Every plan, config, sweep and job poll carries `inputs` in its top-level
+/// summary, and `get_job` removes the nested `sweep["io.phirewall/summary"]`
+/// when promoting it to the root.
+#[tokio::test]
+async fn summary_inputs_are_always_sent_and_job_promotes_summary_without_nesting() {
+    let root = TempRoot::new("inputs-always");
+    let client = connect(root.path(), test_options(), ()).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let dataset_id = ingest_wide(&client, &tools).await;
+    let draft_args = args(&[
+        ("dataset_id", json!(dataset_id)),
+        ("response_format", json!("json")),
+    ]);
+    let first = ok(
+        &client,
+        &tools,
+        "draft_preprocessing_plan",
+        draft_args.clone(),
+    )
+    .await;
+    assert!(summary_of(&first, "draft")["inputs"].is_object());
+    let again = ok(&client, &tools, "draft_preprocessing_plan", draft_args).await;
+    let again = summary_of(&again, "draft again");
+    assert_eq!(again["inputs"], summary_of(&first, "draft")["inputs"]);
+    assert_eq!(again["run"]["dataset_id"], json!(dataset_id));
+
+    let plan_id = first["plan_id"].as_str().unwrap();
+    let edited = ok(
+        &client,
+        &tools,
+        "edit_preprocessing_plan",
+        args(&[
+            ("plan_id", json!(plan_id)),
+            ("base_revision", json!(1)),
+            ("edits", json!([{"column": "visits1", "role": "drop"}])),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert!(summary_of(&edited, "edit")["inputs"].is_object());
+
+    let cfg = ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", json!(dataset_id))]),
+    )
+    .await;
+    assert!(summary_of(&cfg, "create_config")["inputs"].is_object());
+    let cfg_again = ok(
+        &client,
+        &tools,
+        "create_config",
+        args(&[("dataset_id", json!(dataset_id))]),
+    )
+    .await;
+    assert!(summary_of(&cfg_again, "create_config again")["inputs"].is_object());
+
+    let sweep = ok(
+        &client,
+        &tools,
+        "run_topological_sweep",
+        args(&[
+            ("dataset_id", json!(dataset_id)),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert!(summary_of(&sweep, "sweep")["inputs"].is_object());
+    let polled = ok(
+        &client,
+        &tools,
+        "get_job",
+        args(&[("run_id", sweep["run_id"].clone())]),
+    )
+    .await;
+    assert!(
+        polled["sweep"].get(SUMMARY).is_none(),
+        "nested summary must be removed when promoted: {}",
+        polled["sweep"]
+    );
+    let polled_summary = summary_of(&polled, "get_job");
+    assert!(polled_summary["inputs"].is_object(), "{polled_summary}");
+    assert!(polled_summary["thresholds"].is_object(), "{polled_summary}");
+    client.cancel().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_sweep_under_a_stored_plan_carries_its_summary_and_hides_its_identifiers() {
     let root = TempRoot::new("sweep-plan");
@@ -5059,6 +5147,7 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
         "version": 1,
         "dataset": "sync_cohort",
         "dataset_version": SOURCE_VERSION,
+        "twin_sha256": twin_sha256(&csv_sync),
         "columns": [
             {
                 "column": "n_visits",
@@ -5198,6 +5287,7 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
         "version": 1,
         "dataset": "rich",
         "dataset_version": SOURCE_VERSION,
+        "twin_sha256": twin_sha256(&csv_rich),
         "columns": [
             {
                 "column": "dose",
@@ -5426,6 +5516,79 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
         "Phirewall's decisions file could not be matched to this CSV (its 'twin_sha256' is not this file's SHA-256; the file changed after Phirewall wrote it), so its decisions were not applied; questions below may already be answered in Phirewall."
     );
 
+    // A sidecar without twin_sha256 is unverified and not applied.
+    let mut hashless_sidecar = stale_sidecar.clone();
+    hashless_sidecar
+        .as_object_mut()
+        .unwrap()
+        .remove("twin_sha256");
+    std::fs::write(
+        format!("{}.decisions.json", csv_stale.display()),
+        serde_json::to_string_pretty(&hashless_sidecar).unwrap(),
+    )
+    .unwrap();
+    let ds_hashless = ingest(&client, &tools, &csv_stale).await;
+    let hashless_draft = ok(
+        &client,
+        &tools,
+        "draft_preprocessing_plan",
+        args(&[
+            ("dataset_id", ds_hashless),
+            ("detail", json!("full")),
+            ("stakes", json!(false)),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert!(hashless_draft.get("imported_decisions").is_none());
+    assert_eq!(
+        hashless_draft["entries"]["n_visits"]["decided_by"],
+        "default"
+    );
+    let hashless_warning = hashless_draft["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "PHIREWALL_SIDECAR_INVALID")
+        .unwrap_or_else(|| panic!("{}", hashless_draft["warnings"]));
+    assert_eq!(
+        hashless_warning["message"],
+        "Phirewall's decisions file has no twin_sha256, so it could not be matched to this CSV and its decisions were not applied; questions below may already be answered in Phirewall. Recording a decision again in Phirewall rewrites the file."
+    );
+
+    // An explicit twin_sha256: null is also rejected with PHIREWALL_SIDECAR_INVALID.
+    let mut null_sha_sidecar = hashless_sidecar.clone();
+    null_sha_sidecar["twin_sha256"] = Value::Null;
+    std::fs::write(
+        format!("{}.decisions.json", csv_stale.display()),
+        serde_json::to_string_pretty(&null_sha_sidecar).unwrap(),
+    )
+    .unwrap();
+    let ds_null_sha = ingest(&client, &tools, &csv_stale).await;
+    let null_sha_draft = ok(
+        &client,
+        &tools,
+        "draft_preprocessing_plan",
+        args(&[
+            ("dataset_id", ds_null_sha),
+            ("detail", json!("full")),
+            ("stakes", json!(false)),
+            ("response_format", json!("json")),
+        ]),
+    )
+    .await;
+    assert!(null_sha_draft.get("imported_decisions").is_none());
+    let null_sha_warning = null_sha_draft["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "PHIREWALL_SIDECAR_INVALID")
+        .unwrap_or_else(|| panic!("{}", null_sha_draft["warnings"]));
+    assert_eq!(
+        null_sha_warning["message"],
+        "Phirewall sidecar 'twin_sha256' must be 64 lowercase hex characters. Phirewall's decisions were not applied; questions below may already be answered in Phirewall."
+    );
+
     // --- Fix 8: when `prepared` is present, ops already applied by the recipe (blank_to_value) are not re-applied ---
     let csv_prep = root.path().join("prep_v1.csv");
     write_sidecar_test_csv(&csv_prep);
@@ -5434,6 +5597,7 @@ async fn phirewall_sidecar_review_fixes_plan_id_sync_conditional_absent_version_
         "version": 1,
         "dataset": "prep_v1",
         "dataset_version": SOURCE_VERSION,
+        "twin_sha256": twin_sha256(&csv_prep),
         "prepared": {
             "name": "prep_v1",
             "parent": "prep",
