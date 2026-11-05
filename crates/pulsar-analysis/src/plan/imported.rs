@@ -295,9 +295,9 @@ impl ImportedDecisions {
     }
 
     /// Check the sidecar belongs to the CSV file at `data_path`: its
-    /// `dataset` (or prepared name or parent) names the file, and when it
-    /// carries `twin_sha256`, that is the file's SHA-256. `dataset_version`
-    /// is Phirewall's provenance token and is not checked: it hashes the
+    /// `dataset` names the file (`<dataset>.csv` or `<dataset>.g<n>.csv`),
+    /// and its `twin_sha256` is the file's SHA-256. `dataset_version` is
+    /// Phirewall's provenance token and is not checked: it hashes the
     /// registered source, which the twin is not.
     pub fn validate_against_csv(&self, data_path: &Path) -> Result<(), ImportedWarning> {
         if let Some(p) = &self.prepared {
@@ -309,31 +309,20 @@ impl ImportedDecisions {
         }
 
         let stem = data_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let parent_dir = data_path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        let matches_name = |name: &str| {
-            stem == name
-                || parent_dir == name
-                || stem.strip_prefix(name).is_some_and(|rest| {
-                    rest.starts_with('_') || rest.starts_with('-') || rest.starts_with('.')
-                })
+        let base_stem = match stem.rsplit_once(".g") {
+            Some((base, gen)) if !gen.is_empty() && gen.bytes().all(|b| b.is_ascii_digit()) => base,
+            _ => stem,
         };
-        let dataset_matches = matches_name(&self.dataset)
-            || self
-                .prepared
-                .as_ref()
-                .is_some_and(|p| matches_name(&p.name) || matches_name(&p.parent));
-        if !dataset_matches {
+        if stem != self.dataset && base_stem != self.dataset {
             return Err(ImportedWarning::unmatched_sidecar(
                 "its 'dataset' names another file",
             ));
         }
 
         let Some(expected) = &self.twin_sha256 else {
-            return Ok(());
+            return Err(ImportedWarning::dropped_sidecar(
+                "Phirewall's decisions file has no twin_sha256, so it could not be matched to this CSV and its decisions were not applied; questions below may already be answered in Phirewall. Recording a decision again in Phirewall rewrites the file.".into(),
+            ));
         };
         let Ok(csv_bytes) = std::fs::read(data_path) else {
             return Err(ImportedWarning::invalid_sidecar(
@@ -405,7 +394,7 @@ impl ImportedDecisions {
         }
 
         let twin_sha256 = match obj.get("twin_sha256") {
-            None | Some(Value::Null) => None,
+            None => None,
             Some(Value::String(h))
                 if h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
             {
@@ -1412,9 +1401,14 @@ mod tests {
         v
     }
 
+    fn twin_digest() -> String {
+        hex_sha256(b"a,b\n1,2\n3,4\n")
+    }
+
     #[test]
     fn an_opaque_dataset_version_is_accepted_on_the_dataset_name() {
-        let csv = twin_with_sidecar("cohort", &sidecar("cohort", None));
+        let digest = twin_digest();
+        let csv = twin_with_sidecar("cohort", &sidecar("cohort", Some(&digest)));
         let (imp, warnings) = ImportedDecisions::load(&csv);
         assert!(warnings.is_empty(), "{warnings:?}");
         let imp = imp.expect("applied");
@@ -1423,9 +1417,21 @@ mod tests {
     }
 
     #[test]
+    fn a_sidecar_without_twin_sha256_is_unverified_and_not_applied() {
+        let csv = twin_with_sidecar("cohort", &sidecar("cohort", None));
+        let (imp, warnings) = ImportedDecisions::load(&csv);
+        assert!(imp.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "PHIREWALL_SIDECAR_INVALID");
+        assert_eq!(
+            warnings[0].message,
+            "Phirewall's decisions file has no twin_sha256, so it could not be matched to this CSV and its decisions were not applied; questions below may already be answered in Phirewall. Recording a decision again in Phirewall rewrites the file."
+        );
+    }
+
+    #[test]
     fn twin_sha256_is_checked_against_the_file_bytes() {
-        let probe = twin_with_sidecar("hashed", &sidecar("hashed", None));
-        let digest = hex_sha256(&std::fs::read(&probe).unwrap());
+        let digest = twin_digest();
         let csv = twin_with_sidecar("hashed", &sidecar("hashed", Some(&digest)));
         let (imp, warnings) = ImportedDecisions::load(&csv);
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1445,22 +1451,36 @@ mod tests {
 
     #[test]
     fn another_dataset_name_is_not_matched() {
-        let csv = twin_with_sidecar("mine", &sidecar("theirs", None));
-        let (imp, warnings) = ImportedDecisions::load(&csv);
-        assert!(imp.is_none());
-        assert_eq!(
-            warnings[0].message,
-            "Phirewall's decisions file could not be matched to this CSV (its 'dataset' names another file), so its decisions were not applied; questions below may already be answered in Phirewall."
-        );
+        let digest = twin_digest();
+        for (stem, ds) in [("mine", "theirs"), ("cohort_other", "cohort")] {
+            let csv = twin_with_sidecar(stem, &sidecar(ds, Some(&digest)));
+            let (imp, warnings) = ImportedDecisions::load(&csv);
+            assert!(imp.is_none(), "{stem} vs {ds}");
+            assert_eq!(warnings[0].code, "PHIREWALL_SIDECAR_INVALID");
+            assert_eq!(
+                warnings[0].message,
+                "Phirewall's decisions file could not be matched to this CSV (its 'dataset' names another file), so its decisions were not applied; questions below may already be answered in Phirewall."
+            );
+        }
     }
 
     #[test]
-    fn a_malformed_twin_sha256_is_refused() {
-        let err = ImportedDecisions::from_sidecar_value(&sidecar("x", Some("ABC"))).unwrap_err();
-        assert_eq!(
-            err.message,
-            "Phirewall sidecar 'twin_sha256' must be 64 lowercase hex characters. Phirewall's decisions were not applied; questions below may already be answered in Phirewall."
-        );
+    fn a_malformed_or_null_twin_sha256_is_refused() {
+        let mut null_sha = sidecar("cohort", None);
+        null_sha["twin_sha256"] = Value::Null;
+        for bad in [sidecar("x", Some("ABC")), null_sha.clone()] {
+            let err = ImportedDecisions::from_sidecar_value(&bad).unwrap_err();
+            assert_eq!(err.code, "PHIREWALL_SIDECAR_INVALID");
+            assert_eq!(
+                err.message,
+                "Phirewall sidecar 'twin_sha256' must be 64 lowercase hex characters. Phirewall's decisions were not applied; questions below may already be answered in Phirewall."
+            );
+        }
+        let csv = twin_with_sidecar("cohort", &null_sha);
+        let (imp, warnings) = ImportedDecisions::load(&csv);
+        assert!(imp.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "PHIREWALL_SIDECAR_INVALID");
     }
 
     #[test]
