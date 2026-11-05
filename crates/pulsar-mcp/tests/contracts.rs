@@ -536,6 +536,14 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
     )
     .await;
     assert_eq!(e["error_code"], "INVALID_HANDLE");
+    // Cluster reads check the handle before the session's labels.
+    let e = err(
+        &client,
+        "get_cluster_profile",
+        args(&[("cluster_id", json!(0)), ("run_id", json!("nope"))]),
+    )
+    .await;
+    assert_eq!(e["error_code"], "INVALID_HANDLE");
     let e = err(
         &client,
         "run_topological_sweep",
