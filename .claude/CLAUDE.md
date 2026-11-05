@@ -15,7 +15,8 @@ CSV/Parquet → Impute → Scale → Projection grid (PCA/JL) → Ball Mapper gr
 There is no Python anywhere in the repository, build, CI or distribution
 (ADR 0002). The Python implementation was the porting reference until the port
 was complete, then removed; `tests/fixtures/golden/README.md` records where the
-frozen fixtures came from (tag `python-reference`, generators in git history).
+frozen fixtures came from (thema-pulsar 0.5.0 at `afe7941`; generator at
+`v0.6.0:scripts/golden/generate.py`).
 
 ## Product name
 

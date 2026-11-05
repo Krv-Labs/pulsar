@@ -2,7 +2,7 @@
 // End-to-end check of the npm packaging on the host platform: build the
 // packages from target/release/<NAME>, `npm pack` them, install the tarballs
 // into a clean project (no registry), run the launcher, and speak MCP to it.
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -104,5 +104,16 @@ try {
   console.log(`mcp ok: ${init.result.serverInfo.name} ${init.result.serverInfo.version}, ${names.length} tools`);
 } finally {
   server.kill();
+}
+
+// A binary that dies from a signal must not look like a clean exit to the host.
+if (!win) {
+  const stub = path.join(tmp, "die-by-sigterm.sh");
+  writeFileSync(stub, "#!/bin/sh\nkill -TERM $$\n", { mode: 0o755 });
+  const died = spawnSync(process.execPath, [launcher], { env: { ...process.env, PULSAR_BINARY: stub } });
+  if (died.signal !== "SIGTERM") {
+    throw new Error(`launcher reported status=${died.status} signal=${died.signal}, expected signal=SIGTERM`);
+  }
+  console.log("signal ok: child SIGTERM propagates");
 }
 console.log(`packages: ${readdirSync(tarballs).join(", ")}`);

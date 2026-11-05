@@ -34,14 +34,15 @@ const STAKES_QUESTIONS: usize = 6;
 /// Open questions previewed in the plan provenance block.
 const PREVIEW: usize = 3;
 
-#[derive(serde::Deserialize, JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, JsonSchema)]
 pub struct Params {
     /// Dataset handle returned by ingest_dataset.
     pub dataset_id: String,
     /// Optional short run name (e.g. 'baseline') stored as run.name in the config. Defaults to 'initial_sweep'.
+    #[serde(default)]
     pub intent: String,
     /// Optional preprocessing plan handle from draft_preprocessing_plan. If omitted, baseline defaults are drafted and stored automatically.
+    #[serde(default)]
     pub plan_id: String,
 }
 

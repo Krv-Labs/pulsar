@@ -542,3 +542,78 @@ fn fitted_models_round_trip_with_the_golden_penguins_case() {
     assert!(affinity.n_edges() >= fitted.graph.n_edges());
     assert!(pulsar_config::from_yaml_str(&back.config_yaml).is_ok());
 }
+
+#[test]
+fn identical_affinity_is_stored_once_and_reloads_from_the_graph() {
+    let root = TempRoot::new("dedupe");
+    let store = Store::open_at(root.path()).unwrap();
+    let mut artifacts = triangle_plus_singleton();
+    artifacts.affinity = artifacts.graph.clone();
+    let job = store.submit(JobKind::Sweep, None).unwrap();
+    job.complete(&record_for(job.id(), None, &artifacts), &artifacts)
+        .unwrap();
+    let dir = store.run_dir(&job.id());
+    assert!(dir.join("graph.arrow").exists());
+    assert!(!dir.join("affinity.arrow").exists());
+    let reopened = Store::open_at(root.path()).unwrap();
+    assert_eq!(
+        reopened.run_affinity(&job.id()).unwrap(),
+        artifacts.affinity
+    );
+    assert_eq!(reopened.run_graph(&job.id()).unwrap(), artifacts.graph);
+    assert!(reopened.run_disk_bytes(&job.id()).unwrap() > 0);
+}
+
+#[test]
+fn retention_prunes_the_oldest_runs_of_the_same_dataset() {
+    let root = TempRoot::new("retention");
+    let store = Store::open_with(
+        root.path(),
+        StoreOptions {
+            run_retention: 2,
+            ..StoreOptions::default()
+        },
+    )
+    .unwrap();
+    let csv = root.path().join("d.csv");
+    std::fs::write(&csv, "a\n1\n").unwrap();
+    let ds = store.register_dataset(&csv).unwrap().dataset_id;
+    let artifacts = triangle_plus_singleton();
+
+    // A run of another dataset never counts against this one's cap.
+    let other = store.submit(JobKind::Sweep, None).unwrap();
+    let mut rec = record_for(other.id(), None, &artifacts);
+    rec.created_at = 1.0;
+    other.complete(&rec, &artifacts).unwrap();
+    // A job still running when the cap is hit is left alone.
+    let running = store.submit(JobKind::Sweep, Some(ds.clone())).unwrap();
+    running.start().unwrap();
+
+    let mut ids = Vec::new();
+    for k in 0..4 {
+        let job = store.submit(JobKind::Sweep, Some(ds.clone())).unwrap();
+        let mut rec = record_for(job.id(), Some(ds.clone()), &artifacts);
+        rec.created_at = 10.0 + k as f64;
+        job.complete(&rec, &artifacts).unwrap();
+        ids.push(job.id());
+    }
+
+    let kept: Vec<RunId> = store
+        .list_runs(Some(&ds))
+        .unwrap()
+        .runs
+        .into_iter()
+        .map(|r| r.run_id)
+        .collect();
+    assert_eq!(kept, ids[2..].to_vec());
+    for pruned in &ids[..2] {
+        assert!(!store.run_dir(pruned).exists());
+        assert_eq!(store.get_run(pruned).unwrap_err().code(), "RUN_ID_UNKNOWN");
+        assert_eq!(store.get_job(pruned).unwrap_err().code(), "RUN_ID_UNKNOWN");
+    }
+    assert!(store.get_run(&other.id()).is_ok());
+    assert_eq!(
+        store.get_job(&running.id()).unwrap().state,
+        JobState::Running
+    );
+}

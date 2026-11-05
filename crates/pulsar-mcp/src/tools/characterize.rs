@@ -201,14 +201,14 @@ pub async fn characterize(
 
 // ---- probe_columns -------------------------------------------------------------
 
-#[derive(serde::Deserialize, JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, JsonSchema)]
 pub struct ProbeParams {
     /// Dataset handle returned by ingest_dataset.
     pub dataset_id: String,
     /// Names of columns of the raw dataset to inspect (at most 20); unknown names are listed under missing_columns.
     pub columns: Vec<String>,
     /// Text view: 'markdown' or 'json'. structured_content is identical.
+    #[serde(default)]
     pub response_format: Format,
 }
 

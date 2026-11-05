@@ -256,9 +256,14 @@ fn set_path(raw: &mut Map<String, Value>, path: &str, value: Value) -> Value {
         }
         cursor = slot.as_object_mut().expect("just ensured an object");
     }
-    cursor
-        .insert(parts[parts.len() - 1].to_owned(), value)
-        .unwrap_or(Value::Null)
+    let leaf = parts[parts.len() - 1];
+    // A grid parameter takes exactly one form: overriding `values` on a
+    // `range` grid replaces the range rather than leaving both.
+    const GRID_FORMS: [&str; 3] = ["values", "range", "distribution"];
+    if GRID_FORMS.contains(&leaf) {
+        cursor.retain(|k, _| k == leaf || !GRID_FORMS.contains(&k.as_str()));
+    }
+    cursor.insert(leaf.to_owned(), value).unwrap_or(Value::Null)
 }
 
 /// Delete the leaf at `path`; `None` when any step is missing.
@@ -547,6 +552,19 @@ mod tests {
         );
         assert_eq!(raw["sweep"]["ball_mapper"]["epsilon"]["range"]["min"], 0.5);
         assert_eq!(raw["sweep"]["ball_mapper"]["epsilon"]["range"]["max"], 3.0);
+    }
+
+    #[test]
+    fn a_new_grid_form_replaces_the_old_one() {
+        let mut raw = base();
+        run(
+            json!({"sweep": {"ball_mapper": {"epsilon": {"values": [0.5, 1.0]}}}}),
+            &mut raw,
+        );
+        assert_eq!(
+            raw["sweep"]["ball_mapper"]["epsilon"],
+            json!({"values": [0.5, 1.0]})
+        );
     }
 
     #[test]
