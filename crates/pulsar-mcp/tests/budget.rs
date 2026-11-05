@@ -874,4 +874,98 @@ async fn detail_pages_fit_the_budget_with_their_release_block() {
             break;
         }
     }
+
+    // Fragmented membership (alternating rows) uses bitmap_b64 in the release block and fits.
+    let store = Store::open_at(&root.0).unwrap();
+    let orig_id = pulsar_store::ClusterAssignmentId::parse(
+        dossier["cluster_assignment_id"].as_str().unwrap(),
+    )
+    .unwrap();
+    let record = store.get_cluster_assignment(&orig_id).unwrap();
+    let n_rows = store.cluster_labels(&orig_id).unwrap().len();
+    let alt_labels: Vec<i64> = (0..n_rows).map(|i| (i % 2) as i64).collect();
+    let alt_id = store
+        .save_cluster_assignment(pulsar_store::ClusterAssignment {
+            run_id: record.run_id.clone(),
+            dataset_id: record.dataset_id.clone(),
+            method: "alternating".into(),
+            interpretation_edge_weight_threshold: record.interpretation_edge_weight_threshold,
+            threshold_source: record.threshold_source.clone(),
+            construction_threshold: record.construction_threshold,
+            labels: &alt_labels,
+        })
+        .unwrap()
+        .cluster_assignment_id;
+    let alt_result = call(
+        &client,
+        "get_cluster_detail",
+        json!({"cluster_assignment_id": alt_id.to_string(), "response_format": "json"}),
+    )
+    .await;
+    assert_eq!(alt_result.is_error, Some(false));
+    let alt_page = alt_result.structured_content.clone().unwrap();
+    assert_eq!(
+        alt_page["io.phirewall/release"]["groups"][0]["rows"]["enc"],
+        "bitmap_b64"
+    );
+    let alt_size = json_chars(&alt_page) + text(&alt_result).chars().count();
+    assert!(alt_size <= render_budget(Some(HARD)), "{alt_size}");
+    client.cancel().await.unwrap();
+
+    // When even a single trimmed cluster cannot fit with its release block, get_cluster_detail
+    // returns a bounded, actionable RESPONSE_TOO_LARGE error.
+    let tight_client = connect_phirewall(&root.0, Some(3_000)).await;
+    let ds_id = record.dataset_id.as_ref().unwrap().to_string();
+    let tight_yaml = format!("{WIDE_YAML}preprocessing:\n  drop_columns: [site, sex]\n");
+    let tight_sweep = call(
+        &tight_client,
+        "run_topological_sweep",
+        json!({
+            "dataset_id": ds_id,
+            "config_yaml": tight_yaml,
+            "response_format": "json"
+        }),
+    )
+    .await;
+    let tight_run_id = pulsar_store::RunId::parse(
+        tight_sweep.structured_content.unwrap()["details"]["committed"]["run_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let tight_alt_id = store
+        .save_cluster_assignment(pulsar_store::ClusterAssignment {
+            run_id: Some(tight_run_id),
+            dataset_id: record.dataset_id.clone(),
+            method: "alternating".into(),
+            interpretation_edge_weight_threshold: record.interpretation_edge_weight_threshold,
+            threshold_source: record.threshold_source.clone(),
+            construction_threshold: record.construction_threshold,
+            labels: &alt_labels,
+        })
+        .unwrap()
+        .cluster_assignment_id;
+    let tight_result = call(
+        &tight_client,
+        "get_cluster_detail",
+        json!({"cluster_assignment_id": tight_alt_id.to_string(), "response_format": "json"}),
+    )
+    .await;
+    assert_eq!(tight_result.is_error, Some(true));
+    assert!(visible_chars(&tight_result) < MAX_ERROR_CHARS);
+    let err_env = tight_result.structured_content.unwrap();
+    assert_eq!(err_env["error_code"], "RESPONSE_TOO_LARGE");
+    assert!(
+        err_env["details"]["size_chars"].as_u64().unwrap()
+            > err_env["details"]["limit_chars"].as_u64().unwrap()
+    );
+    assert!(
+        err_env["agent_action"]
+            .as_str()
+            .unwrap()
+            .contains("sections"),
+        "{}",
+        err_env["agent_action"]
+    );
+    tight_client.cancel().await.unwrap();
 }

@@ -146,15 +146,53 @@ fn cluster() -> Value {
     cluster
 }
 
+fn decode_b64(encoded: &str) -> Vec<u8> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let val = |b: u8| TABLE.iter().position(|&c| c == b).unwrap() as u32;
+    let mut out = Vec::new();
+    for chunk in encoded.as_bytes().chunks(4) {
+        let b0 = val(chunk[0]);
+        let b1 = val(chunk[1]);
+        let b2 = if chunk[2] == b'=' { 0 } else { val(chunk[2]) };
+        let b3 = if chunk[3] == b'=' { 0 } else { val(chunk[3]) };
+        let n = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+        out.push((n >> 16) as u8);
+        if chunk[2] != b'=' {
+            out.push((n >> 8) as u8);
+        }
+        if chunk[3] != b'=' {
+            out.push(n as u8);
+        }
+    }
+    out
+}
+
 fn group_rows(release: &Value) -> BTreeMap<String, BTreeSet<usize>> {
     let mut groups = BTreeMap::new();
     for group in release["groups"].as_array().unwrap() {
         let id = group["id"].as_str().unwrap().to_owned();
         let mut rows = BTreeSet::new();
-        for range in group["rows"]["v"].as_array().unwrap() {
-            let start = range[0].as_u64().unwrap() as usize;
-            let end = range[1].as_u64().unwrap() as usize;
-            rows.extend(start..end);
+        match group["rows"]["enc"].as_str().unwrap() {
+            "ranges" => {
+                for range in group["rows"]["v"].as_array().unwrap() {
+                    let start = range[0].as_u64().unwrap() as usize;
+                    let end = range[1].as_u64().unwrap() as usize;
+                    rows.extend(start..end);
+                }
+            }
+            "bitmap_b64" => {
+                for (byte_at, byte) in decode_b64(group["rows"]["v"].as_str().unwrap())
+                    .into_iter()
+                    .enumerate()
+                {
+                    for bit in 0..8usize {
+                        if byte & (1 << bit) != 0 {
+                            rows.insert(byte_at * 8 + bit);
+                        }
+                    }
+                }
+            }
+            other => panic!("unexpected row encoding {other}"),
         }
         assert!(groups.insert(id, rows).is_none(), "duplicate group");
     }
@@ -317,4 +355,22 @@ fn group_ids_contain_no_raw_values() {
             "group id {id} contains raw value Gentoo"
         );
     }
+}
+
+#[test]
+fn fragmented_groups_use_bitmap_b64_and_stay_compact() {
+    let labels: Vec<i64> = (0..10_000).map(|i| i % 2).collect();
+    let groups = super::groups_of(&labels);
+    assert_eq!(groups.len(), 2);
+    for g in &groups {
+        assert_eq!(g["rows"]["enc"], "bitmap_b64");
+    }
+    let release = json!({"groups": groups});
+    let chars = crate::budget::json_chars(&release);
+    assert!(chars < 4_000, "{chars}");
+    let decoded = group_rows(&release);
+    assert_eq!(decoded["c0"].len(), 5_000);
+    assert_eq!(decoded["c1"].len(), 5_000);
+    assert!(decoded["c0"].iter().all(|r| r % 2 == 0));
+    assert!(decoded["c1"].iter().all(|r| r % 2 == 1));
 }

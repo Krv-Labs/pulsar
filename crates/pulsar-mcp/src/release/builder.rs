@@ -1,5 +1,5 @@
 //! [`ReleaseBuilder`]: the block's groups (twin row sets, encoded as
-//! ranges) and its labels.
+//! ranges or `bitmap_b64`) and its labels.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -24,7 +24,44 @@ pub(super) fn escape_token(s: &str) -> String {
 /// The value evidence uses for a missing categorical cell.
 const MISSING_VALUE: &str = "__MISSING__";
 
-/// `{enc: "ranges", v: [[start, end), ...]}` from ascending row indices.
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        out.push(B64[b0 >> 2] as char);
+        out.push(B64[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
+        if chunk.len() > 1 {
+            out.push(B64[((b1 & 0x0f) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64[b2 & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn bitmap_json(rows: &[usize]) -> Value {
+    let len = rows.last().map_or(0, |&r| r / 8 + 1);
+    let mut bytes = vec![0u8; len];
+    for &r in rows {
+        bytes[r / 8] |= 1u8 << (r % 8);
+    }
+    json!({
+        "enc": "bitmap_b64",
+        "v": base64_encode(&bytes),
+    })
+}
+
+/// `{enc: "ranges", v: [[start, end), ...]}` or `{enc: "bitmap_b64", v: "..."}`
+/// (whichever is shorter) from ascending row indices.
 fn rows_json(rows: &[usize]) -> Value {
     let mut ranges: Vec<[usize; 2]> = Vec::new();
     for &r in rows {
@@ -36,14 +73,21 @@ fn rows_json(rows: &[usize]) -> Value {
         }
         ranges.push([r, r + 1]);
     }
-    json!({
+    let as_ranges = json!({
         "enc": "ranges",
         "v": ranges,
-    })
+    });
+    let bitmap_bytes = rows.last().map_or(0, |&r| r / 8 + 1);
+    let bitmap_chars = 27 + bitmap_bytes.div_ceil(3) * 4;
+    if bitmap_chars < crate::budget::json_chars(&as_ranges) {
+        bitmap_json(rows)
+    } else {
+        as_ranges
+    }
 }
 
-/// Group entries (`{id, rows: {enc: "ranges", v: [[start, end), ...]}}`) from
-/// a per-row cluster label slice where node index == twin row index.
+/// Group entries (`{id, rows}`) from a per-row cluster label slice where
+/// node index == twin row index.
 pub fn groups_of(labels: &[i64]) -> Vec<Value> {
     let mut by_cluster: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
     for (row, &cid) in labels.iter().enumerate() {

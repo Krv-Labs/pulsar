@@ -261,9 +261,20 @@ fn shrink(
             let room = limit.saturating_sub(summary_chars(summary.as_ref())) / weight;
             trim_to(&mut payload, room, &mut trims);
             if cost(&payload, summary.as_ref()) > limit {
+                if summary.as_ref().and_then(|s| s.get("grouping")).is_some() {
+                    return None;
+                }
                 // Nothing of the agent's is left to cut: the summary goes
                 // whole, never cut further.
-                summary = None;
+                if summary.take().is_some() {
+                    let base = format!("/{}", SUMMARY_KEY.replace('/', "~1"));
+                    trims.retain(|t| !t.path.starts_with(&base));
+                    trims.push(Trim {
+                        path: base,
+                        shown: 0,
+                        total: 1,
+                    });
+                }
                 trim_to(&mut payload, limit / weight, &mut trims);
                 if cost(&payload, None) > limit {
                     return None;
@@ -326,6 +337,10 @@ fn next_step(tool: &str, args: Option<&Map<String, Value>>, trims: &[Trim]) -> S
         .filter(|t| !t.path.starts_with(&summary_path))
         .collect();
     let panel = trims.len() - cut.len();
+    let whole_summary_dropped = trims.iter().any(|t| t.path == summary_path);
+    let inputs_dropped = trims
+        .iter()
+        .any(|t| t.path == format!("{summary_path}/inputs"));
     let mut out = String::new();
     if !cut.is_empty() {
         let list: Vec<String> = cut
@@ -338,7 +353,15 @@ fn next_step(tool: &str, args: Option<&Map<String, Value>>, trims: &[Trim]) -> S
         if !out.is_empty() {
             out.push(' ');
         }
-        out.push_str("The panel's summary lists fewer columns (its *_omitted counts the rest).");
+        if whole_summary_dropped {
+            out.push_str("The panel's summary was omitted to fit.");
+        } else if inputs_dropped {
+            out.push_str("The panel's summary omitted its inputs part to fit.");
+        } else {
+            out.push_str(
+                "The panel's summary lists fewer columns (its *_omitted counts the rest).",
+            );
+        }
     }
     if cut.is_empty() && panel > 0 {
         return out;
@@ -412,8 +435,24 @@ fn trim_to(payload: &mut Value, max: usize, trims: &mut Vec<Trim>) {
         let Some((path, len)) = largest(payload, "") else {
             // The gateway's summary is a validated contract: dropped whole,
             // never cut, and only when nothing else is left to trim.
+            if payload
+                .get(SUMMARY_KEY)
+                .and_then(|s| s.get("grouping"))
+                .is_some()
+            {
+                return;
+            }
             match payload.as_object_mut().map(|m| m.remove(SUMMARY_KEY)) {
-                Some(Some(_)) => continue,
+                Some(Some(_)) => {
+                    let base = format!("/{}", SUMMARY_KEY.replace('/', "~1"));
+                    trims.retain(|t| !t.path.starts_with(&base));
+                    trims.push(Trim {
+                        path: base,
+                        shown: 0,
+                        total: 1,
+                    });
+                    continue;
+                }
                 _ => return,
             }
         };
@@ -532,6 +571,15 @@ fn too_large(tool: &str, result: &CallToolResult, size: usize, hard: usize) -> C
     .detail("limit_chars", json!(hard));
     if !ids.is_empty() {
         error = error.detail("committed", Value::Object(ids));
+    }
+    if let Some(limits) = result
+        .structured_content
+        .as_ref()
+        .and_then(|p| p.get(SUMMARY_KEY))
+        .and_then(|s| s.get("grouping"))
+        .and_then(|g| g.get("limits"))
+    {
+        error = error.detail("limits", limits.clone());
     }
     bound_error(error.into_result())
 }
@@ -778,5 +826,88 @@ mod tests {
         let s = out.structured_content.unwrap();
         assert_eq!(s["error_code"], "X");
         assert_eq!(s["agent_action"], "do this");
+    }
+
+    #[test]
+    fn whole_summary_removal_records_a_trim_and_accurate_next() {
+        let thresholds: Vec<Value> = (0..1_500)
+            .map(|i| json!({"threshold": i, "components": 4, "giant_share": 0.5}))
+            .collect();
+        let payload = json!({
+            "status": "ok",
+            "run_id": "run_0123456789ab",
+            SUMMARY_KEY: {
+                "version": 1,
+                "row_floor": 8,
+                "run": {"run_id": "run_0123456789ab", "rows": 500},
+                "thresholds": {"points": thresholds},
+            }
+        });
+        let out = degrade(
+            "get_threshold_stability_curve",
+            None,
+            ok_result(payload, None),
+            45_000,
+        );
+        assert_eq!(out.is_error, Some(false));
+        let s = out.structured_content.unwrap();
+        assert!(s.get(SUMMARY_KEY).is_none());
+        assert_eq!(
+            s["truncation"]["trimmed"],
+            json!([{"path": "/io.phirewall~1summary", "shown": 0, "total": 1}])
+        );
+        assert_eq!(
+            s["truncation"]["next"],
+            "The panel's summary was omitted to fit."
+        );
+    }
+
+    #[test]
+    fn oversized_grouping_summary_returns_bounded_error_with_applied_limits() {
+        let limits = json!({
+            "max_groups": 1000,
+            "max_features": 8,
+            "min_sd": 0.5,
+            "min_rows": 8,
+            "max_traits": 5
+        });
+        let groups: Vec<Value> = (0..1_000)
+            .map(|i| {
+                json!({
+                    "id": format!("c{i}"),
+                    "rows": 10,
+                    "share": 0.001,
+                    "traits": [{"column": "feature_a", "direction": "high", "sd": 1.2}]
+                })
+            })
+            .collect();
+        let payload = json!({
+            "status": "ok",
+            "cluster_assignment_id": "ca_0123456789ab",
+            SUMMARY_KEY: {
+                "version": 1,
+                "row_floor": 8,
+                "run": {"run_id": "run_0123456789ab", "rows": 10_000},
+                "grouping": {
+                    "limits": limits,
+                    "groups": groups,
+                }
+            }
+        });
+        let out = degrade(
+            "generate_cluster_dossier",
+            None,
+            ok_result(payload, None),
+            45_000,
+        );
+        assert_eq!(out.is_error, Some(true));
+        assert!(visible_chars(&out) < MAX_ERROR_CHARS);
+        let s = out.structured_content.unwrap();
+        assert_eq!(s["error_code"], "RESPONSE_TOO_LARGE");
+        assert_eq!(s["details"]["limits"], limits);
+        assert_eq!(
+            s["details"]["committed"]["cluster_assignment_id"],
+            "ca_0123456789ab"
+        );
     }
 }

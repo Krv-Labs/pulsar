@@ -766,8 +766,24 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
         }
     }
     let n = lo.min(n);
-    if n == 1 && !fits(&render(&list, 1, true)) {
+    let mut final_page = render(&list, n, true);
+    if n == 1 && !fits(&final_page) {
         budget::trim_value(&mut list[0], budget / 3);
+        final_page = render(&list, 1, true);
     }
-    finish(render(&list, n, true))
+    if !fits(&final_page) {
+        let size = budget::json_chars(&final_page.0) + final_page.1.chars().count();
+        return Err(ToolError::new(
+            NAME,
+            "RESPONSE_TOO_LARGE",
+            format!(
+                "Even one trimmed cluster page is {size} characters (with its release block), over the {budget}-character budget."
+            ),
+            "Re-call get_cluster_detail with fewer sections (e.g. sections=['tier_counts', 'feature_preview']), a lower max_features, or a single cluster in cluster_ids, or use get_cluster_profile; or raise PULSAR_MCP_MAX_RESPONSE_BYTES.",
+        )
+        .detail("size_chars", json!(size))
+        .detail("limit_chars", json!(budget))
+        .detail("cluster_assignment_id", json!(assignment_id)));
+    }
+    finish(final_page)
 }
