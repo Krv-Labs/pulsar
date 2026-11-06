@@ -835,9 +835,10 @@ async fn unprobed_tools_fit_the_budget_on_fixtures() {
 }
 
 /// Under the gateway, each detail page carries its `io.phirewall/release`
-/// block, which grows with the page; the page is fitted with it counted.
+/// block; the page is fitted on what the agent sees, which the gateway
+/// leaves once it strips the block.
 #[tokio::test(flavor = "multi_thread")]
-async fn detail_pages_fit_the_budget_with_their_release_block() {
+async fn detail_pages_fit_the_budget_and_carry_their_release_block() {
     let root = TempRoot::new("detail-release");
     let client = connect_phirewall(&root.0, Some(HARD)).await;
     let tools = client.list_all_tools().await.unwrap();
@@ -863,7 +864,7 @@ async fn detail_pages_fit_the_budget_with_their_release_block() {
             page.get("io.phirewall/release").is_some(),
             "no release block"
         );
-        let size = json_chars(&page) + text(&result).chars().count();
+        let size = visible_chars(&result);
         assert!(
             size <= render_budget(Some(HARD)),
             "page {pages}: {size} chars"
@@ -908,12 +909,12 @@ async fn detail_pages_fit_the_budget_with_their_release_block() {
         alt_page["io.phirewall/release"]["groups"][0]["rows"]["enc"],
         "bitmap_b64"
     );
-    let alt_size = json_chars(&alt_page) + text(&alt_result).chars().count();
+    let alt_size = visible_chars(&alt_result);
     assert!(alt_size <= render_budget(Some(HARD)), "{alt_size}");
     client.cancel().await.unwrap();
 
-    // When even a single trimmed cluster cannot fit with its release block, get_cluster_detail
-    // returns a bounded, actionable RESPONSE_TOO_LARGE error.
+    // A tight limit still serves a fragmented page (one release block
+    // overrunning the limit on its own is the next test).
     let tight_client = connect_phirewall(&root.0, Some(3_000)).await;
     let ds_id = record.dataset_id.as_ref().unwrap().to_string();
     let tight_yaml = format!("{WIDE_YAML}preprocessing:\n  drop_columns: [site, sex]\n");
@@ -951,35 +952,108 @@ async fn detail_pages_fit_the_budget_with_their_release_block() {
         json!({"cluster_assignment_id": tight_alt_id.to_string(), "response_format": "json"}),
     )
     .await;
-    assert_eq!(tight_result.is_error, Some(true));
-    assert!(visible_chars(&tight_result) < MAX_ERROR_CHARS);
-    let err_env = tight_result.structured_content.unwrap();
-    assert_eq!(err_env["error_code"], "RESPONSE_TOO_LARGE");
-    assert!(
-        err_env["details"]["size_chars"].as_u64().unwrap()
-            > err_env["details"]["limit_chars"].as_u64().unwrap()
-    );
-    assert!(
-        err_env["agent_action"]
-            .as_str()
-            .unwrap()
-            .contains("sections"),
-        "{}",
-        err_env["agent_action"]
-    );
-    // The error carries the sizes and names the request that can still fit.
-    let details = &err_env["details"];
     assert_eq!(
-        details["size_chars"].as_u64().unwrap(),
-        details["release_chars"].as_u64().unwrap() + details["evidence_chars"].as_u64().unwrap()
+        tight_result.is_error,
+        Some(false),
+        "{}",
+        text(&tight_result)
     );
-    assert!(details["release_chars"].as_u64().unwrap() > 0, "{details}");
-    let reason = err_env["reason"].as_str().unwrap();
-    assert!(reason.contains("bitmap_b64"), "{reason}");
-    let action = err_env["agent_action"].as_str().unwrap();
-    assert!(
-        action.contains("cluster_ids=[") || action.contains("get_cluster_profile"),
-        "{action}"
-    );
+    assert!(visible_chars(&tight_result) <= render_budget(Some(3_000)));
+    let tight_page = tight_result.structured_content.clone().unwrap();
+    assert!(tight_page.get("io.phirewall/release").is_some());
     tight_client.cancel().await.unwrap();
+}
+
+/// The private release block never shapes what the agent sees: two
+/// labellings with the same cluster sizes, differing only in which of rows
+/// 9 and 10 is a singleton, give the same visible `get_cluster_detail`
+/// result for another cluster, even under a limit the release block alone
+/// overruns (the block encodes every group's row set, so its length moves
+/// with membership).
+#[tokio::test(flavor = "multi_thread")]
+async fn detail_page_size_does_not_depend_on_the_release_block() {
+    let root = TempRoot::new("detail-release-blind");
+    let tight = 3_000;
+    let client = connect_phirewall(&root.0, Some(tight)).await;
+    let csv = cohort(&root.0);
+    let ingested = call(
+        &client,
+        "ingest_dataset",
+        json!({"path": csv.display().to_string()}),
+    )
+    .await;
+    let dataset_id = ingested.structured_content.unwrap()["dataset_id"].clone();
+    let sweep = call(
+        &client,
+        "run_topological_sweep",
+        json!({
+            "dataset_id": dataset_id,
+            "config_yaml": format!("{WIDE_YAML}preprocessing:\n  drop_columns: [site, sex]\n"),
+            "response_format": "json"
+        }),
+    )
+    .await;
+    let sweep = sweep.structured_content.unwrap();
+    let run_id = pulsar_store::RunId::parse(
+        sweep["details"]["committed"]["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{sweep}")),
+    )
+    .unwrap();
+    let store = Store::open_at(&root.0).unwrap();
+    let dataset = pulsar_store::DatasetId::parse(dataset_id.as_str().unwrap()).unwrap();
+    // 100 clusters of three (row / 3); then row 9 or row 10 leaves cluster 3
+    // for a singleton cluster 100. Every cluster size is the same either way.
+    let labelling = |singleton: usize| -> Vec<i64> {
+        (0..300)
+            .map(|row| {
+                if row == singleton {
+                    100
+                } else {
+                    (row / 3) as i64
+                }
+            })
+            .collect()
+    };
+    let mut seen = Vec::new();
+    for singleton in [9, 10] {
+        let labels = labelling(singleton);
+        let id = store
+            .save_cluster_assignment(pulsar_store::ClusterAssignment {
+                run_id: Some(run_id.clone()),
+                dataset_id: Some(dataset.clone()),
+                method: "witness".into(),
+                interpretation_edge_weight_threshold: 0.5,
+                threshold_source: "test".into(),
+                construction_threshold: 0.5,
+                labels: &labels,
+            })
+            .unwrap()
+            .cluster_assignment_id
+            .to_string();
+        let result = call(
+            &client,
+            "get_cluster_detail",
+            json!({"cluster_assignment_id": id, "cluster_ids": [1], "sections": [], "response_format": "json"}),
+        )
+        .await;
+        let mut visible = result.structured_content.clone().unwrap();
+        // The release block alone overruns the limit, and is not fitted.
+        assert!(
+            json_chars(&visible["io.phirewall/release"]) > render_budget(Some(tight)),
+            "{visible}"
+        );
+        if let Some(map) = visible.as_object_mut() {
+            map.remove("io.phirewall/release");
+        }
+        let shown = format!("{visible}\n{}", text(&result)).replace(&id, "<id>");
+        assert_eq!(result.is_error, Some(false), "{shown}");
+        assert!(
+            visible_chars(&result) <= render_budget(Some(tight)),
+            "{shown}"
+        );
+        seen.push(shown);
+    }
+    assert_eq!(seen[0], seen[1]);
+    client.cancel().await.unwrap();
 }

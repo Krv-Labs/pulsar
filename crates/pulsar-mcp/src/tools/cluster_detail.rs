@@ -730,15 +730,19 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
                 )
             }
         };
-        release::attach_detail(state, &loaded.live_run.run_id, &loaded.labels, &mut payload);
         (payload, text)
     };
-    // The release block grows with the page (labels per cluster entry), so
-    // it is counted in the fit, though the gateway strips it.
-    let fits =
-        |pair: &(Value, String)| budget::json_chars(&pair.0) + pair.1.chars().count() <= budget;
+    // Pages are fitted on what the agent sees. The release block is attached
+    // only to the page that is sent, and its size never decides how many
+    // clusters a page holds or what an error says: it encodes every group's
+    // row set, so its length moves with membership the agent must not learn.
+    // The gateway strips it before the agent's limit applies.
+    let fits = |pair: &(Value, String)| budget::pair_chars(&pair.0, &pair.1) <= budget;
 
-    let finish = |(payload, text): (Value, String)| Ok(ok_result(payload, Some(text)));
+    let finish = |(mut payload, text): (Value, String)| {
+        release::attach_detail(state, &loaded.live_run.run_id, &loaded.labels, &mut payload);
+        Ok(ok_result(payload, Some(text)))
+    };
 
     let mut list = built;
     let n = list.len();
@@ -783,40 +787,52 @@ pub async fn call(state: &ServerState, p: DetailParams) -> Result<CallToolResult
 }
 
 /// `RESPONSE_TOO_LARGE` for a page already cut to one cluster: names the
-/// sizes and the one request that can still help, so the agent adapts rather
-/// than retrying. The release block (the page's row sets, as ranges or
-/// `bitmap_b64`, whichever is shorter) is counted in the page's size.
+/// visible size and the one request that can still help, so the agent adapts
+/// rather than retrying. Every size is of agent-visible content; the page
+/// carries no release block yet (see `finish`).
 fn page_too_large(payload: &Value, text: &str, budget: usize, assignment_id: &str) -> ToolError {
-    let size = budget::json_chars(payload) + text.chars().count();
-    let release_chars = payload.get(release::KEY).map_or(0, budget::json_chars);
-    let evidence_chars = size - release_chars;
+    let size = budget::pair_chars(payload, text);
     let cluster = payload["clusters"][0]["cluster_id"].as_i64();
     let which = cluster.map_or_else(String::new, |id| format!(" (cluster {id})"));
-    let (reason, action) = if release_chars >= budget {
-        (
-            format!(
-                "Even a one-cluster page{which} is {size} characters, over the {budget}-character budget: its release block (row sets, already in the shorter of ranges and bitmap_b64) is {release_chars} characters on its own, so no section or page setting shrinks it."
-            ),
-            format!(
-                "Raise PULSAR_MCP_MAX_RESPONSE_BYTES to at least {size}, or read this cluster with get_cluster_profile. Fewer sections, a lower max_features or another page do not help."
-            ),
-        )
-    } else {
-        (
-            format!(
-                "Even a one-cluster page{which} is {size} characters, over the {budget}-character budget: {evidence_chars} of evidence plus a {release_chars}-character release block (row sets, already in the shorter of ranges and bitmap_b64). The page cannot get smaller than one cluster."
-            ),
-            format!(
-                "Re-call get_cluster_detail with cluster_ids=[{}], sections=['tier_counts'] and max_features=1 (evidence must fit in {} characters); or use get_cluster_profile; or raise PULSAR_MCP_MAX_RESPONSE_BYTES to at least {size}.",
-                cluster.map_or_else(|| "<one id>".to_owned(), |id| id.to_string()),
-                budget - release_chars
-            ),
-        )
-    };
+    let reason = format!(
+        "Even a one-cluster page{which} is {size} characters, over the {budget}-character budget. The page cannot get smaller than one cluster."
+    );
+    let action = format!(
+        "Re-call get_cluster_detail with cluster_ids=[{}], sections=['tier_counts'] and max_features=1; or use get_cluster_profile; or raise PULSAR_MCP_MAX_RESPONSE_BYTES to at least {size}.",
+        cluster.map_or_else(|| "<one id>".to_owned(), |id| id.to_string()),
+    );
     ToolError::new(NAME, "RESPONSE_TOO_LARGE", reason, action)
         .detail("size_chars", json!(size))
         .detail("limit_chars", json!(budget))
-        .detail("release_chars", json!(release_chars))
-        .detail("evidence_chars", json!(evidence_chars))
         .detail("cluster_assignment_id", json!(assignment_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The too-large error is a function of the visible page only: a release
+    /// block of any length changes neither its sizes nor its wording.
+    #[test]
+    fn too_large_error_ignores_the_release_block() {
+        let visible = json!({"status": "ok", "clusters": [{"cluster_id": 1, "size": 3}]});
+        let text = "# Cluster Detail";
+        let error_with = |release: &str| {
+            let mut payload = visible.clone();
+            payload[release::KEY] = json!({"groups": [{"id": "c3", "rows": release}]});
+            page_too_large(&payload, text, 10, "ca_x")
+        };
+        let (short, long) = (error_with("AQ=="), error_with(&"A".repeat(5_000)));
+        let expected = budget::pair_chars(&visible, text);
+        for e in [&short, &long] {
+            assert_eq!(e.details["size_chars"], json!(expected));
+            assert_eq!(e.details["limit_chars"], json!(10));
+            assert!(!e.details.contains_key("release_chars"));
+            assert!(e.reason.contains(&format!("is {expected} characters")));
+            assert!(e.agent_action.contains("cluster_ids=[1]"));
+        }
+        assert_eq!(short.reason, long.reason);
+        assert_eq!(short.agent_action, long.agent_action);
+        assert_eq!(short.details, long.details);
+    }
 }
