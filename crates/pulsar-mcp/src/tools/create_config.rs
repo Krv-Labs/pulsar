@@ -131,7 +131,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Create Config",
-        description: "Generate a broad baseline sweep config (YAML) calibrated in processed feature space under `plan_id` (or defaults; warns on open questions or >1.5x one-hot expansion). JL dimensions span the 50/70/85% variance frontiers to the 90% elbow (`grid_ceiling_source` names the bound; `sweep.pca` mirrors `sweep.projection`); `knn_distance_percentiles` `[p5, p95]` bounds valid epsilon. Cost grows with ball maps \u{d7} rows \u{d7} balls \u{d7} dimension (linear scan >16d). Then `diagnose_cosmic_graph`, `refine_config`. Stored as the active config; `detail='summary'` omits `config_yaml` (see `config_yaml_chars`).",
+        description: "Generate a broad baseline sweep config (YAML) calibrated in processed feature space under `plan_id` (or defaults; warns on open questions or >1.5x one-hot expansion). JL dimensions span the 50/70/85% variance frontiers to the 90% elbow (`grid_ceiling_source` names the bound; `sweep.pca` mirrors `sweep.projection`); `knn_distance_percentiles` `[p5, p95]` bounds valid epsilon. Cost grows with ball maps \u{d7} rows \u{d7} balls \u{d7} dimension (linear scan >16d). Then `diagnose_cosmic_graph`, `refine_config` if listed. Stored as the active config; `detail='summary'` omits `config_yaml` (see `config_yaml_chars`).",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
@@ -546,6 +546,20 @@ fn counts_decisions(plan: &PreprocessingPlan) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_description_names_refine_config_only_as_optional() {
+        // A profile may leave refine_config out; the description must not
+        // promise it.
+        let text = spec().description;
+        let at = text
+            .find("`refine_config`")
+            .expect("the next step is named");
+        assert!(
+            text[at..].starts_with("`refine_config` if listed"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn probe_limit_names_the_largest_probe_and_the_unmeasured_range() {
