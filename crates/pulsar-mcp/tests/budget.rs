@@ -967,5 +967,19 @@ async fn detail_pages_fit_the_budget_with_their_release_block() {
         "{}",
         err_env["agent_action"]
     );
+    // The error carries the sizes and names the request that can still fit.
+    let details = &err_env["details"];
+    assert_eq!(
+        details["size_chars"].as_u64().unwrap(),
+        details["release_chars"].as_u64().unwrap() + details["evidence_chars"].as_u64().unwrap()
+    );
+    assert!(details["release_chars"].as_u64().unwrap() > 0, "{details}");
+    let reason = err_env["reason"].as_str().unwrap();
+    assert!(reason.contains("bitmap_b64"), "{reason}");
+    let action = err_env["agent_action"].as_str().unwrap();
+    assert!(
+        action.contains("cluster_ids=[") || action.contains("get_cluster_profile"),
+        "{action}"
+    );
     tight_client.cancel().await.unwrap();
 }
