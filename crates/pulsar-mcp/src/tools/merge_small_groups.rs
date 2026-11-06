@@ -43,7 +43,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Merge Small Groups",
-        description: "Merge clusters under min_patients patients (default 8; can only be raised) into their most-connected neighbour by the run's full edge weights; a merged group still under the floor merges again, and a cluster with no edge joins the largest. Patients are counted distinct via the dataset's patient token column; tables without one are refused. Publishes a new cluster_assignment_id (method 'merged:<original>') and returns merges [{from, into, linkage, weight_share}] in the original ids, with a run of isolated merges into the same group collapsed to {into, linkage:'isolated', from:[...], count} (the summary's grouping.merges keeps one entry per merge); sizes are rounded and groups renumbered by first row when anything merges. Call when generate_cluster_dossier reports a small cluster, then pass the new id to generate_cluster_dossier (method='assignment') for full evidence, or to other cluster tools and exports.",
+        description: "Merge clusters under min_patients patients (default 8, via the patient token column) into their strongest-linked neighbor by full edge weights (isolated clusters join the largest), chaining until every group meets the floor. Publishes a new cluster_assignment_id (method 'merged:<original>') and returns merges [{from, into, linkage, weight_share}] (consecutive isolated merges into one group collapse to {into, linkage:'isolated', from:[...], count}) plus rounded sizes. generate_cluster_dossier with method='assignment' and this cluster_assignment_id builds the full evidence on the merged groups.",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
@@ -58,7 +58,6 @@ pub fn spec() -> ToolSpec {
                 (phirewall::KEY, open.clone()),
                 (release::KEY, open),
                 ("recommended_next_tools", s::array(s::string())),
-                ("detail_hint", s::string()),
             ],
             &[
                 "status",
@@ -286,7 +285,6 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "get_cluster_profile",
             "compare_clusters",
         ],
-        "detail_hint": "generate_cluster_dossier with method='assignment' and this cluster_assignment_id builds the full evidence on the merged groups.",
     });
     // Nothing merged: there is no parent id and no merge list to report.
     if merged.merges.is_empty() {

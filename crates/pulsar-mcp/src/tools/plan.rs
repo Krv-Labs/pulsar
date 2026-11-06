@@ -136,7 +136,7 @@ pub fn draft_spec() -> ToolSpec {
     ToolSpec {
         name: DRAFT,
         title: "Draft Preprocessing Plan",
-        description: "Measure dataset evidence and draft a versioned preprocessing plan (`plan_id`, `revision=1`). Returns labeled defaults (`decided_by='default'`), open questions ranked by measured k-NN `stakes`, evidence, `marker_legend` and the preprocessing YAML. Constant, all-missing and ID drops are resolved defaults; reverse them via `edit_preprocessing_plan`. Infer what you can (`source='agent'`); ask the user only when needed.",
+        description: "Draft a versioned preprocessing plan (`plan_id`, `revision=1`, `decided_by='default'`, questions ranked by k-NN `stakes`, evidence, `marker_legend`, `weak_hints.event_flag_columns`: 0/1 or count columns that explain other columns' blanks; only you can say if one is an outcome; `detail='full'` adds `how_to_use`). Resolve via `edit_preprocessing_plan` (`source='agent'` when inferred, `source='user'` after asking). Hold out outcomes via `edits=[{'column': '<col>', 'role': 'target'}]` (or `target_columns`); clear `TARGET_PROXY_COLUMNS` with `indicator='none'` or `role='drop'`; set `code_columns` to `encode='one_hot'` or `role='drop'`.",
         input_schema: input_schema::<DraftParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -273,6 +273,15 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
     }
 
     only_registered(&mut payload);
+    // The constant prose is in the tool description; `detail='full'` keeps it.
+    if p.detail != Detail::Full {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.remove("how_to_use");
+            if let Some(hints) = obj.get_mut("weak_hints").and_then(Value::as_object_mut) {
+                hints.remove("description");
+            }
+        }
+    }
     let text = match p.response_format {
         Format::Markdown => draft_plan_payload_to_markdown(&payload),
         Format::Json => compact(&payload),

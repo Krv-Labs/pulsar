@@ -663,7 +663,9 @@ pub fn draft_plan_payload_to_markdown(payload: &Value) -> String {
             int(&payload["preprocessing_yaml_chars"])
         ));
     }
-    lines.extend([String::new(), HOW_TO_USE.to_string()]);
+    if let Some(how_to_use) = payload["how_to_use"].as_str() {
+        lines.extend([String::new(), how_to_use.to_string()]);
+    }
     lines.join("\n").trim().to_string()
 }
 

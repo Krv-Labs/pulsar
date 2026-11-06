@@ -159,7 +159,7 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Cluster Evidence Dossier",
-        description: "Cluster the latest run's graph and build a statistical evidence dossier. Persists a cluster_assignment_id and publishes the labels into the session for cluster tools and exports; a new sweep clears them. Start with detail='summary'; escalate after narrowing focus. An oversized result is truncated, with truncation.next (get_cluster_detail) paging the rest, rather than failing. method='assignment' with cluster_assignment_id builds evidence on stored labels without re-clustering, e.g. the assignment merge_small_groups returns.",
+        description: "Cluster the latest run's graph and build a statistical evidence dossier. Persists `cluster_assignment_id` and publishes labels into the session (cleared by a new sweep). Use `get_cluster_profile`/`get_feature_signal` for evidence; `detail='full'` returns lossless arrays for audit. Oversized results truncate with `truncation.next` (`get_cluster_detail`). `method='assignment'` with `cluster_assignment_id` builds evidence on stored labels (e.g. from `merge_small_groups`).",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
@@ -192,7 +192,6 @@ pub fn spec() -> ToolSpec {
                 (phirewall::KEY, open.clone()),
                 ("clusters", s::array(open.clone())),
                 ("recommended_next_tools", s::array(s::string())),
-                ("detail_hint", s::string()),
                 ("surface_labels_ref", s::string()),
                 ("surface_labels", open.clone()),
                 ("cluster_index", open),
@@ -990,7 +989,6 @@ pub(crate) async fn run(
                 "get_cluster_signal_matrix",
                 "compare_clusters",
             ]);
-            payload["detail_hint"] = json!("Use get_cluster_profile/get_feature_signal for evidence; detail='full' returns lossless arrays for audit.");
             let text = header
                 + &cluster_selection_to_markdown(&payload["cluster_selection"])
                 + &summary_evidence_payload_to_markdown(&payload);
@@ -1017,7 +1015,6 @@ pub(crate) async fn run(
                 "compare_clusters",
                 "export_html_report"
             ]);
-            payload["detail_hint"] = json!("Use targeted evidence tools for routine loops; detail='full' is the lossless audit payload.");
             let text = header
                 + &dossier_to_markdown(
                     dossier,

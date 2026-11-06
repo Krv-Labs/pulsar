@@ -138,10 +138,11 @@ async fn summary_detail_omits_the_yaml_and_the_sweep_uses_the_active_config() {
     )
     .await;
     assert!(summary.get("config_yaml").is_none(), "{summary}");
-    assert!(summary["config_yaml_note"]
-        .as_str()
-        .unwrap()
-        .contains("active config"));
+    assert_eq!(
+        summary["config_yaml_chars"].as_u64().unwrap() as usize,
+        yaml.chars().count()
+    );
+    assert!(summary.get("config_yaml_note").is_none());
     let context = ok(&client, "get_runtime_context", &[]).await;
     let plan_id = summary["preprocessing_plan"]["plan_id"].as_str().unwrap();
     let active = context["active_config_yaml"].as_str().expect("stored");

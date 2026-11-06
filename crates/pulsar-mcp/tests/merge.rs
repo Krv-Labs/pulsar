@@ -367,3 +367,134 @@ async fn the_floor_and_the_missing_token_column_are_explained() {
     assert!(text.contains("NO_PATIENT_IDENTIFIER"), "{text}");
     assert!(text.contains("token column"), "{text}");
 }
+
+/// The tool's description (what the agent reads once), looked up by name.
+async fn description<H: ClientHandler>(
+    client: &RunningService<RoleClient, H>,
+    name: &str,
+) -> String {
+    let tools = client.list_all_tools().await.unwrap();
+    tools
+        .iter()
+        .find(|t| t.name == name)
+        .unwrap_or_else(|| panic!("{name} is registered"))
+        .description
+        .as_deref()
+        .unwrap()
+        .to_owned()
+}
+
+/// Constant guidance lives in the tool description, not in every answer.
+#[tokio::test]
+async fn constant_guidance_is_in_the_description_not_the_answer() {
+    let root = TempRoot::new("constant-guidance");
+    let csv = cohort(&root.0);
+    let (_state, client) = serve_phirewall(&root.0).await;
+    let ds = ok(
+        &client,
+        "ingest_dataset",
+        json!({"path": csv.display().to_string()}),
+    )
+    .await;
+    let dataset_id = ds["dataset_id"].as_str().unwrap();
+
+    let characterize = ok(
+        &client,
+        "characterize_dataset",
+        json!({"dataset_id": dataset_id}),
+    )
+    .await;
+    assert!(
+        characterize.get("agent_guidance").is_none(),
+        "{characterize}"
+    );
+    assert!(description(&client, "characterize_dataset")
+        .await
+        .contains("probe_columns"));
+
+    let draft = ok(
+        &client,
+        "draft_preprocessing_plan",
+        json!({"dataset_id": dataset_id, "response_format": "json"}),
+    )
+    .await;
+    assert!(draft.get("how_to_use").is_none(), "{draft}");
+    assert!(draft["weak_hints"].get("description").is_none(), "{draft}");
+    let text = description(&client, "draft_preprocessing_plan").await;
+    assert!(text.contains("TARGET_PROXY_COLUMNS") && text.contains("one_hot"));
+    let full = ok(
+        &client,
+        "draft_preprocessing_plan",
+        json!({"dataset_id": dataset_id, "detail": "full", "response_format": "json"}),
+    )
+    .await;
+    assert!(full["how_to_use"].is_string(), "full keeps it");
+
+    for detail in ["full", "summary"] {
+        let created = ok(
+            &client,
+            "create_config",
+            json!({"dataset_id": dataset_id, "detail": detail}),
+        )
+        .await;
+        for gone in ["config_yaml_note", "agent_guidance", "parameter_reasoning"] {
+            assert!(created.get(gone).is_none(), "{gone}: {created}");
+        }
+        for gone in [
+            "cost_note",
+            "agent_guidance",
+            "compatibility_note",
+            "parameter_reasoning",
+        ] {
+            assert!(
+                created["sweep_strategy"].get(gone).is_none(),
+                "{gone}: {created}"
+            );
+        }
+        let note = created["calibration_note"].as_str().unwrap_or_default();
+        assert!(!note.contains("Geometry calibrated under"), "{note}");
+        assert_eq!(created.get("config_yaml").is_some(), detail == "full");
+    }
+    let text = description(&client, "create_config").await;
+    assert!(
+        text.contains("linear scan") && text.contains("[p5, p95]") && text.contains("config_yaml")
+    );
+
+    sweep(&client, &csv, CONFIG).await;
+
+    let diagnosis = ok(&client, "diagnose_cosmic_graph", json!({})).await;
+    assert!(
+        diagnosis["weight_distribution"].get("basis").is_none(),
+        "{diagnosis}"
+    );
+    assert!(description(&client, "diagnose_cosmic_graph")
+        .await
+        .contains("zeros include absent edges"));
+
+    let curve = ok(&client, "get_threshold_stability_curve", json!({})).await;
+    for gone in ["structural_breakpoints_filter", "full_detail_available"] {
+        assert!(curve.get(gone).is_none(), "{gone}: {curve}");
+    }
+    assert!(description(&client, "get_threshold_stability_curve")
+        .await
+        .contains("small_component_absorption"));
+
+    for detail in ["summary", "full"] {
+        let dossier = ok(
+            &client,
+            "generate_cluster_dossier",
+            json!({"method": "components", "interpretation_edge_weight_threshold": 0.0, "detail": detail, "response_format": "json"}),
+        )
+        .await;
+        assert!(dossier.get("detail_hint").is_none(), "{dossier}");
+    }
+    assert!(description(&client, "generate_cluster_dossier")
+        .await
+        .contains("lossless arrays"));
+
+    let merged = ok(&client, "merge_small_groups", json!({})).await;
+    assert!(merged.get("detail_hint").is_none(), "{merged}");
+    assert!(description(&client, "merge_small_groups")
+        .await
+        .contains("method='assignment'"));
+}

@@ -72,7 +72,7 @@ pub fn diagnose_spec() -> ToolSpec {
     ToolSpec {
         name: DIAGNOSE,
         title: "Diagnose Cosmic Graph",
-        description: "Graph-state observables for a fitted cosmic graph: scale, component morphology, weight distribution, sweep support, observed patterns and risk factors (plus MinHash weight accuracy when used). Measurement only. Use after run_topological_sweep; use get_threshold_stability_curve to compare construction thresholds.",
+        description: "Graph-state observables for a fitted cosmic graph: scale, component morphology, upper-triangle node-pair weight distribution (zeros include absent edges), sweep support, observed patterns and risk factors (plus MinHash accuracy when used). Use after `run_topological_sweep`; use `get_threshold_stability_curve` to compare construction thresholds.",
         input_schema: input_schema::<DiagnoseParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -141,7 +141,6 @@ pub fn diagnose_spec() -> ToolSpec {
                             ("p50", s::number()),
                             ("p95", s::number()),
                             ("sparkline", s::string()),
-                            ("basis", s::string()),
                         ],
                         &["p25", "p50", "p95"],
                         true,
@@ -369,7 +368,6 @@ fn diagnosis_payload(
             "p50": m.weight_p50,
             "p95": m.weight_p95,
             "sparkline": m.weight_distribution_sparkline,
-            "basis": "upper-triangle node-pair distribution; zeros include absent edges",
         },
         "sweep_support": {
             "n_ball_maps": m.n_ball_maps,
@@ -530,7 +528,7 @@ pub fn curve_spec() -> ToolSpec {
     ToolSpec {
         name: CURVE,
         title: "Threshold Stability Curve",
-        description: "Threshold morphology and candidate lenses along the H0 component-stability curve, comparing the fitted construction threshold with H0 plateaus and structural breakpoints. Use to judge or choose a construction threshold before editing the config; use diagnose_cosmic_graph for the graph already built.",
+        description: "Threshold morphology and candidate lenses along the H0 component-stability curve, comparing the construction threshold with H0 plateaus and structural breakpoints (`summary` hides `small_component_absorption` dust events; `detail='full'` returns all breakpoints, plateaus and raw curve arrays). Use to choose a construction threshold; use `diagnose_cosmic_graph` for the built graph.",
         input_schema: input_schema::<CurveParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -554,12 +552,10 @@ pub fn curve_spec() -> ToolSpec {
                 ("unthresholded_component_count", s::nullable(s::integer())),
                 ("structural_breakpoints", s::array(open.clone())),
                 ("structural_breakpoints_omitted", s::integer()),
-                ("structural_breakpoints_filter", s::string()),
                 ("structural_breakpoints_guidance", s::string()),
                 ("plateaus_returned", s::integer()),
                 ("plateaus_omitted", s::integer()),
                 ("curve_point_count", s::integer()),
-                ("full_detail_available", s::string()),
                 ("agent_threshold_options", open.clone()),
                 ("plateaus", s::array(open.clone())),
                 (phirewall::KEY, open.clone()),
@@ -958,11 +954,9 @@ fn curve_payload_with_breakpoints(
             "unthresholded_component_count": counts.last().copied(),
             "structural_breakpoints": summary_bps,
             "structural_breakpoints_omitted": breakpoints.len().saturating_sub(summary_bps.len()),
-            "structural_breakpoints_filter": "summary hides small_component_absorption dust events; use detail='full' for all breakpoints",
             "plateaus_returned": top.len().min(3),
             "plateaus_omitted": top.len().saturating_sub(3),
             "curve_point_count": thresholds.len(),
-            "full_detail_available": "get_threshold_stability_curve(detail='full')",
         });
     }
 

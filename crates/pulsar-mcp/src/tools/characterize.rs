@@ -64,9 +64,6 @@ pub(super) async fn load(tool: &'static str, path: &str) -> Result<Table, ToolEr
 fn point_at_registered_tools(payload: &mut Value, markdown: &mut String) {
     if !registered("create_config") {
         payload["recommended_next_tool"] = json!("draft_preprocessing_plan");
-        payload["agent_guidance"] = json!(
-            "Use draft_preprocessing_plan(dataset_id) to draft a preprocessing plan. Use probe_columns(dataset_id, columns) only for specific columns listed in column_profile_preview or named by the user."
-        );
         *markdown = markdown.replace(
             "- `create_config` for processed-space calibration.",
             "- `draft_preprocessing_plan` to draft a preprocessing plan.",
@@ -97,7 +94,7 @@ pub fn characterize_spec() -> ToolSpec {
     ToolSpec {
         name: CHARACTERIZE,
         title: "Characterize dataset",
-        description: "Summarize dataset geometry and schema: row/feature counts, variance curve, k-NN scale and a ranked column preview. Returns a bounded measurement packet with no domain interpretation. On massive datasets it adds a minhash_advisory suggesting cosmic_graph.minhash_d. Use it to see the data's scale and structure before drafting a preprocessing plan.",
+        description: "Summarize raw dataset geometry and schema: row/feature counts, variance curve, k-NN scale and a ranked `column_profile_preview` (plus `minhash_advisory` on large tables). `recommended_next_tool` names the next step (`create_config` for processed-space calibration, else `draft_preprocessing_plan`); use `probe_columns(dataset_id, columns)` only for specific columns listed in `column_profile_preview` or named by the user.",
         input_schema: input_schema::<CharacterizeParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -115,7 +112,6 @@ pub fn characterize_spec() -> ToolSpec {
                 ("column_profile_preview", s::array(s::open_object())),
                 ("omitted_column_profiles", s::integer()),
                 ("recommended_next_tool", s::string()),
-                ("agent_guidance", s::string()),
                 ("minhash_advisory", s::open_object()),
             ],
             &["status", "n_samples", "raw_numeric_geometry", "schema_summary", "column_profile_preview", "recommended_next_tool"],
@@ -189,6 +185,9 @@ pub async fn characterize(
     .map_err(|e| characterization_error(CHARACTERIZE, e))?;
 
     let mut payload = compact_characterization_payload(&profile);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("agent_guidance");
+    }
     payload["dataset_id"] = json!(dataset_id.to_string());
     let mut markdown = characterization_payload_to_markdown(&payload);
     point_at_registered_tools(&mut payload, &mut markdown);

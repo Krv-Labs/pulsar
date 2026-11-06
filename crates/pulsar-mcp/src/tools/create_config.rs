@@ -22,7 +22,7 @@ use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde_json::{json, Value};
 
-use super::characterize::{characterization_error, load, registered};
+use super::characterize::{characterization_error, load};
 use super::config::{parse_config, resolve_dataset};
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
@@ -89,7 +89,6 @@ pub fn spec() -> ToolSpec {
                 ]),
             ),
             ("variance_at_ceiling", s::nullable(s::number())),
-            ("cost_note", s::string()),
         ],
         &[
             "projection_method",
@@ -102,7 +101,6 @@ pub fn spec() -> ToolSpec {
             "grid_ceiling",
             "grid_ceiling_source",
             "variance_at_ceiling",
-            "cost_note",
         ],
         true,
     );
@@ -133,13 +131,13 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: NAME,
         title: "Create Config",
-        description: "Generate a broad baseline Pulsar sweep config (YAML) for an ingested dataset. Epsilon and dimensions are calibrated in the processed feature space under the preprocessing plan (or baseline defaults if plan_id is omitted, warning on open questions). Stores the YAML as the session's active config; detail='summary' omits the YAML text. Warns when processed features exceed 1.5x raw, naming the widest one-hot columns.",
+        description: "Generate a broad baseline sweep config (YAML) calibrated in processed feature space under `plan_id` (or defaults; warns on open questions or >1.5x one-hot expansion). JL dimensions span the 50/70/85% variance frontiers to the 90% elbow (`grid_ceiling_source` names the bound; `sweep.pca` mirrors `sweep.projection`); `knn_distance_percentiles` `[p5, p95]` bounds valid epsilon. Cost grows with ball maps \u{d7} rows \u{d7} balls \u{d7} dimension (linear scan >16d). Then `diagnose_cosmic_graph`, `refine_config`. Stored as the active config; `detail='summary'` omits `config_yaml` (see `config_yaml_chars`).",
         input_schema: input_schema::<Params>(),
         output_schema: s::as_object(s::object(
             &[
                 ("status", s::string()),
                 ("config_yaml", s::string()),
-                ("config_yaml_note", s::string()),
+                ("config_yaml_chars", s::integer()),
                 ("calibration_space", s::enumeration(&["processed", "raw"])),
                 ("preprocessing_plan", provenance),
                 (phirewall::KEY, s::open_object()),
@@ -150,7 +148,7 @@ pub fn spec() -> ToolSpec {
                 ("knn_distance_percentiles", s::open_object()),
                 ("calibration_note", s::string()),
             ],
-            &["status", "calibration_space", "preprocessing_plan", "sweep_strategy", "calibration_note"],
+            &["status", "calibration_space", "preprocessing_plan", "sweep_strategy"],
             false,
         )),
         read_only: false,
@@ -209,22 +207,6 @@ fn bypassed_edited_plan(state: &ServerState, dataset_id: &str) -> Option<Preproc
         .filter(|r| r.revision > 1)
         .filter_map(|r| PreprocessingPlan::from_value(r.plan).ok())
         .next_back()
-}
-
-fn agent_guidance() -> String {
-    let next = if registered("refine_config") {
-        "use refine_config"
-    } else {
-        "edit the config YAML (validate_config checks it)"
-    };
-    let then = if registered("compare_sweeps") {
-        " plus compare_sweeps"
-    } else {
-        ""
-    };
-    format!(
-        "Run this broad baseline first, inspect diagnose_cosmic_graph, then {next}{then} to shift or concentrate the grid around the informative region."
-    )
 }
 
 pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, ToolError> {
@@ -384,15 +366,6 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
             "grid_ceiling": ceiling.dim,
             "grid_ceiling_source": ceiling.source.as_str(),
             "variance_at_ceiling": ceiling.variance,
-            "cost_note": "Runtime grows with ball maps \u{d7} rows \u{d7} balls per map \u{d7} projection dimension (every distance is O(dimension)); a smaller epsilon yields more balls, and the grid is not clamped at 16; it is bounded only by the measured elbow, the feature count and the profiled rows, so a high variance elbow on a wide table means wide, slower maps. Above 16 dimensions the radius query switches from a KD-tree to a linear scan; that switch changes speed, not which points a ball contains.",
-            "compatibility_note": (!dims.is_empty()).then_some(
-                "sweep.pca is a legacy mirror of sweep.projection for older configs; sweep.projection is authoritative."
-            ),
-            "agent_guidance": agent_guidance(),
-            "parameter_reasoning": [
-                "Projection dimensions are selected from the processed cumulative-variance structure to span multiple resolutions; the default projection method is JL.",
-                "Epsilon is calibrated in processed feature space when possible, with k-NN percentiles returned as the safe domain for refinement.",
-            ],
         },
     });
 
@@ -474,9 +447,7 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
                 "p75": round_to(m.knn_p75, 4),
                 "p95": round_to(m.knn_p95, 4),
             });
-            payload["calibration_note"] = json!(format!(
-                "Geometry calibrated under the active preprocessing plan. Epsilon and projection dimensions reflect the processed feature space (after drop/impute/encode/scale), not raw columns. Dimensions are selected from the cumulative-variance structure: the 50/70/85% frontiers plus the elbow (the first probed dimension at or above 90% cumulative variance), bounded by the processed feature count and by the number of profiled rows (PCA keeps at most as many components as rows). {ceiling_note} sweep_strategy.grid_ceiling_source names the bound that set the top. The default projection is JL. knn_distance_percentiles show the valid epsilon domain \u{2014} epsilon values outside [p5, p95] will produce degenerate graphs."
-            ));
+            payload["calibration_note"] = json!(ceiling_note);
         }
         Err(fallback) => {
             payload["calibration_note"] = json!(format!(
@@ -489,11 +460,8 @@ pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, Tool
         let obj = payload.as_object_mut().expect("payload is an object");
         obj.remove("config_yaml");
         obj.insert(
-            "config_yaml_note".into(),
-            json!(format!(
-                "config_yaml ({} chars) is stored as the session's active config; run_topological_sweep without config_yaml, refine_config and get_runtime_context read it. Pass detail='full' to receive the text.",
-                config_yaml.chars().count()
-            )),
+            "config_yaml_chars".into(),
+            json!(config_yaml.chars().count()),
         );
     }
     payload[phirewall::KEY] = phirewall::summary(

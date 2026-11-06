@@ -1952,19 +1952,8 @@ async fn create_config_calibrates_a_baseline_that_validates_and_becomes_active()
     );
     assert!(strategy["variance_at_ceiling"].is_null() || strategy["variance_at_ceiling"].is_f64());
     assert!(strategy["n_rows"].as_u64().unwrap() > 0);
-    assert!(strategy["cost_note"].as_str().unwrap().contains("ball"));
     let p = &created["knn_distance_percentiles"];
     assert!(p["p5"].as_f64().unwrap() <= p["p95"].as_f64().unwrap());
-    // Only registered tools are advertised.
-    let guidance = strategy["agent_guidance"].as_str().unwrap();
-    for named in ["refine_config", "compare_sweeps"] {
-        assert_eq!(
-            guidance.contains(named),
-            tools.iter().any(|t| t.name == named),
-            "{named} in {guidance}"
-        );
-    }
-
     // It is the session's active config, and a valid one.
     let context = ok(&client, &tools, "get_runtime_context", args(&[])).await;
     assert_eq!(context["active_config_yaml"], created["config_yaml"]);
