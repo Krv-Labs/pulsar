@@ -403,7 +403,8 @@ pub fn build_preprocessing_summary(
         .collect();
 
     let changes_from_previous = previous.map(|p| changes(p, plan)).unwrap_or_default();
-    json!({
+    let hidden = features.len() - kept.len() + imputed_count - imputed.len();
+    let mut summary = json!({
         "revision": plan.revision,
         "input_columns": plan.entries.len(),
         "output_features": feature_names.map(<[String]>::len),
@@ -425,8 +426,15 @@ pub fn build_preprocessing_summary(
         "open_questions_omitted": 0,
         "changes_from_previous": changes_from_previous,
         "changes_from_previous_omitted": 0,
-    })
+    });
+    if hidden > 0 {
+        summary["all_columns"] = json!(ALL_COLUMNS_POINTER);
+    }
+    summary
 }
+
+/// Where the columns `kept` and `imputed` leave out are listed.
+pub const ALL_COLUMNS_POINTER: &str = "kept and imputed list only columns off the default rules; draft_preprocessing_plan(dataset_id, detail='full') returns every column's treatment in `entries`.";
 
 #[cfg(test)]
 mod tests {
@@ -528,6 +536,7 @@ mod tests {
         // default rules; the omitted counts carry the rest.
         assert_eq!(s["kept_omitted"], 3);
         assert_eq!(s["imputed_omitted"], 1);
+        assert_eq!(s["all_columns"], json!(ALL_COLUMNS_POINTER));
         // score is blank in 8 of 36 rows: 0.22 to 2 dp.
         let score = s["imputed"]
             .as_array()
@@ -650,5 +659,15 @@ mod tests {
         // died and score follow the default rules: counted, not listed.
         assert!(lines.iter().all(|e| e["column"] != "score"));
         assert_eq!(s["kept_omitted"], 2);
+    }
+
+    #[test]
+    fn the_pointer_to_every_column_appears_only_when_a_list_hides_some() {
+        let t = Table::new(vec!["flat".to_owned()], vec![Column::Float(vec![1.0; 12])]).unwrap();
+        let plan = draft_plan(&t, "ds_aaaaaaaaaaaa", &DraftOptions::default()).unwrap();
+        let s = build_preprocessing_summary(&plan, None, None, 8);
+        assert_eq!(s["kept_omitted"], 0);
+        assert_eq!(s["imputed_omitted"], 0);
+        assert!(s.get("all_columns").is_none(), "{s}");
     }
 }
