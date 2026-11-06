@@ -33,6 +33,8 @@ fn run(scenario: &Value) -> Value {
     )
     .unwrap();
     let mut ctx = DraftContext::new(&table, &evidence, &targets, &entity, &time);
+    // Python kept row-index columns as features.
+    ctx.row_index_ids = false;
     populate_default_entries(&mut ctx);
     let pending = build_pending_questions(&mut ctx);
     let mut blank: Vec<&String> = ctx.blank_group_cols.iter().collect();

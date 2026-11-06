@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:phirewall:release:v1",
+  "title": "io.phirewall/release v1",
+  "description": "One object in a tool result's structuredContent under the key \"io.phirewall/release\", beside the server's own fields. It labels the server's own output: which numbers are counts, shares or statistics over which group of twin rows, which strings are values read from a twin column, and which fields are patient records. The Phirewall gateway verifies each label against the dataset's twin, releases only what checks out, and strips the object before the agent sees the result. Unknown fields are allowed and ignored; adding an optional field or a label kind does not bump `version`.",
+  "type": "object",
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "description": "Contract version. Bumped only on a breaking change. The gateway ignores an object whose version it does not know, and the result falls back to its scans.",
+      "const": 1
+    },
+    "dataset_id": {
+      "description": "Phirewall's name for the registered dataset the rows index, when the server knows it.",
+      "type": "string",
+      "minLength": 1
+    },
+    "dataset_path": {
+      "description": "The file the server read, as it was given (the dataset's safe_path from list_datasets). The gateway resolves this or dataset_id against its catalog. A derived dataset is not verifiable.",
+      "type": "string",
+      "minLength": 1
+    },
+    "groups": {
+      "description": "The groups the labels refer to. Ids are unique.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/group" }
+    },
+    "labels": {
+      "description": "One label per labelled place in the result. Paths are unique.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/label" }
+    }
+  },
+  "anyOf": [{ "required": ["dataset_id"] }, { "required": ["dataset_path"] }],
+  "additionalProperties": true,
+  "$defs": {
+    "groupId": {
+      "description": "A server's handle for a group. \"all\" and \"rest\" are reserved for scopes.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": { "enum": ["all", "rest"] }
+    },
+    "scope": {
+      "description": "\"all\" (every row of the dataset), \"rest\" (the rows outside the label's group) or another group's id.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "row": {
+      "description": "A twin row: the 0-based ordinal of a data record in the file the server read (the header is not a row).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "group": {
+      "description": "A set of twin rows. The server never states how many patients a group has; the gateway counts them.",
+      "type": "object",
+      "required": ["id", "rows"],
+      "properties": {
+        "id": { "$ref": "#/$defs/groupId" },
+        "rows": { "$ref": "#/$defs/rows" }
+      },
+      "additionalProperties": true
+    },
+    "rows": {
+      "description": "A group's membership, in one of two encodings.",
+      "oneOf": [
+        {
+          "description": "Half-open [start, end) ranges, ascending and not overlapping (touching is allowed).",
+          "type": "object",
+          "required": ["enc", "v"],
+          "properties": {
+            "enc": { "const": "ranges" },
+            "v": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [{ "$ref": "#/$defs/row" }, { "$ref": "#/$defs/row" }],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "description": "Standard base64 (RFC 4648, padding optional) of a bitmap: row i is bit i % 8, least significant first, of byte i / 8. Trailing zero bytes may be left off.",
+          "type": "object",
+          "required": ["enc", "v"],
+          "properties": {
+            "enc": { "const": "bitmap_b64" },
+            "v": { "type": "string", "pattern": "^[A-Za-z0-9+/]*={0,2}$" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "label": {
+      "description": "What the value at `path` is. A kind the gateway does not know leaves that path to its scans.",
+      "type": "object",
+      "required": ["path", "kind"],
+      "properties": {
+        "path": {
+          "description": "A JSON Pointer (RFC 6901) rooted at structuredContent, never into this object.",
+          "type": "string",
+          "pattern": "^(/([^~/]|~[01])*)+$"
+        },
+        "kind": {
+          "description": "count: the number of patients in `group` (the gateway releases its own count). share: the share of `of` that `group` is (recomputed to 2 dp). statistic: a statistic over `group`, set against `vs`. label: a value read from twin column `column` that describes `group`. records: patient-level records, always withheld.",
+          "enum": ["count", "share", "statistic", "label", "records"]
+        },
+        "group": { "$ref": "#/$defs/groupId" },
+        "of": {
+          "description": "For share: the denominator. Default \"all\".",
+          "$ref": "#/$defs/scope"
+        },
+        "vs": {
+          "description": "For statistic: the comparator. Default \"rest\".",
+          "$ref": "#/$defs/scope"
+        },
+        "column": {
+          "description": "For label: the twin column the value was read from.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["count", "share", "statistic"] } } },
+          "then": { "required": ["group"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "label" } } },
+          "then": { "required": ["group", "column"] }
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

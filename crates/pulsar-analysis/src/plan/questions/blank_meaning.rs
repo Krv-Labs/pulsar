@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::group_or;
 use crate::plan::defaults::DraftContext;
+use crate::plan::imported::Decides;
 use crate::plan::model::{
     edit, EntryStatus, PendingQuestion, PlanQuestion, QuestionOption, QuestionTopic,
 };
@@ -112,6 +113,10 @@ fn options(
 pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
     let mut pending = Vec::new();
     for (_gid, cols) in ctx.grouped_7b.clone() {
+        let cols: Vec<String> = cols
+            .into_iter()
+            .filter(|c| !ctx.imported.decides(c, QuestionTopic::BlankMeaning))
+            .collect();
         let count_like: Vec<String> = cols
             .iter()
             .filter(|c| is_count_like_zero_free(ctx.ev_by_col[c.as_str()]))

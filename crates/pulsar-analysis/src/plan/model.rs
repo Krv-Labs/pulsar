@@ -34,6 +34,7 @@ pub enum DecidedBy {
     Default,
     Agent,
     User,
+    Phirewall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

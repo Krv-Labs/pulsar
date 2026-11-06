@@ -79,6 +79,13 @@ pub enum DataError {
     #[error("non-numeric columns remain after preprocessing: {}. Encode them via preprocessing.encode, or drop them via drop_columns.", .columns.join(", "))]
     NonNumericRemaining { columns: Vec<String> },
 
+    #[error("column {column:?} holds a non-finite value ({value}) at row {row}. Infinite values are not missing and are not imputed; they would turn the whole scaled column into NaN. Fix or null the cell, or drop the column via drop_columns.")]
+    NonFiniteValue {
+        column: String,
+        row: usize,
+        value: f64,
+    },
+
     #[error("feature layout does not match the reference dataset. Missing columns: {missing:?}. Extra columns: {extra:?}.")]
     LayoutMismatch {
         missing: Vec<String>,
@@ -117,6 +124,7 @@ impl DataError {
             Self::TooManyCategories { .. } => "TOO_MANY_CATEGORIES",
             Self::NanRemaining { .. } => "NAN_REMAINING",
             Self::NonNumericRemaining { .. } => "NON_NUMERIC_REMAINING",
+            Self::NonFiniteValue { .. } => "NON_FINITE_VALUE",
             Self::LayoutMismatch { .. } => "LAYOUT_MISMATCH",
             Self::RowCountMismatch { .. } => "ROW_COUNT_MISMATCH",
             Self::Core(e) => e.code(),
@@ -134,6 +142,17 @@ impl DataError {
             | Self::FillValueType { column, .. }
             | Self::TooManyCategories { column, .. } => Some(column),
             _ => None,
+        }
+    }
+
+    /// Format the error, omitting raw cell samples when `phirewall_release` is active.
+    pub fn display_for(&self, phirewall_release: bool) -> String {
+        match (self, phirewall_release) {
+            (Self::CoercionFailed { column, method, .. }, true) => format!(
+                "column {column:?} is configured for numeric imputation ({method}) but contains \
+                 non-numeric values. Clean the data or use a string imputation method."
+            ),
+            _ => self.to_string(),
         }
     }
 }

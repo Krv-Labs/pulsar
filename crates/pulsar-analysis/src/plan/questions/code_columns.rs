@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use crate::evidence::{ColumnKind, RelationKind};
 use crate::plan::defaults::DraftContext;
+use crate::plan::imported::Decides;
 use crate::plan::model::{PendingQuestion, PlanQuestion, QuestionOption, QuestionTopic, Role};
 use crate::plan::text::is_count_like_zero_free;
 
@@ -24,7 +25,8 @@ pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
         .iter()
         .filter(|(col, entry)| {
             let ev = ctx.ev_by_col[col.as_str()];
-            entry.role == Role::Feature
+            !ctx.imported.decides(col, QuestionTopic::CodeColumns)
+                && entry.role == Role::Feature
                 && ev.kind == ColumnKind::Numeric
                 && ev.integer_valued == Some(true)
                 && ev.nonnegative == Some(true)

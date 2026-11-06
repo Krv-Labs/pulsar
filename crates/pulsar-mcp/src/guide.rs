@@ -4,11 +4,14 @@
 /// The terse tool map every client sees in `initialize`.
 pub const INSTRUCTIONS: &str = "Manifold discovery and topological data analysis for tabular datasets. Call \
 `get_workflow_guide` once for the end-to-end procedure and tool map.\n\
-Shared params across tools: `detail` ('summary' default; 'full' for audit/debug) and \
-`response_format` ('json' for structured payloads; 'markdown' where a readable rendering is supported).\n\
+`detail` ('summary' default; 'full' for the audit view) is a parameter of draft_preprocessing_plan, \
+create_config (yaml text), run_topological_sweep, diagnose_cosmic_graph, get_threshold_stability_curve, \
+get_topological_skeleton, get_sweep_history, generate_cluster_dossier and the longitudinal tools; each \
+tool's schema lists its own values.\n\
 Results carry structured content; errors set the MCP error flag with a JSON envelope \
-(error_code, agent_action). Long sweeps: run_topological_sweep(execution='async') returns a run_id \
-immediately; poll it with wait_job.";
+(error_code, agent_action). A long run_topological_sweep may return a task handle on clients that \
+support MCP tasks, which the client follows; clients that expose `execution` can pass 'async' to get a \
+run_id and poll it with wait_job / get_job.";
 
 pub const WORKFLOW_PROMPT: &str = r#"# Pulsar Topological Analysis Workflow
 
@@ -69,12 +72,13 @@ Reveal the dataset's topology; do not force convenient clusters.
 ## PHASE II: EXECUTE & VALIDATE
 4. Run: `run_topological_sweep(config_yaml, dataset_id)`. The response carries `run_id`, key
    metrics, the construction threshold, a threshold-stability summary and a finalization gate.
-   - Default `execution='sync'` waits for the fit. On clients that support the MCP tasks
-     extension the server returns a task handle instead and the client polls it transparently.
-   - `execution='async'` returns `{status: "running", run_id}` at once; poll with
-     `wait_job(run_id)` (blocks up to `timeout_s`, then reports progress) or `get_job(run_id)`.
-     The completed sweep response is persisted, so `wait_job` returns the same payload the
-     synchronous call would have.
+   - The call waits for the fit by default. On clients that support the MCP tasks extension
+     the server returns a task handle instead and the client follows it.
+   - If your client exposes `execution`, `execution='async'` returns `{status: "running", run_id}`
+     at once; `wait_job(run_id)` (blocks up to `timeout_s`, then reports progress) and
+     `get_job(run_id)` then read the job. The completed sweep response is persisted, so
+     `wait_job` returns the same payload the synchronous call would have. Where these are not
+     listed, the call returns when the fit ends, or hands the client a task handle that it follows.
 5. Validate: `diagnose_cosmic_graph`. Read it as graph-state measurement, not a directive. Use
    `scale`, `component_morphology`, `sweep_support`, `observed_patterns` and `risk_factors`
    to judge the graph against the user's objective.
@@ -89,9 +93,10 @@ Reveal the dataset's topology; do not force convenient clusters.
    `get_sweep_history(detail='summary')` distills patterns across persisted runs (which
    projection dimensions collapsed structure, where singletons spiked); you still own the
    next-config decision. Prefer 2-3 deliberate sweeps over one brittle perfect-looking run.
-7. Inspect payloads summary-first. `get_topological_skeleton(detail='nodes')` gives the
-   compact hub/bridge summary; `detail='edges'` capped raw edges; `detail='full'` nodes,
-   edges and the config YAML.
+7. Inspect payloads summary-first. `get_topological_skeleton` default `detail='summary'` gives counts
+   and components only; `detail='nodes'` adds the compact hub/bridge summary;
+   `detail='full_nodes'` capped raw nodes; `detail='edges'` capped raw edges;
+   `detail='full'` nodes, edges and the config YAML.
 
 ## PHASE III: INTERPRET
 8. Cluster: `generate_cluster_dossier(detail='summary')` for routine exploration; treat
@@ -104,13 +109,16 @@ Reveal the dataset's topology; do not force convenient clusters.
    for latent structure inside one continuous dominant component.
    Any new `run_topological_sweep` discards the session's cluster labels: dossiers can only be
    published for the latest run (`SESSION_REVISION_CONFLICT` otherwise).
+   The dossier fits the response budget: it always lists every cluster in `cluster_index` and
+   shows sections largest first; `truncation.next` is the `get_cluster_detail` call that pages
+   through the rest (any persisted `cluster_assignment_id`, live labels unchanged).
 9. Contrast: read the published labels with `get_cluster_profile` (one cluster),
    `get_feature_signal` (chosen features across clusters), `get_cluster_signal_matrix`
    (all features at a glance) and `compare_clusters` (two clusters, per-feature tests). Identify
    the 'Pivot Feature' that most cleanly separates a cluster from its topological neighbours;
-   do not name clusters in isolation. These tools read only the latest dossier: after a new
-   sweep they return `CLUSTERS_NOT_BUILT`, and `run_id` is a provenance check
-   (`CLUSTERS_STALE`), not a way to recover old labels.
+   do not name clusters in isolation. These tools read the latest dossier's labels; pass
+   `cluster_assignment_id` to read an earlier assignment while its run is loaded. After a new
+   sweep they return `CLUSTERS_NOT_BUILT` without one; `run_id` is a provenance check.
 
 ## LONGITUDINAL DATA (PANELS)
 Long-format data (one row per entity and time step) is the wrong input for the static sweep,
@@ -162,8 +170,12 @@ feedback.
   data; it collapses structure and injects spurious consensus edges.
 - **The epsilon gates**: keep epsilon inside the data's k-NN distance domain. Shattered
   graph: raise the upper bound. One dominant component: lower it or shift projections up.
-- Projections above 16 dimensions fall back from the KD-tree to a linear scan in Ball
-  Mapper; stay at or below 16 unless the user asks for more.
+- Projection dimension is a sweep axis: each dimension is a different lens. JL scales
+  every dimension to the same expected distances, so one epsilon list serves the grid.
+  JL draws its matrix row by row at the grid's largest dimension, so raising the grid's
+  largest dimension changes the draws at every other dimension for the same seed; adding
+  a dimension below it leaves existing embeddings unchanged. Above 16 dimensions Ball
+  Mapper swaps its KD-tree for a linear scan: same membership, different speed.
 
 ## NO HILL-CLIMBING OPTIMISATION
 The cosmic graph is a stable representation, not a score to maximise. Density, component

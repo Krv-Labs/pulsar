@@ -227,31 +227,64 @@ pub fn resolve_clusters(
         .filter(|&(_, _, w)| w > 0.0)
         .collect();
     let tg = ThresholdGraph::from_edges(graph.n, &edges);
+    resolve_clusters_with_threshold_graph(
+        &Graph { n: graph.n, edges },
+        &tg,
+        stability,
+        method,
+        max_k,
+        interpretation_threshold,
+    )
+}
+
+/// Resolve clusters reusing a pre-sorted [`ThresholdGraph`] over `affinity`
+/// (`weighted_edges(threshold=0.0)`).
+pub fn resolve_clusters_with_threshold_graph(
+    affinity: &Graph,
+    tg: &ThresholdGraph,
+    stability: Option<&StabilityResult>,
+    method: ResolveMethod,
+    max_k: usize,
+    interpretation_threshold: f64,
+) -> Result<ClusterResult, ResolveError> {
+    if affinity.n == 0 {
+        return Err(AnalysisError::EmptyGraph.into());
+    }
+    if !interpretation_threshold.is_finite() {
+        return Err(AnalysisError::InvalidArgument(format!(
+            "interpretation_edge_weight_threshold must be finite, got {interpretation_threshold}"
+        ))
+        .into());
+    }
     let thresh = interpretation_threshold.max(0.0);
 
     if method == ResolveMethod::Components
         || (method == ResolveMethod::Auto && interpretation_threshold > 0.0)
     {
-        return Ok(components_result(&tg, thresh));
+        return Ok(components_result(tg, thresh));
     }
     if method == ResolveMethod::Auto {
         let computed;
         let stability = match stability {
             Some(s) => s,
             None => {
-                computed = find_stable_thresholds_from_edges(graph.n, &edges, DEFAULT_NUM_BINS)
-                    .map_err(AnalysisError::from)?;
+                computed = find_stable_thresholds_from_edges(
+                    affinity.n,
+                    &affinity.edges,
+                    DEFAULT_NUM_BINS,
+                )
+                .map_err(AnalysisError::from)?;
                 &computed
             }
         };
-        if let Some(result) = threshold_stability_cut(&tg, stability) {
+        if let Some(result) = threshold_stability_cut(tg, stability) {
             return Ok(result);
         }
         if tg.component_count_at(0.0) > 1 {
-            return Ok(components_result(&tg, thresh));
+            return Ok(components_result(tg, thresh));
         }
     }
-    spectral_result(graph.n, &edges, &tg, max_k, thresh)
+    spectral_result(affinity.n, &affinity.edges, tg, max_k, thresh)
 }
 
 fn components_result(tg: &ThresholdGraph, thresh: f64) -> ClusterResult {

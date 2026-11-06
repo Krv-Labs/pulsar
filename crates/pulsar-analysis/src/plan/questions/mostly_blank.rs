@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use super::group_or;
 use crate::plan::defaults::DraftContext;
+use crate::plan::imported::Decides;
 use crate::plan::model::{
     edit, DecidedBy, EntryStatus, PendingQuestion, PlanQuestion, QuestionOption, QuestionTopic,
     Role,
@@ -108,9 +109,17 @@ pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
         if ctx.blank_group_cols.contains(&cols[0]) {
             continue;
         }
+        let cols: Vec<String> = cols
+            .iter()
+            .filter(|c| !ctx.imported.decides(c, QuestionTopic::MostlyBlank))
+            .cloned()
+            .collect();
+        if cols.is_empty() {
+            continue;
+        }
         let first = ctx.ev_by_col[cols[0].as_str()];
         if first.n_missing > ctx.n_rows - first.n_missing {
-            raw.extend(cols.iter().cloned());
+            raw.extend(cols);
         }
     }
     raw.sort_by(|a, b| frac(b).total_cmp(&frac(a)).then_with(|| a.cmp(b)));
@@ -125,7 +134,9 @@ pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
             e.impute = None;
             e.indicator = "none".into();
             e.encode = None;
-            e.decided_by = DecidedBy::Default;
+            if e.decided_by != DecidedBy::Phirewall {
+                e.decided_by = DecidedBy::Default;
+            }
             e.status = EntryStatus::Open;
         }
     }
@@ -140,13 +151,24 @@ pub(super) fn build(ctx: &mut DraftContext) -> Vec<PendingQuestion> {
         .unwrap_or(0);
     let mean = cols.iter().map(&frac).sum::<f64>() / cols.len() as f64;
     let est_pct = 51.max(round_int(100.0 * mean));
+    let default_option = if cols.iter().all(|c| {
+        ctx.imported
+            .as_ref()
+            .and_then(|imp| imp.column(c))
+            .and_then(|ic| ic.meaning.as_deref())
+            == Some("not_applicable")
+    }) {
+        "has_value"
+    } else {
+        "leave_out"
+    };
     let question = PlanQuestion::new(
         QuestionTopic::MostlyBlank,
         text,
         cols.clone(),
         rows_affected,
         options(ctx, &cols, &preview, has_value_effect, est_pct),
-        "leave_out",
+        default_option,
     );
     vec![(question, cols)]
 }

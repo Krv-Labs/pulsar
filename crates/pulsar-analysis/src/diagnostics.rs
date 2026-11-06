@@ -83,6 +83,19 @@ fn value_at_sparse_upper_index(sorted: &[f64], zero_count: usize, index: usize) 
     sorted.get(index - zero_count).copied().unwrap_or(0.0)
 }
 
+fn sparse_upper_percentile_sorted(sorted: &[f64], total_pairs: usize, percentile: f64) -> f64 {
+    if total_pairs == 0 {
+        return 0.0;
+    }
+    let zero_count = total_pairs.saturating_sub(sorted.len());
+    let pos = (total_pairs - 1) as f64 * (percentile / 100.0);
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let lo_v = value_at_sparse_upper_index(sorted, zero_count, lo);
+    let hi_v = value_at_sparse_upper_index(sorted, zero_count, hi);
+    lo_v + (hi_v - lo_v) * (pos - lo as f64)
+}
+
 /// Percentile of the weight distribution over *all* node pairs, where the
 /// pairs without an edge count as zeros (`_sparse_upper_percentile`).
 pub fn sparse_upper_percentile(weights: &[f64], total_pairs: usize, percentile: f64) -> f64 {
@@ -91,27 +104,17 @@ pub fn sparse_upper_percentile(weights: &[f64], total_pairs: usize, percentile: 
     }
     let mut sorted: Vec<f64> = weights.iter().copied().filter(|&w| w > 0.0).collect();
     sorted.sort_by(f64::total_cmp);
-    let zero_count = total_pairs.saturating_sub(sorted.len());
-    let pos = (total_pairs - 1) as f64 * (percentile / 100.0);
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    let lo_v = value_at_sparse_upper_index(&sorted, zero_count, lo);
-    let hi_v = value_at_sparse_upper_index(&sorted, zero_count, hi);
-    lo_v + (hi_v - lo_v) * (pos - lo as f64)
+    sparse_upper_percentile_sorted(&sorted, total_pairs, percentile)
 }
 
-/// A bounded sample of the pair-weight distribution: up to 512 zeros plus
-/// up to 1536 evenly spaced positive weights (`_sparse_upper_sample`).
-pub fn sparse_upper_sample(weights: &[f64], total_pairs: usize) -> Vec<f64> {
+fn sparse_upper_sample_sorted(sorted: &[f64], total_pairs: usize) -> Vec<f64> {
     if total_pairs == 0 {
         return Vec::new();
     }
-    let mut sorted: Vec<f64> = weights.iter().copied().filter(|&w| w > 0.0).collect();
-    sorted.sort_by(f64::total_cmp);
     let zero_count = total_pairs.saturating_sub(sorted.len());
     let mut out = vec![0.0; zero_count.min(512)];
     if sorted.len() <= 1536 {
-        out.extend_from_slice(&sorted);
+        out.extend_from_slice(sorted);
     } else {
         let num = 1536;
         let step = (sorted.len() - 1) as f64 / (num - 1) as f64;
@@ -125,6 +128,17 @@ pub fn sparse_upper_sample(weights: &[f64], total_pairs: usize) -> Vec<f64> {
         }
     }
     out
+}
+
+/// A bounded sample of the pair-weight distribution: up to 512 zeros plus
+/// up to 1536 evenly spaced positive weights (`_sparse_upper_sample`).
+pub fn sparse_upper_sample(weights: &[f64], total_pairs: usize) -> Vec<f64> {
+    if total_pairs == 0 {
+        return Vec::new();
+    }
+    let mut sorted: Vec<f64> = weights.iter().copied().filter(|&w| w > 0.0).collect();
+    sorted.sort_by(f64::total_cmp);
+    sparse_upper_sample_sorted(&sorted, total_pairs)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -355,16 +369,19 @@ impl<'a> GraphAnalysis<'a> {
         let singleton_count = self.sizes.iter().filter(|&&s| s == 1).count();
         let singleton_fraction = singleton_count as f64 / n as f64;
 
-        let weights: Vec<f64> = match full_weight_edges {
-            Some(edges) => edges.iter().map(|e| e.2).collect(),
-            None => self.graph.edges.iter().map(|e| e.2).collect(),
-        };
+        let edge_slice = full_weight_edges.unwrap_or(&self.graph.edges);
         let nonzero_fraction = if max_pairs > 0 {
-            weights.len() as f64 / max_pairs as f64
+            edge_slice.len() as f64 / max_pairs as f64
         } else {
             0.0
         };
-        let sample = sparse_upper_sample(&weights, max_pairs);
+        let mut sorted_weights: Vec<f64> = edge_slice
+            .iter()
+            .map(|e| e.2)
+            .filter(|&w| w > 0.0)
+            .collect();
+        sorted_weights.sort_by(f64::total_cmp);
+        let sample = sparse_upper_sample_sorted(&sorted_weights, max_pairs);
         let (status, note) = grid_adequacy(n_ball_maps);
         GraphMetrics {
             n_nodes: n,
@@ -377,9 +394,9 @@ impl<'a> GraphAnalysis<'a> {
             component_count: self.sizes.len(),
             resolved_construction_threshold,
             nonzero_fraction,
-            weight_p25: sparse_upper_percentile(&weights, max_pairs, 25.0),
-            weight_p50: sparse_upper_percentile(&weights, max_pairs, 50.0),
-            weight_p95: sparse_upper_percentile(&weights, max_pairs, 95.0),
+            weight_p25: sparse_upper_percentile_sorted(&sorted_weights, max_pairs, 25.0),
+            weight_p50: sparse_upper_percentile_sorted(&sorted_weights, max_pairs, 50.0),
+            weight_p95: sparse_upper_percentile_sorted(&sorted_weights, max_pairs, 95.0),
             weight_distribution_sparkline: distribution_sparkline(&sample, 10),
             component_sizes: self.sizes.clone(),
             n_ball_maps,
@@ -411,14 +428,18 @@ impl<'a> GraphAnalysis<'a> {
                 weight: w,
             })
             .collect();
-        edges.sort_by(|a, b| {
+        let edge_cmp = |a: &EdgeSummary, b: &EdgeSummary| {
             b.weight
                 .total_cmp(&a.weight)
                 .then_with(|| (a.source, a.target).cmp(&(b.source, b.target)))
-        });
+        };
         let total_edges = edges.len();
         let truncated = total_edges > MAX_EDGES_IN_SUMMARY;
-        edges.truncate(MAX_EDGES_IN_SUMMARY);
+        if truncated {
+            edges.select_nth_unstable_by(MAX_EDGES_IN_SUMMARY - 1, edge_cmp);
+            edges.truncate(MAX_EDGES_IN_SUMMARY);
+        }
+        edges.sort_by(edge_cmp);
 
         let n_components = self.sizes.len();
         let mut key_hubs = Vec::new();
@@ -567,49 +588,94 @@ pub fn skeleton_payload(
     if include_edges {
         obj.insert("edges".into(), json!(edges));
     }
+    if !include_nodes && !include_edges {
+        obj.insert(
+            "more".into(),
+            json!(format!(
+                "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes ({} in the graph), detail='edges' up to max_edges raw edges ({}), detail='full' both (plus the config YAML on surface='constructed'; no config YAML on 'artifact').",
+                summary.node_count, summary.edge_count
+            )),
+        );
+    }
+    if summary.node_count > 1 && summary.edge_count * 10 < summary.node_count {
+        obj.insert(
+            "connectivity_note".into(),
+            json!(format!(
+                "{} edges over {} nodes ({} components): the graph is nearly disconnected at this threshold. get_threshold_stability_curve shows which thresholds hold larger components.",
+                summary.edge_count, summary.node_count, summary.component_count
+            )),
+        );
+    }
     payload
 }
 
 /// Projection dimensions to zoom into after a dominant-component gate
-/// (`_suggest_resolution_pca_dims`).
-pub fn suggest_resolution_dims(dims: &[usize]) -> Vec<usize> {
+/// (`_suggest_resolution_pca_dims`). `ceiling` bounds the suggestions: the
+/// projection input's feature count, or the run's own largest dimension when
+/// that is unknown (`0`). Python clamped at 16 instead. A ceiling below 2
+/// leaves no valid projection dimension, so nothing is suggested. Nothing is
+/// suggested either when two or more swept dimensions all lie above the
+/// ceiling: JL accepts a dimension above the feature count and
+/// `refine_config` passes the swept dimensions through, so a run can hold
+/// only such dimensions, and none of them is kept.
+pub fn suggest_resolution_dims(dims: &[usize], ceiling: usize) -> Vec<usize> {
     let mut dims: Vec<usize> = dims.iter().copied().filter(|&d| d > 1).collect();
     dims.sort_unstable();
     dims.dedup();
+    let ceiling = match ceiling {
+        0 => dims.last().copied().unwrap_or(usize::MAX),
+        1 => return Vec::new(),
+        c => c,
+    };
     if dims.is_empty() {
-        return vec![5, 8, 12, 16];
+        let mut out: Vec<usize> = [5, 8, 12, 16].map(|d| d.min(ceiling)).to_vec();
+        out.dedup();
+        return out;
     }
     if dims.len() == 1 {
-        let center = dims[0].min(16);
+        let center = dims[0].min(ceiling);
         let mut out = vec![
             center.saturating_sub(4).max(2),
             center.saturating_sub(2).max(2),
             center,
-            (center + 2).min(16),
+            (center + 2).min(ceiling),
         ];
         out.sort_unstable();
         out.dedup();
         return out;
     }
     let low = dims[0];
-    let high = dims[dims.len() - 1].min(16);
+    let high = dims[dims.len() - 1].min(ceiling);
     if high <= low {
+        dims.retain(|&d| d <= ceiling);
         return dims;
     }
-    let mut step = round_int((high - low) as f64 / 5.0).max(1) as usize;
-    if high - low >= 6 {
+    let span = high - low;
+    let mut step = round_int(span as f64 / 5.0).max(1) as usize;
+    if span >= 6 {
         step = step.max(2);
     }
-    (low..=high).step_by(step).take(6).collect()
+    // Python stepped from `low` and kept the first six, which drops `high`
+    // whenever the step does not divide the span. The step only sets how many
+    // points to take; they are spread evenly so both ends are always kept.
+    // When the step divides the span this is Python's sequence.
+    let count = (span / step + 1).min(6);
+    let mut out: Vec<usize> = (0..count)
+        .map(|i| low + round_int((i * span) as f64 / (count - 1) as f64) as usize)
+        .collect();
+    out.dedup();
+    out
 }
 
 /// Whether clusters may be finalized on a dominant-component graph
 /// (`_finalization_gate`). `candidates` are the threshold candidates of the
-/// stability curve, if any.
+/// stability curve, if any. `n_features` is the projection input's feature
+/// count (`0` when unknown); it bounds the suggested dimensions.
 pub fn finalization_gate(
     metrics: &GraphMetrics,
     sweep_count: usize,
     projection_dims: &[usize],
+    n_features: usize,
     candidates: Option<&[Candidate]>,
 ) -> Value {
     let needs_resolution = metrics.giant_fraction > 0.95
@@ -641,7 +707,7 @@ pub fn finalization_gate(
             metrics.giant_fraction * 100.0
         ),
         "suggested_refinement": {
-            "projection_dimensions": suggest_resolution_dims(projection_dims),
+            "projection_dimensions": suggest_resolution_dims(projection_dims, n_features),
             "projection_seeds": [42, 7, 13],
             "epsilon_steps_min": 24,
             "strategy": "Zoom into the useful projection band with multiple seeds. Shift/lower epsilon if density remains high; avoid narrowing to a single projection dimension or single seed.",
@@ -730,6 +796,36 @@ mod tests {
         assert!(payload.get("nodes").is_none());
         let nodes = skeleton_payload(&s, "nodes", 2, 10);
         assert!(nodes["topological_summary"]["bridges"].is_array());
+        // Counts-only levels say which detail returns nodes and edges.
+        assert_eq!(
+            nodes["more"],
+            "This detail returns counts only, no nodes or edges. detail='full_nodes' returns up to max_nodes raw nodes (6 in the graph), detail='edges' up to max_edges raw edges (5), detail='full' both (plus the config YAML on surface='constructed'; no config YAML on 'artifact')."
+        );
+        assert!(skeleton_payload(&s, "summary", 2, 10).get("more").is_some());
+        assert!(payload.get("more").is_none());
+        assert!(skeleton_payload(&s, "full", 2, 10).get("more").is_none());
+        assert!(payload.get("connectivity_note").is_none());
+        // 1 edge over 20 nodes: nearly disconnected.
+        let sparse = GraphAnalysis::new(&Graph {
+            n: 20,
+            edges: vec![(0, 1, 0.5)],
+        })
+        .unwrap()
+        .summary(0.5);
+        assert_eq!(
+            skeleton_payload(&sparse, "summary", 2, 10)["connectivity_note"],
+            "1 edges over 20 nodes (19 components): the graph is nearly disconnected at this threshold. get_threshold_stability_curve shows which thresholds hold larger components."
+        );
+        // A 1-node graph is trivially connected, not disconnected.
+        let one_node = GraphAnalysis::new(&Graph {
+            n: 1,
+            edges: vec![],
+        })
+        .unwrap()
+        .summary(0.5);
+        assert!(skeleton_payload(&one_node, "summary", 2, 10)
+            .get("connectivity_note")
+            .is_none());
 
         let empty = Graph {
             n: 3,
@@ -755,30 +851,113 @@ mod tests {
 
     #[test]
     fn gate_and_resolution_dims_follow_python() {
-        assert_eq!(suggest_resolution_dims(&[]), vec![5, 8, 12, 16]);
-        assert_eq!(suggest_resolution_dims(&[3]), vec![2, 3, 5]);
-        assert_eq!(suggest_resolution_dims(&[2, 5, 8]), vec![2, 4, 6, 8]);
-        assert_eq!(suggest_resolution_dims(&[2, 20]), vec![2, 5, 8, 11, 14]);
-        assert_eq!(suggest_resolution_dims(&[16, 20]), vec![16, 20]);
+        // Grids up to 16 dims with at least 16 features match Python.
+        assert_eq!(suggest_resolution_dims(&[], 16), vec![5, 8, 12, 16]);
+        assert_eq!(suggest_resolution_dims(&[3], 30), vec![2, 3, 5]);
+        assert_eq!(suggest_resolution_dims(&[2, 5, 8], 30), vec![2, 4, 6, 8]);
+        assert_eq!(suggest_resolution_dims(&[16], 16), vec![12, 14, 16]);
+        // Python stepped from the low end and truncated, dropping the high
+        // end ([4, 6, 8, 10, 12, 14]); the suggestions now span both ends.
+        assert_eq!(
+            suggest_resolution_dims(&[4, 16], 0),
+            vec![4, 6, 9, 11, 14, 16]
+        );
+        // Python clamped at 16; the ceiling is now the feature count or the
+        // run's own largest dimension.
+        assert_eq!(
+            suggest_resolution_dims(&[2, 20], 30),
+            vec![2, 6, 11, 16, 20]
+        );
+        assert_eq!(suggest_resolution_dims(&[2, 20], 0), vec![2, 6, 11, 16, 20]);
+        assert_eq!(
+            suggest_resolution_dims(&[16, 20], 30),
+            vec![16, 17, 18, 19, 20]
+        );
+        assert_eq!(suggest_resolution_dims(&[18], 19), vec![14, 16, 18, 19]);
+        assert_eq!(suggest_resolution_dims(&[], 6), vec![5, 6]);
+        // Never above the feature count, and nothing when it is below 2.
+        assert!(suggest_resolution_dims(&[], 1).is_empty());
+        assert!(suggest_resolution_dims(&[2, 3], 1).is_empty());
+        assert_eq!(suggest_resolution_dims(&[5, 8], 4), Vec::<usize>::new());
+        assert_eq!(suggest_resolution_dims(&[3, 8], 3), vec![3]);
+        assert_eq!(suggest_resolution_dims(&[3], 2), vec![2]);
+        // At most six suggestions, always from the low end to the high end.
+        for (lo, hi) in [(2, 7), (2, 9), (3, 17), (2, 40), (5, 64), (2, 3)] {
+            let got = suggest_resolution_dims(&[lo, hi], 0);
+            assert!(got.len() <= 6, "[{lo}, {hi}] -> {got:?}");
+            assert_eq!(got.first(), Some(&lo), "[{lo}, {hi}] -> {got:?}");
+            assert_eq!(got.last(), Some(&hi), "[{lo}, {hi}] -> {got:?}");
+            assert!(got.windows(2).all(|w| w[0] < w[1]), "{got:?}");
+        }
 
         let g = Graph {
             n: 40,
             edges: (0..39).map(|i| (i, i + 1, 1.0)).collect(),
         };
         let m = GraphAnalysis::new(&g).unwrap().metrics(0.1, 10, None, None);
-        let gate = finalization_gate(&m, 1, &[2, 5], None);
+        let gate = finalization_gate(&m, 1, &[2, 5], 0, None);
         assert_eq!(gate["status"], "blocked");
         assert_eq!(gate["code"], "UNRESOLVED_DOMINANT_COMPONENT");
         assert!(gate["message"]
             .as_str()
             .unwrap()
             .starts_with("giant_fraction=100.0% after 1 sweep(s)."));
-        let ok = finalization_gate(&m, 3, &[2, 5], None);
+        let ok = finalization_gate(&m, 3, &[2, 5], 0, None);
         assert_eq!(
             ok["status"], "blocked",
             "density 0.05 but n_ball_maps 10 < 40"
         );
         let m2 = GraphAnalysis::new(&g).unwrap().metrics(0.1, 50, None, None);
-        assert_eq!(finalization_gate(&m2, 3, &[2], None)["status"], "ok");
+        assert_eq!(finalization_gate(&m2, 3, &[2], 0, None)["status"], "ok");
+    }
+
+    #[test]
+    fn skeleton_top_k_matches_full_sort_on_random_graphs() {
+        let edge_cmp = |a: &EdgeSummary, b: &EdgeSummary| {
+            b.weight
+                .total_cmp(&a.weight)
+                .then_with(|| (a.source, a.target).cmp(&(b.source, b.target)))
+        };
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next_u64 = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        for &(n, n_edges, weight_levels) in &[
+            (80usize, 120usize, 1000u64),
+            (120, 500, 20),
+            (200, 1500, 15),
+            (300, 4000, 500),
+        ] {
+            let mut edges = Vec::with_capacity(n_edges);
+            for _ in 0..n_edges {
+                let u = (next_u64() as usize) % n;
+                let mut v = (next_u64() as usize) % (n - 1);
+                if v >= u {
+                    v += 1;
+                }
+                let (i, j) = if u < v { (u, v) } else { (v, u) };
+                // Quantized weights force many weight ties broken by (source, target).
+                let w = ((next_u64() % weight_levels) + 1) as f64 / weight_levels as f64;
+                edges.push((i, j, w));
+            }
+            let g = Graph { n, edges };
+            let summary = GraphAnalysis::new(&g).unwrap().summary(0.1);
+            let mut full_sorted: Vec<EdgeSummary> = g
+                .edges
+                .iter()
+                .map(|&(i, j, w)| EdgeSummary {
+                    source: i,
+                    target: j,
+                    weight: w,
+                })
+                .collect();
+            full_sorted.sort_by(edge_cmp);
+            full_sorted.truncate(MAX_EDGES_IN_SUMMARY);
+            assert_eq!(summary.edges, full_sorted);
+            assert_eq!(summary.edges_truncated, n_edges > MAX_EDGES_IN_SUMMARY);
+        }
     }
 }

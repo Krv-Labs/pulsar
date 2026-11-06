@@ -47,6 +47,8 @@ fn drafted(case: &Value, question_limit: usize) -> (pulsar_data::Table, Preproce
         time_column: text("time"),
         stakes: true,
         stakes_max_questions: 2 * question_limit,
+        // Python kept row-index columns as features.
+        row_index_ids: false,
         ..DraftOptions::default()
     };
     let mut plan = draft_plan(&table, "ds_fixture", &opts).unwrap();

@@ -1,13 +1,11 @@
 //! Cluster-facing payload builders (`pulsar/mcp/payloads.py` and the note in
 //! `pulsar/mcp/tools/clustering.py`): the cluster header with fragmentation and
-//! readiness advice, the cluster-selection disclosure, the dossier and summary
+//! readiness advice, the cluster-selection summary, the dossier and summary
 //! evidence payloads, the threshold surface, and the Markdown views.
 //!
 //! All are bounded and summary-first: size collections become
 //! `{total, preview, omitted}`, previews are capped, and the readiness block is
 //! advisory (`not a hard quality threshold`), never a verdict.
-
-use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
@@ -87,8 +85,8 @@ pub fn compact_cluster_result_payload(meta: &Value, include_full_sizes: bool) ->
     Value::Object(out)
 }
 
-/// A uniform disclosure of which clusters a truncated view shows, so that a
-/// partial view is never mistaken for a different partition.
+/// Which clusters a truncated view shows, so a partial view is not mistaken
+/// for a different partition.
 pub fn build_cluster_selection(meta: &Value, shown_ids: &[i64], ranked_by: &str) -> Value {
     let all_ids: Vec<i64> = meta["cluster_sizes"]
         .as_array()
@@ -116,7 +114,7 @@ pub fn build_cluster_selection(meta: &Value, shown_ids: &[i64], ranked_by: &str)
     })
 }
 
-/// A compact, prominent Markdown header for a cluster-selection disclosure.
+/// A compact, prominent Markdown header for a cluster selection.
 pub fn cluster_selection_to_markdown(selection: &Value) -> String {
     let (shown, omitted) = (&selection["shown_ids"], &selection["omitted_ids"]);
     let list = |v: &Value| {
@@ -260,10 +258,7 @@ pub fn cluster_result_payload(
     stability_plateaus: &Value,
     failure_reason: Option<&str>,
 ) -> Value {
-    let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
-    for &l in labels {
-        *counts.entry(l).or_default() += 1;
-    }
+    let counts = crate::clustering::merge::label_sizes(labels);
     let total = labels.len();
     let mut desc: Vec<usize> = counts.values().copied().collect();
     desc.sort_unstable_by(|a, b| b.cmp(a));

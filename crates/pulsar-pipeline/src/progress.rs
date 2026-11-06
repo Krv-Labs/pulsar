@@ -1,8 +1,22 @@
 //! Stage-weighted progress: maps per-stage local progress onto one monotonic
 //! `[0, 1]` span, as `pulsar.runtime.utils.ProgressTracker` did.
 
-/// A progress sink: `(stage label, cumulative fraction in [0, 1])`.
-pub type ProgressFn<'a> = dyn FnMut(&str, f64) + 'a;
+/// One progress tick emitted by [`ProgressTracker`].
+///
+/// Carries the tracker's registered stage `key` and optional 1-based `(done,
+/// total)` sub-step count alongside the display `label`, so downstream sinks
+/// (such as the MCP server's `io.phirewall/progress` contract builder) can map
+/// stages from structure rather than parsing free-text labels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProgressEvent<'a> {
+    pub key: &'a str,
+    pub label: &'a str,
+    pub fraction: f64,
+    pub count: Option<(u64, u64)>,
+}
+
+/// A progress sink receiving structured [`ProgressEvent`] ticks.
+pub type ProgressFn<'a> = dyn FnMut(ProgressEvent<'_>) + 'a;
 
 /// Maps stage-local updates onto a single monotonic `0..1` span.
 ///
@@ -38,6 +52,33 @@ impl<'a, 'b> ProgressTracker<'a, 'b> {
     /// Report `local_fraction` of `stage` done, under `label` (defaults to
     /// the stage name). Unknown stages are ignored.
     pub fn update(&mut self, stage: &str, local_fraction: f64, label: Option<&str>) {
+        self.emit(stage, local_fraction, label, None);
+    }
+
+    /// Report 1-based step `done` of `total` within `stage`, under `label`.
+    pub fn step(&mut self, stage: &str, done: usize, total: usize, label: &str) {
+        if total == 0 {
+            return;
+        }
+        self.emit(
+            stage,
+            done as f64 / total as f64,
+            Some(label),
+            Some((done as u64, total as u64)),
+        );
+    }
+
+    pub fn complete(&mut self, stage: &str, label: Option<&str>) {
+        self.update(stage, 1.0, label);
+    }
+
+    fn emit(
+        &mut self,
+        stage: &str,
+        local_fraction: f64,
+        label: Option<&str>,
+        count: Option<(u64, u64)>,
+    ) {
         let Some(cb) = self.callback.as_mut() else {
             return;
         };
@@ -50,11 +91,12 @@ impl<'a, 'b> ProgressTracker<'a, 'b> {
             return;
         }
         self.last = fraction;
-        cb(label.unwrap_or(stage), fraction);
-    }
-
-    pub fn complete(&mut self, stage: &str, label: Option<&str>) {
-        self.update(stage, 1.0, label);
+        cb(ProgressEvent {
+            key: stage,
+            label: label.unwrap_or(stage),
+            fraction,
+            count,
+        });
     }
 }
 
@@ -64,8 +106,15 @@ mod tests {
 
     #[test]
     fn fractions_are_monotonic_and_end_at_one() {
-        let mut seen: Vec<(String, f64)> = Vec::new();
-        let mut cb = |s: &str, f: f64| seen.push((s.to_string(), f));
+        let mut seen = Vec::new();
+        let mut cb = |ev: ProgressEvent<'_>| {
+            seen.push((
+                ev.key.to_string(),
+                ev.label.to_string(),
+                ev.fraction,
+                ev.count,
+            ))
+        };
         let stages = vec![
             ("a".to_string(), 1.0),
             ("b".to_string(), 3.0),
@@ -73,7 +122,7 @@ mod tests {
         ];
         let mut t = ProgressTracker::new(&stages, Some(&mut cb));
         t.complete("a", None);
-        t.update("b", 0.5, Some("b half"));
+        t.step("b", 1, 2, "b half");
         t.update("b", 0.25, None); // goes backwards: dropped
         t.complete("b", None);
         t.complete("zero", None); // reaches 1.0 again: still reported
@@ -81,10 +130,10 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                ("a".to_string(), 0.25),
-                ("b half".to_string(), 0.625),
-                ("b".to_string(), 1.0),
-                ("zero".to_string(), 1.0),
+                ("a".to_string(), "a".to_string(), 0.25, None),
+                ("b".to_string(), "b half".to_string(), 0.625, Some((1, 2))),
+                ("b".to_string(), "b".to_string(), 1.0, None),
+                ("zero".to_string(), "zero".to_string(), 1.0, None),
             ]
         );
     }

@@ -57,7 +57,7 @@ fn plan_to_matrix(table: &Table, plan: &PreprocessingPlan) -> Result<Array2<f64>
     let config = plan_config(plan, "stakes_eval")?;
     preprocess(table, &config.preprocessing, None, None)
         .map(|p| p.matrix)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.display_for(plan.phirewall_release))
 }
 
 /// The base representation's neighbours, computed once for every option.

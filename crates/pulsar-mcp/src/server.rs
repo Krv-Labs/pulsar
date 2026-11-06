@@ -5,18 +5,25 @@ use std::sync::Arc;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CancelTaskParams, CreateTaskResult, GetTaskParams,
-    GetTaskResult, Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
-    ServerConfig, Tool, UpdateTaskParams,
+    GetTaskResult, Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool, UpdateTaskParams,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::task_manager::{TaskExit, TaskOptions};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
 
-use crate::envelope::{result_size_bytes, too_large};
+use crate::budget;
 use crate::guide::INSTRUCTIONS;
 use crate::jobs::ProgressTarget;
 use crate::state::ServerState;
 use crate::tools::{self, CallContext, ToolSpec};
+
+/// How long a sweep task lives, counted from its creation. `rmcp`'s default
+/// is five minutes, and at its TTL the task manager aborts the work and marks
+/// the task failed, so a longer sweep was killed mid-run. A sweep's real limit
+/// is the client's to enforce (it cancels with `tasks/cancel`); this only has
+/// to outlast any sweep, and bounds how long a finished task is kept.
+pub const SWEEP_TASK_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Clone)]
 pub struct PulsarServer {
@@ -56,16 +63,15 @@ impl PulsarServer {
         progress: Option<ProgressTarget>,
     ) -> rmcp::model::CallToolResult {
         let args = params.arguments.unwrap_or_default();
+        let passed = args.clone();
         let result =
             match tools::dispatch(state.clone(), &name, args, CallContext { progress }).await {
                 Ok(result) => result,
                 Err(error) => error.into_result(),
             };
         match state.options.max_response_bytes {
-            Some(limit) if result_size_bytes(&result) > limit => {
-                too_large(&name, result_size_bytes(&result), limit)
-            }
-            _ => result,
+            Some(limit) => budget::degrade(&name, Some(&passed), result, limit),
+            None => result,
         }
     }
 }
@@ -83,6 +89,16 @@ impl ServerHandler for PulsarServer {
         info.server_info = implementation;
         info.instructions = Some(INSTRUCTIONS.to_owned());
         info
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        self.state.session().phirewall_release = crate::release::declared_by(&request.capabilities);
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
     }
 
     async fn list_tools(
@@ -131,6 +147,7 @@ impl ServerHandler for PulsarServer {
             let task = self.state.tasks.spawn(
                 TaskOptions::new()
                     .with_status_message("sweep queued")
+                    .with_ttl_ms(SWEEP_TASK_TTL_MS)
                     .with_poll_interval_ms(500),
                 move |task_ctx| {
                     Box::pin(async move {

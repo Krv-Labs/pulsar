@@ -70,6 +70,61 @@ pub fn sweep(payload: &Value) -> String {
     if let Some(advisory) = payload["config_advisory"].as_str() {
         lines.push(format!("- Config advisory: {advisory}"));
     }
+    if let Some(summary) = payload.get("diagnose_summary").filter(|v| v.is_object()) {
+        let sizes: Vec<String> = summary["top_component_sizes"]
+            .as_array()
+            .map(|a| a.iter().map(metric).collect())
+            .unwrap_or_default();
+        let patterns: Vec<String> = summary["observed_patterns"]
+            .as_array()
+            .map(|a| a.iter().map(metric).collect())
+            .unwrap_or_default();
+        let risks: Vec<String> = summary["risk_factors"]
+            .as_array()
+            .map(|a| a.iter().map(|r| metric(&r["code"])).collect::<Vec<_>>())
+            .unwrap_or_default();
+        lines.extend([
+            "".into(),
+            "## Diagnose Summary".into(),
+            "".into(),
+            format!(
+                "- Components: {} (top sizes {}); largest {}, singletons {}",
+                metric(&summary["component_count"]),
+                if sizes.is_empty() {
+                    "n/a".to_owned()
+                } else {
+                    sizes.join(", ")
+                },
+                pct(&summary["largest_component_fraction"]),
+                pct(&summary["singleton_fraction"]),
+            ),
+            format!(
+                "- Grid support: {}; density {}",
+                metric(&summary["grid_adequacy_status"]),
+                metric(&summary["density"]),
+            ),
+            format!(
+                "- Observed patterns: {}",
+                if patterns.is_empty() {
+                    "n/a".to_owned()
+                } else {
+                    patterns.join(", ")
+                }
+            ),
+            format!(
+                "- Risk factors: {}",
+                if risks.is_empty() {
+                    "none".to_owned()
+                } else {
+                    risks.join(", ")
+                }
+            ),
+            format!(
+                "- Full view: call `diagnose_cosmic_graph(run_id=\"{}\")`",
+                payload["run_id"].as_str().unwrap_or_default(),
+            ),
+        ]);
+    }
     lines.extend([
         "".into(),
         "## Key Metrics".into(),

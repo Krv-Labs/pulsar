@@ -7,12 +7,10 @@
 //! steps read, exactly as the dict-based Python did. The golden fixtures
 //! `threshold_options` and `breakpoints` check this port at `rtol 1e-9`.
 
-use std::collections::HashMap;
-
 use pulsar_core::Plateau;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{ComponentState, ThresholdGraph};
+use crate::components::ThresholdGraph;
 use crate::error::AnalysisError;
 use crate::pyround::{round_int, round_to};
 
@@ -86,21 +84,32 @@ pub fn component_mass_profile(
     top_k: usize,
     small_component_max_fraction: f64,
 ) -> ComponentMassProfile {
-    profile_from_state(
-        graph.n_nodes(),
-        &graph.state_at(threshold),
-        top_k,
-        small_component_max_fraction,
-    )
+    let sizes = &graph.sizes_at(&[threshold])[0];
+    profile_from_sizes(graph.n_nodes(), sizes, top_k, small_component_max_fraction)
 }
 
-fn profile_from_state(
+/// Component mass profiles for a slice of thresholds in a single incremental
+/// union-find sweep.
+pub fn component_mass_profiles(
+    graph: &ThresholdGraph,
+    thresholds: &[f64],
+    top_k: usize,
+    small_component_max_fraction: f64,
+) -> Vec<ComponentMassProfile> {
+    let n_nodes = graph.n_nodes();
+    graph
+        .sizes_at(thresholds)
+        .iter()
+        .map(|sizes| profile_from_sizes(n_nodes, sizes, top_k, small_component_max_fraction))
+        .collect()
+}
+
+fn profile_from_sizes(
     n_nodes: usize,
-    state: &ComponentState,
+    sizes: &[usize],
     top_k: usize,
     small_component_max_fraction: f64,
 ) -> ComponentMassProfile {
-    let sizes = &state.sizes;
     let top: Vec<usize> = sizes.iter().copied().take(top_k).collect();
     let singleton_count = sizes.iter().filter(|&&s| s == 1).count();
     let small_size_limit = 1.max((n_nodes as f64 * small_component_max_fraction) as usize);
@@ -268,12 +277,7 @@ pub struct MorphologyRow {
     pub interpretation_hint: &'static str,
 }
 
-pub fn threshold_morphology_profile(
-    graph: &ThresholdGraph,
-    threshold: f64,
-    top_k: usize,
-) -> MorphologyRow {
-    let profile = component_mass_profile(graph, threshold, top_k, 0.01);
+fn morphology_from_profile(threshold: f64, profile: ComponentMassProfile) -> MorphologyRow {
     let metrics = mass_shape_metrics(&profile);
     let giant = profile.top_component_sizes.first().copied().unwrap_or(0);
     let second = profile.top_component_sizes.get(1).copied().unwrap_or(0);
@@ -282,10 +286,11 @@ pub fn threshold_morphology_profile(
     } else {
         0.0
     };
+    let hint = mass_profile_hint(&profile);
     MorphologyRow {
         threshold,
         component_count: profile.component_count,
-        top_component_sizes: profile.top_component_sizes.clone(),
+        top_component_sizes: profile.top_component_sizes,
         top_component_sizes_omitted: profile.top_component_sizes_omitted,
         giant_fraction: profile.largest_component_fraction,
         second_largest_ratio: round_to(ratio, 4),
@@ -296,8 +301,32 @@ pub fn threshold_morphology_profile(
         nontrivial_mass_fraction: metrics.nontrivial_mass_fraction,
         multi_component_coverage: metrics.multi_component_coverage,
         component_size_entropy: metrics.component_size_entropy,
-        interpretation_hint: mass_profile_hint(&profile),
+        interpretation_hint: hint,
     }
+}
+
+pub fn threshold_morphology_profile(
+    graph: &ThresholdGraph,
+    threshold: f64,
+    top_k: usize,
+) -> MorphologyRow {
+    morphology_from_profile(
+        threshold,
+        component_mass_profile(graph, threshold, top_k, 0.01),
+    )
+}
+
+pub fn threshold_morphology_profiles(
+    graph: &ThresholdGraph,
+    thresholds: &[f64],
+    top_k: usize,
+) -> Vec<MorphologyRow> {
+    thresholds
+        .iter()
+        .copied()
+        .zip(component_mass_profiles(graph, thresholds, top_k, 0.01))
+        .map(|(t, profile)| morphology_from_profile(t, profile))
+        .collect()
 }
 
 // ------------------------------------------------------- plateau candidates
@@ -461,12 +490,14 @@ pub fn plateau_threshold_candidates(
 ) -> Vec<PlateauCandidate> {
     let active_range =
         active_range.unwrap_or_else(|| active_range_from_plateaus(plateaus, graph.n_nodes()));
+    let midpoints: Vec<f64> = plateaus.iter().map(Plateau::midpoint).collect();
+    let profiles = component_mass_profiles(graph, &midpoints, 5, 0.01);
     let mut candidates: Vec<PlateauCandidate> = plateaus
         .iter()
-        .map(|plateau| {
+        .zip(profiles)
+        .map(|(plateau, profile)| {
             let midpoint = plateau.midpoint();
             let width = plateau.length();
-            let profile = component_mass_profile(graph, midpoint, 5, 0.01);
             let metrics = mass_shape_metrics(&profile);
             let tier = plateau_tier(&profile, &metrics);
             let rank =
@@ -576,19 +607,20 @@ pub fn transition_adjacent_candidates(
     policy: Policy,
     max_candidates: usize,
 ) -> Vec<TransitionCandidate> {
-    let events = structural_breakpoints(
+    let events: Vec<Breakpoint> = structural_breakpoints(
         graph,
         thresholds,
         component_counts,
         (max_candidates * 3).max(6),
         32,
-    );
-    let mut candidates = Vec::new();
-    for event in &events {
-        if event.event == "small_component_absorption" && policy != Policy::OutlierMining {
-            continue;
-        }
-        let profile = component_mass_profile(graph, event.threshold, 5, 0.01);
+    )
+    .into_iter()
+    .filter(|e| !(e.event == "small_component_absorption" && policy != Policy::OutlierMining))
+    .collect();
+    let event_thresholds: Vec<f64> = events.iter().map(|e| e.threshold).collect();
+    let profiles = component_mass_profiles(graph, &event_thresholds, 5, 0.01);
+    let mut candidates = Vec::with_capacity(events.len());
+    for (event, profile) in events.iter().zip(profiles) {
         let metrics = mass_shape_metrics(&profile);
         let tier = transition_candidate_tier(&profile, &metrics);
         let rank = rank_transition_candidate(&profile, &metrics, event, policy);
@@ -963,22 +995,20 @@ pub fn structural_breakpoints(
     };
     selected.sort_unstable();
 
-    let mut states: HashMap<u64, ComponentState> = HashMap::new();
-    let mut state = |t: f64| -> ComponentState {
-        states
-            .entry(t.to_bits())
-            .or_insert_with(|| graph.state_at(t))
-            .clone()
-    };
+    let mut query_thresholds: Vec<f64> = Vec::with_capacity(selected.len() * 2);
+    for &i in &selected {
+        query_thresholds.push(thresholds[i - 1]);
+        query_thresholds.push(thresholds[i]);
+    }
+    let computed_states = graph.states_at(&query_thresholds);
 
     let mut candidates = Vec::new();
-    for i in selected {
-        let before_threshold = thresholds[i - 1];
+    for (pair_idx, i) in selected.into_iter().enumerate() {
         let after_threshold = thresholds[i];
         let before_count = component_counts[i - 1];
         let after_count = component_counts[i];
-        let before = state(before_threshold);
-        let after = state(after_threshold);
+        let before = &computed_states[2 * pair_idx];
+        let after = &computed_states[2 * pair_idx + 1];
         let before_size_by_label = before.size_by_label();
 
         // Prior (before) labels grouped by after label, in ascending label order.

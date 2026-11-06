@@ -189,6 +189,43 @@ pub struct StabilitySummary {
 impl StabilitySummary {
     const TOP_K: usize = 3;
 
+    fn warning(
+        n_edges: usize,
+        singleton_fraction: f64,
+        top_plateaus: &[PlateauSummary],
+    ) -> Option<String> {
+        if n_edges == 0 || singleton_fraction > 0.8 {
+            let lead = if n_edges == 0 {
+                "Auto threshold landed in an empty-graph regime (100% of nodes are singletons)"
+                    .to_owned()
+            } else {
+                format!(
+                    "Auto threshold left {}% of nodes as singletons",
+                    (singleton_fraction * 100.0).round()
+                )
+            };
+            let better = top_plateaus.iter().find(|p| p.singleton_fraction <= 0.5);
+            Some(match better {
+                Some(p) => format!(
+                    "{lead}. top_plateaus has a plateau \
+                     at {:.4} with {} components and {}% singletons; to build there call \
+                     refine_config(overrides={{\"construction_threshold\": {:.4}}}) and sweep again.",
+                    p.midpoint,
+                    p.component_count,
+                    (p.singleton_fraction * 100.0).round(),
+                    p.midpoint
+                ),
+                None => format!(
+                    "{lead}, and none of top_plateaus \
+                     is below 50% singletons. get_threshold_stability_curve lists more \
+                     thresholds; set one with refine_config(overrides={{\"construction_threshold\": ...}})."
+                ),
+            })
+        } else {
+            None
+        }
+    }
+
     /// `None` when the run used a fixed threshold.
     pub fn from_fitted(fitted: &Fitted, metrics: &RunMetrics) -> Option<Self> {
         let stability = fitted.stability.as_ref()?;
@@ -199,7 +236,7 @@ impl StabilitySummary {
             row_max[j] = row_max[j].max(w);
         }
         let singletons_at = |t: f64| row_max.iter().filter(|&&v| v <= t).count();
-        let top_plateaus = stability
+        let top_plateaus: Vec<PlateauSummary> = stability
             .plateaus
             .iter()
             .take(Self::TOP_K)
@@ -216,21 +253,7 @@ impl StabilitySummary {
                 }
             })
             .collect();
-        let warning = if metrics.n_edges == 0 {
-            Some(
-                "Auto threshold landed in an empty-graph regime. Pick a lower plateau midpoint \
-                 and re-run, or fix construction_threshold."
-                    .to_owned(),
-            )
-        } else if metrics.singleton_fraction > 0.8 {
-            Some(
-                "Auto threshold left >80% of nodes as singletons. Try a lower plateau midpoint \
-                 to retain more edges."
-                    .to_owned(),
-            )
-        } else {
-            None
-        };
+        let warning = Self::warning(metrics.n_edges, metrics.singleton_fraction, &top_plateaus);
         Some(Self {
             selected_threshold: stability.optimal_threshold,
             top_plateaus,
@@ -382,6 +405,12 @@ pub struct PlanRecord {
     pub dataset_id: String,
     pub revision: u32,
     pub plan: serde_json::Value,
+    /// The plan body as it was before the last [`Store::update_plan`], so a
+    /// caller can say what the latest revision changed. Absent on revision 1.
+    ///
+    /// [`Store::update_plan`]: crate::Store::update_plan
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_plan: Option<serde_json::Value>,
     pub created_at: f64,
     pub updated_at: f64,
 }
@@ -389,6 +418,51 @@ pub struct PlanRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plateau(midpoint: f64, component_count: usize, singleton_fraction: f64) -> PlateauSummary {
+        PlateauSummary {
+            start: midpoint - 0.001,
+            end: midpoint + 0.001,
+            midpoint,
+            length: 0.002,
+            component_count,
+            singleton_count: 0,
+            singleton_fraction,
+        }
+    }
+
+    #[test]
+    fn a_singleton_dominated_threshold_names_a_better_plateau_and_the_call() {
+        let plateaus = [
+            plateau(0.4, 1699, 0.99),
+            plateau(0.3, 900, 0.7),
+            plateau(0.0254, 107, 0.2),
+        ];
+        assert_eq!(
+            StabilitySummary::warning(10, 0.9994, &plateaus).as_deref(),
+            Some("Auto threshold left 100% of nodes as singletons. top_plateaus has a plateau at 0.0254 with 107 components and 20% singletons; to build there call refine_config(overrides={\"construction_threshold\": 0.0254}) and sweep again.")
+        );
+        let none_better = [plateau(0.4, 1699, 0.99)];
+        let w = StabilitySummary::warning(10, 0.9, &none_better).unwrap();
+        assert!(
+            w.starts_with(
+                "Auto threshold left 90% of nodes as singletons, and none of top_plateaus"
+            ),
+            "{w}"
+        );
+        assert_eq!(
+            StabilitySummary::warning(0, 1.0, &plateaus).as_deref(),
+            Some("Auto threshold landed in an empty-graph regime (100% of nodes are singletons). top_plateaus has a plateau at 0.0254 with 107 components and 20% singletons; to build there call refine_config(overrides={\"construction_threshold\": 0.0254}) and sweep again.")
+        );
+        let empty_none_better = StabilitySummary::warning(0, 1.0, &none_better).unwrap();
+        assert!(
+            empty_none_better.starts_with(
+                "Auto threshold landed in an empty-graph regime (100% of nodes are singletons), and none of top_plateaus"
+            ),
+            "{empty_none_better}"
+        );
+        assert_eq!(StabilitySummary::warning(10, 0.5, &plateaus), None);
+    }
 
     #[test]
     fn metrics_and_health_label_follow_the_python_rules() {

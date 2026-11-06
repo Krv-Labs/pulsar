@@ -10,10 +10,11 @@
 use std::collections::HashSet;
 
 use pulsar_analysis::plan::{
-    apply_answers_and_edits, build_draft_plan_payload, build_edit_plan_payload, diff_plan_entries,
-    draft_plan, draft_plan_payload_to_markdown, dry_run_processed_space,
-    edit_plan_payload_to_markdown, DecidedBy, Detail as PlanDetail, DraftError, DraftOptions,
-    Limits, PlanEditError, PreprocessingPlan,
+    apply_answers_and_edits_guarded, build_draft_plan_payload, build_edit_plan_payload,
+    build_preprocessing_summary, diff_plan_entries, draft_plan, draft_plan_payload_to_markdown,
+    dry_run_processed_space, edit_plan_payload_to_markdown, processed_feature_names, DecidedBy,
+    Detail as PlanDetail, DraftError, DraftOptions, HeldOneHot, ImportedDecisions, Limits,
+    PlanEditError, PreprocessingPlan,
 };
 use pulsar_data::Table;
 use pulsar_store::{PlanId, StoreError};
@@ -26,6 +27,7 @@ use super::config::resolve_dataset;
 use super::params::{Detail, Format};
 use super::ToolSpec;
 use crate::envelope::{ok_result, ToolError};
+use crate::phirewall;
 use crate::schema::{self as s, input_schema};
 use crate::state::ServerState;
 
@@ -41,6 +43,25 @@ fn compact(payload: &Value) -> String {
 }
 
 /// Keep only next-step tools this server actually registers.
+/// The plan's `inputs` part for Phirewall's panel, so a plan shows as its own
+/// card before any sweep runs; `previous` is the revision it replaced.
+fn attach_summary(
+    payload: &mut Value,
+    table: &Table,
+    plan: &PreprocessingPlan,
+    previous: Option<&PreprocessingPlan>,
+) {
+    let names = processed_feature_names(table, plan).ok();
+    let inputs =
+        build_preprocessing_summary(plan, previous, names.as_deref(), phirewall::ROW_FLOOR);
+    payload[phirewall::KEY] = phirewall::summary(
+        None,
+        Some(plan.dataset_id.clone()),
+        table.n_rows(),
+        [("inputs", inputs)],
+    );
+}
+
 fn only_registered(payload: &mut Value) {
     let names: HashSet<&'static str> = super::catalog().iter().map(|t| t.name).collect();
     if let Some(list) = payload.get_mut("next_tools").and_then(Value::as_array_mut) {
@@ -53,7 +74,7 @@ async fn read_table(tool: &'static str, path: &str) -> Result<Table, ToolError> 
     let shown = path.display().to_string();
     tokio::task::spawn_blocking(move || pulsar_data::read_table(&path))
         .await
-        .map_err(|e| ToolError::new(tool, "INGEST_FAILED", e.to_string(), "Retry the call."))?
+        .map_err(|e| ToolError::worker_stopped(tool, "INGEST_FAILED", &e))?
         .map_err(|e| {
             ToolError::new(
                 tool,
@@ -63,15 +84,6 @@ async fn read_table(tool: &'static str, path: &str) -> Result<Table, ToolError> 
             )
             .detail("path", json!(shown))
         })
-}
-
-fn blocking_failed(tool: &'static str, code: &str, e: tokio::task::JoinError) -> ToolError {
-    ToolError::new(
-        tool,
-        code,
-        e.to_string(),
-        "Report the error; retry with a smaller dataset if it recurs.",
-    )
 }
 
 fn plan_error(tool: &'static str, error: &PlanEditError, action: String) -> ToolError {
@@ -128,7 +140,7 @@ pub fn draft_spec() -> ToolSpec {
     ToolSpec {
         name: DRAFT,
         title: "Draft Preprocessing Plan",
-        description: "Measure dataset evidence and draft a versioned preprocessing plan (`plan_id`, `revision=1`). Returns labeled defaults (`decided_by=\"default\"`), open plain-language questions ranked by measured k-NN `stakes`, evidence, `marker_legend` and the plan's preprocessing YAML. Constant, all-missing and ID drops are resolved defaults reversible via `edit_preprocessing_plan`. Infer what you can (`source=\"agent\"`); ask the user in domain words only when needed.",
+        description: "Draft a versioned preprocessing plan (`plan_id`, `revision=1`, `decided_by='default'`, questions ranked by k-NN `stakes`, evidence, `marker_legend`, `weak_hints.event_flag_columns`: 0/1 or count columns that explain other columns' blanks; only you can say if one is an outcome; `detail='full'` adds `how_to_use`). Resolve via `edit_preprocessing_plan` (`source='agent'` when inferred, `source='user'` after asking). Hold out outcomes via `edits=[{'column': '<col>', 'role': 'target'}]` (or `target_columns`); clear `TARGET_PROXY_COLUMNS` with `indicator='none'` or `role='drop'`; set `code_columns` to `encode='one_hot'` or `role='drop'`.",
         input_schema: input_schema::<DraftParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -203,6 +215,7 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
     let (dataset_id, path) = resolve_dataset(state, DRAFT, &p.dataset_id)?
         .expect("a non-empty dataset_id always resolves or errors");
     let table = read_table(DRAFT, &path).await?;
+    let (imported, sidecar_warnings) = ImportedDecisions::load(std::path::Path::new(&path));
 
     let opts = DraftOptions {
         target_columns: p.target_columns.clone().unwrap_or_default(),
@@ -210,6 +223,8 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
         time_column: p.time_column.clone(),
         stakes: p.stakes,
         stakes_max_questions: 2 * question_limit,
+        imported,
+        phirewall_release: state.phirewall_release(),
         ..DraftOptions::default()
     };
     let detail = if p.detail == Detail::Full {
@@ -234,11 +249,19 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
                     list.push(json!(format!("Processed-space dry-run failed: {error}")));
                 }
             }
-            let payload = build_draft_plan_payload(&plan, space.as_ref(), detail, limits);
+            let mut payload = build_draft_plan_payload(&plan, space.as_ref(), detail, limits);
+            if !sidecar_warnings.is_empty() {
+                if let Some(list) = payload.get_mut("warnings").and_then(Value::as_array_mut) {
+                    for w in &sidecar_warnings {
+                        list.push(w.to_plan_warning());
+                    }
+                }
+            }
+            attach_summary(&mut payload, &table, &plan, None);
             Ok((plan, payload))
         })
         .await
-        .map_err(|e| blocking_failed(DRAFT, "DRAFT_PLAN_FAILED", e))?
+        .map_err(|e| ToolError::worker_stopped(DRAFT, "DRAFT_PLAN_FAILED", &e))?
         .map_err(draft_error)?;
     let (plan, mut payload) = built;
 
@@ -254,6 +277,15 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
     }
 
     only_registered(&mut payload);
+    // The constant prose is in the tool description; `detail='full'` keeps it.
+    if p.detail != Detail::Full {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.remove("how_to_use");
+            if let Some(hints) = obj.get_mut("weak_hints").and_then(Value::as_object_mut) {
+                hints.remove("description");
+            }
+        }
+    }
     let text = match p.response_format {
         Format::Markdown => draft_plan_payload_to_markdown(&payload),
         Format::Json => compact(&payload),
@@ -275,15 +307,17 @@ pub enum Source {
 pub struct EditParams {
     /// Plan handle returned by draft_preprocessing_plan.
     pub plan_id: String,
-    /// Revision number being edited; a mismatch returns SESSION_REVISION_CONFLICT. If omitted, edits the current revision.
+    /// Revision being edited; mismatch returns SESSION_REVISION_CONFLICT. Omit to edit the current revision.
     #[serde(default)]
     pub base_revision: Option<i64>,
-    /// Answers as [{question_id, option_id}] using the listed ids; use option_ids: [id, ...] to ensemble compatible imputation treatments, preserving each option's indicator.
+    /// Answers as [{question_id, option_id}]; option_ids: [id, ...] ensembles compatible imputation treatments, preserving each option's indicator.
     #[serde(default)]
     pub answers: Option<Vec<Value>>,
-    /// Direct column edits as [{'column': col, 'role'?: ..., 'impute_method'?: method or list, 'impute_value'?: ..., 'indicator'?: ..., 'encode'?: ...}]. 'impute' accepts a spec or candidate list with method, value?, seed?, indicator?: bool.
+    /// Direct column edits: [{'column', 'role'?, 'impute_method'?, 'impute_value'?, 'indicator'?, 'encode'?}]. 'impute' takes a method, value, seed and indicator, or a candidate list.
     #[serde(default)]
     pub edits: Option<Vec<Value>>,
+    /// Columns to one-hot even with more levels than sqrt(n_rows); until named here, such a one-hot is held and listed in `warnings`.
+    pub confirm_one_hot: Option<Vec<String>>,
     /// Decision provenance: 'agent' when inferred from context/schema; 'user' when relaying a user's answer.
     #[serde(default)]
     pub source: Source,
@@ -296,7 +330,7 @@ pub fn edit_spec() -> ToolSpec {
     ToolSpec {
         name: EDIT,
         title: "Edit Preprocessing Plan",
-        description: "Apply question `answers` and/or per-column `edits` to a stored preprocessing plan. Checks `base_revision` (`SESSION_REVISION_CONFLICT` on mismatch), records decision provenance (`source=\"agent\"` or `\"user\"`), dry-runs preprocessing (`validation.valid=false` with error text on failure, without raising) and stores the new revision. `option_ids` ensembles compatible treatments; role, encoding and missingness groups must agree across selected options.",
+        description: "Apply question `answers` and/or per-column `edits` to a stored plan. Checks `base_revision` (SESSION_REVISION_CONFLICT on mismatch), records `source='agent'|'user'`, dry-runs preprocessing (failures set `validation.valid=false`, not an error) and stores a new revision. One-hotting a column with more levels than sqrt(n_rows) is held in `warnings` (HIGH_CARDINALITY_ONE_HOT) until named in `confirm_one_hot`; `option_ids` ensembles compatible treatments that must agree on role, encoding and missingness.",
         input_schema: input_schema::<EditParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -356,6 +390,48 @@ fn revision_conflict(plan_id: &str, current: u32, base: i64) -> ToolError {
     .detail("base_revision", json!(base))
 }
 
+/// The warning for one-hot encodings left out because the column has more levels
+/// than the plan's categorical threshold. Facts, the alternatives, and how to confirm.
+fn held_one_hot_warning(held: &[HeldOneHot], features_now: Option<usize>) -> Value {
+    let added: usize = held.iter().map(|h| h.features_added).sum();
+    let parts: Vec<String> = held
+        .iter()
+        .map(|h| {
+            format!(
+                "`{}` has {} levels (threshold sqrt(n_rows) = {}) and would add {} features",
+                h.column, h.levels, h.threshold, h.features_added
+            )
+        })
+        .collect();
+    let total = match features_now {
+        Some(n) => format!(" Processed features: {n} now, {} if applied.", n + added),
+        None => String::new(),
+    };
+    let cols: Vec<&str> = held.iter().map(|h| h.column.as_str()).collect();
+    let answered: Vec<&str> = held
+        .iter()
+        .filter_map(|h| h.question_id.as_deref())
+        .collect();
+    let scope = if answered.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " An answer is held whole, so question(s) {} stay open.",
+            answered.join(", ")
+        )
+    };
+    json!({
+        "code": "HIGH_CARDINALITY_ONE_HOT",
+        "target": "plan",
+        "message": format!(
+            "Not applied, the plan keeps its current treatment: {}.{total}{scope} Alternatives are role 'drop', treating the column as numeric (omit encode), or one-hot anyway by resending the same answers/edits with confirm_one_hot={}.",
+            parts.join("; "),
+            json!(cols)
+        ),
+        "columns": cols,
+    })
+}
+
 pub async fn edit(state: &ServerState, p: EditParams) -> Result<CallToolResult, ToolError> {
     if p.plan_id.is_empty() {
         return Err(ToolError::new(
@@ -402,40 +478,67 @@ pub async fn edit(state: &ServerState, p: EditParams) -> Result<CallToolResult, 
     } else {
         DecidedBy::Agent
     };
-    let worker_plan = plan.clone();
+    let confirmed = p.confirm_one_hot.clone().unwrap_or_default();
+    let phirewall_release = state.phirewall_release();
+    let mut worker_plan = plan.clone();
+    worker_plan.phirewall_release = phirewall_release;
     let (updated, mut payload) = tokio::task::spawn_blocking(
         move || -> Result<(PreprocessingPlan, Value), PlanEditError> {
-            let mut updated = apply_answers_and_edits(&worker_plan, &answers, &edits, source)?;
+            let (mut updated, held) = apply_answers_and_edits_guarded(
+                &worker_plan,
+                &answers,
+                &edits,
+                source,
+                &confirmed,
+            )?;
+            // Whatever was not held is applied, so a new revision is stored for any
+            // change to entries (settings, provenance) or question state. Only when
+            // everything was held is the stored revision kept rather than minting an
+            // unchanged one.
+            if updated.entries == worker_plan.entries && updated.questions == worker_plan.questions
+            {
+                updated = worker_plan.clone();
+            }
             let changes = diff_plan_entries(&worker_plan, &updated);
             let (space, validation) = dry_run_processed_space(&table, &mut updated);
-            let payload = build_edit_plan_payload(
+            let mut payload = build_edit_plan_payload(
                 &updated,
                 &changes,
                 space.as_ref(),
                 &validation,
                 Limits::default(),
             );
+            if !held.is_empty() {
+                let now = space.as_ref().map(|sp| sp.feature_count);
+                payload["warnings"]
+                    .as_array_mut()
+                    .expect("warnings is an array")
+                    .push(held_one_hot_warning(&held, now));
+            }
+            attach_summary(&mut payload, &table, &updated, Some(&worker_plan));
             Ok((updated, payload))
         },
     )
     .await
-    .map_err(|e| blocking_failed(EDIT, "EDIT_PLAN_FAILED", e))?
+    .map_err(|e| ToolError::worker_stopped(EDIT, "EDIT_PLAN_FAILED", &e))?
     .map_err(|e| plan_error(EDIT, &e, edit_error_action(&e)))?;
 
-    state
-        .store
-        .update_plan(
-            &plan_id,
-            plan.revision,
-            updated.revision,
-            updated.to_value(),
-        )
-        .map_err(|e| match e {
-            StoreError::RevisionConflict { current, .. } => {
-                revision_conflict(&p.plan_id, current, expected)
-            }
-            other => ToolError::from_store(EDIT, other),
-        })?;
+    if updated.revision != plan.revision {
+        state
+            .store
+            .update_plan(
+                &plan_id,
+                plan.revision,
+                updated.revision,
+                updated.to_value(),
+            )
+            .map_err(|e| match e {
+                StoreError::RevisionConflict { current, .. } => {
+                    revision_conflict(&p.plan_id, current, expected)
+                }
+                other => ToolError::from_store(EDIT, other),
+            })?;
+    }
     state.session().latest_plan_id = Some(plan_id);
 
     only_registered(&mut payload);
@@ -516,6 +619,7 @@ fn config_error(errors: &pulsar_config::ConfigErrors) -> ToolError {
 fn validation_payload(
     table: &Table,
     config: &pulsar_config::PulsarConfig,
+    phirewall_release: bool,
 ) -> Result<Value, ToolError> {
     let invalid = |reason: String| {
         ToolError::new(
@@ -529,36 +633,52 @@ fn validation_payload(
     // Every variant of a multi-imputation ensemble must be applicable.
     let variants = config.preprocessing_variants();
     let first = pulsar_data::preprocess(table, &variants[0].preprocessing, None, None)
-        .map_err(|e| invalid(e.to_string()))?;
+        .map_err(|e| invalid(e.display_for(phirewall_release)))?;
     let mut nan_remaining = first.matrix.iter().filter(|v| v.is_nan()).count();
     for variant in &variants[1..] {
         let out = pulsar_data::preprocess(table, &variant.preprocessing, None, None)
-            .map_err(|e| invalid(e.to_string()))?;
+            .map_err(|e| invalid(e.display_for(phirewall_release)))?;
         nan_remaining = nan_remaining.max(out.matrix.iter().filter(|v| v.is_nan()).count());
     }
 
     let names = first.feature_names();
     let inputs: HashSet<&str> = table.names.iter().map(String::as_str).collect();
-    let prefixes: Vec<String> = config
+    let encoded: Vec<&str> = config
         .preprocessing
         .encode
         .keys()
-        .map(|c| format!("{c}_"))
+        .map(String::as_str)
         .collect();
     let is_marker = |n: &str| n.ends_with("_was_missing");
-    let dummies = if prefixes.is_empty() {
-        0
-    } else {
-        names
+    let dummy_owner = |n: &str| -> Option<&str> {
+        if is_marker(n) || inputs.contains(n) {
+            return None;
+        }
+        encoded
             .iter()
-            .filter(|n| {
-                !is_marker(n)
-                    && !inputs.contains(n.as_str())
-                    && prefixes.iter().any(|p| n.starts_with(p.as_str()))
-            })
-            .count()
+            .copied()
+            .filter(|c| n.len() > c.len() + 1 && n.starts_with(c) && n[c.len()..].starts_with('_'))
+            .max_by_key(|c| c.len())
     };
-    let mut preview: Vec<String> = names.iter().take(8).cloned().collect();
+    let dummies = names.iter().filter(|n| dummy_owner(n).is_some()).count();
+    let mut level_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut preview: Vec<String> = names
+        .iter()
+        .enumerate()
+        .take(8)
+        .map(|(j, name)| {
+            if phirewall_release {
+                if let Some(col) = dummy_owner(name) {
+                    let idx = level_idx.entry(col).and_modify(|k| *k += 1).or_insert(1);
+                    let rows = first.matrix.column(j).iter().filter(|&&v| v == 1.0).count();
+                    if rows < phirewall::ROW_FLOOR {
+                        return format!("{col}_level_{idx}");
+                    }
+                }
+            }
+            name.clone()
+        })
+        .collect();
     if names.len() > 8 {
         preview.push(format!("... +{} more", names.len() - 8));
     }
@@ -616,8 +736,12 @@ pub async fn validate(state: &ServerState, p: ValidateParams) -> Result<CallTool
     }
     let config = pulsar_config::from_yaml_str(&text).map_err(|e| config_error(&e))?;
     let table = read_table(VALIDATE, &path).await?;
-    let payload = tokio::task::spawn_blocking(move || validation_payload(&table, &config))
-        .await
-        .map_err(|e| blocking_failed(VALIDATE, "VALIDATE_PREPROCESSING_FAILED", e))??;
+    let phirewall_release = state.phirewall_release();
+    let payload =
+        tokio::task::spawn_blocking(move || validation_payload(&table, &config, phirewall_release))
+            .await
+            .map_err(|e| {
+                ToolError::worker_stopped(VALIDATE, "VALIDATE_PREPROCESSING_FAILED", &e)
+            })??;
     Ok(ok_result(payload, None))
 }

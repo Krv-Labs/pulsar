@@ -51,6 +51,18 @@ impl ToolError {
         Self::new(tool, "INVALID_ARGUMENT", reason, agent_action)
     }
 
+    /// A blocking worker that panicked or was cancelled. No input reaches
+    /// this path by design, so the envelope states a defect and keeps the
+    /// join error as the evidence; `code` is the calling tool's own code.
+    pub fn worker_stopped(tool: &'static str, code: &str, join: &tokio::task::JoinError) -> Self {
+        Self::new(
+            tool,
+            code,
+            format!("the worker stopped unexpectedly: {join}"),
+            "An internal computation stopped unexpectedly: this is a defect and the message is the evidence. Report it with the message.",
+        )
+    }
+
     pub fn detail(mut self, key: &str, value: Value) -> Self {
         self.details.insert(key.to_owned(), value);
         self
@@ -82,7 +94,7 @@ impl ToolError {
         let action = match kind {
             HandleKind::Run => {
                 "Check the run_id against get_sweep_history. If the run exists but did not complete, \
-                 poll get_job; otherwise re-run run_topological_sweep. Omit run_id to use the latest run."
+                 check its job state (get_job, when listed); otherwise re-run run_topological_sweep. Omit run_id to use the latest run."
             }
             _ => "Create or retrieve a valid handle before retrying this tool.",
         };
@@ -190,34 +202,6 @@ pub fn ok_result(payload: Value, text: Option<String>) -> CallToolResult {
     result
 }
 
-/// Bytes a result costs the client: text blocks plus the structured JSON.
-pub fn result_size_bytes(result: &CallToolResult) -> usize {
-    let mut size = 0;
-    for block in &result.content {
-        if let ContentBlock::Text(t) = block {
-            size += t.text.len();
-        }
-    }
-    if let Some(s) = &result.structured_content {
-        size += serde_json::to_vec(s).map(|v| v.len()).unwrap_or(0);
-    }
-    size
-}
-
-/// The `RESPONSE_TOO_LARGE` backstop (`ResponseBudgetMiddleware`).
-pub fn too_large(tool: &str, size: usize, limit: usize) -> CallToolResult {
-    let tool: &'static str = Box::leak(tool.to_owned().into_boxed_str());
-    ToolError::new(
-        tool,
-        "RESPONSE_TOO_LARGE",
-        format!("Response is {size} bytes, over the {limit}-byte limit."),
-        "Request detail='summary', lower max_* / preview limits, or use a narrower tool.",
-    )
-    .detail("size_bytes", json!(size))
-    .detail("limit_bytes", json!(limit))
-    .into_result()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,11 +228,5 @@ mod tests {
 
         let ok = ok_result(json!({"a": 1}), None);
         assert_eq!(ok.is_error, Some(false));
-        assert!(result_size_bytes(&ok) > 0);
-        let big = too_large("x", 10, 5);
-        assert_eq!(
-            big.structured_content.unwrap()["error_code"],
-            "RESPONSE_TOO_LARGE"
-        );
     }
 }

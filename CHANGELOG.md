@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `get_cluster_detail`: per-cluster evidence sections (`topological_neighbors`, `tier_counts`, `feature_preview`, `numeric_features`, `categorical_features`, `central_rows`, at the dossier's `clusters[]` paths) for any persisted `cluster_assignment_id`, including merged ones, paged largest first by `cursor` or picked by `cluster_ids`. Evidence is built for the page only; the live labels are never changed.
+- `get_cluster_profile`, `get_feature_signal`, `get_cluster_signal_matrix` and `compare_clusters` take an optional `cluster_assignment_id` to read an earlier assignment while its run is loaded, and name the assignment they used. `get_cluster_profile` characterizes a cluster the dossier skipped on demand instead of calling it unknown.
+
+### Changed
+
+- Responses are budgeted in agent-visible characters (text plus structured content, without the gateway-stripped `io.phirewall/release` key). `PULSAR_MCP_MAX_RESPONSE_BYTES` defaults to 45,000 (was 100,000), under Claude Code's 50,000-character spill line; budget-aware tools render to 38,000 (5% under a 40,000 target).
+- `generate_cluster_dossier` fits the budget by construction: it keeps the header and an index of every cluster (`cluster_index`), shortens per-cluster sections before dropping whole ones, and reports `truncation` (`shown`, `total`, `omitted_cluster_ids`, `budget_chars`, `next` / `next_call`, a valid `get_cluster_detail` call) mirrored as one line of text. `detail='full'` follows the same budget.
+- An over-budget result is trimmed (largest arrays and strings first, every id kept) with a `truncation` notice instead of being replaced by `RESPONSE_TOO_LARGE`; that error now only happens when no trimmed form fits, stays under 5,000 characters and names the ids the call committed. Oversized error envelopes are trimmed the same way. `get_cluster_signal_matrix`, `get_feature_signal` and `get_cluster_profile` lower their own `max_clusters` / `max_features` to fit and say so.
+
+### Fixed
+
+- A dossier over the response limit no longer reports failure after it had already published new live labels (the agent never saw the new `cluster_assignment_id`, and the next cluster read failed with an unknown cluster id).
+- A sweep whose `save_config` file write fails says that the run completed, is now the session's latest run and cleared the cluster labels; `create_config` validates its config before storing the drafted plan.
+- Phirewall disclosure mode (`PULSAR_MCP_DISCLOSURE`, set by the Phirewall gateway with its own `MIN_PATIENTS` and `COUNT_ROUNDING`): every tool result releases counts only, each of at least k distinct patients (Phirewall tokens, else rows) and rounded, with secondary suppression; no cell values, means, medians, deviations, extremes or quantiles; per-row lists and patient tokens withheld; `get_cross_time_neighbors`, `export_html_report` and `export_dataset_bundle` refused. Results carry a `disclosure` block; `initialize` advertises `io.phirewall/disclosure`. Off by default, with results unchanged.
+
 ## [0.7.0] - 2026-10-28
 
 Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt binary per platform (eight platform packages plus the launcher: macOS arm64/x64, Linux arm64/x64 on glibc and musl, Windows x64/arm64). `npx -y @krv-labs/pulsar install` registers the MCP server with detected agents and upgrades the entries the Python installer wrote. `thema-pulsar` on PyPI stays at 0.6 with no further releases (ADR 0002). The entries further down (0.6.0 and earlier) describe the Python package this replaces.
@@ -14,7 +31,6 @@ Pulsar is now pure Rust and ships on npm as **`@krv-labs/pulsar`**: one prebuilt
 ### Added
 
 - Pure-Rust replacements for every Python MCP tool: the cluster read tools, the six longitudinal tools (`CosmicTrajectory`, `TemporalCosmicGraph`, panel pivot), `export_labeled_data` (pandas-identical CSV), `export_dataset_bundle`, `create_graph_artifact` (with `surface='artifact'` on diagnose/skeleton) and `export_html_report` (byte-identical HTML). Parity against frozen fixtures.
-
 - `get_job` and `wait_job`, and `execution` (`sync` / `async`) on `run_topological_sweep`: a sweep can run as a background job that you poll.
 
 ### Changed (breaking: MCP contract and results)
@@ -25,10 +41,19 @@ Compared with the published `thema-pulsar[mcp]==0.6.0` server:
 - **Characterization above 1,000 rows.** The row subsample is drawn with a different RNG, so k-NN percentiles shift, and `create_config` can derive a different epsilon grid from them. On a 9,172-row dataset this moved the default-workflow topology (largest component 6,646 → 6,282 rows, 243 → 229 components). With the same config, graphs and diagnostics are unchanged.
 - **Dossier signal tiers.** Tiers now come from the exact optimal 1-D k-means instead of scikit-learn's randomized `KMeans(n_init=10)`, so `core` / `supporting` / `context` labels can move for the same graph.
 - **Parity reference.** The golden fixtures were generated by thema-pulsar **0.5.0** (`afe7941`), not 0.6.0. Behaviour added in 0.6.0 is covered by Rust known-answer tests, not fixtures.
+- `create_config` no longer clamps the projection grid at 16 (the KD-tree/linear-scan switch changes speed, not membership); `sweep_strategy` reports the grid ceiling, its source, the variance there and the row count, and dominant-component resolution suggestions are bounded by the feature count.
+- The PCA variance curve (`characterize_dataset`, `create_config` calibration) is probed up to the largest measurable dimension, `min(features, profiled rows)`, instead of only at 2, 3, 5, 10, 15 and 20: every dimension up to 12, otherwise 12 geometrically spaced probes, so the variance elbow and the dimension grid can exceed 20. `DatasetProfile` reports `n_features_profiled`; explicit probe dimensions outside the measurable range are rejected (`PROBE_OUT_OF_RANGE`). `grid_ceiling_source` gains `row_limit`, and the grid is bounded by the profiled row count.
+- The production variance curve is exact: it is read from the eigenvalues of the subsample's Gram matrix (at most profiled-rows squared), so probing every dimension costs one small eigendecomposition and a 1000x5000 table characterizes in about the time the old six-probe randomized estimate took. The Python-parity path keeps the randomized estimate.
 - Package license metadata now matches the BSD 3-Clause LICENSE file (the Cargo manifests said MIT).
+- Rust API: `pseudo_laplacian_inner`, `accumulate_pseudo_laplacians`, `accumulate_pseudo_laplacians_sparse` and `accumulate_temporal_pseudo_laplacians_inner` now return `Result`; `initial_pca_grid` and `build_initial_config_yaml` take `cap: Option<usize>`, and `initial_pca_grid` and `grid_ceiling` take the profiled row count; `characterize_dataset`, `profile_numeric_matrix` and `calibrate_processed_space` take a `PcaProbes` probe set; `DatasetProfile` carries `n_samples_profiled`; `suggest_resolution_dims` takes a ceiling and `finalization_gate` takes `n_features`; `pulsar_core::ensure_finite` and `ensure_members_in_range` are public; `calibrate_processed_space` returns `Result<_, CalibrationFallback>`.
 
 ### Fixed
 
+- Ball Mapper no longer panics on more than 32 identical points in the KD-tree path (projections of 1-16 dims); duplicate-heavy data, including pooled longitudinal panels, now sweeps.
+- PCA rejects NaN or infinite input (in `fit` and `transform`) with an error naming the cell instead of hanging in the SVD. JL rejects it the same way instead of propagating NaN into the projection. Preprocessing and `characterize_dataset` report an infinite cell as `NON_FINITE_VALUE`, and the longitudinal panel pivot as `PANEL_NON_FINITE_VALUE`, before it reaches the scaler.
+- Non-positive or non-finite Ball Mapper epsilons set programmatically are rejected before any projection runs.
+- The pseudo-Laplacian, temporal and MinHash accumulators validate member indices instead of panicking on or dropping out-of-range ones.
+- Panic envelopes state the defect and ask for a report.
 - Tool input schemas advertise their defaults again (`detail`, `response_format`, `surface`, `method`, `execution`, …), and the parameters 0.6.0 required are required again (`ingest_dataset.path`, `create_config.dataset_id`, `draft_preprocessing_plan.dataset_id`, `edit_preprocessing_plan.plan_id`, `validate_config.config_yaml`, `validate_preprocessing_config.config_yaml`, `probe_columns.dataset_id` / `columns`, `compare_sweeps.run_a` / `run_b`). A missing one now fails schema validation.
 - The sweep summary lists `generate_cluster_dossier` in `next_tools` again.
 - Run storage no longer grows without bound. A run whose full affinity equals its constructed graph stores one edge file instead of two identical ones, the store keeps the last `PULSAR_STORE_RUN_RETENTION` completed runs per dataset (default 20, `0` keeps every run), and the sweep reports the run's size as `run_disk_mb`. A pruned `run_id` returns `RUN_ID_UNKNOWN`.

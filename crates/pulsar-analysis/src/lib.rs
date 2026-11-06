@@ -26,6 +26,7 @@ pub mod components;
 pub mod config_build;
 pub mod config_overrides;
 pub mod diagnostics;
+pub mod disclosure;
 pub mod dossier;
 pub mod dossier_payloads;
 pub mod error;
@@ -58,7 +59,8 @@ pub use evidence::{
 pub use hooks::{label_points, membership_matrix, unclustered_points};
 pub use silhouette::{silhouette_samples, silhouette_score};
 pub use thresholds::{
-    agent_threshold_options, component_mass_profile, first_report_ready_candidate,
-    plateau_threshold_candidates, structural_breakpoints, threshold_morphology_profile,
-    transition_adjacent_candidates, Breakpoint, Candidate, Policy, ThresholdOptions,
+    agent_threshold_options, component_mass_profile, component_mass_profiles,
+    first_report_ready_candidate, plateau_threshold_candidates, structural_breakpoints,
+    threshold_morphology_profile, threshold_morphology_profiles, transition_adjacent_candidates,
+    Breakpoint, Candidate, Policy, ThresholdOptions,
 };

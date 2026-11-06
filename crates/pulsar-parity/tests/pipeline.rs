@@ -230,7 +230,7 @@ fn cached_embeddings_reproduce_the_fit() {
         let cfg = exact(cfg);
         let first = fit_case(&cfg, &table);
         let mut seen: Vec<String> = Vec::new();
-        let mut cb = |stage: &str, _: f64| seen.push(stage.to_string());
+        let mut cb = |ev: pulsar_pipeline::ProgressEvent<'_>| seen.push(ev.label.to_string());
         let again = fit(
             &cfg,
             &table,
@@ -276,9 +276,9 @@ fn multi_imputation_fit_and_cache_reuse() {
     );
     let mut fractions: Vec<f64> = Vec::new();
     let mut stages: Vec<String> = Vec::new();
-    let mut cb = |stage: &str, f: f64| {
-        stages.push(stage.to_string());
-        fractions.push(f);
+    let mut cb = |ev: pulsar_pipeline::ProgressEvent<'_>| {
+        stages.push(ev.label.to_string());
+        fractions.push(ev.fraction);
     };
     let multi = fit(&multi_cfg, &table, FitOptions::default(), Some(&mut cb))
         .expect("multi-imputation fit");
@@ -313,7 +313,7 @@ fn multi_imputation_fit_and_cache_reuse() {
 fn progress_is_monotonic_and_ends_at_one() {
     let (cfg, table) = inputs("blobs");
     let mut fractions: Vec<f64> = Vec::new();
-    let mut cb = |_: &str, f: f64| fractions.push(f);
+    let mut cb = |ev: pulsar_pipeline::ProgressEvent<'_>| fractions.push(ev.fraction);
     fit(&cfg, &table, FitOptions::default(), Some(&mut cb)).expect("fit");
     assert!(fractions.windows(2).all(|w| w[0] <= w[1]), "{fractions:?}");
     assert_eq!(fractions.last().copied(), Some(1.0));

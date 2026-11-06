@@ -28,6 +28,8 @@ fn options(want: &Value) -> DraftOptions {
         target_columns: serde_json::from_value(args["targets"].clone()).unwrap(),
         entity_column: args["entity"].as_str().unwrap().into(),
         time_column: args["time"].as_str().unwrap().into(),
+        // Python kept row-index columns as features.
+        row_index_ids: false,
         ..DraftOptions::default()
     };
     if let Some(b) = o["stakes"].as_bool() {

@@ -5,9 +5,10 @@ use pulsar_config::{
     Construction, CosmicGraph as CosmicSpec, Projection, ProjectionMethod, PulsarConfig, Threshold,
 };
 use pulsar_core::{
-    accumulate_pseudo_laplacians_sparse, ball_mapper_grid, find_stable_thresholds_from_edges,
-    jl_grid, pca_grid, BallMapper, CosmicGraphInner, MinHashSignatures, SparsePseudoLaplacian,
-    StabilityResult, StandardScalerInner, DEFAULT_NUM_BINS,
+    accumulate_pseudo_laplacians_sparse, ball_mapper_grid, ensure_members_in_range,
+    find_stable_thresholds_from_edges, jl_grid, pca_grid, BallMapper, CosmicGraphInner,
+    MinHashSignatures, SparsePseudoLaplacian, StabilityResult, StandardScalerInner,
+    DEFAULT_NUM_BINS,
 };
 use pulsar_data::{preprocess, read_table, shared_vocab, Layout, Preprocessed, Table};
 
@@ -170,6 +171,7 @@ pub fn fit(
     progress: Option<&mut ProgressFn<'_>>,
 ) -> Result<Fitted, PipelineError> {
     let batch_size = check_batch_size(opts.ballmap_batch_size)?;
+    check_epsilons(&cfg.ball_mapper.epsilons)?;
     let use_cached = opts.precomputed_embeddings.is_some();
     let variants = cfg.preprocessing_variants();
     let n_variants = variants.len().max(1);
@@ -212,6 +214,11 @@ pub fn fit(
                     expected: n,
                 });
             }
+            // `fit_inner` trusts its input; cached embeddings never passed
+            // through a projection's own finiteness check.
+            for m in &e {
+                pulsar_core::ensure_finite(m)?;
+            }
             e
         }
         None => {
@@ -219,19 +226,21 @@ pub fn fit(
             tracker.complete("scale", None);
             let mut all_embeddings = projection_grid(&x_scaled, &variants[0].projection)?;
             drop(x_scaled);
-            tracker.update(
+            tracker.step(
                 "projection",
-                1.0 / n_variants as f64,
-                Some(&format!("projection variant 1/{n_variants}")),
+                1,
+                n_variants,
+                &format!("projection variant 1/{n_variants}"),
             );
             for (idx, variant_cfg) in variants[1..].iter().enumerate() {
                 let pre_k = preprocess(table, &variant_cfg.preprocessing, None, None)?;
                 let (x_k_scaled, _) = StandardScalerInner::fit_transform(&pre_k.matrix);
                 all_embeddings.extend(projection_grid(&x_k_scaled, &variant_cfg.projection)?);
-                tracker.update(
+                tracker.step(
                     "projection",
-                    (idx + 2) as f64 / n_variants as f64,
-                    Some(&format!("projection variant {}/{n_variants}", idx + 2)),
+                    idx + 2,
+                    n_variants,
+                    &format!("projection variant {}/{n_variants}", idx + 2),
                 );
             }
             all_embeddings
@@ -299,6 +308,7 @@ pub fn fit_multi(
         return Err(PipelineError::EmptyDatasets);
     }
     let batch_size = check_batch_size(opts.ballmap_batch_size)?;
+    check_epsilons(&cfg.ball_mapper.epsilons)?;
     let count = tables.len();
     let projection_count = grid_size(&cfg.projection);
     let batch_count = batch_count(projection_count, batch_size);
@@ -448,6 +458,19 @@ fn stability_weight(spec: &CosmicSpec) -> f64 {
     }
 }
 
+/// Ball Mapper needs at least one radius, each finite and > 0. The config
+/// loader enforces this, but `PulsarConfig` fields are public, so
+/// programmatic configs are re-checked before any ball map is built.
+pub(crate) fn check_epsilons(epsilons: &[f64]) -> Result<(), PipelineError> {
+    if !epsilons.is_empty() && epsilons.iter().all(|&eps| eps.is_finite() && eps > 0.0) {
+        Ok(())
+    } else {
+        Err(PipelineError::InvalidOption {
+            what: "ball_mapper.epsilons",
+        })
+    }
+}
+
 /// Ball Mapper over `embeddings` in batches, folded into `builder`.
 fn sweep(
     embeddings: &[Array2<f64>],
@@ -470,13 +493,14 @@ fn sweep(
         if let Some(store) = store.as_deref_mut() {
             store.extend(maps);
         }
-        tracker.update(
+        tracker.step(
             &stage,
-            (k + 1) as f64 / total as f64,
-            Some(&format!(
+            k + 1,
+            total,
+            &format!(
                 "{prefix}sweep batch {}/{total}: ball_mapper + construction",
                 k + 1
-            )),
+            ),
         );
     }
     Ok(())
@@ -510,6 +534,9 @@ impl CosmicBuilder {
     pub(crate) fn accumulate(&mut self, maps: &[BallMapper]) -> Result<(), PipelineError> {
         match self {
             Self::MinHash(sig) => {
+                // MinHash drops an index past `n` without a trace; the exact
+                // path refuses it, so refuse it here too.
+                ensure_members_in_range(maps.iter().flat_map(|m| &m.nodes), sig.n())?;
                 let balls: Vec<&[usize]> = maps
                     .iter()
                     .flat_map(|m| m.nodes.iter().map(Vec::as_slice))
@@ -518,7 +545,7 @@ impl CosmicBuilder {
             }
             Self::Exact { n, acc } => {
                 let per_map: Vec<&[Vec<usize>]> = maps.iter().map(|m| m.nodes.as_slice()).collect();
-                let block = accumulate_pseudo_laplacians_sparse(&per_map, *n);
+                let block = accumulate_pseudo_laplacians_sparse(&per_map, *n)?;
                 match acc {
                     None => *acc = Some(block),
                     Some(existing) => existing.merge_in_place(&block)?,
@@ -615,4 +642,32 @@ fn finalize(
         threshold,
         graph,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_constructions_refuse_an_out_of_range_member() {
+        let mut spec = pulsar_config::from_yaml_str("sweep: {ball_mapper: {epsilon: 0.5}}")
+            .unwrap()
+            .cosmic_graph;
+        let maps = [BallMapper {
+            eps: 0.5,
+            nodes: vec![vec![0, 1], vec![2, 4]],
+            edges: vec![],
+        }];
+        for construction in [Construction::Minhash, Construction::Exact] {
+            spec.construction = construction;
+            let err = CosmicBuilder::new(4, &spec).accumulate(&maps).unwrap_err();
+            assert_eq!(err.code(), "INVALID_PARAMETER", "{construction:?}");
+            assert!(
+                err.to_string()
+                    .contains("index 4 is out of range for n = 4"),
+                "{construction:?}: {err}"
+            );
+            assert!(CosmicBuilder::new(5, &spec).accumulate(&maps).is_ok());
+        }
+    }
 }

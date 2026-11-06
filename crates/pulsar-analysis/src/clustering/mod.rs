@@ -2,6 +2,7 @@
 
 pub mod agglomerative;
 pub mod lobpcg;
+pub mod merge;
 pub mod resolve;
 pub mod spectral;
 

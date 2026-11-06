@@ -1,9 +1,13 @@
 //! Process-wide server state: the store, the bounded model cache, the
 //! single-client session, and run resolution for tools.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use pulsar_analysis::characterization::GroupSummaryThresholds;
+use pulsar_analysis::clustering::resolve::ResolveMethod;
+use pulsar_analysis::dossier::TopologicalDossier;
 use pulsar_analysis::feature_evidence::FeatureEvidenceIndex;
 use pulsar_config::PulsarConfig;
 use pulsar_core::TemporalCosmicGraph;
@@ -18,9 +22,10 @@ use rmcp::task_manager::TaskManager;
 
 use crate::envelope::ToolError;
 
-/// Default `PULSAR_MCP_MAX_RESPONSE_BYTES`: ~25k tokens, the tool-result cap
-/// of the stricter agent hosts.
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100_000;
+/// Default `PULSAR_MCP_MAX_RESPONSE_BYTES`, the hard limit in agent-visible
+/// characters: under Claude Code's 50,000-character spill line (see
+/// [`crate::budget`]).
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = crate::budget::DEFAULT_HARD_LIMIT;
 
 /// A fitted model held in memory with what it was fitted on.
 pub struct LiveRun {
@@ -31,6 +36,9 @@ pub struct LiveRun {
     pub data_path: Option<PathBuf>,
     /// Projection fingerprint of the embeddings (cache reuse across retries).
     pub projection_fingerprint: String,
+    /// Columns the run's preprocessing plan names as identifiers (empty
+    /// when the run matches no stored plan).
+    pub identifier_columns: Vec<String>,
 }
 
 impl LiveRun {
@@ -55,12 +63,17 @@ pub struct Session {
     /// Labels and evidence published by `generate_cluster_dossier`; a new
     /// sweep clears them.
     pub clusters: Option<Arc<ClusterState>>,
+    /// The last persisted (non-live) assignment a cluster read tool loaded
+    /// by `cluster_assignment_id`; never the live labels.
+    pub persisted_clusters: Option<Arc<ClusterState>>,
     /// Longitudinal panels built in this session, oldest first (at most
     /// [`MAX_LONGITUDINAL_ARTIFACTS`]).
     pub longitudinal: Vec<Arc<LongitudinalArtifact>>,
     /// Graph artifacts from `create_graph_artifact`, oldest first (at most
     /// [`MAX_GRAPH_ARTIFACTS`]). A new sweep marks them stale, not gone.
     pub graph_artifacts: Vec<Arc<GraphArtifact>>,
+    /// True iff the client declared experimental `io.phirewall/release` v1 at initialize.
+    pub phirewall_release: bool,
 }
 
 /// Graph artifacts kept in the session.
@@ -100,6 +113,103 @@ pub struct LongitudinalArtifact {
     pub config_yaml: String,
 }
 
+/// Cached graph-level metrics and sorted structures for one `run_id`,
+/// invalidated when a new sweep replaces the session's run.
+#[derive(Debug, Clone)]
+pub struct RunGraphCache {
+    pub run_id: RunId,
+    pub affinity: Arc<Graph>,
+    pub threshold_graph: Arc<pulsar_analysis::ThresholdGraph>,
+    pub stability: Option<Arc<pulsar_core::StabilityResult>>,
+    pub metrics: Option<pulsar_analysis::GraphMetrics>,
+    pub summary: Option<Arc<pulsar_analysis::GraphSummary>>,
+}
+
+impl RunGraphCache {
+    pub fn build(
+        run_id: RunId,
+        graph: &Graph,
+        affinity: Graph,
+        resolved_construction_threshold: f64,
+        n_ball_maps: usize,
+        minhash_d: Option<usize>,
+        fitted_stability: Option<&pulsar_core::StabilityResult>,
+    ) -> Self {
+        let threshold_graph = Arc::new(pulsar_analysis::ThresholdGraph::from_edges(
+            affinity.n,
+            &affinity.edges,
+        ));
+        let (metrics, summary) = match pulsar_analysis::GraphAnalysis::new(graph) {
+            Ok(analysis) => {
+                let m = analysis.metrics(
+                    resolved_construction_threshold,
+                    n_ball_maps,
+                    Some(&affinity.edges),
+                    minhash_d,
+                );
+                let s = Arc::new(analysis.summary(resolved_construction_threshold));
+                (Some(m), Some(s))
+            }
+            Err(_) => (None, None),
+        };
+        let stability = match fitted_stability {
+            Some(s) => Some(Arc::new(s.clone())),
+            None => pulsar_core::find_stable_thresholds_from_edges(
+                affinity.n,
+                &affinity.edges,
+                pulsar_core::DEFAULT_NUM_BINS,
+            )
+            .ok()
+            .map(Arc::new),
+        };
+        Self {
+            run_id,
+            affinity: Arc::new(affinity),
+            threshold_graph,
+            stability,
+            metrics,
+            summary,
+        }
+    }
+
+    pub fn from_live(live: &LiveRun, record: &RunRecord) -> Self {
+        let fitted = &live.fitted;
+        let affinity = Graph {
+            n: fitted.n,
+            edges: fitted.weighted_edges(Some(0.0)),
+        };
+        let minhash_d = match fitted.config.cosmic_graph.construction {
+            pulsar_config::Construction::Minhash => {
+                Some(fitted.config.cosmic_graph.minhash_d as usize)
+            }
+            pulsar_config::Construction::Exact => None,
+        };
+        Self::build(
+            record.run_id.clone(),
+            &fitted.graph,
+            affinity,
+            record.resolved_construction_threshold,
+            record.n_ball_maps,
+            minhash_d,
+            fitted.stability.as_ref(),
+        )
+    }
+}
+
+/// Cached clustering resolution for the live `ClusterState`.
+#[derive(Debug, Clone)]
+pub struct CachedResolution {
+    pub method: ResolveMethod,
+    pub max_k: usize,
+    pub interpretation_threshold: f64,
+    pub method_used: String,
+    pub n_clusters: usize,
+    pub silhouette: Option<f64>,
+    pub threshold_applied: f64,
+    pub plateaus: serde_json::Value,
+    pub failure_reason: Option<String>,
+}
+
 /// One published clustering of the session's latest run: what the cluster
 /// tools read, and the evidence cache a repeated dossier reuses.
 #[derive(Debug)]
@@ -112,6 +222,14 @@ pub struct ClusterState {
     pub evidence: Arc<FeatureEvidenceIndex>,
     /// Everything besides the run and labels that `evidence` depends on.
     pub evidence_key: EvidenceKey,
+    /// The dossier's group_summary, reused while the evidence and the
+    /// thresholds match.
+    pub group_summary: serde_json::Value,
+    pub summary_thresholds: GroupSummaryThresholds,
+    /// Cached clustering cut when computed via `resolve_clusters`.
+    pub resolution: Option<CachedResolution>,
+    /// Cached `TopologicalDossier` by detail (`"standard"` / `"full"`).
+    pub dossiers: Mutex<HashMap<String, TopologicalDossier>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +274,7 @@ pub struct ServerState {
     pub tasks: TaskManager,
     pub options: ServerOptions,
     session: Mutex<Session>,
+    run_graph_cache: Arc<Mutex<HashMap<RunId, Arc<RunGraphCache>>>>,
 }
 
 impl ServerState {
@@ -169,6 +288,7 @@ impl ServerState {
             tasks: TaskManager::new(),
             options,
             session: Mutex::new(Session::default()),
+            run_graph_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -178,6 +298,43 @@ impl ServerState {
 
     pub fn session_snapshot(&self) -> Session {
         self.session().clone()
+    }
+
+    pub fn phirewall_release(&self) -> bool {
+        self.session().phirewall_release
+    }
+
+    /// Replace the cached graph metrics for the newly fitted run and
+    /// invalidate any superseded run's cached graph metrics.
+    pub fn set_run_graph_cache(&self, replaced: Option<&RunId>, entry: Arc<RunGraphCache>) {
+        let mut guard = self
+            .run_graph_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = replaced {
+            guard.remove(prev);
+        }
+        guard.insert(entry.run_id.clone(), entry);
+    }
+
+    /// Return the cached `RunGraphCache` for `record.run_id`, building and
+    /// inserting it from `live` on a miss.
+    pub fn graph_cache_for_live(&self, live: &LiveRun, record: &RunRecord) -> Arc<RunGraphCache> {
+        if let Some(entry) = self
+            .run_graph_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&record.run_id)
+            .cloned()
+        {
+            return entry;
+        }
+        let arc = Arc::new(RunGraphCache::from_live(live, record));
+        self.run_graph_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(record.run_id.clone(), arc.clone());
+        arc
     }
 
     /// Resolve `run_id` (empty = the session's latest run) to its persisted
@@ -199,6 +356,7 @@ impl ServerState {
             live: self.cache.get(&id),
             record,
             store: self.store.clone(),
+            run_graph_cache: self.run_graph_cache.clone(),
         })
     }
 
@@ -232,11 +390,48 @@ pub struct RunView {
     pub record: RunRecord,
     pub live: Option<Arc<LiveRun>>,
     store: Store,
+    run_graph_cache: Arc<Mutex<HashMap<RunId, Arc<RunGraphCache>>>>,
 }
 
 impl RunView {
     pub fn run_id(&self) -> &RunId {
         &self.record.run_id
+    }
+
+    /// Cached graph metrics, sorted edge structures and stability curve for
+    /// this `run_id`, computed once on demand and reused across tools.
+    pub fn graph_cache(&self) -> Result<Arc<RunGraphCache>, StoreError> {
+        if let Some(entry) = self
+            .run_graph_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.record.run_id)
+            .cloned()
+        {
+            return Ok(entry);
+        }
+        let built = match &self.live {
+            Some(live) => RunGraphCache::from_live(live, &self.record),
+            None => {
+                let graph = self.store.run_graph(&self.record.run_id)?;
+                let affinity = self.store.run_affinity(&self.record.run_id)?;
+                RunGraphCache::build(
+                    self.record.run_id.clone(),
+                    &graph,
+                    affinity,
+                    self.record.resolved_construction_threshold,
+                    self.record.n_ball_maps,
+                    self.minhash_d(),
+                    None,
+                )
+            }
+        };
+        let arc = Arc::new(built);
+        self.run_graph_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(self.record.run_id.clone(), arc.clone());
+        Ok(arc)
     }
 
     /// The constructed graph (live model or the `graph.arrow` sidecar).
@@ -249,6 +444,15 @@ impl RunView {
 
     /// The full weighted affinity (live model or the `affinity.arrow` sidecar).
     pub fn affinity(&self) -> Result<Graph, StoreError> {
+        if let Some(entry) = self
+            .run_graph_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.record.run_id)
+            .cloned()
+        {
+            return Ok((*entry.affinity).clone());
+        }
         match &self.live {
             Some(live) => Ok(Graph {
                 n: live.fitted.n,

@@ -25,7 +25,7 @@ pub use error::PipelineError;
 pub use fingerprint::projection_fingerprint;
 pub use fit::{fit, fit_multi, fit_path, projection_grid, FitOptions, Fitted};
 pub use graph::{Csr, Graph};
-pub use progress::{ProgressFn, ProgressTracker};
+pub use progress::{ProgressEvent, ProgressFn, ProgressTracker};
 pub use representatives::select_representatives;
 pub use threads::{configure_threads, current_threads};
 pub use trajectory::{Ball, CosmicTrajectory, EntityIds, Observation};

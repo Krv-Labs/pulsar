@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use pulsar_analysis::characterization::{
     characterization_payload_to_markdown, characterize_dataset, compact_characterization_payload,
     probe_columns_payload, probe_columns_payload_to_markdown, profile_column_details,
-    CharacterizationError, ColumnProfile,
+    CharacterizationError, ColumnProfile, PcaProbes,
 };
 use pulsar_data::{DataError, Table};
 use rmcp::model::CallToolResult;
@@ -41,7 +41,7 @@ pub(super) async fn load(tool: &'static str, path: &str) -> Result<Table, ToolEr
     let owned = std::path::PathBuf::from(path);
     tokio::task::spawn_blocking(move || pulsar_data::read_table(&owned))
         .await
-        .map_err(|e| ToolError::new(tool, "DATASET_LOAD_FAILED", e.to_string(), "Retry the call."))?
+        .map_err(|e| ToolError::worker_stopped(tool, "DATASET_LOAD_FAILED", &e))?
         .map_err(|e| match &e {
             DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => ToolError::path_access(
                 tool,
@@ -64,9 +64,6 @@ pub(super) async fn load(tool: &'static str, path: &str) -> Result<Table, ToolEr
 fn point_at_registered_tools(payload: &mut Value, markdown: &mut String) {
     if !registered("create_config") {
         payload["recommended_next_tool"] = json!("draft_preprocessing_plan");
-        payload["agent_guidance"] = json!(
-            "Use draft_preprocessing_plan(dataset_id) to draft a preprocessing plan. Use probe_columns(dataset_id, columns) only for specific columns listed in column_profile_preview or named by the user."
-        );
         *markdown = markdown.replace(
             "- `create_config` for processed-space calibration.",
             "- `draft_preprocessing_plan` to draft a preprocessing plan.",
@@ -97,7 +94,7 @@ pub fn characterize_spec() -> ToolSpec {
     ToolSpec {
         name: CHARACTERIZE,
         title: "Characterize dataset",
-        description: "Summarize dataset geometry and schema: row/feature counts, variance curve, k-NN scale and a ranked column preview. Returns a bounded measurement packet with no domain interpretation. On massive datasets it adds a minhash_advisory suggesting cosmic_graph.minhash_d. Use it to see the data's scale and structure before drafting a preprocessing plan.",
+        description: "Summarize raw dataset geometry and schema: row/feature counts, variance curve, k-NN scale and a ranked `column_profile_preview` (plus `minhash_advisory` on large tables). `recommended_next_tool` names the next step (`create_config` for processed-space calibration, else `draft_preprocessing_plan`); use `probe_columns(dataset_id, columns)` only for specific columns listed in `column_profile_preview` or named by the user.",
         input_schema: input_schema::<CharacterizeParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -115,7 +112,6 @@ pub fn characterize_spec() -> ToolSpec {
                 ("column_profile_preview", s::array(s::open_object())),
                 ("omitted_column_profiles", s::integer()),
                 ("recommended_next_tool", s::string()),
-                ("agent_guidance", s::string()),
                 ("minhash_advisory", s::open_object()),
             ],
             &["status", "n_samples", "raw_numeric_geometry", "schema_summary", "column_profile_preview", "recommended_next_tool"],
@@ -126,15 +122,27 @@ pub fn characterize_spec() -> ToolSpec {
     }
 }
 
-fn characterization_error(error: CharacterizationError) -> ToolError {
+pub(super) fn characterization_error(
+    tool: &'static str,
+    error: CharacterizationError,
+) -> ToolError {
     let action = match &error {
         CharacterizationError::TooFewNumericColumns { .. } => {
             "Geometry needs at least two numeric columns. Inspect the schema with probe_columns, or fix the column types and re-ingest."
         }
         CharacterizationError::TooFewRows { .. } => "The dataset needs at least two rows to measure neighbour distances.",
+        CharacterizationError::NonFiniteValue { .. } => {
+            "Geometry is measured on the raw file, before any preprocessing plan applies, so this cell blocks it until the source value is replaced or nulled (or the column removed) and the dataset is re-ingested. probe_columns shows the column's range."
+        }
         _ => "Check the dataset is readable tabular data, then retry or re-ingest it.",
     };
-    ToolError::new(CHARACTERIZE, error.code(), error.to_string(), action)
+    let err = ToolError::new(tool, error.code(), error.to_string(), action);
+    match &error {
+        CharacterizationError::NonFiniteValue { column, row, .. } => err
+            .detail("column", json!(column))
+            .detail("row", json!(row)),
+        _ => err,
+    }
 }
 
 pub async fn characterize(
@@ -169,20 +177,17 @@ pub async fn characterize(
     };
     state.session().latest_dataset_id = Some(dataset_id.clone());
     let table = load(CHARACTERIZE, &path).await?;
-    let profile =
-        tokio::task::spawn_blocking(move || characterize_dataset(&table, SUBSAMPLE, SEED))
-            .await
-            .map_err(|e| {
-                ToolError::new(
-                    CHARACTERIZE,
-                    "CHARACTERIZATION_FAILED",
-                    e.to_string(),
-                    "Retry; report the error if it recurs.",
-                )
-            })?
-            .map_err(characterization_error)?;
+    let profile = tokio::task::spawn_blocking(move || {
+        characterize_dataset(&table, SUBSAMPLE, SEED, PcaProbes::DataRelative)
+    })
+    .await
+    .map_err(|e| ToolError::worker_stopped(CHARACTERIZE, "CHARACTERIZATION_FAILED", &e))?
+    .map_err(|e| characterization_error(CHARACTERIZE, e))?;
 
     let mut payload = compact_characterization_payload(&profile);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("agent_guidance");
+    }
     payload["dataset_id"] = json!(dataset_id.to_string());
     let mut markdown = characterization_payload_to_markdown(&payload);
     point_at_registered_tools(&mut payload, &mut markdown);
@@ -269,14 +274,7 @@ pub async fn probe(state: &ServerState, p: ProbeParams) -> Result<CallToolResult
         probe_columns_payload(&profiles, &columns, &missing)
     })
     .await
-    .map_err(|e| {
-        ToolError::new(
-            PROBE,
-            "PROBE_FAILED",
-            e.to_string(),
-            "Check the column names and retry with fewer columns.",
-        )
-    })?;
+    .map_err(|e| ToolError::worker_stopped(PROBE, "PROBE_FAILED", &e))?;
 
     let text = match p.response_format {
         Format::Markdown => probe_columns_payload_to_markdown(&payload),

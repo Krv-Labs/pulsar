@@ -11,8 +11,10 @@ use crate::state::ServerState;
 pub const NAME: &str = "ingest_dataset";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
-    /// Absolute path to a CSV or Parquet file on the machine running this server (host-visible; sandbox-only paths fail).
+    /// Absolute path to a CSV or Parquet file on the machine running this server (host-visible; sandbox-only paths fail). `csv_path` is accepted as an alias.
+    #[serde(alias = "csv_path")]
     pub path: String,
 }
 
@@ -41,31 +43,27 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, ToolError> {
-    if p.path.trim().is_empty() {
-        return Err(ToolError::invalid_argument(
-            NAME,
-            "path is required.",
-            "Pass the absolute, host-visible path of a CSV or Parquet file.",
-        ));
-    }
+    let raw_path = match Some(p.path.as_str()).filter(|s| !s.trim().is_empty()) {
+        Some(path) => path.to_owned(),
+        None => {
+            return Err(ToolError::invalid_argument(
+                NAME,
+                "path is required.",
+                "Pass the absolute, host-visible path of a CSV or Parquet file as `path` (or `csv_path`).",
+            ));
+        }
+    };
     let store = state.store.clone();
-    let path = p.path.clone();
+    let path = raw_path.clone();
     let record = tokio::task::spawn_blocking(move || store.register_dataset(&path))
         .await
-        .map_err(|e| {
-            ToolError::new(
-                NAME,
-                "INGEST_FAILED",
-                e.to_string(),
-                "Retry ingest_dataset.",
-            )
-        })?;
+        .map_err(|e| ToolError::worker_stopped(NAME, "INGEST_FAILED", &e))?;
     let record = match record {
         Ok(r) => r,
         Err(pulsar_store::StoreError::DatasetNotFound { .. }) => {
             return Err(ToolError::path_access(
                 NAME,
-                &p.path,
+                &raw_path,
                 "Ask the user for a host-visible absolute dataset path, then call ingest_dataset again.",
                 "Your file is isolated in a sandbox. DO NOT use base64 or chunked uploads. Ask the user for a host-visible absolute path, or call get_runtime_context to find `cache_dir`; only if the user confirms the server host can see it, copy the file there and retry ingest_dataset(path) with the new path.",
             ));

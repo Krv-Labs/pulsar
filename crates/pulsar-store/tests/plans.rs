@@ -62,13 +62,19 @@ fn updating_swaps_the_revision_and_keeps_the_creation_time() {
     let store = Store::open_at(root.path()).unwrap();
     let id = PlanId::random();
     let first = store.save_plan(&id, "ds_x", 1, json!({"v": 1})).unwrap();
+    assert_eq!(first.previous_plan, None);
     let second = store.update_plan(&id, 1, 2, json!({"v": 2})).unwrap();
     assert_eq!(
         (second.revision, second.plan, second.created_at),
         (2, json!({"v": 2}), first.created_at)
     );
     assert!(second.updated_at >= first.updated_at);
-    assert_eq!(store.get_plan(&id).unwrap().revision, 2);
+    // The body it replaced is kept, so the latest change can be described.
+    let stored = store.get_plan(&id).unwrap();
+    assert_eq!(
+        (stored.revision, stored.previous_plan),
+        (2, Some(json!({"v": 1})))
+    );
 }
 
 #[test]

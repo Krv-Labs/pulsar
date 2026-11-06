@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:phirewall:data-decisions-sidecar:v1",
+  "title": "data-decisions sidecar v1",
+  "description": "A JSON file Phirewall writes next to a dataset twin (`<safe_path>.decisions.json`) so downstream tools read Phirewall's data-meaning decisions instead of re-asking. Only decisions in force appear: stale ones are excluded. Codes only, plus the agent's gated question text on open items: no cell values, no value lists, no counts of rows or patients. `prepared` is present only for prepared versions, whose ops are already applied to the twin and must not be re-applied. Unknown fields are allowed and ignored; adding an optional field or an enum code does not bump `version`.",
+  "type": "object",
+  "required": ["contract", "version", "dataset", "dataset_version", "columns", "open"],
+  "properties": {
+    "contract": {
+      "description": "What this file is. A reader ignores a file whose contract it does not know.",
+      "const": "io.phirewall/data-decisions"
+    },
+    "version": {
+      "description": "Contract version. Bumped only on a breaking change (a field removed, renamed, retyped, made required, or its meaning or bound changed). A reader ignores a file whose version it does not know.",
+      "const": 1
+    },
+    "dataset": {
+      "description": "The Phirewall dataset name this sidecar belongs to: a prepared version's name, or the registered dataset's.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "dataset_version": {
+      "description": "The data version the decisions were made against: the dataset's own version (a hash of its file and column names), or the recipe's source_data_version for a prepared version.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "twin_sha256": {
+      "description": "Optional (added in v1, additive). The lowercase hex SHA-256 of the exact CSV bytes this sidecar sits beside: the registered dataset's twin, or the prepared version's. A reader checks it against the twin it reads; `dataset_version` hashes the source file and column names, so it never equals a hash of the twin.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "prepared": {
+      "description": "Present only for prepared versions. Their ops are already applied to the twin, so a reader must not re-apply them.",
+      "type": "object",
+      "required": ["name", "parent", "recipe_ops"],
+      "properties": {
+        "name": {
+          "description": "The prepared version's dataset name (the same as `dataset`).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "parent": {
+          "description": "The dataset the version was prepared from.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "recipe_ops": {
+          "description": "How many recipe ops were applied to the twin, in run order. A count of ops, never of rows or patients.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "columns": {
+      "description": "One entry per column a settled (agent_decided or clinician_confirmed) in-force decision covers. A decision over several columns appears once per column.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["column", "decided_by", "state"],
+        "properties": {
+          "column": {
+            "description": "The column name, as registered.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "meaning": {
+            "description": "What the column means, when the decision is an interpretation with a non-role meaning (a code from data-decisions v1).",
+            "$ref": "#/$defs/meaningCode"
+          },
+          "role": {
+            "description": "The column's role, when the decision is an interpretation with a role meaning: time, outcome or group.",
+            "enum": ["time", "outcome", "group"]
+          },
+          "op": {
+            "description": "The decided transformation's op name only, never its arguments (they can carry values).",
+            "$ref": "#/$defs/opCode"
+          },
+          "decided_by": {
+            "description": "Who settled the decision: the agent or the clinician.",
+            "enum": ["agent", "clinician"]
+          },
+          "state": {
+            "description": "How far the decision got. Only settled states appear here; open ones are under `open`.",
+            "enum": ["agent_decided", "clinician_confirmed"]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "open": {
+      "description": "The in-force decisions still open: questions for the clinician. A reader keeps asking these.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["column", "question", "state"],
+        "properties": {
+          "column": {
+            "description": "The column name, as registered.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "question": {
+            "description": "The open question in the decider's own words (their rationale). It passed the output gate's identifier check before it was stored, and again before this file was written.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
+          },
+          "state": {
+            "description": "Always `open` here.",
+            "const": "open"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "meaningCode": {
+      "description": "A data-agnostic reading of a column or a value (the non-role codes of data-decisions v1).",
+      "enum": ["code", "ordinal", "quantity", "count", "date", "flag", "identifier", "free_text", "not_recorded", "not_applicable", "unknown", "refused", "real_value", "bound", "shared_missingness"]
+    },
+    "opCode": {
+      "description": "The repair vocabulary (the op codes of data-decisions v1).",
+      "enum": ["normalize_text", "decimal_separator", "value_map", "sentinel_to_blank", "text_to_number", "capped_to_bound", "date_format", "split", "code_normalize", "unit_convert", "range_flag", "drop_column", "combine_columns"]
+    }
+  }
+}

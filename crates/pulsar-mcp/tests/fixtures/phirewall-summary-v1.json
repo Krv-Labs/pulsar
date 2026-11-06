@@ -1,0 +1,482 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:phirewall:summary:v1",
+  "title": "io.phirewall/summary v1",
+  "description": "One object in a tool result's structuredContent under the key \"io.phirewall/summary\", added beside the server's own fields. Parts are optional; a server emits the ones that fit its output. Column names, codes and numbers only, never prose or data values. Lists have no fixed maximum: the gateway's answer size limit bounds the object, and readers apply their own display limits. Unknown fields and unknown parts are allowed and ignored by a reader that does not know them. A new part is a new top-level property: add it under `properties` with its own `$defs` entry (an object that follows the privacy rules and gives every list an `*_omitted` count where the server leaves entries out); adding a part or an optional field does not bump `version`.",
+  "type": "object",
+  "required": ["version", "row_floor", "run"],
+  "properties": {
+    "version": {
+      "description": "Contract version. Bumped only on a breaking change (a field removed, renamed, retyped, made required, or its meaning or bound changed). A reader ignores the whole object when it does not know the version.",
+      "const": 1
+    },
+    "row_floor": {
+      "description": "The fewest rows any disclosed group, level or count stands for. Every \"under N\" in this object has N = row_floor, except in `grouping`, where it is `grouping.limits.min_rows` (never lower).",
+      "type": "integer",
+      "minimum": 8
+    },
+    "run": { "$ref": "#/$defs/run" },
+    "inputs": { "$ref": "#/$defs/inputs" },
+    "thresholds": { "$ref": "#/$defs/thresholds" },
+    "grouping": { "$ref": "#/$defs/grouping" },
+    "changes": { "$ref": "#/$defs/changes" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "part": {
+      "description": "The shape every part, defined here or added later (e.g. `trajectories`), must have: an object. A reader ignores a top-level key it does not know.",
+      "type": "object"
+    },
+
+    "id": {
+      "description": "A server's handle for a run or dataset.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "label": {
+      "description": "A column name or level as the server read it, cut to 80 characters plus \"…\" (on a character boundary). The entry holding a cut label sets `truncated: true`. Display only, never an id.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 81,
+      "if": { "minLength": 81 },
+      "then": { "pattern": "…$" }
+    },
+    "blankShare": {
+      "description": "Share of rows blank, to 2 decimals; a nonzero share under 0.01 is 0.01. Null when unknown.",
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "decidedBy": {
+      "description": "Who set the treatment: a default rule, the agent or the user.",
+      "enum": ["default", "agent", "user"]
+    },
+    "decision": {
+      "description": "A settled data decision on a column (data-decisions v1 `columnDecision`): what the column or its values mean and the repair applied, as codes. `decided_by` is who settled it (agent or clinician), independent of the line's own `decided_by` for the server's treatment. `version` is the dataset version it belongs to: a prepared version's name, or the source data_version.",
+      "type": "object",
+      "required": ["source", "decided_by", "version"],
+      "properties": {
+        "source": { "enum": ["phirewall", "pulsar"] },
+        "meaning": { "$ref": "#/$defs/code" },
+        "op": { "$ref": "#/$defs/code" },
+        "decided_by": { "enum": ["agent", "clinician"] },
+        "version": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": true
+    },
+    "code": {
+      "description": "A fixed machine word (a method, reason, metric or question code), never data.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "maxLength": 40
+    },
+    "feature": {
+      "description": "Stable column id: the column's zero-based position in the dataset's table as the server read it (all columns, before any exclusion). The same for the same column in every part and every run on the dataset.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "description": "A label in this entry was cut. Omitted or false when none was.",
+      "type": "boolean"
+    },
+    "omitted": {
+      "description": "How many entries the list beside it left out (the list `x` has the sibling `x_omitted`).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "rowCount": {
+      "description": "A disclosed row count: 0, or rounded to the nearest 5 (halves up), or the string \"under N\" when nonzero and under the floor that applies.",
+      "oneOf": [
+        { "type": "integer", "minimum": 0, "multipleOf": 5 },
+        { "type": "string", "pattern": "^under ([89]|[1-9][0-9]+)$" }
+      ]
+    },
+    "column": {
+      "description": "A column named by id and label.",
+      "type": "object",
+      "required": ["feature", "column"],
+      "properties": {
+        "feature": { "$ref": "#/$defs/feature" },
+        "column": { "$ref": "#/$defs/label" },
+        "truncated": { "$ref": "#/$defs/truncated" }
+      },
+      "if": { "required": ["column"], "properties": { "column": { "minLength": 81 } } },
+      "then": { "required": ["truncated"], "properties": { "truncated": { "const": true } } },
+      "additionalProperties": true
+    },
+
+    "run": {
+      "description": "Which run and dataset the parts describe. The gateway remembers parts under run_id, or under dataset_id when there is no run yet (a config before its first sweep).",
+      "type": "object",
+      "properties": {
+        "run_id": { "$ref": "#/$defs/id" },
+        "dataset_id": { "$ref": "#/$defs/id" },
+        "rows": {
+          "description": "The dataset's rows, the denominator for every part.",
+          "$ref": "#/$defs/rowCount"
+        }
+      },
+      "anyOf": [{ "required": ["run_id"] }, { "required": ["dataset_id"] }],
+      "additionalProperties": true
+    },
+
+    "inputs": {
+      "description": "What preprocessing does to the input columns. Column counts and level counts are exact; row counts follow the privacy rules.",
+      "type": "object",
+      "required": ["revision", "input_columns", "output_features", "counts", "dropped", "dropped_omitted", "encoded", "encoded_omitted", "imputed", "imputed_omitted", "open_questions", "open_questions_omitted", "changes_from_previous", "changes_from_previous_omitted"],
+      "properties": {
+        "revision": { "description": "Plan revision, from 1.", "type": "integer", "minimum": 1 },
+        "input_columns": { "type": "integer", "minimum": 0 },
+        "output_features": {
+          "description": "Processed features after encoding; null when the plan does not apply to the data.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "counts": {
+          "description": "Columns per fate. `kept` includes encoded and imputed columns; one column can be both encoded and imputed. kept + dropped = input_columns.",
+          "type": "object",
+          "required": ["kept", "dropped", "encoded", "imputed"],
+          "properties": {
+            "kept": { "type": "integer", "minimum": 0 },
+            "dropped": { "type": "integer", "minimum": 0 },
+            "encoded": { "type": "integer", "minimum": 0 },
+            "imputed": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        },
+        "kept": {
+          "description": "Every feature column. With `dropped`, one line per input column. Optional: older producers omit it.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/column" }],
+            "properties": {
+              "indicator": {
+                "description": "Blank marker: none, the column's own, or one a group shares.",
+                "enum": ["none", "own", "group"]
+              },
+              "missing_fraction": { "$ref": "#/$defs/blankShare" },
+              "decided_by": { "$ref": "#/$defs/decidedBy" },
+              "question": {
+                "description": "Id of the open question whose default sets this column's treatment, as `open_questions[].id`.",
+                "$ref": "#/$defs/code"
+              },
+              "partner": {
+                "description": "The 0/1 column this one is blank against: set only when it is blank exactly where the partner has one value.",
+                "$ref": "#/$defs/column"
+              },
+              "relation": {
+                "description": "Where the column is blank, relative to `partner`.",
+                "enum": ["missing_when_partner_zero", "missing_when_partner_nonzero"]
+              },
+              "decision": {
+                "description": "The settled data decision behind this column, when there is one: Phirewall's (shared, from data-decisions v1) or the server's own. Open decisions are not here; they stay `open_questions`.",
+                "$ref": "#/$defs/decision"
+              }
+            }
+          }
+        },
+        "kept_omitted": { "$ref": "#/$defs/omitted" },
+        "dropped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/column" }],
+            "required": ["reason"],
+            "properties": {
+              "reason": {
+                "enum": ["designated", "user", "agent", "missing", "constant", "identifier", "datetime", "conditional", "high_cardinality", "other"]
+              },
+              "role": {
+                "description": "The column's role: drop, id, or a designated entity, time or target (outcome) column.",
+                "enum": ["drop", "id", "entity", "time", "target"]
+              },
+              "missing_fraction": { "$ref": "#/$defs/blankShare" },
+              "decided_by": { "$ref": "#/$defs/decidedBy" },
+              "question": {
+                "description": "Id of the open question whose default sets this column's treatment, as `open_questions[].id`.",
+                "$ref": "#/$defs/code"
+              },
+              "partner": {
+                "description": "The 0/1 column this one is blank against: set only when it is blank exactly where the partner has one value.",
+                "$ref": "#/$defs/column"
+              },
+              "relation": {
+                "description": "Where the column is blank, relative to `partner`.",
+                "enum": ["missing_when_partner_zero", "missing_when_partner_nonzero"]
+              },
+              "decision": {
+                "description": "The settled data decision behind this column, when there is one: Phirewall's (shared, from data-decisions v1) or the server's own. Open decisions are not here; they stay `open_questions`.",
+                "$ref": "#/$defs/decision"
+              }
+            }
+          }
+        },
+        "dropped_omitted": { "$ref": "#/$defs/omitted" },
+        "encoded": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/column" }],
+            "required": ["method", "levels"],
+            "properties": {
+              "method": { "$ref": "#/$defs/code" },
+              "levels": {
+                "description": "Features the encoding adds (one per level under one_hot); null when the plan does not apply to the data.",
+                "type": ["integer", "null"],
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "encoded_omitted": { "$ref": "#/$defs/omitted" },
+        "imputed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/column" }],
+            "required": ["method", "missing_fraction"],
+            "properties": {
+              "method": { "$ref": "#/$defs/code" },
+              "missing_fraction": { "$ref": "#/$defs/blankShare" }
+            }
+          }
+        },
+        "imputed_omitted": { "$ref": "#/$defs/omitted" },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "columns", "columns_omitted", "rows_affected"],
+            "properties": {
+              "id": {
+                "description": "The question's id; column lines name it as `question`.",
+                "$ref": "#/$defs/code"
+              },
+              "default": {
+                "description": "Code of the option the plan applies while the question is open.",
+                "oneOf": [{ "$ref": "#/$defs/code" }, { "type": "null" }]
+              },
+              "code": { "$ref": "#/$defs/code" },
+              "columns": { "type": "array", "items": { "$ref": "#/$defs/column" } },
+              "columns_omitted": { "$ref": "#/$defs/omitted" },
+              "rows_affected": { "$ref": "#/$defs/rowCount" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "open_questions_omitted": { "$ref": "#/$defs/omitted" },
+        "changes_from_previous": {
+          "description": "What differs from the plan revision this one replaced; empty for revision 1.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/column" }],
+            "required": ["field", "to"],
+            "properties": {
+              "field": { "enum": ["role", "impute", "encode", "indicator"] },
+              "to": {
+                "description": "The new role, method or marker as a code; null when the field was cleared.",
+                "oneOf": [{ "$ref": "#/$defs/code" }, { "type": "null" }]
+              },
+              "by": { "$ref": "#/$defs/decidedBy" }
+            }
+          }
+        },
+        "changes_from_previous_omitted": { "$ref": "#/$defs/omitted" }
+      },
+      "additionalProperties": true
+    },
+
+    "thresholds": {
+      "description": "The groups each candidate cut-off gives: the steadiest ranges, the structural breakpoints, and the one the run selected. Cut-offs are on the server's own scale. Group counts are exact; group sizes follow the privacy rules.",
+      "type": "object",
+      "required": ["cuts"],
+      "properties": {
+        "cuts": {
+          "description": "Ascending by cutoff. Exactly one has selected: true.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["cutoff", "range", "groups", "top_sizes", "singletons", "selected"],
+            "properties": {
+              "cutoff": { "description": "Finite, on the server's scale.", "type": "number" },
+              "range": {
+                "description": "[lo, hi], lo <= cutoff <= hi: the cut-offs that give the same groups.",
+                "type": "array",
+                "prefixItems": [{ "type": "number" }, { "type": "number" }],
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "groups": { "description": "Groups at this cut-off, exact.", "type": "integer", "minimum": 1 },
+              "top_sizes": {
+                "description": "The largest groups' rows, largest first, at most 6.",
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 6,
+                "items": { "$ref": "#/$defs/rowCount" }
+              },
+              "singletons": { "description": "Groups of one row. Each is one row, so the count is disclosed as a row count.", "$ref": "#/$defs/rowCount" },
+              "kind": { "enum": ["plateau", "breakpoint", "selected"] },
+              "selected": { "type": "boolean" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "grouping": {
+      "description": "How the groups differ from all rows. sd = (group mean - all-rows mean) / all-rows population SD; a level is its 0/1 indicator. separation = eta squared over the groups of at least min_rows rows.",
+      "type": "object",
+      "required": ["limits", "method", "cut_off", "group_count", "groups", "small_groups", "defining_features", "cells", "not_used_for_grouping", "not_used_for_grouping_omitted"],
+      "properties": {
+        "limits": {
+          "description": "The bounds the server applied (after any clamping of its own), not the ones requested. They bound the lists below.",
+          "type": "object",
+          "required": ["max_groups", "max_features", "min_sd", "min_rows", "max_traits"],
+          "properties": {
+            "max_groups": { "type": "integer", "minimum": 1 },
+            "max_features": { "type": "integer", "minimum": 1 },
+            "min_sd": { "type": "number", "minimum": 0 },
+            "min_rows": { "description": "Never below row_floor.", "type": "integer", "minimum": 8 },
+            "max_traits": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": true
+        },
+        "method": { "$ref": "#/$defs/code" },
+        "cut_off": { "description": "The cut-off applied; null when the method uses none.", "type": ["number", "null"] },
+        "group_count": { "description": "All groups, exact.", "type": "integer", "minimum": 0 },
+        "groups": {
+          "description": "Groups of at least min_rows rows, largest first, at most limits.max_groups. Every other group is counted in small_groups.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "size", "traits"],
+            "properties": {
+              "id": { "type": "integer" },
+              "size": { "description": "Rounded to the nearest 5; never under min_rows.", "type": "integer", "minimum": 5, "multipleOf": 5 },
+              "traits": {
+                "description": "Strongest |sd| >= min_sd first, at most limits.max_traits. [] means close to all rows.",
+                "type": "array",
+                "items": { "$ref": "#/$defs/difference" }
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "small_groups": {
+          "description": "Every group not listed: counted, none of its values shown.",
+          "type": "object",
+          "required": ["count", "rows"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "rows": { "$ref": "#/$defs/rowCount" }
+          },
+          "additionalProperties": true
+        },
+        "defining_features": {
+          "description": "Grouping columns that separate the groups most, separation descending, at most limits.max_features.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/column" }],
+            "required": ["separation"],
+            "properties": {
+              "separation": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+              "kind": { "enum": ["numeric", "categorical", "binary"] }
+            }
+          }
+        },
+        "cells": {
+          "description": "Per listed group and defining feature, its strongest emittable difference with |sd| >= min_sd: at most one per (group, feature).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/difference" }],
+            "required": ["group"],
+            "properties": { "group": { "type": "integer" } }
+          }
+        },
+        "not_used_for_grouping": {
+          "description": "Profiled columns the grouping did not use: never defining features.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/column" }
+        },
+        "not_used_for_grouping_omitted": { "$ref": "#/$defs/omitted" },
+        "merged_from": {
+          "description": "Optional. Present when the groups come from merging the clusters of the assignment with this id: the id of that assignment.",
+          "$ref": "#/$defs/id"
+        },
+        "merges": {
+          "description": "Optional, with merged_from. One entry per merge, in order, in the original assignment's cluster ids (`group` is the new id of the group it ended in). Never a size.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "into", "linkage", "weight_share"],
+            "properties": {
+              "from": { "description": "The cluster that was merged away.", "type": "integer" },
+              "into": { "description": "The cluster it joined.", "type": "integer" },
+              "group": { "description": "The id, in this grouping, of the group it ended in.", "type": "integer" },
+              "linkage": { "description": "`edge_weight`: the neighbour with the most edge weight; `isolated`: no edge to any other cluster, joined the largest.", "$ref": "#/$defs/code" },
+              "weight_share": { "description": "The share of the cluster's edge weight to other clusters that went to `into`, to 2 decimals; 0 when isolated.", "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "difference": {
+      "description": "A group's difference on a column, in SDs from all rows. `level` names the categorical level (held by at least min_rows of the group's rows); absent for a numeric column.",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/column" }],
+      "required": ["sd"],
+      "properties": {
+        "level": { "$ref": "#/$defs/label" },
+        "sd": { "description": "Rounded to 2 decimals; finite.", "type": "number" }
+      },
+      "if": { "required": ["level"], "properties": { "level": { "minLength": 81 } } },
+      "then": { "required": ["truncated"], "properties": { "truncated": { "const": true } } }
+    },
+
+    "changes": {
+      "description": "This run against the previous run on the same dataset. Emitted only when there is one; empty lists mean nothing changed.",
+      "type": "object",
+      "required": ["changed_settings", "changed_settings_omitted", "metrics", "metrics_omitted"],
+      "properties": {
+        "changed_settings": {
+          "description": "Settings whose value differs, by name only, never the value.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/setting" }
+        },
+        "changed_settings_omitted": { "$ref": "#/$defs/omitted" },
+        "metrics": {
+          "description": "Run statistics that differ, before and after (e.g. `component_count`, `n_edges`, `giant_fraction`). A fraction of rows is to 2 decimals. Never a row count: a metric that counts rows is left out.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "before", "after"],
+            "properties": {
+              "code": { "$ref": "#/$defs/code" },
+              "before": { "description": "Finite.", "type": "number" },
+              "after": { "description": "Finite.", "type": "number" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "metrics_omitted": { "$ref": "#/$defs/omitted" }
+      },
+      "additionalProperties": true
+    },
+    "setting": {
+      "description": "A setting's code, dotted key (e.g. `cosmic_graph.epsilon`) or short label. Never its value.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    }
+  }
+}

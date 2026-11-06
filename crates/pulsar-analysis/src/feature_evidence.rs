@@ -66,10 +66,7 @@ pub type Adjacency = BTreeMap<i64, Vec<Neighbor>>;
 /// Aggregate the cosmic graph's edges `(source, target, weight)` into
 /// cluster-to-cluster bridge strengths, strongest first.
 pub fn graph_cluster_adjacency(edges: &[(usize, usize, f64)], clusters: &[i64]) -> Adjacency {
-    let mut sizes: BTreeMap<i64, usize> = BTreeMap::new();
-    for &c in clusters {
-        *sizes.entry(c).or_default() += 1;
-    }
+    let sizes = crate::clustering::merge::label_sizes(clusters);
     let mut internal: BTreeMap<i64, f64> = sizes.keys().map(|&c| (c, 0.0)).collect();
     let mut pairs: IndexMap<(i64, i64), f64> = IndexMap::new();
     for &(s, t, weight) in edges {
@@ -135,7 +132,10 @@ pub struct NumericRow {
     pub z_score: f64,
     pub homogeneity: f64,
     pub effect_mean_std: f64,
-    pub effect_median_mad: f64,
+    pub effect_median_mad: Option<f64>,
+    /// Why `effect_median_mad` is absent, when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_median_mad_reason: Option<String>,
     pub ks_stat: f64,
     pub wasserstein_norm: f64,
     pub variance_ratio_log: f64,
@@ -193,7 +193,7 @@ pub struct CategoricalRow {
 /// What the scoring pass needs from either kind of row.
 trait Scored {
     const METRICS: &'static [&'static str];
-    fn metrics(&self) -> Vec<f64>;
+    fn metrics(&self) -> Vec<Option<f64>>;
     fn set_scores(&mut self, aggregate: f64, evidence: IndexMap<String, f64>);
     fn set_percentile(&mut self, percentile: f64);
     fn aggregate(&self) -> f64;
@@ -216,17 +216,17 @@ impl Scored for NumericRow {
         "global_sig",
         "neighbor_effect",
     ];
-    fn metrics(&self) -> Vec<f64> {
+    fn metrics(&self) -> Vec<Option<f64>> {
         vec![
-            self.effect_mean_std.abs(),
-            self.effect_median_mad.abs(),
-            self.ks_stat,
-            self.wasserstein_norm,
-            self.concentration_gain.max(0.0),
-            self.specificity_score,
-            neg_log10(self.one_vs_rest_q),
-            neg_log10(self.global_q),
-            self.neighbor_effect.abs(),
+            Some(self.effect_mean_std.abs()),
+            self.effect_median_mad.map(f64::abs),
+            Some(self.ks_stat),
+            Some(self.wasserstein_norm),
+            Some(self.concentration_gain.max(0.0)),
+            Some(self.specificity_score),
+            Some(neg_log10(self.one_vs_rest_q)),
+            Some(neg_log10(self.global_q)),
+            Some(self.neighbor_effect.abs()),
         ]
     }
     fn set_scores(&mut self, aggregate: f64, evidence: IndexMap<String, f64>) {
@@ -255,16 +255,16 @@ impl Scored for CategoricalRow {
         "fisher_sig",
         "global_sig",
     ];
-    fn metrics(&self) -> Vec<f64> {
+    fn metrics(&self) -> Vec<Option<f64>> {
         vec![
-            self.prevalence_cluster,
-            self.log_lift.abs(),
-            self.specificity.abs(),
-            self.global_recall,
-            self.neighbor_specificity.abs(),
-            self.mi_contrib.abs(),
-            neg_log10(self.fisher_q),
-            neg_log10(self.global_q),
+            Some(self.prevalence_cluster),
+            Some(self.log_lift.abs()),
+            Some(self.specificity.abs()),
+            Some(self.global_recall),
+            Some(self.neighbor_specificity.abs()),
+            Some(self.mi_contrib.abs()),
+            Some(neg_log10(self.fisher_q)),
+            Some(neg_log10(self.global_q)),
         ]
     }
     fn set_scores(&mut self, aggregate: f64, evidence: IndexMap<String, f64>) {
@@ -295,16 +295,23 @@ fn py_max(a: f64, b: f64) -> f64 {
 /// the aggregate is the geometric mean of the row's metric percentiles (offset
 /// by a small positive floor); the percentile is the aggregate's own percentile.
 fn apply_percentile_aggregate<R: Scored>(rows: &mut [R]) {
-    let metrics: Vec<Vec<f64>> = rows.iter().map(Scored::metrics).collect();
-    let columns: Vec<Vec<f64>> = (0..R::METRICS.len())
-        .map(|m| empirical_percentiles(&metrics.iter().map(|r| r[m]).collect::<Vec<_>>()))
+    let metrics: Vec<Vec<Option<f64>>> = rows.iter().map(Scored::metrics).collect();
+    let columns: Vec<Vec<Option<f64>>> = (0..R::METRICS.len())
+        .map(|m| {
+            let present: Vec<f64> = metrics.iter().filter_map(|r| r[m]).collect();
+            let mut percentiles = empirical_percentiles(&present).into_iter();
+            metrics
+                .iter()
+                .map(|r| r[m].map(|_| percentiles.next().expect("one percentile per value")))
+                .collect()
+        })
         .collect();
     let mut aggregates = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter_mut().enumerate() {
         let vector: IndexMap<String, f64> = R::METRICS
             .iter()
             .enumerate()
-            .map(|(m, name)| ((*name).to_owned(), columns[m][i]))
+            .filter_map(|(m, name)| columns[m][i].map(|v| ((*name).to_owned(), v)))
             .collect();
         let logs: Vec<f64> = vector
             .values()
@@ -564,9 +571,22 @@ fn compute_numeric_rows(
             let (std_cluster, std_rest) = (safe_std(&cl), safe_std(&rest));
             let (mad_cluster, mad_rest) = (safe_mad(&cl), safe_mad(&rest));
             let (mean_cl, mean_rest) = (safe_mean(&cl), safe_mean(&rest));
+            let (median_cl, median_rest) = (safe_median(&cl), safe_median(&rest));
             let effect_mean_std = (mean_cl - mean_rest) / pooled.max(EPS);
-            let effect_median_mad =
-                (safe_median(&cl) - safe_median(&rest)) / (1.4826 * mad_rest.max(gmad)).max(EPS);
+            let median_diff = median_cl - median_rest;
+            let (effect_median_mad, effect_median_mad_reason) =
+                if mad_cluster == 0.0 && mad_rest == 0.0 {
+                    if median_diff == 0.0 {
+                        (Some(0.0), None)
+                    } else {
+                        (None, Some("no spread in either group".to_owned()))
+                    }
+                } else {
+                    (
+                        Some(median_diff / (1.4826 * mad_rest.max(gmad)).max(EPS)),
+                        None,
+                    )
+                };
             let ks_stat = ks_two_sample_stat(&cl, &rest).unwrap_or_else(|e| {
                 failures.push(format!("ks_2samp: {e}"));
                 0.0
@@ -593,20 +613,33 @@ fn compute_numeric_rows(
                     1.0
                 });
             }
+            let direction_effects: Vec<f64> = [
+                Some(effect_mean_std),
+                effect_median_mad,
+                Some(neighbor_effect),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let specificity_terms: Vec<f64> = [
+                Some(effect_mean_std.abs()),
+                effect_median_mad.map(f64::abs),
+                Some(neighbor_effect.abs()),
+                Some(ks_stat),
+                Some(wasserstein_norm),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             let g = &global[name];
             rows.push(NumericRow {
                 column: name.clone(),
                 cluster_id,
-                direction: direction_from_effects(&[
-                    effect_mean_std,
-                    effect_median_mad,
-                    neighbor_effect,
-                ])
-                .into(),
+                direction: direction_from_effects(&direction_effects).into(),
                 mean: mean_cl,
                 mean_rest,
-                median: safe_median(&cl),
-                median_rest: safe_median(&rest),
+                median: median_cl,
+                median_rest,
                 std_cluster,
                 std_rest,
                 mad_cluster,
@@ -617,6 +650,7 @@ fn compute_numeric_rows(
                 homogeneity: std_cluster / gstd.max(EPS),
                 effect_mean_std,
                 effect_median_mad,
+                effect_median_mad_reason,
                 ks_stat,
                 wasserstein_norm,
                 variance_ratio_log,
@@ -629,12 +663,8 @@ fn compute_numeric_rows(
                 neighbor_cluster_id: neighbor_id,
                 neighbor_effect,
                 neighbor_p,
-                specificity_score: (effect_mean_std.abs()
-                    + effect_median_mad.abs()
-                    + neighbor_effect.abs()
-                    + ks_stat
-                    + wasserstein_norm)
-                    / 5.0,
+                specificity_score: specificity_terms.iter().sum::<f64>()
+                    / specificity_terms.len().max(1) as f64,
                 aggregate_score: 0.0,
                 percentile_score: 0.0,
                 signal_tier: "noise".into(),
@@ -948,7 +978,7 @@ pub struct ClusterBundle {
 }
 
 /// Cached feature evidence derived from one clustering assignment.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct FeatureEvidenceIndex {
     pub cluster_bundles: BTreeMap<i64, ClusterBundle>,
     pub numeric_global_ranking: Vec<String>,
@@ -957,6 +987,28 @@ pub struct FeatureEvidenceIndex {
     pub metadata: Value,
     pub working_columns: Vec<String>,
     pub categorical_columns_gated: Vec<GatedColumn>,
+}
+
+impl FeatureEvidenceIndex {
+    /// Set each cluster's `semantic_name` from `names` (by cluster id). A
+    /// cluster absent from `names` (beyond `summary_max_groups`, under
+    /// `summary_min_rows`, or with no trait above `summary_min_sd`) is reset
+    /// to its feature-evidence [`auto_semantic_name`]. Returns whether any
+    /// name changed.
+    pub fn rename(&mut self, names: &HashMap<i64, String>) -> bool {
+        let mut changed = false;
+        for (id, bundle) in &mut self.cluster_bundles {
+            let next = names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| auto_semantic_name(&bundle.numeric, &bundle.categorical, *id));
+            if next != bundle.semantic_name {
+                bundle.semantic_name = next;
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 fn auto_semantic_name(
@@ -1084,6 +1136,44 @@ pub fn build_feature_evidence_index(
     exclude_columns: &[String],
     max_clusters_to_characterize: Option<usize>,
 ) -> Result<FeatureEvidenceIndex, EvidenceIndexError> {
+    build_index(
+        table,
+        clusters,
+        edges,
+        exclude_columns,
+        max_clusters_to_characterize,
+        None,
+    )
+}
+
+/// [`build_feature_evidence_index`] characterizing exactly the clusters
+/// `cluster_ids` (unknown ids are ignored), so a page of a large clustering
+/// costs what the page holds.
+pub fn build_feature_evidence_index_for_clusters(
+    table: &Table,
+    clusters: &[i64],
+    edges: &[(usize, usize, f64)],
+    exclude_columns: &[String],
+    cluster_ids: &[i64],
+) -> Result<FeatureEvidenceIndex, EvidenceIndexError> {
+    build_index(
+        table,
+        clusters,
+        edges,
+        exclude_columns,
+        None,
+        Some(cluster_ids),
+    )
+}
+
+fn build_index(
+    table: &Table,
+    clusters: &[i64],
+    edges: &[(usize, usize, f64)],
+    exclude_columns: &[String],
+    max_clusters_to_characterize: Option<usize>,
+    only: Option<&[i64]>,
+) -> Result<FeatureEvidenceIndex, EvidenceIndexError> {
     let n_rows = table.n_rows();
     if clusters.len() != n_rows {
         return Err(EvidenceIndexError::Alignment {
@@ -1126,6 +1216,15 @@ pub fn build_feature_evidence_index(
             );
             omitted = n_unique - max;
         }
+    }
+    if let Some(ids) = only {
+        let wanted: HashSet<i64> = sizes
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| ids.contains(c))
+            .collect();
+        omitted = n_unique - wanted.len();
+        target = Some(wanted);
     }
 
     let adjacency = graph_cluster_adjacency(edges, clusters);
@@ -1321,6 +1420,61 @@ mod tests {
         assert_eq!(e.to_string(), "Alignment error: clusters(1) != data(2)");
     }
 
+    fn numeric_rows_for(values: Vec<f64>) -> Vec<NumericRow> {
+        let columns = [("c".to_owned(), values)];
+        let clusters = [0, 0, 0, 0, 1, 1, 1, 1];
+        compute_numeric_rows(&columns, &clusters, &Adjacency::new(), None).0
+    }
+
+    #[test]
+    fn zero_mad_on_both_sides_with_equal_medians_is_zero() {
+        let rows = numeric_rows_for(vec![5.0; 8]);
+        let row = rows.iter().find(|r| r.cluster_id == 0).unwrap();
+        assert_eq!(row.effect_median_mad, Some(0.0));
+        assert_eq!(row.effect_median_mad_reason, None);
+    }
+
+    #[test]
+    fn zero_mad_on_both_sides_with_different_medians_is_undefined() {
+        // Each side has MAD 0 (three equal values plus one outlier) but their
+        // medians differ, so the robust effect has no denominator.
+        let rows = numeric_rows_for(vec![0.0, 0.0, 0.0, 1.0, 10.0, 10.0, 10.0, 11.0]);
+        let row = rows.iter().find(|r| r.cluster_id == 0).unwrap();
+        assert_eq!(row.effect_median_mad, None);
+        assert_eq!(
+            row.effect_median_mad_reason.as_deref(),
+            Some("no spread in either group")
+        );
+        assert!(!row.evidence_vector.contains_key("effect_median_mad"));
+        let json = serde_json::to_value(row).unwrap();
+        assert!(json["effect_median_mad"].is_null());
+        assert_eq!(
+            json["effect_median_mad_reason"],
+            "no spread in either group"
+        );
+        assert!(json["evidence_vector"].get("effect_median_mad").is_none());
+        let specificity = (row.effect_mean_std.abs()
+            + row.neighbor_effect.abs()
+            + row.ks_stat
+            + row.wasserstein_norm)
+            / 4.0;
+        assert!((row.specificity_score - specificity).abs() < 1e-12);
+    }
+
+    #[test]
+    fn one_zero_mad_keeps_the_existing_effect() {
+        let mut values = vec![0.0, 0.0, 0.0, 1.0];
+        let rest = [10.0, 20.0, 30.0, 40.0];
+        values.extend_from_slice(&rest);
+        let rows = numeric_rows_for(values.clone());
+        let row = rows.iter().find(|r| r.cluster_id == 0).unwrap();
+        let expected =
+            (0.0 - 25.0) / (1.4826 * safe_mad(&rest).max(safe_mad(&values).max(EPS))).max(EPS);
+        assert_eq!(row.effect_median_mad, Some(expected));
+        assert_eq!(row.effect_median_mad_reason, None);
+        assert!(row.evidence_vector.contains_key("effect_median_mad"));
+    }
+
     fn blank_numeric() -> NumericRow {
         NumericRow {
             column: "c".into(),
@@ -1339,7 +1493,8 @@ mod tests {
             z_score: 0.0,
             homogeneity: 0.0,
             effect_mean_std: 0.0,
-            effect_median_mad: 0.0,
+            effect_median_mad: Some(0.0),
+            effect_median_mad_reason: None,
             ks_stat: 0.0,
             wasserstein_norm: 0.0,
             variance_ratio_log: 0.0,

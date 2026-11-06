@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pulsar_analysis::diagnostics::sparse_upper_percentile;
-use pulsar_analysis::{
-    agent_threshold_options, finalization_gate, GraphAnalysis, Policy, ThresholdGraph,
+use pulsar_analysis::disclosure::row_fraction;
+use pulsar_analysis::plan::{
+    build_preprocessing_summary, plan_matches_preprocessing, PreprocessingPlan, Role,
 };
+use pulsar_analysis::{agent_threshold_options, finalization_gate, Policy};
 use pulsar_config::{PulsarConfig, Threshold};
 use pulsar_pipeline::projection_fingerprint;
 use pulsar_store::{summarize_history, JobState, RunId, RunRecord};
@@ -16,13 +18,15 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Map, Value};
 
 use super::config::{parse_config, resolve_dataset};
+use super::diagnostics::{diagnose_summary, threshold_table};
 use super::params::{Detail, Format};
 use super::{CallContext, ToolSpec};
 use crate::envelope::{ok_result, ToolError};
 use crate::jobs::{run_sweep, submit, ProgressTarget, SweepRequest};
 use crate::markdown;
+use crate::phirewall;
 use crate::schema::{self as s, input_schema};
-use crate::state::{LiveRun, ServerState};
+use crate::state::{LiveRun, RunGraphCache, ServerState};
 
 pub const SWEEP: &str = "run_topological_sweep";
 pub const GET_JOB: &str = "get_job";
@@ -49,30 +53,30 @@ pub enum Execution {
     /// Wait for the fit and return the sweep result (a task handle on clients that support MCP tasks).
     #[default]
     Sync,
-    /// Return `{status: "running", run_id}` at once; poll with wait_job / get_job.
+    /// Return `{status: "running", run_id}` at once; poll with wait_job / get_job when those tools are listed.
     Async,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SweepParams {
-    /// Host-visible absolute path to a *.yaml/*.yml config file. Used only when config_yaml is empty.
+    /// Host-visible absolute path to a *.yaml/*.yml config. Used only when config_yaml is empty.
     pub config_path: String,
-    /// Full Pulsar config as raw YAML (preferred). If this and config_path are empty, the session's active config is used.
+    /// Full Pulsar config as raw YAML (preferred). If empty with config_path, the session's active config is used.
     pub config_yaml: String,
-    /// Dataset handle from ingest_dataset; overrides run.data in the config. Empty uses the config's run.data.
+    /// Dataset handle from ingest_dataset; overrides run.data. Empty uses the config's run.data.
     pub dataset_id: String,
-    /// If true, also write the resolved config to <run name>_params.yaml next to the data for reproducibility.
+    /// If true, also write the resolved config to <run name>_params.yaml next to the data.
     pub save_config: bool,
-    /// 'summary' = compact decision packet (key metrics, bounded component preview); 'full' = the complete raw response including all metrics.
+    /// 'summary' = compact decision packet (key metrics, bounded component preview); 'full' = complete raw response.
     pub detail: Detail,
-    /// Text rendering only: 'markdown' or 'json'. structured_content is identical in both.
+    /// Text rendering only: 'markdown' or 'json'; structured_content is identical.
     pub response_format: Format,
-    /// Summary detail only: include the normalized config YAML in the payload.
+    /// Summary detail only: include the normalized config YAML.
     pub include_config_yaml: bool,
-    /// Summary detail only: how many component sizes to preview (largest first); the rest are counted as omitted. Must be >= 1.
+    /// Summary detail only: component sizes to preview, largest first (>= 1); the rest are counted as omitted.
     pub component_limit: usize,
-    /// 'sync' (default) waits for the fit; 'async' returns the run_id immediately for wait_job / get_job polling.
+    /// 'sync' (default) waits for the fit; 'async' returns the run_id at once, to poll with wait_job / get_job.
     pub execution: Execution,
 }
 
@@ -97,7 +101,7 @@ pub fn sweep_spec() -> ToolSpec {
     ToolSpec {
         name: SWEEP,
         title: "Run Topological Sweep",
-        description: "Run the Pulsar topological sweep (project, ball-map grid, cosmic graph) and persist the run. Returns run_id, key graph metrics, threshold and a finalization gate; follow with diagnose_cosmic_graph. Prefer inline config_yaml; otherwise the active session config is used. execution='async' returns the run_id immediately for wait_job polling.",
+        description: "Run the Pulsar topological sweep (project, ball-map grid, cosmic graph) and persist the run. Returns run_id, key graph metrics, threshold and a finalization gate; follow with diagnose_cosmic_graph. Prefer inline config_yaml; otherwise the active session config is used. A long fit may return a task handle on clients that support MCP tasks; if `execution` is available, 'async' returns run_id at once for wait_job polling.",
         input_schema: input_schema::<SweepParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -108,6 +112,7 @@ pub fn sweep_spec() -> ToolSpec {
                 ("data_shape", s::array(s::integer())),
                 ("construction_threshold", s::number()),
                 ("graph_health", s::any()),
+                ("diagnose_summary", open.clone()),
                 ("analysis_status", s::string()),
                 ("next_required_check", s::string()),
                 ("finalization_gate", s::any()),
@@ -123,6 +128,7 @@ pub fn sweep_spec() -> ToolSpec {
                 ("diff", s::array(s::any())),
                 ("diff_summary", open.clone()),
                 ("threshold_stability_summary", s::nullable(open.clone())),
+                (phirewall::KEY, open.clone()),
                 ("projection_method", s::string()),
                 ("projection_cached", s::boolean()),
                 ("projection_cache_status", s::any()),
@@ -163,6 +169,7 @@ fn job_schema() -> Value {
             ("run_complete", s::boolean()),
             ("response_available", s::boolean()),
             ("sweep", s::open_object()),
+            (phirewall::KEY, s::open_object()),
             ("poll_with", s::string()),
         ],
         &["status", "run_id", "job"],
@@ -204,7 +211,7 @@ pub fn wait_job_spec() -> ToolSpec {
     ToolSpec {
         name: WAIT_JOB,
         title: "Wait For Job",
-        description: "Block until a sweep job completes or `timeout_s` elapses, then return its state. A completed job returns the same sweep summary run_topological_sweep would have; a failed job returns its error envelope; a timeout returns the current progress so you can call wait_job again.",
+        description: "Block until a sweep job completes or `timeout_s` elapses, then return its state. A completed job returns run_topological_sweep's summary; a failed job its error envelope; a timeout returns current progress so you can call wait_job again.",
         input_schema: input_schema::<WaitParams>(),
         output_schema: s::as_object(job_schema()),
         read_only: true,
@@ -267,6 +274,8 @@ pub struct Prepared {
     projection_method: &'static str,
     projection_cache_status: Value,
     save_config: bool,
+    /// The stored plan revision the config applies, with the one before it.
+    plan: Option<(PreprocessingPlan, Option<PreprocessingPlan>)>,
 }
 
 async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolError> {
@@ -334,10 +343,21 @@ async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolE
         }
     };
 
+    let plan = dataset_id
+        .as_ref()
+        .and_then(|id| run_plan(state, id.as_str(), &cfg.preprocessing));
+    let identifier_columns = plan.as_ref().map_or_else(Vec::new, |(plan, _)| {
+        plan.entries
+            .iter()
+            .filter(|(_, e)| matches!(e.role, Role::Id | Role::Entity))
+            .map(|(col, _)| col.clone())
+            .collect()
+    });
+
     let read_path = data_path.clone();
     let table = tokio::task::spawn_blocking(move || pulsar_data::read_table(&read_path))
         .await
-        .map_err(|e| ToolError::new(SWEEP, "INGEST_FAILED", e.to_string(), "Retry the sweep."))?
+        .map_err(|e| ToolError::worker_stopped(SWEEP, "INGEST_FAILED", &e))?
         .map_err(|e| {
             ToolError::new(
                 SWEEP,
@@ -406,12 +426,37 @@ async fn prepare(state: &ServerState, p: &SweepParams) -> Result<Prepared, ToolE
             data_path: Some(data_path),
             precomputed,
             projection_fingerprint: fingerprint,
+            identifier_columns,
         },
         normalized_yaml,
         previous,
         projection_method,
         projection_cache_status,
         save_config: p.save_config,
+        plan,
+    })
+}
+
+/// The stored plan revision for `dataset_id` whose preprocessing `pre` is,
+/// most recently updated plan first, with the revision before it when that
+/// is known. A config edited away from every stored revision matches none.
+fn run_plan(
+    state: &ServerState,
+    dataset_id: &str,
+    pre: &pulsar_config::Preprocessing,
+) -> Option<(PreprocessingPlan, Option<PreprocessingPlan>)> {
+    let records = state.store.list_plans(Some(dataset_id)).ok()?;
+    records.into_iter().rev().find_map(|record| {
+        let current = PreprocessingPlan::from_value(record.plan).ok()?;
+        let previous = record
+            .previous_plan
+            .and_then(|v| PreprocessingPlan::from_value(v).ok());
+        if plan_matches_preprocessing(&current, pre) {
+            return Some((current, previous));
+        }
+        previous
+            .filter(|p| plan_matches_preprocessing(p, pre))
+            .map(|p| (p, None))
     })
 }
 
@@ -439,6 +484,7 @@ async fn execute(
         projection_method,
         projection_cache_status,
         save_config,
+        plan,
     } = prepared;
     let projection_cached = projection_cache_status["status"] == "hit";
     let cfg_for_save = save_config.then(|| request.cfg.clone());
@@ -447,22 +493,35 @@ async fn execute(
     let saved_path = match cfg_for_save {
         Some(cfg) => match save_config_file(&cfg, live.data_path.as_deref()) {
             Ok(path) => Some(path),
-            Err(err) => {
+            Err(mut err) => {
                 let _ = job.fail("CONFIG_SAVE_FAILED", "could not save config file");
-                return Err(err);
+                // The sweep itself finished and is live: say so.
+                err.reason += &format!(" The sweep itself completed: run {} is now the session's latest run and the previous cluster labels were cleared.", live.run_id);
+                return Err(err.detail("run_id", json!(live.run_id)));
             }
         },
         None => None,
     };
-    let sweep_count = state
+    // This run is not listed until the job completes.
+    let history = state
         .store
         .list_runs(record.dataset_id.as_ref())
-        .map(|l| l.runs.len() + 1)
-        .unwrap_or(1);
+        .map(|l| l.runs)
+        .unwrap_or_default();
+    let sweep_count = history.len() + 1;
+    // The contract's `changes` compare with the latest earlier run on this
+    // dataset, whichever session ran it.
+    let on_dataset = record
+        .dataset_id
+        .as_ref()
+        .and_then(|_| history.iter().rev().find(|r| r.run_id != record.run_id));
+    let graph_cache = state.graph_cache_for_live(&live, &record);
     let mut response = build_response(
         &live,
         &record,
+        &graph_cache,
         previous.as_ref(),
+        on_dataset,
         &normalized_yaml,
         projection_method,
         projection_cached,
@@ -470,6 +529,14 @@ async fn execute(
         saved_path.as_deref(),
         sweep_count,
     );
+    if let Some((plan, previous)) = &plan {
+        response[phirewall::KEY]["inputs"] = build_preprocessing_summary(
+            plan,
+            previous.as_ref(),
+            Some(&live.fitted.layout.feature_names),
+            phirewall::ROW_FLOOR,
+        );
+    }
     job.complete(&record, &artifacts)
         .map_err(|e| ToolError::from_store(SWEEP, e))?;
     // Persisted record + sidecars, before the response blob is attached.
@@ -589,7 +656,9 @@ fn sweep_diff(
 fn build_response(
     live: &LiveRun,
     record: &RunRecord,
+    graph_cache: &RunGraphCache,
     previous: Option<&RunRecord>,
+    on_dataset: Option<&RunRecord>,
     normalized_yaml: &str,
     projection_method: &str,
     projection_cached: bool,
@@ -598,37 +667,20 @@ fn build_response(
     sweep_count: usize,
 ) -> Value {
     let fitted = &live.fitted;
-    let affinity = fitted.weighted_edges(Some(0.0));
-    let minhash_d = match fitted.config.cosmic_graph.construction {
-        pulsar_config::Construction::Minhash => Some(fitted.config.cosmic_graph.minhash_d as usize),
-        pulsar_config::Construction::Exact => None,
-    };
-    let metrics = GraphAnalysis::new(&fitted.graph)
-        .map(|a| {
-            a.metrics(
-                fitted.construction_threshold,
-                fitted.ball_maps.len(),
-                Some(&affinity),
-                minhash_d,
-            )
-        })
-        .ok();
+    let metrics = graph_cache.metrics.as_ref();
     let metrics_value = metrics
-        .as_ref()
         .and_then(|m| serde_json::to_value(m).ok())
         .unwrap_or(json!({}));
-    let (health, is_connected) = metrics
-        .as_ref()
-        .map(graph_health)
-        .unwrap_or(("empty", true));
-    let threshold_graph = ThresholdGraph::from_edges(fitted.n, &affinity);
+    let (health, is_connected) = metrics.map(graph_health).unwrap_or(("empty", true));
+    let threshold_graph = &graph_cache.threshold_graph;
     let full_affinity_connected = fitted.n > 0 && threshold_graph.component_count_at(0.0) <= 1;
 
-    let gate = match (&metrics, &fitted.stability) {
+    let n_features = fitted.layout.feature_names.len();
+    let gate = match (metrics, &fitted.stability) {
         (Some(m), Some(stability)) => {
             let plateaus: Vec<_> = stability.plateaus.iter().take(10).cloned().collect();
             let options = agent_threshold_options(
-                &threshold_graph,
+                threshold_graph,
                 &plateaus,
                 &stability.thresholds,
                 &stability.component_counts,
@@ -639,12 +691,17 @@ fn build_response(
                 m,
                 sweep_count,
                 &fitted.config.projection.dimensions,
+                n_features,
                 Some(&options.candidates),
             )
         }
-        (Some(m), None) => {
-            finalization_gate(m, sweep_count, &fitted.config.projection.dimensions, None)
-        }
+        (Some(m), None) => finalization_gate(
+            m,
+            sweep_count,
+            &fitted.config.projection.dimensions,
+            n_features,
+            None,
+        ),
         (None, _) => {
             json!({"status": "ok", "reason": "No dominant-component resolution gate triggered."})
         }
@@ -652,7 +709,7 @@ fn build_response(
 
     let config_advisory = match saved_path {
         Some(path) => format!("Config changes persisted to host at: {path}"),
-        None => "Config changes are in-memory (session-only). Set save_config=True to persist to params.yaml.".to_owned(),
+        None => "Active config was not saved (save_config=false); it lives only in this session. Set save_config=True to persist to params.yaml.".to_owned(),
     };
     let mut response = Map::new();
     response.insert("status".into(), json!("ok"));
@@ -697,6 +754,9 @@ fn build_response(
     response.insert("graph_health".into(), json!(health));
     response.insert("analysis_status".into(), json!("diagnostics_required"));
     response.insert("next_required_check".into(), json!("diagnose_cosmic_graph"));
+    if let Some(m) = metrics {
+        response.insert("diagnose_summary".into(), diagnose_summary(m));
+    }
     response.insert("finalization_gate".into(), gate);
     response.insert(
         "construction_threshold".into(),
@@ -705,6 +765,34 @@ fn build_response(
     if let Some(summary) = &record.threshold_stability_summary {
         response.insert("threshold_stability_summary".into(), json!(summary));
     }
+    let mut parts = vec![];
+    if let Some(stability) = fitted
+        .stability
+        .as_ref()
+        .or(graph_cache.stability.as_deref())
+    {
+        parts.push((
+            "thresholds",
+            threshold_table(
+                threshold_graph,
+                stability,
+                fitted.construction_threshold,
+                phirewall::ROW_FLOOR,
+            ),
+        ));
+    }
+    if let Some(changes) = on_dataset.and_then(|p| changes_part(p, record, &fitted.config)) {
+        parts.push(("changes", changes));
+    }
+    response.insert(
+        phirewall::KEY.into(),
+        phirewall::summary(
+            Some(record.run_id.to_string()),
+            record.dataset_id.as_ref().map(|d| d.to_string()),
+            live.table.n_rows(),
+            parts,
+        ),
+    );
     if let Some(path) = saved_path {
         response.insert("saved_config_path".into(), json!(path));
     }
@@ -712,6 +800,105 @@ fn build_response(
         response.insert("dataset_id".into(), json!(ds));
     }
     Value::Object(response)
+}
+
+/// The settings (by name) and metrics (`{previous, current}` by name) that
+/// `diff` rows say changed.
+fn diff_changes(diff: &[Value]) -> (Vec<Value>, Map<String, Value>) {
+    let mut parameter_changes = Vec::new();
+    let mut metric_changes = Map::new();
+    for row in diff {
+        let field = row["field"].as_str().unwrap_or("");
+        match field {
+            "n_edges" | "component_count" | "giant_fraction" => {
+                metric_changes.insert(
+                    field.to_owned(),
+                    json!({"previous": row["previous"], "current": row["current"]}),
+                );
+            }
+            "projection_dimensions" | "pca_dims" => {
+                parameter_changes.push(json!("sweep.projection.dimensions.values"))
+            }
+            "epsilon" => parameter_changes.push(json!("cosmic_graph.epsilon")),
+            other => parameter_changes.push(json!(other)),
+        }
+    }
+    (parameter_changes, metric_changes)
+}
+
+/// The dotted names (`section.field`, or a top-level field) of the config
+/// settings whose values differ. Fields are compared as resolved, never
+/// through a label, and names stop at the field: no column or value.
+fn changed_settings(before: &PulsarConfig, after: &PulsarConfig) -> Vec<String> {
+    fn fields(cfg: &PulsarConfig) -> Map<String, Value> {
+        match serde_json::to_value(cfg) {
+            Ok(Value::Object(m)) => m,
+            _ => Map::new(),
+        }
+    }
+    fn differing<'a>(a: &'a Map<String, Value>, b: &'a Map<String, Value>) -> Vec<&'a String> {
+        let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        keys.retain(|k| a.get(*k) != b.get(*k));
+        keys
+    }
+    let (a, b) = (fields(before), fields(after));
+    let mut out = vec![];
+    for key in differing(&a, &b) {
+        match (a.get(key), b.get(key)) {
+            (Some(Value::Object(x)), Some(Value::Object(y))) => {
+                out.extend(differing(x, y).into_iter().map(|f| format!("{key}.{f}")));
+            }
+            _ => out.push(key.clone()),
+        }
+    }
+    out
+}
+
+/// The `changes` part: `current` against `previous`, an earlier run on the
+/// same dataset. Settings by name; metrics that differ, before and after,
+/// with `giant_fraction` (a share of rows) to 2 dp and left out when either
+/// run's largest group is under the row floor. `None` when the previous
+/// run's config cannot be read, so nothing can be said about settings.
+fn changes_part(
+    previous: &RunRecord,
+    current: &RunRecord,
+    current_cfg: &PulsarConfig,
+) -> Option<Value> {
+    let settings = changed_settings(&config_of(previous)?, current_cfg);
+    let (pm, cm) = (&previous.metrics, &current.metrics);
+    let mut metrics = vec![];
+    let mut omitted = 0;
+    if pm.n_edges != cm.n_edges {
+        metrics.push(json!({"code": "n_edges", "before": pm.n_edges, "after": cm.n_edges}));
+    }
+    if pm.component_count != cm.component_count {
+        metrics.push(json!({"code": "component_count", "before": pm.component_count, "after": cm.component_count}));
+    }
+    if pm.giant_fraction != cm.giant_fraction {
+        let backed = |m: &pulsar_store::RunMetrics| {
+            m.giant_fraction.is_finite()
+                && m.component_sizes
+                    .first()
+                    .is_none_or(|&s| s == 0 || s >= phirewall::ROW_FLOOR)
+        };
+        if backed(pm) && backed(cm) {
+            metrics.push(json!({
+                "code": "giant_fraction",
+                "before": row_fraction(pm.giant_fraction),
+                "after": row_fraction(cm.giant_fraction),
+            }));
+        } else {
+            omitted += 1;
+        }
+    }
+    Some(json!({
+        "changed_settings": settings,
+        "changed_settings_omitted": 0,
+        "metrics": metrics,
+        "metrics_omitted": omitted,
+    }))
 }
 
 /// `build_sweep_summary_payload`.
@@ -740,24 +927,7 @@ pub fn summary_payload(
     .filter_map(|k| metrics.get(*k).map(|v| ((*k).to_owned(), v.clone())))
     .collect();
     let diff: Vec<Value> = response["diff"].as_array().cloned().unwrap_or_default();
-    let mut parameter_changes = Vec::new();
-    let mut metric_changes = Map::new();
-    for row in &diff {
-        let field = row["field"].as_str().unwrap_or("");
-        match field {
-            "n_edges" | "component_count" | "giant_fraction" => {
-                metric_changes.insert(
-                    field.to_owned(),
-                    json!({"previous": row["previous"], "current": row["current"]}),
-                );
-            }
-            "projection_dimensions" | "pca_dims" => {
-                parameter_changes.push(json!("sweep.projection.dimensions.values"))
-            }
-            "epsilon" => parameter_changes.push(json!("cosmic_graph.epsilon")),
-            other => parameter_changes.push(json!(other)),
-        }
-    }
+    let (parameter_changes, metric_changes) = diff_changes(&diff);
     let changes_returned = parameter_changes.len() + metric_changes.len();
     let mut payload = json!({
         "status": response["status"],
@@ -767,6 +937,7 @@ pub fn summary_payload(
         "data_shape": response["data_shape"],
         "construction_threshold": response["construction_threshold"],
         "graph_health": response["graph_health"],
+        "diagnose_summary": response.get("diagnose_summary").cloned().unwrap_or(Value::Null),
         "analysis_status": response["analysis_status"],
         "next_required_check": response["next_required_check"],
         "finalization_gate": response["finalization_gate"],
@@ -792,7 +963,7 @@ pub fn summary_payload(
         "config_advisory": response["config_advisory"],
         "config_yaml_included": include_config_yaml,
         "config_yaml_available_via": "get_runtime_context",
-        "next_tools": ["diagnose_cosmic_graph", "generate_cluster_dossier", "get_sweep_history", "get_threshold_stability_curve"],
+        "next_tools": ["diagnose_cosmic_graph", "generate_cluster_dossier", "get_sweep_history", "get_threshold_stability_curve", "refine_config"],
     });
     let obj = payload.as_object_mut().expect("object");
     if include_config_yaml {
@@ -801,8 +972,10 @@ pub fn summary_payload(
             response["config_yaml_normalized"].clone(),
         );
     }
-    if let Some(path) = response.get("saved_config_path") {
-        obj.insert("saved_config_path".into(), path.clone());
+    for key in ["saved_config_path", phirewall::KEY] {
+        if let Some(value) = response.get(key) {
+            obj.insert(key.into(), value.clone());
+        }
     }
     payload
 }
@@ -855,7 +1028,12 @@ fn job_payload(state: &ServerState, run_id: &RunId) -> Result<(Value, JobState),
         "response_available": response.is_some(),
     });
     if let Some(r) = response {
-        payload["sweep"] = summary_payload(&r, 20, false);
+        let mut sweep = summary_payload(&r, 20, false);
+        // The gateway reads the contract at the top level only.
+        if let Some(summary) = sweep.as_object_mut().and_then(|m| m.remove(phirewall::KEY)) {
+            payload[phirewall::KEY] = summary;
+        }
+        payload["sweep"] = sweep;
     }
     if !job.state.is_terminal() {
         payload["poll_with"] = json!("wait_job");
@@ -966,7 +1144,7 @@ pub fn history_spec() -> ToolSpec {
     ToolSpec {
         name: HISTORY,
         title: "Sweep History",
-        description: "List the persisted sweeps with graph metrics per run. Use after several run_topological_sweep calls to see how epsilon and projection dimensions moved nodes, edges, components and giant fraction; detail='summary' synthesizes patterns across runs. Reads the store, so it covers every completed run.",
+        description: "List persisted sweeps with graph metrics per run. Use after several run_topological_sweep calls to see how epsilon and projection dimensions moved nodes, edges, components and giant fraction; detail='summary' synthesizes patterns across runs. Reads the store, so covers every completed run.",
         input_schema: input_schema::<HistoryParams>(),
         output_schema: s::as_object(s::object(
             &[
@@ -1078,7 +1256,7 @@ pub fn compare_spec() -> ToolSpec {
     ToolSpec {
         name: COMPARE,
         title: "Compare Sweeps",
-        description: "Compare two persisted sweeps side by side by config and graph metrics. Returns each run's projection dimensions, epsilon, construction threshold, nodes, edges, components, giant fraction and weight p95; the text view is a markdown table. Measurement only: it does not rank the runs.",
+        description: "Compare two persisted sweeps by config and graph metrics: each run's projection dimensions, epsilon, construction threshold, nodes, edges, components, giant fraction and weight p95; text is a markdown table. Measurement only; it does not rank runs.",
         input_schema: input_schema::<CompareParams>(),
         output_schema: s::as_object(s::object(
             &[("status", s::string()), ("run_a", side.clone()), ("run_b", side)],

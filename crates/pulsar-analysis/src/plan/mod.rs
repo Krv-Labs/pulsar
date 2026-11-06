@@ -7,6 +7,7 @@
 mod defaults;
 mod draft;
 mod edits;
+pub mod imported;
 mod model;
 mod payload;
 #[allow(clippy::module_inception)]
@@ -15,13 +16,20 @@ mod proxies;
 mod questions;
 mod render;
 mod stakes;
+mod summary;
 mod text;
 
-pub use defaults::{populate_default_entries, validate_role_designations, DraftContext};
+pub use defaults::{
+    populate_default_entries, row_index_like, validate_role_designations, DraftContext,
+};
 pub use draft::{draft_plan, DraftError, DraftOptions};
 pub use edits::{
-    apply_answers_and_edits, diff_plan_entries, VALID_ENCODE_METHODS, VALID_IMPUTE_METHODS,
-    VALID_ROLES,
+    apply_answers_and_edits, apply_answers_and_edits_guarded, diff_plan_entries, HeldOneHot,
+    VALID_ENCODE_METHODS, VALID_IMPUTE_METHODS, VALID_ROLES,
+};
+pub use imported::{
+    hex_sha256, Decides, ImportedColumn, ImportedDecisions, ImportedOpen, ImportedWarning,
+    PreparedVersion,
 };
 pub use model::{
     edit, DecidedBy, Edit, EntryStatus, ImputeSpec, PendingQuestion, PlanEditError, PlanEntry,
@@ -32,13 +40,17 @@ pub use payload::{
     edit_plan_payload_to_markdown, Detail, Limits, EVENT_FLAG_HINT_DESCRIPTION, HOW_TO_USE,
 };
 pub use plan::{PreprocessingPlan, TargetProxy};
-pub use proxies::{calibrate_processed_space, dry_run_processed_space, DryRun, ProcessedSpace};
+pub use proxies::{
+    calibrate_processed_space, dry_run_processed_space, plan_matches_preprocessing,
+    processed_feature_names, CalibrationFallback, DryRun, ProcessedSpace,
+};
 pub use questions::build_pending_questions;
 pub use render::{
     build_marker_legend, plan_fingerprint, plan_to_preprocessing_dict, plan_to_preprocessing_yaml,
     py_canonical_json, py_json_dumps, summarize_plan_counts,
 };
 pub use stakes::{compute_stakes, StakesOptions};
+pub use summary::{build_preprocessing_summary, DROP_REASONS};
 pub use text::{
     format_col_list, format_missing_reason, is_count_like_zero_free, plural, py_repr, py_repr_list,
     py_repr_value, py_str, thousands,
