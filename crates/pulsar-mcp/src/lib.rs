@@ -37,5 +37,8 @@ pub use state::{ServerOptions, ServerState};
 pub use tools::{catalog, ToolSpec};
 
 /// Character budget of the advertised catalog (descriptions plus input
-/// schemas): ~12k tokens. Raise deliberately, not by accident.
-pub const CATALOG_BUDGET_CHARS: usize = 48_000;
+/// schemas), a guard against accidental growth rather than a measured limit.
+/// Raised from 48k when the 0.7.0 schema defaults (v0.6.0 parity) met the
+/// guidance moved out of per-call answers into descriptions; the catalog is
+/// sent once per session, those answers on every call. Raise deliberately.
+pub const CATALOG_BUDGET_CHARS: usize = 50_000;

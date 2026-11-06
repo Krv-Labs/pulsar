@@ -600,17 +600,8 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
     )
     .await;
     assert_eq!(e["error_code"], "HOST_PATH_NOT_VISIBLE");
-    // `csv_path` is in the advertised input_schema and works as an alias.
-    let ingest_input_schema = Value::Object(
-        (*tools
-            .iter()
-            .find(|t| t.name == "ingest_dataset")
-            .unwrap()
-            .input_schema)
-            .clone(),
-    );
-    let csv_call = json!({"csv_path": golden("blobs", "input.csv").display().to_string()});
-    common::validate_schema(&ingest_input_schema, &csv_call, "ingest_dataset(csv_path)");
+    // `csv_path` works as an alias; the schema advertises only the required
+    // `path` (v0.6.0 parity), and the description names the alias.
     let via_alias = ok(
         &client,
         &tools,
@@ -640,7 +631,7 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
     assert!(
         e["reason"]
             .as_str()
-            .is_some_and(|m| m.contains("unknown field `file`, expected `path` or `csv_path`")),
+            .is_some_and(|m| m.contains("unknown field `file`, expected `csv_path` or `path`")),
         "{e}"
     );
     let e = err(

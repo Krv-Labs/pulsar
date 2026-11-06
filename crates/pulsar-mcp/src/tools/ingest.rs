@@ -10,13 +10,12 @@ use crate::state::ServerState;
 
 pub const NAME: &str = "ingest_dataset";
 
-#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
-#[serde(default, deny_unknown_fields)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Params {
     /// Absolute path to a CSV or Parquet file on the machine running this server (host-visible; sandbox-only paths fail). `csv_path` is accepted as an alias.
+    #[serde(alias = "csv_path")]
     pub path: String,
-    /// Alias for `path` (used when `path` is omitted).
-    pub csv_path: Option<String>,
 }
 
 pub fn spec() -> ToolSpec {
@@ -44,12 +43,9 @@ pub fn spec() -> ToolSpec {
 }
 
 pub async fn call(state: &ServerState, p: Params) -> Result<CallToolResult, ToolError> {
-    let raw_path = match (
-        Some(p.path.as_str()).filter(|s| !s.trim().is_empty()),
-        p.csv_path.as_deref().filter(|s| !s.trim().is_empty()),
-    ) {
-        (Some(path), _) | (None, Some(path)) => path.to_owned(),
-        (None, None) => {
+    let raw_path = match Some(p.path.as_str()).filter(|s| !s.trim().is_empty()) {
+        Some(path) => path.to_owned(),
+        None => {
             return Err(ToolError::invalid_argument(
                 NAME,
                 "path is required.",
