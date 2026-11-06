@@ -12,6 +12,8 @@
 use pulsar_data::Column;
 use pulsar_store::{ClusterAssignmentId, StoreError};
 use rmcp::model::CallToolResult;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::characterize::load;
@@ -245,7 +247,7 @@ pub async fn labeled(state: &ServerState, p: LabeledParams) -> Result<CallToolRe
 
 // ---- export_dataset_bundle ---------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutParam {
     #[default]

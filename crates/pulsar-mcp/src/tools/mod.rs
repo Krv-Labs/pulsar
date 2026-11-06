@@ -220,9 +220,9 @@ pub async fn dispatch(
 /// Shared parameter enums.
 pub mod params {
     use schemars::JsonSchema;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
     #[serde(rename_all = "snake_case")]
     pub enum Format {
         #[default]
@@ -230,7 +230,7 @@ pub mod params {
         Json,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
     #[serde(rename_all = "snake_case")]
     pub enum Detail {
         #[default]
@@ -244,6 +244,56 @@ pub mod params {
                 Self::Summary => "summary",
                 Self::Full => "full",
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    fn input(tool: &str) -> Value {
+        let spec = super::catalog()
+            .into_iter()
+            .find(|t| t.name == tool)
+            .unwrap_or_else(|| panic!("no tool {tool}"));
+        Value::Object((*spec.input_schema).clone())
+    }
+
+    /// v0.6.0 parity: required params are required on the wire and optional
+    /// ones advertise their default (schemars needs `Serialize` for that).
+    #[test]
+    fn input_schemas_advertise_v060_required_params_and_defaults() {
+        for (tool, required) in [
+            ("ingest_dataset", &["path"][..]),
+            ("create_config", &["dataset_id"]),
+            ("validate_config", &["config_yaml"]),
+            ("validate_preprocessing_config", &["config_yaml"]),
+            ("draft_preprocessing_plan", &["dataset_id"]),
+            ("edit_preprocessing_plan", &["plan_id"]),
+            ("probe_columns", &["dataset_id", "columns"]),
+            ("compare_sweeps", &["run_a", "run_b"]),
+        ] {
+            assert_eq!(input(tool)["required"], json!(required), "{tool}");
+        }
+        for (tool, param, default) in [
+            ("diagnose_cosmic_graph", "detail", json!("summary")),
+            ("diagnose_cosmic_graph", "response_format", json!("json")),
+            ("diagnose_cosmic_graph", "surface", json!("constructed")),
+            ("generate_cluster_dossier", "method", json!("auto")),
+            ("run_topological_sweep", "detail", json!("summary")),
+            ("probe_columns", "response_format", json!("markdown")),
+            ("draft_preprocessing_plan", "stakes", json!(true)),
+            ("draft_preprocessing_plan", "question_limit", json!(8)),
+            ("validate_config", "dataset_id", json!("")),
+            ("run_topological_sweep", "execution", json!("sync")),
+            ("get_sweep_history", "detail", json!("table")),
+        ] {
+            assert_eq!(
+                input(tool)["properties"][param]["default"],
+                default,
+                "{tool}.{param}"
+            );
         }
     }
 }

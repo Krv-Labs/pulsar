@@ -41,7 +41,7 @@ pub use record::{
     LongitudinalRecord, PlanRecord, PlateauSummary, Representation, RunArtifacts, RunMetrics,
     RunRecord, StabilitySummary, ThresholdPolicy, UploadRecord, SCHEMA_VERSION,
 };
-pub use store::{RunListing, StagedClusterAssignment, Store, StoreOptions};
+pub use store::{RunListing, StagedClusterAssignment, Store, StoreOptions, ENV_RUN_RETENTION};
 
 #[cfg(test)]
 pub(crate) mod test_util {

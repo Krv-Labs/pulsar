@@ -20,6 +20,7 @@ use pulsar_data::Table;
 use pulsar_store::{PlanId, StoreError};
 use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::config::resolve_dataset;
@@ -94,42 +95,45 @@ fn plan_error(tool: &'static str, error: &PlanEditError, action: String) -> Tool
 // ---- draft_preprocessing_plan ------------------------------------------------
 
 #[derive(serde::Deserialize, JsonSchema)]
-#[serde(default)]
 pub struct DraftParams {
     /// Required. Dataset handle returned by ingest_dataset; an empty value returns MISSING_INPUT.
     pub dataset_id: String,
     /// Columns to hold out as evaluation outcomes (role='target', decided_by='agent', excluded from map features).
+    #[serde(default)]
     pub target_columns: Option<Vec<String>>,
     /// Optional entity identifier column (role='entity', excluded from map features).
+    #[serde(default)]
     pub entity_column: String,
     /// Optional longitudinal time column (role='time', excluded from map features).
+    #[serde(default)]
     pub time_column: String,
     /// Compute k-NN neighborhood overlap stakes for open questions on a deterministic row sample (up to 2 * question_limit questions).
+    #[serde(default = "yes")]
     pub stakes: bool,
     /// summary: capped question and evidence previews. full: uncapped lists plus every column entry in `entries`.
+    #[serde(default)]
     pub detail: Detail,
     /// Max open questions returned in summary mode (>= 1).
+    #[serde(default = "eight")]
     pub question_limit: i64,
     /// Max items per evidence list in summary mode (>= 1).
+    #[serde(default = "twelve")]
     pub evidence_limit: i64,
     /// Text view: 'markdown' or 'json'. structured_content is identical.
+    #[serde(default)]
     pub response_format: Format,
 }
 
-impl Default for DraftParams {
-    fn default() -> Self {
-        Self {
-            dataset_id: String::new(),
-            target_columns: None,
-            entity_column: String::new(),
-            time_column: String::new(),
-            stakes: true,
-            detail: Detail::Summary,
-            question_limit: 8,
-            evidence_limit: 12,
-            response_format: Format::Markdown,
-        }
-    }
+fn yes() -> bool {
+    true
+}
+
+fn eight() -> i64 {
+    8
+}
+
+fn twelve() -> i64 {
+    12
 }
 
 pub fn draft_spec() -> ToolSpec {
@@ -291,7 +295,7 @@ pub async fn draft(state: &ServerState, p: DraftParams) -> Result<CallToolResult
 
 // ---- edit_preprocessing_plan -------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     #[default]
@@ -299,22 +303,26 @@ pub enum Source {
     User,
 }
 
-#[derive(serde::Deserialize, JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, JsonSchema)]
 pub struct EditParams {
     /// Plan handle returned by draft_preprocessing_plan.
     pub plan_id: String,
     /// Revision being edited; mismatch returns SESSION_REVISION_CONFLICT. Omit to edit the current revision.
+    #[serde(default)]
     pub base_revision: Option<i64>,
     /// Answers as [{question_id, option_id}]; option_ids: [id, ...] ensembles compatible imputation treatments, preserving each option's indicator.
+    #[serde(default)]
     pub answers: Option<Vec<Value>>,
     /// Direct column edits: [{'column', 'role'?, 'impute_method'?, 'impute_value'?, 'indicator'?, 'encode'?}]. 'impute' takes a method, value, seed and indicator, or a candidate list.
+    #[serde(default)]
     pub edits: Option<Vec<Value>>,
     /// Columns to one-hot even with more levels than sqrt(n_rows); until named here, such a one-hot is held and listed in `warnings`.
     pub confirm_one_hot: Option<Vec<String>>,
     /// Decision provenance: 'agent' when inferred from context/schema; 'user' when relaying a user's answer.
+    #[serde(default)]
     pub source: Source,
     /// Text view: 'markdown' or 'json'. structured_content is identical.
+    #[serde(default)]
     pub response_format: Format,
 }
 
@@ -543,12 +551,12 @@ pub async fn edit(state: &ServerState, p: EditParams) -> Result<CallToolResult, 
 
 // ---- validate_preprocessing_config -------------------------------------------
 
-#[derive(serde::Deserialize, JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, JsonSchema)]
 pub struct ValidateParams {
     /// Full config as YAML text (a mapping with a `preprocessing` section); only preprocessing is executed.
     pub config_yaml: String,
     /// Dataset handle from ingest_dataset to validate against. Omit to use the dataset most recently registered or validated in this session.
+    #[serde(default)]
     pub dataset_id: String,
 }
 

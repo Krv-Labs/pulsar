@@ -41,6 +41,8 @@ use pulsar_store::{
     StagedClusterAssignment, Store,
 };
 use rmcp::model::CallToolResult;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::params::Format;
@@ -56,7 +58,7 @@ pub const NAME: &str = "generate_cluster_dossier";
 
 const THRESHOLD_RANGE_MESSAGE: &str = "Threshold must be finite and between 0.0 and 1.0.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MethodParam {
     #[default]
@@ -78,7 +80,7 @@ impl MethodParam {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DossierDetail {
     #[default]

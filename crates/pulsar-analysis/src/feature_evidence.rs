@@ -11,9 +11,11 @@
 //!
 //! Known divergences from Python:
 //! - Tiers come from the exact optimal 1-D k-means partition of the positive
-//!   aggregate scores (dynamic programming); scikit-learn's `KMeans(n_init=10,
-//!   random_state=42)` reaches the same optimum on these inputs but is a
-//!   randomized search.
+//!   aggregate scores (dynamic programming). scikit-learn's `KMeans(n_init=10,
+//!   random_state=42)` is a randomized search: it reaches the same optimum on
+//!   the golden fixtures, but on larger real data it can stop at a local
+//!   optimum, so `core` / `supporting` / `context` tiers can differ from v0.6.0
+//!   for the same graph.
 //! - Fisher's exact test sums the support directly (see
 //!   [`crate::stats::fisher_exact_two_sided`]).
 //! - Node `i` of the graph is row `i` of the data, as in a default index.

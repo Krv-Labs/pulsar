@@ -183,6 +183,24 @@ async fn err<H: ClientHandler>(
     payload
 }
 
+/// Omitting a required parameter fails argument parsing (the schema lists it
+/// as required), naming the field.
+async fn assert_missing_field<H: ClientHandler>(
+    client: &RunningService<RoleClient, H>,
+    name: &str,
+    field: &str,
+) {
+    let e = err(client, name, args(&[])).await;
+    assert_eq!(e["error_code"], "INVALID_ARGUMENT", "{name}: {e}");
+    assert!(
+        e["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("missing field `{field}`")),
+        "{name}: {e}"
+    );
+}
+
 /// A small JSON Schema validator covering the subset the catalog uses.
 fn validate(schema: &Value, value: &Value, path: &str) {
     if let Some(any_of) = schema["anyOf"].as_array() {
@@ -550,6 +568,14 @@ async fn canonical_loop_with_schema_validation_and_error_envelopes() {
         &client,
         "diagnose_cosmic_graph",
         args(&[("run_id", json!("nope"))]),
+    )
+    .await;
+    assert_eq!(e["error_code"], "INVALID_HANDLE");
+    // Cluster reads check the handle before the session's labels.
+    let e = err(
+        &client,
+        "get_cluster_profile",
+        args(&[("cluster_id", json!(0)), ("run_id", json!("nope"))]),
     )
     .await;
     assert_eq!(e["error_code"], "INVALID_HANDLE");
@@ -1410,8 +1436,16 @@ async fn draft_and_edit_errors_tell_the_agent_what_to_do() {
     let plan_id = draft["plan_id"].as_str().unwrap().to_owned();
 
     // draft_preprocessing_plan
+    assert_missing_field(&client, "draft_preprocessing_plan", "dataset_id").await;
     assert_eq!(
-        code_of(&err(&client, "draft_preprocessing_plan", args(&[])).await),
+        code_of(
+            &err(
+                &client,
+                "draft_preprocessing_plan",
+                args(&[("dataset_id", json!(""))])
+            )
+            .await
+        ),
         "MISSING_INPUT"
     );
     assert_eq!(
@@ -1455,8 +1489,16 @@ async fn draft_and_edit_errors_tell_the_agent_what_to_do() {
     );
 
     // edit_preprocessing_plan
+    assert_missing_field(&client, "edit_preprocessing_plan", "plan_id").await;
     assert_eq!(
-        code_of(&err(&client, "edit_preprocessing_plan", args(&[])).await),
+        code_of(
+            &err(
+                &client,
+                "edit_preprocessing_plan",
+                args(&[("plan_id", json!(""))])
+            )
+            .await
+        ),
         "MISSING_INPUT"
     );
     for (id, want) in [
@@ -2093,8 +2135,9 @@ async fn create_config_errors_tell_the_agent_what_to_do() {
     let tools = client.list_all_tools().await.unwrap();
     let dataset_id = ingest_wide(&client, &tools).await;
 
+    assert_missing_field(&client, "create_config", "dataset_id").await;
     assert_eq!(
-        code_of(&err(&client, "create_config", args(&[])).await),
+        code_of(&err(&client, "create_config", args(&[("dataset_id", json!(""))])).await),
         "MISSING_INPUT"
     );
     assert!(!code_of(

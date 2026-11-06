@@ -16,6 +16,8 @@ use pulsar_analysis::{
 };
 use pulsar_core::{find_stable_thresholds_from_edges, Plateau, StabilityResult, DEFAULT_NUM_BINS};
 use rmcp::model::CallToolResult;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::params::{Detail, Format};
@@ -31,7 +33,7 @@ pub const DIAGNOSE: &str = "diagnose_cosmic_graph";
 pub const CURVE: &str = "get_threshold_stability_curve";
 pub const SKELETON: &str = "get_topological_skeleton";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     #[default]
@@ -477,7 +479,7 @@ fn payload_morph(m: &GraphMetrics, detail: Detail) -> Value {
 
 // ------------------------------------------------------------------- curve
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CurveSource {
     /// Recompute from the run's persisted full affinity (always available).
@@ -487,7 +489,7 @@ pub enum CurveSource {
     Live,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyParam {
     #[default]
@@ -1097,7 +1099,7 @@ pub async fn curve(state: &ServerState, p: CurveParams) -> Result<CallToolResult
 
 // ---------------------------------------------------------------- skeleton
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkeletonDetail {
     #[default]

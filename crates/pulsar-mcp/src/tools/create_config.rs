@@ -36,20 +36,24 @@ const STAKES_QUESTIONS: usize = 6;
 /// Open questions previewed in the plan provenance block.
 const PREVIEW: usize = 3;
 
-#[derive(serde::Deserialize, JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, JsonSchema)]
 pub struct Params {
     /// Dataset handle returned by ingest_dataset.
     pub dataset_id: String,
     /// Optional short run name (e.g. 'baseline') stored as run.name. Defaults to 'initial_sweep'.
+    #[serde(default)]
     pub intent: String,
     /// Optional plan handle from draft_preprocessing_plan. Omit to draft and store baseline defaults.
+    #[serde(default)]
     pub plan_id: String,
     /// 'full' (default) returns `config_yaml`. 'summary' omits it; the YAML is still the session's active config for run_topological_sweep (without config_yaml), refine_config and get_runtime_context.
+    #[serde(default)]
     pub detail: ConfigDetail,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigDetail {
     #[default]

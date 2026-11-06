@@ -21,6 +21,7 @@ use pulsar_analysis::dossier_payloads::{
     cluster_profile_payload, feature_signal_payload, signal_matrix_payload,
 };
 use pulsar_analysis::plan::py_str;
+use pulsar_store::RunId;
 use rmcp::model::CallToolResult;
 use serde_json::{json, Map, Value};
 
@@ -66,6 +67,9 @@ pub(crate) fn require_clusters(
     tool: &'static str,
     run_id: &str,
 ) -> Result<Arc<ClusterState>, ToolError> {
+    if !run_id.is_empty() {
+        RunId::parse(run_id).map_err(|e| ToolError::from_store(tool, e))?;
+    }
     let session = state.session();
     if run_id.is_empty() && session.latest_run_id.is_none() {
         return Err(ToolError::model_not_loaded(tool));
