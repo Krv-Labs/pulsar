@@ -104,7 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           scratch=$(mktemp -d)
-          git ls-files -z | xargs -0 cp --parents -t "$scratch"
+          git archive HEAD | tar -x -C "$scratch"
           cd "$scratch"
           git init -q
           sed -i 's/^## \[Unreleased\]$/## [Unreleased]\n\n- ci check/' CHANGELOG.md
