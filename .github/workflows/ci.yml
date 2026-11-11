@@ -99,7 +99,7 @@ jobs:
       - name: install.sh end to end (throwaway HOME)
         run: sh scripts/test-install.sh
       # The release PR's script, on a scratch copy: it must bump Cargo.toml,
-      # Cargo.lock (still --locked-consistent) and the changelog together.
+      # Cargo.lock (still --locked-consistent), the plugin and the changelog together.
       - name: Release script self-check
         run: |
           set -euo pipefail
@@ -112,6 +112,8 @@ jobs:
           [ "$v" = 99.0.0 ]
           grep -q '^version = "99.0.0"' Cargo.toml
           grep -q '^## \[99.0.0\] - ' CHANGELOG.md
+          [ "$(jq -r .version plugins/pulsar/.claude-plugin/plugin.json)" = 99.0.0 ]
+          grep -q '"@krv-labs/pulsar@99.0.0"' plugins/pulsar/.mcp.json
           cargo metadata --locked --format-version 1 --no-deps >/dev/null
 
   # The one required status check. A skipped job is a pass (a push to main
