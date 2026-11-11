@@ -42,12 +42,16 @@ jobs:
       # only the broken one (a runner's apt mirror blip used to cancel all eight).
       fail-fast: false
       matrix:
+        # Linux builds pin an Ubuntu release instead of ubuntu-latest: the glibc
+        # binaries need the oldest glibc we support (24.04's 2.39, the same on
+        # both arches), and ubuntu-latest (26.04) fetches musl-tools from a host
+        # its x86 runners cannot resolve.
         include:
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, musl: true }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, musl: true }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
           # Cross-compiled with the image's MSVC ARM64 tools (no ARM Windows
