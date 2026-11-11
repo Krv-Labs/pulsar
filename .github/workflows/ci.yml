@@ -1,37 +1,71 @@
 name: CI
 
+# Tests run on pull requests, and only once a PR is ready for review: a draft
+# runs nothing, CI starts when it is marked ready and re-runs on each push
+# after that. GitHub will not merge a draft.
+#
+# A push to main does not test again (every change arrives through a PR whose
+# `ci gate` passed). It only compiles, to save the Rust cache that PRs
+# restore: GitHub lets a PR read its base branch's caches, never another PR's,
+# so caches are saved from main alone.
+#
+# `ci gate` is the one required status check on main. Branch rules name that
+# job only, so adding or renaming a job never strands a PR on a check that
+# will not report.
+
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# Supersede in-flight runs of a PR that has moved on. A push to main is never
+# cancelled: it is what fills the cache.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  TESTS: ${{ github.event_name != 'push' }}
 
 jobs:
   rust:
     name: rust (fmt, clippy, test)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: env.TESTS == 'true'
+        run: cargo fmt --all --check
+      - if: env.TESTS == 'true'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build the tests (main, for the cache)
+        if: env.TESTS != 'true'
+        run: cargo test --workspace --locked --no-run
+      - if: env.TESTS == 'true'
+        run: cargo test --workspace --locked
       - name: Smoke-test the binary
+        if: env.TESTS == 'true'
         run: |
           cargo run -q --locked -p pulsar-cli -- --version
           cargo run -q --locked -p pulsar-cli -- config validate params.yaml.sample >/dev/null
 
   msrv:
+    if: ${{ github.event_name != 'push' && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Read rust-version
@@ -41,15 +75,21 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
       - run: cargo check --workspace --locked
 
   npm:
     name: npm package (pack + launcher smoke)
+    if: ${{ github.event_name != 'push' && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -58,3 +98,35 @@ jobs:
         run: node npm/scripts/smoke.mjs
       - name: install.sh end to end (throwaway HOME)
         run: sh scripts/test-install.sh
+      # The release PR's script, on a scratch copy: it must bump Cargo.toml,
+      # Cargo.lock (still --locked-consistent) and the changelog together.
+      - name: Release script self-check
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d)
+          git ls-files -z | xargs -0 cp --parents -t "$scratch"
+          cd "$scratch"
+          git init -q
+          sed -i 's/^## \[Unreleased\]$/## [Unreleased]\n\n- ci check/' CHANGELOG.md
+          v=$(node scripts/prepare-release.mjs --version 99.0.0)
+          [ "$v" = 99.0.0 ]
+          grep -q '^version = "99.0.0"' Cargo.toml
+          grep -q '^## \[99.0.0\] - ' CHANGELOG.md
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+
+  # The one required status check. A skipped job is a pass (a push to main
+  # skips the PR-only jobs); a failed or cancelled one is not.
+  ci-gate:
+    name: ci gate
+    needs: [rust, msrv, npm]
+    if: ${{ always() && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: ${RESULTS}"
+          for r in ${RESULTS}; do
+            case "$r" in success|skipped) ;; *) echo "::error::a required job ended ${r}"; exit 1 ;; esac
+          done

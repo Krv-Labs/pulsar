@@ -5,14 +5,23 @@ name: Release
 # NPM_TOKEN secret (an npm automation token with publish rights on @krv-labs). The name is pulsar
 # (binary, @krv-labs/pulsar, @krv-labs/pulsar-<platform>); it must match
 # NAME in npm/scripts/build-packages.mjs and the pulsar-cli [[bin]] name.
-# Runs on version tags; workflow_dispatch builds everything and runs a publish
-# dry run. A real publish only ever runs from a v* tag (dispatch with
-# publish=true on any other ref fails), so the tag-vs-version check always runs.
+# Runs on version tags pushed by a person, and is called by release-tag.yml
+# when a release PR merges (a tag that workflow makes with GITHUB_TOKEN starts
+# no workflow, so it calls this one with the tag instead). workflow_dispatch
+# builds everything and runs a publish dry run. A real publish only ever runs
+# for a v* tag (dispatch with publish=true on any other ref fails), so the
+# tag-vs-version check always runs.
 # A rerun after a partial failure skips packages already on npmjs.com.
 # Prerelease versions (with a '-') publish under the `next` dist-tag.
 on:
   push:
     tags: ['v*']
+  workflow_call:
+    inputs:
+      tag:
+        description: The vX.Y.Z tag to build and publish
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       publish:
@@ -26,6 +35,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   NAME: pulsar
+  # The release tag, or empty for a dry run.
+  TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
 
 jobs:
   build:
@@ -47,6 +58,8 @@ jobs:
           - { target: aarch64-pc-windows-msvc, os: windows-latest }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable   # required when pinned by SHA (the action reads it from the ref otherwise)
@@ -77,6 +90,8 @@ jobs:
       id-token: write   # npm provenance
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -91,10 +106,10 @@ jobs:
           for d in binaries/bin-*; do mv "$d" "binaries/${d#binaries/bin-}"; done
           ls -R binaries | head -30
       - name: Check the tag matches the workspace version
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.TAG != ''
         run: |
           want="$(grep -m1 -A3 '^\[workspace.package\]' Cargo.toml | grep '^version' | cut -d'"' -f2)"
-          test "v$want" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != workspace version v$want"; exit 1; }
+          test "v$want" = "${TAG}" || { echo "tag ${TAG} != workspace version v$want"; exit 1; }
       - name: Build npm packages (all eight platforms required)
         run: node npm/scripts/build-packages.mjs --binaries binaries --out dist --require-all
       - name: Publish (platform packages first, then the launcher)
@@ -102,13 +117,14 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # Not `cond && '' || '--dry-run'`: '' is falsy in expressions, so that
           # form always dry-ran, even on a tag. Use non-empty values.
-          MODE: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.publish) && 'publish' || 'dry-run' }}
+          MODE: ${{ (env.TAG != '' || inputs.publish) && 'publish' || 'dry-run' }}
         run: |
-          echo "mode: $MODE"
-          case "$GITHUB_REF" in
-            refs/tags/v*) [ "$MODE" = publish ] || { echo "a tag run must publish, got mode $MODE"; exit 1; } ;;
-            *) if [ "$MODE" = publish ]; then echo "publishing is only allowed from a v* tag, not $GITHUB_REF"; exit 1; fi ;;
-          esac
+          echo "mode: $MODE (tag: ${TAG:-none})"
+          if [ -n "$TAG" ]; then
+            [ "$MODE" = publish ] || { echo "a tag run must publish, got mode $MODE"; exit 1; }
+          elif [ "$MODE" = publish ]; then
+            echo "publishing is only allowed for a v* tag, not $GITHUB_REF"; exit 1
+          fi
           if [ "$MODE" = publish ] && [ -z "$NODE_AUTH_TOKEN" ]; then
             echo "NPM_TOKEN is not set: add an npm automation token for @krv-labs as a repository secret"; exit 1
           fi
@@ -125,7 +141,7 @@ jobs:
           for d in dist/$NAME-*; do publish "$d"; done
           publish "dist/$NAME"
       - name: Verify the release on npmjs.com
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        if: env.TAG != '' || inputs.publish
         run: |
           version=$(node -p "require('./dist/$NAME/package.json').version")
           # Every package resolves at this version (retry while the registry catches up).

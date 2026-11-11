@@ -1,0 +1,84 @@
+name: Prepare release
+
+# Step one of a release: opens the release PR. It sets the workspace version
+# (Cargo.toml and Cargo.lock) and dates CHANGELOG.md's [Unreleased] section
+# (scripts/prepare-release.mjs, no dependencies) on a release/vX.Y.Z branch.
+# Merging the PR tags vX.Y.Z and publishes (release-tag.yml).
+#
+# The PR is opened as a draft with GITHUB_TOKEN. GitHub starts no workflow for
+# a PR or push made with GITHUB_TOKEN, so CI would never run on it; marking it
+# "Ready for review" is a person's event and starts CI like on any other PR.
+# Needs "Allow GitHub Actions to create and approve pull requests" in the
+# repository's Actions settings.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Bump from the last release (ignored when a version is given)"
+        type: choice
+        options: [minor, patch, major]
+        default: minor
+      version:
+        description: "Exact version instead, X.Y.Z (optional)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  open:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set the version and date the changelog
+        id: prepare
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION}" ]; then
+            version=$(node scripts/prepare-release.mjs --version "${VERSION}")
+          else
+            version=$(node scripts/prepare-release.mjs --bump "${BUMP}")
+          fi
+          if git ls-remote --exit-code --heads origin "release/v${version}" >/dev/null; then
+            echo "::error::release/v${version} already exists; close or merge its PR first"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Open the release PR (draft)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="release/v${VERSION}"
+          git switch -c "${branch}"
+          git commit -am "release: ${VERSION}"
+          git push origin "${branch}"
+          notes=$(awk -v v="## [${VERSION}]" 'index($0, v) == 1 {f = 1; next} /^## \[/ || /^---$/ {f = 0} f' CHANGELOG.md)
+          body=$(printf 'Release %s, opened by %s from "Prepare release".\n\n**Mark this PR ready for review to run CI** (a draft opened by Actions starts no workflow). Merging it tags `v%s` and publishes the npm packages to npmjs.com. Edit the notes below in CHANGELOG.md on this branch if needed.\n\n%s\n' \
+            "${VERSION}" "${GITHUB_ACTOR}" "${VERSION}" "${notes}")
+          gh pr create --draft --base main --head "${branch}" --title "release: ${VERSION}" --body "${body}"
