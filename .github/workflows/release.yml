@@ -37,7 +37,10 @@ jobs:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true
+      # publish needs every build, so one failure still stops the release; with
+      # fail-fast off the other targets finish and "Re-run failed jobs" rebuilds
+      # only the broken one (a runner's apt mirror blip used to cancel all eight).
+      fail-fast: false
       matrix:
         include:
           - { target: aarch64-apple-darwin, os: macos-latest }
@@ -57,7 +60,13 @@ jobs:
           toolchain: stable   # required when pinned by SHA (the action reads it from the ref otherwise)
           targets: ${{ matrix.target }}
       - if: matrix.musl
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        # Retried: the runner's apt mirrors fail to resolve now and then.
+        run: |
+          for try in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y musl-tools && break
+            echo "apt failed (attempt $try); retrying in 20 s"; sleep 20
+          done
+          command -v musl-gcc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
