@@ -1,0 +1,61 @@
+name: Tag release
+
+# Step two of a release: when a release/vX.Y.Z PR from "Prepare release"
+# merges, tag its merge commit vX.Y.Z, then dispatch release.yml on that tag
+# to build and publish it. A tag made with GITHUB_TOKEN starts no workflow, but
+# a workflow_dispatch does, so the release runs once, and always from
+# release.yml (the one workflow npm trusted publishing trusts).
+#
+# Only a merged release/v* PR tags, never a version change on its own, so a PR
+# that edits Cargo.toml cannot start a release by accident.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged && startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      # The branch name, Cargo.toml and the changelog must all say the same
+      # version, or nothing is tagged.
+      - name: Tag the merge commit and dispatch the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          version="${BRANCH#release/v}"
+          files="$(grep -m1 -A3 '^\[workspace.package\]' Cargo.toml | grep '^version' | cut -d'"' -f2)"
+          [ "${files}" = "${version}" ] \
+            || { echo "::error::branch says ${version}, Cargo.toml says ${files}"; exit 1; }
+          grep -q "^## \[${version}\] - " CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no dated [${version}] section"; exit 1; }
+          if existing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${version}" --jq .object.sha 2>/dev/null); then
+            [ "${existing}" = "${SHA}" ] \
+              || { echo "::error::v${version} already tags ${existing::12}, not this merge"; exit 1; }
+            echo "::notice::v${version} already tags this merge; publishing"
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/v${version}" -f sha="${SHA}" >/dev/null
+            echo "::notice::tagged ${SHA::12} as v${version}"
+          fi
+          gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "v${version}"
+          echo "::notice::dispatched release.yml on v${version}"
