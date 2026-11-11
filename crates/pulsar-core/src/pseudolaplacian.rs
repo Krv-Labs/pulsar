@@ -1,7 +1,7 @@
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::error::PulsarError;
+use crate::error::{ensure_members_in_range, PulsarError};
 
 /// Compute pseudo-Laplacian matrix from Ball Mapper node membership.
 ///
@@ -11,7 +11,16 @@ use crate::error::PulsarError;
 ///
 /// This reflects topological proximity: frequently co-occurring points have
 /// strong negative off-diagonal entries.
-pub fn pseudo_laplacian_inner(nodes: &[Vec<usize>], n: usize) -> Array2<i64> {
+///
+/// # Errors
+/// [`PulsarError::InvalidParameter`] if any member index is `>= n`.
+pub fn pseudo_laplacian_inner(nodes: &[Vec<usize>], n: usize) -> Result<Array2<i64>, PulsarError> {
+    ensure_members_in_range(nodes, n)?;
+    Ok(dense_contribution(nodes, n))
+}
+
+/// [`pseudo_laplacian_inner`] without the bounds check; members must be `< n`.
+pub(crate) fn dense_contribution(nodes: &[Vec<usize>], n: usize) -> Array2<i64> {
     let mut l = Array2::<i64>::zeros((n, n));
     for members in nodes {
         for &i in members {
@@ -31,17 +40,24 @@ pub fn pseudo_laplacian_inner(nodes: &[Vec<usize>], n: usize) -> Array2<i64> {
 ///
 /// This is the optimized entry point that replaces sequential Python loops.
 /// Uses rayon parallel map-reduce for maximum throughput.
-pub fn accumulate_pseudo_laplacians(all_nodes: &[&[Vec<usize>]], n: usize) -> Array2<i64> {
-    all_nodes
+///
+/// # Errors
+/// [`PulsarError::InvalidParameter`] if any member index is `>= n`.
+pub fn accumulate_pseudo_laplacians(
+    all_nodes: &[&[Vec<usize>]],
+    n: usize,
+) -> Result<Array2<i64>, PulsarError> {
+    ensure_members_in_range(all_nodes.iter().flat_map(|nodes| nodes.iter()), n)?;
+    Ok(all_nodes
         .par_iter()
-        .map(|nodes| pseudo_laplacian_inner(nodes, n))
+        .map(|nodes| dense_contribution(nodes, n))
         .reduce(
             || Array2::<i64>::zeros((n, n)),
             |mut acc, l| {
                 acc += &l;
                 acc
             },
-        )
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -222,10 +238,14 @@ fn pseudo_laplacian_inner_sparse(nodes: &[Vec<usize>], n: usize) -> SparseLaplac
 /// contribution; every contribution is sorted/merged locally, and the rayon reduce
 /// merges sorted COO buffers while adding diagonals. This avoids carrying raw
 /// duplicate co-membership pairs across the whole sweep.
+///
+/// # Errors
+/// [`PulsarError::InvalidParameter`] if any member index is `>= n`.
 pub fn accumulate_pseudo_laplacians_sparse(
     all_nodes: &[&[Vec<usize>]],
     n: usize,
-) -> SparsePseudoLaplacian {
+) -> Result<SparsePseudoLaplacian, PulsarError> {
+    ensure_members_in_range(all_nodes.iter().flat_map(|nodes| nodes.iter()), n)?;
     let (diag, raw_offdiag): (Vec<i64>, Vec<(usize, usize, i64)>) = all_nodes
         .par_iter()
         .map(|nodes| {
@@ -245,7 +265,7 @@ pub fn accumulate_pseudo_laplacians_sparse(
         );
 
     let offdiag = raw_offdiag;
-    SparsePseudoLaplacian { n, diag, offdiag }
+    Ok(SparsePseudoLaplacian { n, diag, offdiag })
 }
 
 #[cfg(test)]
@@ -269,7 +289,7 @@ mod tests {
     fn sparse_inner_reconstructs_dense() {
         let nodes = vec![vec![0, 1, 2], vec![1, 2, 3], vec![3, 4]];
         let n = 5;
-        let dense = pseudo_laplacian_inner(&nodes, n);
+        let dense = pseudo_laplacian_inner(&nodes, n).unwrap();
         let c = pseudo_laplacian_inner_sparse(&nodes, n);
         // The per-ball contribution stores raw (possibly duplicate) pairs; merge first.
         let merged = sort_and_merge(c.offdiag);
@@ -289,5 +309,34 @@ mod tests {
         let nodes = vec![vec![3, 1, 2]]; // unsorted members
         let c = pseudo_laplacian_inner_sparse(&nodes, 4);
         assert!(c.offdiag.iter().all(|&(i, j, _)| i < j));
+    }
+
+    /// Ten points, but one ball map built over 40 rows.
+    fn forty_row_ball_map() -> Vec<Vec<usize>> {
+        vec![(0..5).collect(), (30..40).collect()]
+    }
+
+    fn assert_out_of_range<T>(result: Result<T, PulsarError>) {
+        match result {
+            Err(PulsarError::InvalidParameter { msg }) => {
+                assert!(msg.contains("index 30") && msg.contains("n = 10"), "{msg}")
+            }
+            Err(other) => panic!("expected InvalidParameter, got {other:?}"),
+            Ok(_) => panic!("expected an out-of-range member error"),
+        }
+    }
+
+    #[test]
+    fn dense_accumulate_rejects_member_index_beyond_n() {
+        let nodes = forty_row_ball_map();
+        assert_out_of_range(pseudo_laplacian_inner(&nodes, 10));
+        assert_out_of_range(accumulate_pseudo_laplacians(&[&nodes], 10));
+    }
+
+    #[test]
+    fn sparse_accumulate_rejects_member_index_beyond_n() {
+        let ok = vec![vec![0, 1]];
+        let nodes = forty_row_ball_map();
+        assert_out_of_range(accumulate_pseudo_laplacians_sparse(&[&ok, &nodes], 10));
     }
 }

@@ -51,6 +51,18 @@ impl ToolError {
         Self::new(tool, "INVALID_ARGUMENT", reason, agent_action)
     }
 
+    /// A blocking worker that panicked or was cancelled. No input reaches
+    /// this path by design, so the envelope states a defect and keeps the
+    /// join error as the evidence; `code` is the calling tool's own code.
+    pub fn worker_stopped(tool: &'static str, code: &str, join: &tokio::task::JoinError) -> Self {
+        Self::new(
+            tool,
+            code,
+            format!("the worker stopped unexpectedly: {join}"),
+            "An internal computation stopped unexpectedly: this is a defect and the message is the evidence. Report it with the message.",
+        )
+    }
+
     pub fn detail(mut self, key: &str, value: Value) -> Self {
         self.details.insert(key.to_owned(), value);
         self

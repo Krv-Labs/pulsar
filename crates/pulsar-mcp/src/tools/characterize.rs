@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use pulsar_analysis::characterization::{
     characterization_payload_to_markdown, characterize_dataset, compact_characterization_payload,
     probe_columns_payload, probe_columns_payload_to_markdown, profile_column_details,
-    CharacterizationError, ColumnProfile,
+    CharacterizationError, ColumnProfile, PcaProbes,
 };
 use pulsar_data::{DataError, Table};
 use rmcp::model::CallToolResult;
@@ -41,7 +41,7 @@ pub(super) async fn load(tool: &'static str, path: &str) -> Result<Table, ToolEr
     let owned = std::path::PathBuf::from(path);
     tokio::task::spawn_blocking(move || pulsar_data::read_table(&owned))
         .await
-        .map_err(|e| ToolError::new(tool, "DATASET_LOAD_FAILED", e.to_string(), "Retry the call."))?
+        .map_err(|e| ToolError::worker_stopped(tool, "DATASET_LOAD_FAILED", &e))?
         .map_err(|e| match &e {
             DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => ToolError::path_access(
                 tool,
@@ -126,15 +126,27 @@ pub fn characterize_spec() -> ToolSpec {
     }
 }
 
-fn characterization_error(error: CharacterizationError) -> ToolError {
+pub(super) fn characterization_error(
+    tool: &'static str,
+    error: CharacterizationError,
+) -> ToolError {
     let action = match &error {
         CharacterizationError::TooFewNumericColumns { .. } => {
             "Geometry needs at least two numeric columns. Inspect the schema with probe_columns, or fix the column types and re-ingest."
         }
         CharacterizationError::TooFewRows { .. } => "The dataset needs at least two rows to measure neighbour distances.",
+        CharacterizationError::NonFiniteValue { .. } => {
+            "Geometry is measured on the raw file, before any preprocessing plan applies, so this cell blocks it until the source value is replaced or nulled (or the column removed) and the dataset is re-ingested. probe_columns shows the column's range."
+        }
         _ => "Check the dataset is readable tabular data, then retry or re-ingest it.",
     };
-    ToolError::new(CHARACTERIZE, error.code(), error.to_string(), action)
+    let err = ToolError::new(tool, error.code(), error.to_string(), action);
+    match &error {
+        CharacterizationError::NonFiniteValue { column, row, .. } => err
+            .detail("column", json!(column))
+            .detail("row", json!(row)),
+        _ => err,
+    }
 }
 
 pub async fn characterize(
@@ -169,18 +181,12 @@ pub async fn characterize(
     };
     state.session().latest_dataset_id = Some(dataset_id.clone());
     let table = load(CHARACTERIZE, &path).await?;
-    let profile =
-        tokio::task::spawn_blocking(move || characterize_dataset(&table, SUBSAMPLE, SEED))
-            .await
-            .map_err(|e| {
-                ToolError::new(
-                    CHARACTERIZE,
-                    "CHARACTERIZATION_FAILED",
-                    e.to_string(),
-                    "Retry; report the error if it recurs.",
-                )
-            })?
-            .map_err(characterization_error)?;
+    let profile = tokio::task::spawn_blocking(move || {
+        characterize_dataset(&table, SUBSAMPLE, SEED, PcaProbes::DataRelative)
+    })
+    .await
+    .map_err(|e| ToolError::worker_stopped(CHARACTERIZE, "CHARACTERIZATION_FAILED", &e))?
+    .map_err(|e| characterization_error(CHARACTERIZE, e))?;
 
     let mut payload = compact_characterization_payload(&profile);
     payload["dataset_id"] = json!(dataset_id.to_string());
@@ -269,14 +275,7 @@ pub async fn probe(state: &ServerState, p: ProbeParams) -> Result<CallToolResult
         probe_columns_payload(&profiles, &columns, &missing)
     })
     .await
-    .map_err(|e| {
-        ToolError::new(
-            PROBE,
-            "PROBE_FAILED",
-            e.to_string(),
-            "Check the column names and retry with fewer columns.",
-        )
-    })?;
+    .map_err(|e| ToolError::worker_stopped(PROBE, "PROBE_FAILED", &e))?;
 
     let text = match p.response_format {
         Format::Markdown => probe_columns_payload_to_markdown(&payload),
