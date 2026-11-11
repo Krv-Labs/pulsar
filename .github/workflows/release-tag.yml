@@ -1,9 +1,10 @@
 name: Tag release
 
 # Step two of a release: when a release/vX.Y.Z PR from "Prepare release"
-# merges, tag its merge commit vX.Y.Z, then build and publish it by calling
-# release.yml. The tag is made with GITHUB_TOKEN, which starts no workflow, so
-# the release runs from here and never twice.
+# merges, tag its merge commit vX.Y.Z, then dispatch release.yml on that tag
+# to build and publish it. A tag made with GITHUB_TOKEN starts no workflow, but
+# a workflow_dispatch does, so the release runs once, and always from
+# release.yml (the one workflow npm trusted publishing trusts).
 #
 # Only a merged release/v* PR tags, never a version change on its own, so a PR
 # that edits Cargo.toml cannot start a release by accident.
@@ -27,8 +28,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,8 +36,7 @@ jobs:
 
       # The branch name, Cargo.toml and the changelog must all say the same
       # version, or nothing is tagged.
-      - name: Tag the merge commit
-        id: tag
+      - name: Tag the merge commit and dispatch the release
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
@@ -58,14 +57,5 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/v${version}" -f sha="${SHA}" >/dev/null
             echo "::notice::tagged ${SHA::12} as v${version}"
           fi
-          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
-
-  release:
-    needs: tag
-    uses: ./.github/workflows/release.yml
-    with:
-      tag: ${{ needs.tag.outputs.tag }}
-    permissions:
-      contents: read
-      id-token: write   # npm provenance
-    secrets: inherit
+          gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "v${version}"
+          echo "::notice::dispatched release.yml on v${version}"

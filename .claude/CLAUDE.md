@@ -49,7 +49,7 @@ node npm/scripts/smoke.mjs              # pack + clean install + MCP handshake (
 - `pulsar-analysis`: thresholds, clustering, diagnostics, `evidence/` and `plan/` (preprocessing plan port).
 - `pulsar-mcp`: the `rmcp` server (typed tools, error envelope, async sweep jobs, tasks).
 - `pulsar-cli`: the `pulsar` binary. `pulsar-parity`: golden-fixture harness.
-- `npm/`: launcher + platform-package builder (`npm/scripts/build-packages.mjs`). Release: run "Prepare release" (`release-pr.yml`, `scripts/prepare-release.mjs`; needs notes under `## [Unreleased]`), mark the draft PR ready so CI runs, squash-merge; `release-tag.yml` tags `vX.Y.Z` and calls `release.yml`. A person pushing a `v*` tag still publishes. CI runs on non-draft PRs; `ci gate` is the one required check.
+- `npm/`: launcher + platform-package builder (`npm/scripts/build-packages.mjs`). Release: run "Prepare release" (`release-pr.yml`, `scripts/prepare-release.mjs`; needs notes under `## [Unreleased]`), mark the draft PR ready so CI runs, squash-merge; `release-tag.yml` tags `vX.Y.Z` and dispatches `release.yml` on it (the only workflow that publishes; npm trusted publishing trusts it). A person pushing a `v*` tag still publishes. CI runs on non-draft PRs; `ci gate` is the one required check.
 
 ## Parity rules
 
