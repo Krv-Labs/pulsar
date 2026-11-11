@@ -12,12 +12,12 @@ use crate::state::ServerState;
 
 pub const NAME: &str = "validate_config";
 
-#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
-#[serde(default)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct Params {
     /// Full Pulsar config as raw YAML text (no Markdown fences).
     pub config_yaml: String,
     /// Optional dataset handle from ingest_dataset; run.data is resolved against it and it becomes the session's current dataset.
+    #[serde(default)]
     pub dataset_id: String,
 }
 

@@ -1,0 +1,778 @@
+{
+ "tables": {
+  "penguins/input.csv": {
+   "csv": "penguins/input.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 0.8990524423906576,
+    "knn_k10_mean": 1.1441533417226268,
+    "knn_k20_mean": 1.5154143545242091,
+    "knn_p5": 0.5423012420829735,
+    "knn_p25": 0.6897994881784175,
+    "knn_p50": 0.9065199738914014,
+    "knn_p75": 1.2339925262813853,
+    "knn_p95": 1.7081660209669787,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.5448
+     ],
+     [
+      3,
+      0.6923
+     ],
+     [
+      5,
+      0.8517
+     ],
+     [
+      10,
+      0.99
+     ],
+     [
+      15,
+      1.0
+     ]
+    ],
+    "n_features": 16,
+    "n_samples_profiled": 344
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: penguins/input.csv\n# preprocessing plan pp_f2b811c215 revision 1 (707712d0b5e3)\npreprocessing:\n  drop_columns: []\n  missing_indicator_groups:\n    bill_length_mm_and_3_more:\n    - bill_length_mm\n    - bill_depth_mm\n    - flipper_length_mm\n    - body_mass_g\n  impute:\n    bill_length_mm:\n      method: fill_median\n      indicator: false\n    bill_depth_mm:\n      method: fill_median\n      indicator: false\n    flipper_length_mm:\n      method: fill_median\n      indicator: false\n    body_mass_g:\n      method: fill_median\n      indicator: false\n    sex:\n      method: fill_value\n      value: (blank)\n      indicator: false\n  encode:\n    species:\n      method: one_hot\n    island:\n      method: one_hot\n    sex:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 5, 10]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [3, 5, 10]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.5173\n        max: 1.6659\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 10,
+   "grid": [
+    3,
+    5,
+    10
+   ]
+  },
+  "blobs/input.csv": {
+   "csv": "blobs/input.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 0.18221199508891678,
+    "knn_k10_mean": 0.21574930343377802,
+    "knn_k20_mean": 0.25976570457102155,
+    "knn_p5": 0.1440913767497699,
+    "knn_p25": 0.1772256456114933,
+    "knn_p50": 0.20692787294424625,
+    "knn_p75": 0.2503223320879643,
+    "knn_p95": 0.32576337926327303,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.9911
+     ],
+     [
+      3,
+      0.9955
+     ],
+     [
+      5,
+      1.0
+     ]
+    ],
+    "n_features": 5,
+    "n_samples_profiled": 150
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: blobs/input.csv\n# preprocessing plan pp_cc8ddda0b6 revision 1 (cb6ce3bc6783)\npreprocessing:\n  drop_columns: []\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [2]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [2]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 0.1329\n        max: 0.3379\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 2,
+   "grid": [
+    2
+   ]
+  },
+  "plan/input.csv": {
+   "csv": "plan/input.csv",
+   "calibrated": false,
+   "config_yaml": "run:\n  name: initial_sweep\n  data: plan/input.csv\n# preprocessing plan pp_3a8948a473 revision 1 (73ab7d4a6f35)\npreprocessing:\n  drop_columns:\n  - rid\n  - dose\n  - dose_txt\n  - visit\n  - city_full\n  - const\n  - empty\n  missing_indicator_groups:\n    age_and_1_more:\n    - age\n    - weight\n  impute:\n    age:\n      method: fill_median\n      indicator: false\n    weight:\n      method: fill_median\n      indicator: false\n    code_mixed:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    amount_mixed:\n      method: fill_median\n    city:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    count:\n      method: fill_median\n    numtxt_clean:\n      method: fill_median\n      indicator: false\n    numtxt_blank:\n      method: fill_median\n  encode:\n    code_mixed:\n      method: one_hot\n    city:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 1.5224\n        max: 2.8546\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 5,
+   "grid": [
+    3,
+    4,
+    5
+   ]
+  },
+  "plan/wide.csv": {
+   "csv": "plan/wide.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 3.2241877204318388,
+    "knn_k10_mean": 3.5793083487742394,
+    "knn_k20_mean": 4.033053774711117,
+    "knn_p5": 2.9287490015834323,
+    "knn_p25": 3.2606965789571163,
+    "knn_p50": 3.6940829059264164,
+    "knn_p75": 3.982978550519408,
+    "knn_p95": 4.417987074967639,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.4402
+     ],
+     [
+      3,
+      0.5606
+     ],
+     [
+      5,
+      0.7549
+     ],
+     [
+      10,
+      1.0
+     ]
+    ],
+    "n_features": 14,
+    "n_samples_profiled": 60
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: plan/wide.csv\n# preprocessing plan pp_d925efe0e4 revision 1 (fc1dd2f7a6e9)\npreprocessing:\n  drop_columns:\n  - id\n  - last_seen\n  - sparse1\n  - sparse2\n  - sparse3\n  - sparse4\n  - when\n  missing_indicator_groups:\n    visits1_and_2_more:\n    - visits1\n    - visits2\n    - visits_zero\n  impute:\n    visits1:\n      method: fill_median\n      indicator: false\n    visits2:\n      method: fill_median\n      indicator: false\n    visits_zero:\n      method: fill_median\n      indicator: false\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 5, 10]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [3, 5, 10]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 2.4455\n        max: 5.3770\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 10,
+   "grid": [
+    3,
+    5,
+    10
+   ]
+  },
+  "plan/sums.csv": {
+   "csv": "plan/sums.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 2.022449447178948,
+    "knn_k10_mean": 2.362560132654949,
+    "knn_k20_mean": 2.8566640354474755,
+    "knn_p5": 1.5329368843333453,
+    "knn_p25": 1.9397760646228885,
+    "knn_p50": 2.429865626034265,
+    "knn_p75": 2.694518237405981,
+    "knn_p95": 3.217445338766142,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.5794
+     ],
+     [
+      3,
+      0.7487
+     ],
+     [
+      5,
+      1.0
+     ]
+    ],
+    "n_features": 7,
+    "n_samples_profiled": 40
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: plan/sums.csv\n# preprocessing plan pp_b5e5637b99 revision 1 (cb6ce3bc6783)\npreprocessing:\n  drop_columns: []\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 1.4548\n        max: 3.6376\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 5,
+   "grid": [
+    3,
+    4,
+    5
+   ]
+  },
+  "plan/unicode.csv": {
+   "csv": "plan/unicode.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 2.1248939113252194,
+    "knn_k10_mean": 2.6549047630464067,
+    "knn_k20_mean": 3.242739581669965,
+    "knn_p5": 1.8065633746220136,
+    "knn_p25": 2.0674624610949777,
+    "knn_p50": 2.5539645993473687,
+    "knn_p75": 3.2805514960658266,
+    "knn_p95": 3.586954938587932,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.475
+     ],
+     [
+      3,
+      0.6564
+     ],
+     [
+      5,
+      0.9265
+     ]
+    ],
+    "n_features": 7,
+    "n_samples_profiled": 30
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: plan/unicode.csv\n# preprocessing plan pp_084469e258 revision 1 (1d81bb84eda8)\npreprocessing:\n  drop_columns: []\n  missing_indicator_groups:\n    \"na\\xEFve_and_1_more\":\n    - \"na\\xEFve\"\n    - \"\\u65E5\\u672C\"\n  impute:\n    \"na\\xEFve\":\n      method: fill_median\n      indicator: false\n    \"\\u65E5\\u672C\":\n      method: fill_median\n      indicator: false\n  encode:\n    ville:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 1.5506\n        max: 4.4287\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 5,
+   "grid": [
+    3,
+    4,
+    5
+   ]
+  },
+  "plan/proxy.csv": {
+   "csv": "plan/proxy.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 2.7246475296589,
+    "knn_k10_mean": 3.153043035535352,
+    "knn_k20_mean": 3.658667028207648,
+    "knn_p5": 2.4488273077039424,
+    "knn_p25": 2.799502871803365,
+    "knn_p50": 3.076746401351821,
+    "knn_p75": 3.570688753581509,
+    "knn_p95": 4.3874283427237,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.413
+     ],
+     [
+      3,
+      0.5487
+     ],
+     [
+      5,
+      0.7449
+     ],
+     [
+      10,
+      0.991
+     ]
+    ],
+    "n_features": 12,
+    "n_samples_profiled": 60
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: plan/proxy.csv\n# preprocessing plan pp_d5bb433f88 revision 1 (b8e8167fac63)\npreprocessing:\n  drop_columns: []\n  impute:\n    lab:\n      method: fill_median\n    lab2:\n      method: fill_median\n    lab3:\n      method: fill_median\n  encode:\n    site:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 5, 10]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [3, 5, 10]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 2.0996\n        max: 4.8204\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 10,
+   "grid": [
+    3,
+    5,
+    10
+   ]
+  },
+  "plan/characterize_wide.csv": {
+   "csv": "plan/characterize_wide.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 8.630939163611757,
+    "knn_k10_mean": 9.018175906652573,
+    "knn_k20_mean": 9.456431197242546,
+    "knn_p5": 8.044029742139426,
+    "knn_p25": 8.517301059677278,
+    "knn_p50": 9.030634595621137,
+    "knn_p75": 9.490597806784631,
+    "knn_p95": 10.623761078261225,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.1354
+     ],
+     [
+      3,
+      0.1889
+     ],
+     [
+      5,
+      0.289
+     ],
+     [
+      10,
+      0.485
+     ],
+     [
+      15,
+      0.6288
+     ],
+     [
+      20,
+      0.7384
+     ]
+    ],
+    "n_features": 58,
+    "n_samples_profiled": 80
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: plan/characterize_wide.csv\n# preprocessing plan pp_0581c3c8ad revision 1 (7dfb218cc621)\npreprocessing:\n  drop_columns:\n  - empty_num\n  - cat4\n  - cat5\n  - cat6\n  - cat7\n  - cat8\n  - cat9\n  - mostly_missing\n  - id_like\n  impute:\n    num01:\n      method: fill_median\n    num02:\n      method: fill_median\n    num03:\n      method: fill_median\n    num04:\n      method: fill_median\n    num06:\n      method: fill_median\n    num07:\n      method: fill_median\n    num08:\n      method: fill_median\n    num09:\n      method: fill_median\n    num11:\n      method: fill_median\n    num12:\n      method: fill_median\n    num13:\n      method: fill_median\n    num14:\n      method: fill_median\n    cat1:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    cat2:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    cat3:\n      method: fill_value\n      value: (blank)\n      indicator: false\n    flag_blank:\n      method: fill_median\n  encode:\n    cat0:\n      method: one_hot\n    cat1:\n      method: one_hot\n    cat2:\n      method: one_hot\n    cat3:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [8, 12, 15, 16]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [8, 12, 15, 16]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 6.3880\n        max: 12.8123\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 20,
+   "grid": [
+    8,
+    12,
+    15,
+    16
+   ]
+  },
+  "plan/characterize_long.csv": {
+   "csv": "plan/characterize_long.csv",
+   "calibrated": true,
+   "processed": {
+    "knn_k5_mean": 2.055223913458558,
+    "knn_k10_mean": 2.675363859224809,
+    "knn_k20_mean": 3.2610088555459966,
+    "knn_p5": 1.7239511989515215,
+    "knn_p25": 2.219600825004698,
+    "knn_p50": 2.8009307796144927,
+    "knn_p75": 3.1104764231627082,
+    "knn_p95": 3.92041186928379,
+    "pca_cumulative_variance": [
+     [
+      2,
+      0.4532
+     ],
+     [
+      3,
+      0.6547
+     ],
+     [
+      5,
+      0.9278
+     ]
+    ],
+    "n_features": 7,
+    "n_samples_profiled": 30
+   },
+   "config_yaml": "run:\n  name: initial_sweep\n  data: plan/characterize_long.csv\n# preprocessing plan pp_4e54decc72 revision 1 (6652476f2df7)\npreprocessing:\n  drop_columns:\n  - notes\n  encode:\n    ville:\n      method: one_hot\nsweep:\n  projection:\n    method: jl\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n    center: true\n  # Legacy mirror for older configs. sweep.projection is authoritative.\n  pca:\n    dimensions:\n      values: [3, 4, 5]\n    seed:\n      values: [42, 7, 13]\n  ball_mapper:\n    epsilon:\n      range:\n        min: 1.6647\n        max: 4.1991\n        steps: 24\ncosmic_graph:\n  construction_threshold: auto\noutput:\n  n_reps: 4\n",
+   "plan_id_independent": true,
+   "knee": 5,
+   "grid": [
+    3,
+    4,
+    5
+   ]
+  }
+ },
+ "grids": [
+  {
+   "n_features": 0,
+   "cumulative": [],
+   "knee": 2,
+   "grid": []
+  },
+  {
+   "n_features": 1,
+   "cumulative": [],
+   "knee": 2,
+   "grid": [
+    1
+   ]
+  },
+  {
+   "n_features": 3,
+   "cumulative": [],
+   "knee": 3,
+   "grid": [
+    3
+   ]
+  },
+  {
+   "n_features": 9,
+   "cumulative": [],
+   "knee": 5,
+   "grid": [
+    3,
+    4,
+    5
+   ]
+  },
+  {
+   "n_features": 13,
+   "cumulative": [],
+   "knee": 11,
+   "grid": [
+    5,
+    8,
+    11
+   ]
+  },
+  {
+   "n_features": 100,
+   "cumulative": [],
+   "knee": 19,
+   "grid": [
+    8,
+    12,
+    16
+   ]
+  },
+  {
+   "n_features": 2,
+   "cumulative": [
+    [
+     1,
+     0.9
+    ],
+    [
+     2,
+     1.0
+    ]
+   ],
+   "knee": 1,
+   "grid": [
+    1
+   ]
+  },
+  {
+   "n_features": 4,
+   "cumulative": [
+    [
+     1,
+     0.6
+    ],
+    [
+     2,
+     0.8
+    ],
+    [
+     3,
+     0.95
+    ],
+    [
+     4,
+     1.0
+    ]
+   ],
+   "knee": 3,
+   "grid": [
+    3
+   ]
+  },
+  {
+   "n_features": 20,
+   "cumulative": [
+    [
+     1,
+     0.05
+    ],
+    [
+     2,
+     0.1
+    ],
+    [
+     3,
+     0.15
+    ],
+    [
+     4,
+     0.2
+    ],
+    [
+     5,
+     0.25
+    ],
+    [
+     6,
+     0.3
+    ],
+    [
+     7,
+     0.35
+    ],
+    [
+     8,
+     0.4
+    ],
+    [
+     9,
+     0.45
+    ],
+    [
+     10,
+     0.5
+    ],
+    [
+     11,
+     0.55
+    ],
+    [
+     12,
+     0.6
+    ],
+    [
+     13,
+     0.65
+    ],
+    [
+     14,
+     0.7
+    ],
+    [
+     15,
+     0.75
+    ],
+    [
+     16,
+     0.8
+    ],
+    [
+     17,
+     0.85
+    ],
+    [
+     18,
+     0.9
+    ],
+    [
+     19,
+     0.95
+    ],
+    [
+     20,
+     1.0
+    ]
+   ],
+   "knee": 18,
+   "grid": [
+    10,
+    14,
+    16
+   ]
+  },
+  {
+   "n_features": 50,
+   "cumulative": [
+    [
+     1,
+     0.05
+    ],
+    [
+     2,
+     0.1
+    ],
+    [
+     3,
+     0.15
+    ],
+    [
+     4,
+     0.2
+    ],
+    [
+     5,
+     0.25
+    ],
+    [
+     6,
+     0.3
+    ],
+    [
+     7,
+     0.35
+    ],
+    [
+     8,
+     0.4
+    ],
+    [
+     9,
+     0.45
+    ],
+    [
+     10,
+     0.5
+    ],
+    [
+     11,
+     0.55
+    ],
+    [
+     12,
+     0.6
+    ],
+    [
+     13,
+     0.65
+    ],
+    [
+     14,
+     0.7
+    ],
+    [
+     15,
+     0.75
+    ],
+    [
+     16,
+     0.8
+    ],
+    [
+     17,
+     0.85
+    ],
+    [
+     18,
+     0.9
+    ],
+    [
+     19,
+     0.95
+    ],
+    [
+     20,
+     1.0
+    ]
+   ],
+   "knee": 18,
+   "grid": [
+    10,
+    14,
+    16
+   ]
+  },
+  {
+   "n_features": 6,
+   "cumulative": [
+    [
+     1,
+     0.3
+    ],
+    [
+     2,
+     0.4
+    ],
+    [
+     3,
+     0.5
+    ],
+    [
+     4,
+     0.6
+    ],
+    [
+     5,
+     0.7
+    ],
+    [
+     6,
+     1.0
+    ]
+   ],
+   "knee": 6,
+   "grid": [
+    3,
+    5,
+    6
+   ]
+  },
+  {
+   "n_features": 10,
+   "cumulative": [
+    [
+     1,
+     0.1
+    ],
+    [
+     2,
+     0.2
+    ],
+    [
+     3,
+     0.30000000000000004
+    ],
+    [
+     4,
+     0.4
+    ],
+    [
+     5,
+     0.5
+    ],
+    [
+     6,
+     0.6000000000000001
+    ],
+    [
+     7,
+     0.7000000000000001
+    ],
+    [
+     8,
+     0.8
+    ],
+    [
+     9,
+     0.9
+    ],
+    [
+     10,
+     1.0
+    ]
+   ],
+   "knee": 9,
+   "grid": [
+    5,
+    7,
+    9
+   ]
+  },
+  {
+   "n_features": 14,
+   "cumulative": [
+    [
+     1,
+     0.05
+    ],
+    [
+     2,
+     0.1
+    ],
+    [
+     3,
+     0.15000000000000002
+    ],
+    [
+     4,
+     0.2
+    ],
+    [
+     5,
+     0.25
+    ],
+    [
+     6,
+     0.30000000000000004
+    ],
+    [
+     7,
+     0.35000000000000003
+    ],
+    [
+     8,
+     0.4
+    ],
+    [
+     9,
+     0.45
+    ],
+    [
+     10,
+     0.5
+    ],
+    [
+     11,
+     0.55
+    ],
+    [
+     12,
+     0.6000000000000001
+    ],
+    [
+     13,
+     0.65
+    ],
+    [
+     14,
+     0.7000000000000001
+    ]
+   ],
+   "knee": 14,
+   "grid": [
+    7,
+    10,
+    14
+   ]
+  }
+ ]
+}

@@ -8,7 +8,8 @@
 //!   jobs/<run_id>.json                  job state and progress
 //!   runs/<run_id>/record.json           the run, written last
 //!   runs/<run_id>/graph.arrow           constructed graph edges
-//!   runs/<run_id>/affinity.arrow        full weighted affinity edges
+//!   runs/<run_id>/affinity.arrow        full weighted affinity edges, absent
+//!                                       when identical to graph.arrow
 //!   cluster_assignments/<id>.json + <id>.labels.arrow
 //!   longitudinal/<id>.json
 //! ```
@@ -20,7 +21,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pulsar_pipeline::Graph;
@@ -28,17 +29,18 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::atomic::{
-    list_json_stems, list_subdirs, now_seconds, read_record, sweep_orphans, write_json,
+    list_json_stems, list_subdirs, now_seconds, read_record, stage_json, sweep_orphans, write_json,
+    StagedFile,
 };
 use crate::error::{io, StoreError};
 use crate::handle::{
-    ClusterAssignmentId, DatasetId, HandleKind, LongitudinalId, RunId, UploadId, HEX_LEN,
+    ClusterAssignmentId, DatasetId, HandleKind, LongitudinalId, PlanId, RunId, UploadId, HEX_LEN,
 };
 use crate::job::{JobHandle, JobKind, JobRecord, INTERRUPTED};
 use crate::paths::{default_root, Dirs};
 use crate::record::{
     ClusterAssignment, ClusterAssignmentRecord, DatasetRecord, DatasetSource, LongitudinalRecord,
-    Representation, RunArtifacts, RunRecord, UploadRecord, SCHEMA_VERSION,
+    PlanRecord, Representation, RunArtifacts, RunRecord, UploadRecord, SCHEMA_VERSION,
 };
 use crate::sidecar;
 
@@ -46,6 +48,9 @@ const RECORD_JSON: &str = "record.json";
 const GRAPH_ARROW: &str = "graph.arrow";
 const AFFINITY_ARROW: &str = "affinity.arrow";
 const UTF8_BOM: [u8; 3] = [0xef, 0xbb, 0xbf];
+/// Environment override for [`StoreOptions::run_retention`].
+pub const ENV_RUN_RETENTION: &str = "PULSAR_STORE_RUN_RETENTION";
+const DEFAULT_RUN_RETENTION: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct StoreOptions {
@@ -53,6 +58,9 @@ pub struct StoreOptions {
     pub progress_flush_interval: Duration,
     /// Temp files older than this are removed when the store opens.
     pub orphan_max_age: Duration,
+    /// Completed runs kept per dataset; older ones are deleted after each
+    /// save. `0` keeps every run. Default `$PULSAR_STORE_RUN_RETENTION`, else 20.
+    pub run_retention: usize,
 }
 
 impl Default for StoreOptions {
@@ -60,6 +68,10 @@ impl Default for StoreOptions {
         Self {
             progress_flush_interval: Duration::from_millis(200),
             orphan_max_age: Duration::from_secs(3600),
+            run_retention: std::env::var(ENV_RUN_RETENTION)
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(DEFAULT_RUN_RETENTION),
         }
     }
 }
@@ -67,6 +79,9 @@ impl Default for StoreOptions {
 struct Inner {
     dirs: Dirs,
     options: StoreOptions,
+    /// Orders plan writers within this process; [`Store::plan_guard`] adds
+    /// a file lock for writers in other processes.
+    plan_lock: Mutex<()>,
 }
 
 /// A handle on one store root. Cheap to clone; safe to share across threads.
@@ -91,6 +106,36 @@ pub struct RunListing {
     /// Run directories without a readable current-schema record (jobs still
     /// running or failed, or records from another Pulsar version).
     pub skipped: usize,
+}
+
+/// A cluster assignment written and fsynced under temp names, not yet
+/// readable by id. [`commit`](Self::commit) publishes it; dropping it
+/// uncommitted discards it, so a publish refused or cancelled after staging
+/// persists nothing.
+#[derive(Debug)]
+#[must_use = "a staged assignment is discarded unless committed"]
+pub struct StagedClusterAssignment {
+    record: ClusterAssignmentRecord,
+    labels: StagedFile,
+    meta: StagedFile,
+}
+
+impl StagedClusterAssignment {
+    pub fn record(&self) -> &ClusterAssignmentRecord {
+        &self.record
+    }
+
+    /// Make the assignment visible. Labels land first; the metadata rename
+    /// is the single step that makes it readable.
+    pub fn commit(self) -> Result<ClusterAssignmentRecord, StoreError> {
+        let labels_path = self.labels.path().to_path_buf();
+        self.labels.commit()?;
+        if let Err(e) = self.meta.commit() {
+            let _ = fs::remove_file(&labels_path);
+            return Err(e);
+        }
+        Ok(self.record)
+    }
 }
 
 fn digest12(hasher: Sha256) -> String {
@@ -138,7 +183,11 @@ impl Store {
         }
         sweep_orphans(&dirs.all(), options.orphan_max_age);
         Ok(Self {
-            inner: Arc::new(Inner { dirs, options }),
+            inner: Arc::new(Inner {
+                dirs,
+                options,
+                plan_lock: Mutex::new(()),
+            }),
         })
     }
 
@@ -205,6 +254,7 @@ impl Store {
         let source_tag = match source {
             DatasetSource::Path => "path",
             DatasetSource::Upload => "upload",
+            DatasetSource::EntitySample => "entity_sample",
         };
         let mut hasher = Sha256::new();
         hasher.update(source_tag.as_bytes());
@@ -478,7 +528,11 @@ impl Store {
         let dir = self.run_dir(&record.run_id);
         fs::create_dir_all(&dir).map_err(io("create", &dir))?;
         sidecar::write_edges(&dir.join(GRAPH_ARROW), &artifacts.graph)?;
-        sidecar::write_edges(&dir.join(AFFINITY_ARROW), &artifacts.affinity)?;
+        // When the threshold sits below every positive weight the two edge
+        // sets are the same; the reader falls back to graph.arrow.
+        if artifacts.affinity != artifacts.graph {
+            sidecar::write_edges(&dir.join(AFFINITY_ARROW), &artifacts.affinity)?;
+        }
         // The record goes last: a visible record implies complete sidecars.
         write_json(&dir.join(RECORD_JSON), record, true)
     }
@@ -510,7 +564,60 @@ impl Store {
     /// an interpretation threshold without a refit.
     pub fn run_affinity(&self, id: &RunId) -> Result<Graph, StoreError> {
         self.get_run(id)?;
-        sidecar::read_edges(&self.run_dir(id).join(AFFINITY_ARROW))
+        let dir = self.run_dir(id);
+        let affinity = dir.join(AFFINITY_ARROW);
+        if affinity.try_exists().map_err(io("stat", &affinity))? {
+            sidecar::read_edges(&affinity)
+        } else {
+            sidecar::read_edges(&dir.join(GRAPH_ARROW))
+        }
+    }
+
+    /// Bytes on disk under a run's directory (record, sidecars, blobs).
+    pub fn run_disk_bytes(&self, id: &RunId) -> Result<u64, StoreError> {
+        let dir = self.run_dir(id);
+        let mut total = 0;
+        for entry in fs::read_dir(&dir).map_err(io("read", &dir))? {
+            let entry = entry.map_err(io("read", &dir))?;
+            total += entry.metadata().map_err(io("stat", entry.path()))?.len();
+        }
+        Ok(total)
+    }
+
+    /// Delete the oldest completed runs of `kept`'s dataset beyond
+    /// [`StoreOptions::run_retention`], never `kept` itself nor a run whose
+    /// job is still queued or running. Removing `record.json` first hides
+    /// the run; removing its job record makes the handle `RUN_ID_UNKNOWN`.
+    /// Returns the pruned ids.
+    pub(crate) fn prune_runs(&self, kept: &RunRecord) -> Result<Vec<RunId>, StoreError> {
+        let cap = self.inner.options.run_retention;
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+        let others: Vec<RunRecord> = self
+            .list_runs(None)?
+            .runs
+            .into_iter()
+            .filter(|r| r.dataset_id == kept.dataset_id && r.run_id != kept.run_id)
+            .filter(|r| !matches!(self.get_job(&r.run_id), Ok(j) if !j.state.is_terminal()))
+            .collect();
+        // `kept` takes one slot; `others` is oldest first.
+        let excess = others.len().saturating_sub(cap - 1);
+        let mut pruned = Vec::with_capacity(excess);
+        for run in others.into_iter().take(excess) {
+            let dir = self.run_dir(&run.run_id);
+            let record = dir.join(RECORD_JSON);
+            fs::remove_file(&record).map_err(io("remove", &record))?;
+            let job = self.job_path(&run.run_id);
+            if let Err(e) = fs::remove_file(&job) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(io("remove", &job)(e));
+                }
+            }
+            fs::remove_dir_all(&dir).map_err(io("remove", &dir))?;
+            pruned.push(run.run_id);
+        }
+        Ok(pruned)
     }
 
     /// Completed runs, oldest first, optionally only those of one dataset.
@@ -556,12 +663,23 @@ impl Store {
             .join(format!("{id}.labels.arrow"))
     }
 
-    /// Persist a label vector. If `run_id` is given it must name a completed
-    /// run with as many rows as there are labels.
+    /// Persist a label vector (stage, then commit). If `run_id` is given it
+    /// must name a completed run with as many rows as there are labels.
     pub fn save_cluster_assignment(
         &self,
         input: ClusterAssignment<'_>,
     ) -> Result<ClusterAssignmentRecord, StoreError> {
+        self.stage_cluster_assignment(input)?.commit()
+    }
+
+    /// Write and fsync an assignment without making it visible. This is the
+    /// O(rows) part, so run it off the async runtime; the
+    /// [`StagedClusterAssignment::commit`] that publishes it is two renames.
+    /// Validation is the same as [`Store::save_cluster_assignment`].
+    pub fn stage_cluster_assignment(
+        &self,
+        input: ClusterAssignment<'_>,
+    ) -> Result<StagedClusterAssignment, StoreError> {
         if let Some(run_id) = &input.run_id {
             let run = self.get_run(run_id)?;
             if run.n_rows != input.labels.len() {
@@ -588,16 +706,20 @@ impl Store {
             cluster_ids,
             created_at: now_seconds(),
         };
-        sidecar::write_labels(
+        let labels = sidecar::stage_labels(
             &self.assignment_labels(&record.cluster_assignment_id),
             input.labels,
         )?;
-        write_json(
+        let meta = stage_json(
             &self.assignment_meta(&record.cluster_assignment_id),
             &record,
             true,
         )?;
-        Ok(record)
+        Ok(StagedClusterAssignment {
+            record,
+            labels,
+            meta,
+        })
     }
 
     pub fn get_cluster_assignment(
@@ -647,6 +769,107 @@ impl Store {
     pub fn get_longitudinal(&self, id: &LongitudinalId) -> Result<LongitudinalRecord, StoreError> {
         read_record(&self.longitudinal_path(id))?
             .ok_or_else(|| unknown(HandleKind::Longitudinal, id.as_str()))
+    }
+
+    // ------------------------------------------------------------------- plans
+
+    fn plan_path(&self, id: &PlanId) -> PathBuf {
+        self.dirs().plans.join(format!("{id}.json"))
+    }
+
+    /// Serializes plan read-modify-write so a revision check and the write
+    /// that follows it cannot interleave with another writer: the mutex
+    /// orders threads of this process, the exclusive lock on `plans/.lock`
+    /// orders the other processes sharing the store. Both release on drop.
+    fn plan_guard(&self) -> Result<(fs::File, std::sync::MutexGuard<'_, ()>), StoreError> {
+        let guard = self
+            .inner
+            .plan_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let path = self.dirs().plans.join(".lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(io("open", &path))?;
+        file.lock().map_err(io("lock", &path))?;
+        Ok((file, guard))
+    }
+
+    /// Create a plan record. An existing plan is never replaced
+    /// ([`StoreError::PlanExists`]); later changes go through
+    /// [`Store::update_plan`], which checks the revision.
+    pub fn save_plan(
+        &self,
+        id: &PlanId,
+        dataset_id: &str,
+        revision: u32,
+        plan: serde_json::Value,
+    ) -> Result<PlanRecord, StoreError> {
+        let _guard = self.plan_guard()?;
+        let path = self.plan_path(id);
+        if path.try_exists().map_err(io("stat", &path))? {
+            return Err(StoreError::PlanExists {
+                plan_id: id.to_string(),
+            });
+        }
+        let now = now_seconds();
+        let record = PlanRecord {
+            schema: SCHEMA_VERSION,
+            plan_id: id.clone(),
+            dataset_id: dataset_id.to_owned(),
+            revision,
+            plan,
+            created_at: now,
+            updated_at: now,
+        };
+        write_json(&path, &record, true)?;
+        Ok(record)
+    }
+
+    pub fn get_plan(&self, id: &PlanId) -> Result<PlanRecord, StoreError> {
+        read_record(&self.plan_path(id))?.ok_or_else(|| unknown(HandleKind::Plan, id.as_str()))
+    }
+
+    /// Replace a plan only if it is still at `expected_revision`; otherwise
+    /// [`StoreError::RevisionConflict`] names the revision it is at now.
+    pub fn update_plan(
+        &self,
+        id: &PlanId,
+        expected_revision: u32,
+        new_revision: u32,
+        plan: serde_json::Value,
+    ) -> Result<PlanRecord, StoreError> {
+        let _guard = self.plan_guard()?;
+        let mut record = self.get_plan(id)?;
+        if record.revision != expected_revision {
+            return Err(StoreError::RevisionConflict {
+                plan_id: id.to_string(),
+                current: record.revision,
+                expected: expected_revision,
+            });
+        }
+        record.revision = new_revision;
+        record.plan = plan;
+        record.updated_at = now_seconds();
+        write_json(&self.plan_path(id), &record, true)?;
+        Ok(record)
+    }
+
+    /// Plans for `dataset_id` (or all), least recently updated first, so the
+    /// last one is the plan most recently worked on. Unreadable records are
+    /// skipped.
+    pub fn list_plans(&self, dataset_id: Option<&str>) -> Result<Vec<PlanRecord>, StoreError> {
+        let mut plans: Vec<PlanRecord> = list_json_stems(&self.dirs().plans)?
+            .iter()
+            .filter_map(|stem| PlanId::parse(stem).ok())
+            .filter_map(|id| self.get_plan(&id).ok())
+            .filter(|p| dataset_id.is_none_or(|d| p.dataset_id == d))
+            .collect();
+        plans.sort_by(|a, b| a.updated_at.total_cmp(&b.updated_at));
+        Ok(plans)
     }
 }
 

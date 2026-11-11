@@ -485,7 +485,7 @@ fn sweep(
 /// Streams ball maps into a cosmic graph by the configured construction.
 /// Both paths are constant-memory in the number of ball maps and never
 /// allocate an n×n matrix.
-enum CosmicBuilder {
+pub(crate) enum CosmicBuilder {
     /// Unbiased MinHash Jaccard sketch (default).
     MinHash(MinHashSignatures),
     /// Exact sparse pseudo-Laplacian merge: the bit-identical backbone.
@@ -496,7 +496,7 @@ enum CosmicBuilder {
 }
 
 impl CosmicBuilder {
-    fn new(n: usize, spec: &CosmicSpec) -> Self {
+    pub(crate) fn new(n: usize, spec: &CosmicSpec) -> Self {
         match spec.construction {
             Construction::Minhash => Self::MinHash(MinHashSignatures::new(
                 n,
@@ -507,7 +507,7 @@ impl CosmicBuilder {
         }
     }
 
-    fn accumulate(&mut self, maps: &[BallMapper]) -> Result<(), PipelineError> {
+    pub(crate) fn accumulate(&mut self, maps: &[BallMapper]) -> Result<(), PipelineError> {
         match self {
             Self::MinHash(sig) => {
                 let balls: Vec<&[usize]> = maps
@@ -528,7 +528,7 @@ impl CosmicBuilder {
         Ok(())
     }
 
-    fn build(self) -> CosmicGraphInner {
+    pub(crate) fn build(self) -> CosmicGraphInner {
         match self {
             Self::MinHash(sig) => CosmicGraphInner::Sparse {
                 n: sig.n(),

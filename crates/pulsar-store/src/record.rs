@@ -7,7 +7,7 @@ use pulsar_config::{Construction, ProjectionMethod, PulsarConfig, Threshold};
 use pulsar_pipeline::{Fitted, Graph};
 use serde::{Deserialize, Serialize};
 
-use crate::handle::{ClusterAssignmentId, DatasetId, LongitudinalId, RunId, UploadId};
+use crate::handle::{ClusterAssignmentId, DatasetId, LongitudinalId, PlanId, RunId, UploadId};
 
 /// Bumped whenever a record's JSON shape changes incompatibly. Readers refuse
 /// other versions with `STALE_RECORD` instead of guessing.
@@ -20,6 +20,8 @@ pub enum DatasetSource {
     Path,
     /// Copied into the store from an upload.
     Upload,
+    /// Written by `sample_longitudinal_entities` from another dataset.
+    EntitySample,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -367,6 +369,21 @@ pub struct LongitudinalRecord {
     /// Panel summary (entity / time / column counts); shape owned by #66.
     pub panel: serde_json::Value,
     pub created_at: f64,
+}
+
+/// A preprocessing plan. The plan body is opaque JSON owned by the analysis
+/// layer; the store only needs the handle, its dataset and the revision it
+/// compares and swaps on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanRecord {
+    pub schema: u32,
+    pub plan_id: PlanId,
+    /// The dataset the plan was drafted for (as given when it was saved).
+    pub dataset_id: String,
+    pub revision: u32,
+    pub plan: serde_json::Value,
+    pub created_at: f64,
+    pub updated_at: f64,
 }
 
 #[cfg(test)]

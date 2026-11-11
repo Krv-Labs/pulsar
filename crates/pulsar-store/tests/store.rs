@@ -377,6 +377,71 @@ fn cluster_assignments_and_longitudinal_records_round_trip() {
     assert_eq!(back.panel["n_entities"], 3);
 }
 
+fn assignment_dir_entries(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join("cluster_assignments"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn staged_assignments_are_visible_only_after_commit() {
+    let root = TempRoot::new("staged");
+    let store = Store::open_at(root.path()).unwrap();
+    let labels = [0_i64, 1, 1, 2];
+    let input = ClusterAssignment {
+        run_id: None,
+        dataset_id: None,
+        method: "components".into(),
+        interpretation_edge_weight_threshold: 0.0,
+        threshold_source: "explicit".into(),
+        construction_threshold: 0.0,
+        labels: &labels,
+    };
+
+    let staged = store.stage_cluster_assignment(input.clone()).unwrap();
+    let id = staged.record().cluster_assignment_id.clone();
+    assert_eq!(
+        store.get_cluster_assignment(&id).unwrap_err().code(),
+        "CLUSTER_ASSIGNMENT_ID_UNKNOWN"
+    );
+    let pending = assignment_dir_entries(root.path());
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().all(|n| n.starts_with('.')), "{pending:?}");
+
+    let committed = staged.commit().unwrap();
+    assert_eq!(committed.cluster_ids, vec![0, 1, 2]);
+    assert_eq!(store.get_cluster_assignment(&id).unwrap(), committed);
+    assert_eq!(store.cluster_labels(&id).unwrap(), labels);
+    assert_eq!(
+        assignment_dir_entries(root.path()),
+        vec![format!("{id}.json"), format!("{id}.labels.arrow")]
+    );
+
+    // Dropping uncommitted is the discard: nothing is left behind.
+    let discarded = store.stage_cluster_assignment(input.clone()).unwrap();
+    let discarded_id = discarded.record().cluster_assignment_id.clone();
+    drop(discarded);
+    assert!(store.get_cluster_assignment(&discarded_id).is_err());
+    assert_eq!(assignment_dir_entries(root.path()).len(), 2);
+
+    // A crash between stage and commit leaves temp files that the next
+    // open sweeps once they are old enough.
+    std::mem::forget(store.stage_cluster_assignment(input).unwrap());
+    assert_eq!(assignment_dir_entries(root.path()).len(), 4);
+    Store::open_with(
+        root.path(),
+        StoreOptions {
+            orphan_max_age: Duration::ZERO,
+            ..StoreOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(assignment_dir_entries(root.path()).len(), 2);
+}
+
 #[test]
 fn history_reads_from_the_store_in_creation_order() {
     let root = TempRoot::new("history");
@@ -476,4 +541,79 @@ fn fitted_models_round_trip_with_the_golden_penguins_case() {
     assert_eq!(affinity.edges, fitted.weighted_edges(Some(0.0)));
     assert!(affinity.n_edges() >= fitted.graph.n_edges());
     assert!(pulsar_config::from_yaml_str(&back.config_yaml).is_ok());
+}
+
+#[test]
+fn identical_affinity_is_stored_once_and_reloads_from_the_graph() {
+    let root = TempRoot::new("dedupe");
+    let store = Store::open_at(root.path()).unwrap();
+    let mut artifacts = triangle_plus_singleton();
+    artifacts.affinity = artifacts.graph.clone();
+    let job = store.submit(JobKind::Sweep, None).unwrap();
+    job.complete(&record_for(job.id(), None, &artifacts), &artifacts)
+        .unwrap();
+    let dir = store.run_dir(&job.id());
+    assert!(dir.join("graph.arrow").exists());
+    assert!(!dir.join("affinity.arrow").exists());
+    let reopened = Store::open_at(root.path()).unwrap();
+    assert_eq!(
+        reopened.run_affinity(&job.id()).unwrap(),
+        artifacts.affinity
+    );
+    assert_eq!(reopened.run_graph(&job.id()).unwrap(), artifacts.graph);
+    assert!(reopened.run_disk_bytes(&job.id()).unwrap() > 0);
+}
+
+#[test]
+fn retention_prunes_the_oldest_runs_of_the_same_dataset() {
+    let root = TempRoot::new("retention");
+    let store = Store::open_with(
+        root.path(),
+        StoreOptions {
+            run_retention: 2,
+            ..StoreOptions::default()
+        },
+    )
+    .unwrap();
+    let csv = root.path().join("d.csv");
+    std::fs::write(&csv, "a\n1\n").unwrap();
+    let ds = store.register_dataset(&csv).unwrap().dataset_id;
+    let artifacts = triangle_plus_singleton();
+
+    // A run of another dataset never counts against this one's cap.
+    let other = store.submit(JobKind::Sweep, None).unwrap();
+    let mut rec = record_for(other.id(), None, &artifacts);
+    rec.created_at = 1.0;
+    other.complete(&rec, &artifacts).unwrap();
+    // A job still running when the cap is hit is left alone.
+    let running = store.submit(JobKind::Sweep, Some(ds.clone())).unwrap();
+    running.start().unwrap();
+
+    let mut ids = Vec::new();
+    for k in 0..4 {
+        let job = store.submit(JobKind::Sweep, Some(ds.clone())).unwrap();
+        let mut rec = record_for(job.id(), Some(ds.clone()), &artifacts);
+        rec.created_at = 10.0 + k as f64;
+        job.complete(&rec, &artifacts).unwrap();
+        ids.push(job.id());
+    }
+
+    let kept: Vec<RunId> = store
+        .list_runs(Some(&ds))
+        .unwrap()
+        .runs
+        .into_iter()
+        .map(|r| r.run_id)
+        .collect();
+    assert_eq!(kept, ids[2..].to_vec());
+    for pruned in &ids[..2] {
+        assert!(!store.run_dir(pruned).exists());
+        assert_eq!(store.get_run(pruned).unwrap_err().code(), "RUN_ID_UNKNOWN");
+        assert_eq!(store.get_job(pruned).unwrap_err().code(), "RUN_ID_UNKNOWN");
+    }
+    assert!(store.get_run(&other.id()).is_ok());
+    assert_eq!(
+        store.get_job(&running.id()).unwrap().state,
+        JobState::Running
+    );
 }

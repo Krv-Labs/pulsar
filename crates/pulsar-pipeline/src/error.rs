@@ -24,6 +24,11 @@ pub enum PipelineError {
     #[error("precomputed embeddings have {got} rows; the current data has {expected}")]
     EmbeddingRows { got: usize, expected: usize },
 
+    /// A longitudinal panel the trajectory build cannot use; the message is
+    /// Python's `ValueError` text.
+    #[error("{0}")]
+    TrajectoryInput(String),
+
     #[error(transparent)]
     Data(#[from] pulsar_data::DataError),
 
@@ -40,6 +45,7 @@ impl PipelineError {
             Self::RowCountMismatch { .. } => "ROW_COUNT_MISMATCH",
             Self::InvalidOption { .. } => "INVALID_OPTION",
             Self::EmbeddingRows { .. } => "EMBEDDING_ROWS",
+            Self::TrajectoryInput(_) => "INVALID_TRAJECTORY_INPUT",
             Self::Data(e) => e.code(),
             Self::Core(e) => e.code(),
         }

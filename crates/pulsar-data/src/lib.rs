@@ -15,16 +15,20 @@
 //! The declarative recipe (#68) and profiling tools (#69) build on these
 //! types; nothing here decides *what* to do with a column.
 
+pub mod csv_out;
 pub mod error;
 pub mod ingest;
+pub mod key;
 pub mod preprocess;
 pub mod pyrandom;
 pub mod table;
 
+pub use csv_out::{to_csv_string, write_csv};
 pub use error::DataError;
 pub use ingest::{
     infer_column, is_null_token, read_csv, read_csv_path, read_parquet, read_table, write_parquet,
     NULL_TOKENS,
 };
+pub use key::Key;
 pub use preprocess::{preprocess, shared_vocab, Layout, Preprocessed, Vocab};
 pub use table::{Column, Table};

@@ -6,6 +6,8 @@ use crate::error::StoreError;
 
 /// Environment override for the store root.
 pub const ENV_ROOT: &str = "PULSAR_STORE_DIR";
+/// Directory name under the platform data dir.
+pub const APP_DIR: &str = "pulsar";
 
 /// The default store root.
 ///
@@ -19,17 +21,17 @@ pub fn default_root() -> Result<PathBuf, StoreError> {
     }
     if cfg!(windows) {
         if let Some(dir) = env_path("LOCALAPPDATA") {
-            return Ok(dir.join("pulsar"));
+            return Ok(dir.join(APP_DIR));
         }
         return env_path("USERPROFILE")
-            .map(|home| home.join("AppData").join("Local").join("pulsar"))
+            .map(|home| home.join("AppData").join("Local").join(APP_DIR))
             .ok_or(StoreError::NoHome);
     }
     if let Some(dir) = env_path("XDG_DATA_HOME").filter(|p| p.is_absolute()) {
-        return Ok(dir.join("pulsar"));
+        return Ok(dir.join(APP_DIR));
     }
     env_path("HOME")
-        .map(|home| home.join(".local").join("share").join("pulsar"))
+        .map(|home| home.join(".local").join("share").join(APP_DIR))
         .ok_or(StoreError::NoHome)
 }
 
@@ -50,6 +52,7 @@ pub(crate) struct Dirs {
     pub jobs: PathBuf,
     pub cluster_assignments: PathBuf,
     pub longitudinal: PathBuf,
+    pub plans: PathBuf,
 }
 
 impl Dirs {
@@ -63,10 +66,11 @@ impl Dirs {
             jobs: root.join("jobs"),
             cluster_assignments: root.join("cluster_assignments"),
             longitudinal: root.join("longitudinal"),
+            plans: root.join("plans"),
         }
     }
 
-    pub fn all(&self) -> [&Path; 7] {
+    pub fn all(&self) -> [&Path; 8] {
         [
             &self.datasets,
             &self.dataset_files,
@@ -75,6 +79,7 @@ impl Dirs {
             &self.jobs,
             &self.cluster_assignments,
             &self.longitudinal,
+            &self.plans,
         ]
     }
 

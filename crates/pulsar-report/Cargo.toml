@@ -8,4 +8,14 @@ publish = false
 description = "Exports: Parquet bundle, labeled CSV, offline HTML report."
 
 [dependencies]
+arrow = { version = "57", default-features = false }
+nalgebra = "0.33"
+parquet = { version = "57", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
 pulsar-analysis = { path = "../pulsar-analysis" }
+pulsar-config = { path = "../pulsar-config" }
+pulsar-core = { path = "../pulsar-core" }
+pulsar-data = { path = "../pulsar-data" }
+pulsar-pipeline = { path = "../pulsar-pipeline" }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"

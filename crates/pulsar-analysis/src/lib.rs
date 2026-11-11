@@ -17,15 +17,28 @@
 //! Every rounded number is rounded with Python semantics ([`pyround`]) so
 //! the `threshold_options` and `breakpoints` golden fixtures reproduce.
 
+pub mod artifact;
+pub mod characterization;
+pub mod cluster_payloads;
 pub mod clustering;
+pub mod compare;
 pub mod components;
+pub mod config_build;
+pub mod config_overrides;
 pub mod diagnostics;
+pub mod dossier;
+pub mod dossier_payloads;
 pub mod error;
+pub mod evidence;
+pub mod feature_evidence;
 pub mod hooks;
+pub mod longitudinal;
 pub mod minhash;
 pub mod payloads;
+pub mod plan;
 pub mod pyround;
 pub mod silhouette;
+pub mod stats;
 pub mod thresholds;
 
 pub use clustering::{
@@ -37,6 +50,11 @@ pub use diagnostics::{
     GraphAnalysis, GraphMetrics, GraphSummary,
 };
 pub use error::AnalysisError;
+pub use evidence::{
+    measure_preprocessing_evidence, neighborhood_overlap, ColumnEvidence, ColumnKind,
+    ColumnRelation, EvidenceError, EvidenceOptions, MaskDependency, MissingGroup,
+    PreprocessingEvidence, RelationKind,
+};
 pub use hooks::{label_points, membership_matrix, unclustered_points};
 pub use silhouette::{silhouette_samples, silhouette_score};
 pub use thresholds::{

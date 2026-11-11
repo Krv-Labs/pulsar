@@ -1,6 +1,6 @@
 //! End-to-end parity for the ported pipeline (#63): reading each case's
 //! `input.csv` and `config.yaml` through `pulsar-data` + `pulsar-pipeline`
-//! must reproduce what `scripts/golden/generate.py` froze from `ThemaRS.fit`.
+//! must reproduce what `generate.py` (Python generator, see `tests/fixtures/golden/README.md`) froze from `ThemaRS.fit`.
 //!
 //! The generator fitted the config twice: once with `construction: exact`
 //! (source of `preprocessed`, `ball_maps`, `cosmic_exact`, `stability` and

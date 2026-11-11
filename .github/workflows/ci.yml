@@ -1,189 +1,132 @@
 name: CI
 
+# Tests run on pull requests, and only once a PR is ready for review: a draft
+# runs nothing, CI starts when it is marked ready and re-runs on each push
+# after that. GitHub will not merge a draft.
+#
+# A push to main does not test again (every change arrives through a PR whose
+# `ci gate` passed). It only compiles, to save the Rust cache that PRs
+# restore: GitHub lets a PR read its base branch's caches, never another PR's,
+# so caches are saved from main alone.
+#
+# `ci gate` is the one required status check on main. Branch rules name that
+# job only, so adding or renaming a job never strands a PR on a check that
+# will not report.
+
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Supersede in-flight runs of a PR that has moved on. A push to main is never
+# cancelled: it is what fills the cache.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  TESTS: ${{ github.event_name != 'push' }}
 
 jobs:
-  # Pure-Rust workspace (v1.0 port, ADR 0001). `thema-pulsar` is the PyO3
-  # extension; it needs a host Python and is built and tested by `build`.
   rust:
+    name: rust (fmt, clippy, test)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Check formatting
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: env.TESTS == 'true'
         run: cargo fmt --all --check
-
-      - name: Run Clippy
-        run: cargo clippy --workspace --exclude thema-pulsar --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo test --workspace --exclude thema-pulsar
-
-      - name: Smoke-test the pulsar binary
-        run: cargo run -p pulsar-cli -- --version
+      - if: env.TESTS == 'true'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build the tests (main, for the cache)
+        if: env.TESTS != 'true'
+        run: cargo test --workspace --locked --no-run
+      - if: env.TESTS == 'true'
+        run: cargo test --workspace --locked
+      - name: Smoke-test the binary
+        if: env.TESTS == 'true'
+        run: |
+          cargo run -q --locked -p pulsar-cli -- --version
+          cargo run -q --locked -p pulsar-cli -- config validate params.yaml.sample >/dev/null
 
   msrv:
+    if: ${{ github.event_name != 'push' && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - run: cargo check --workspace --locked
 
-      - name: Install Rust (workspace rust-version)
-        uses: dtolnay/rust-toolchain@1.90
-
-      - name: Check MSRV
-        run: cargo check --workspace --exclude thema-pulsar --locked
-
-  mcp-latest:
+  npm:
+    name: npm package (pack + launcher smoke)
+    if: ${{ github.event_name != 'push' && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          enable-cache: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+          save-if: false
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.10"
-
-      - name: Build wheel
-        run: uv build --wheel
-
-      - name: Install built wheel with latest MCP extra
+          node-version: 22
+      - run: cargo build --release --locked -p pulsar-cli
+      - name: Build packages from the host binary and run the launcher from tarballs
+        run: node npm/scripts/smoke.mjs
+      - name: install.sh end to end (throwaway HOME)
+        run: sh scripts/test-install.sh
+      # The release PR's script, on a scratch copy: it must bump Cargo.toml,
+      # Cargo.lock (still --locked-consistent) and the changelog together.
+      - name: Release script self-check
         run: |
-          uv venv "$RUNNER_TEMP/mcp-venv"
-          wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
-          uv pip install --refresh --python "$RUNNER_TEMP/mcp-venv/bin/python" \
-            "thema-pulsar[mcp] @ file://$GITHUB_WORKSPACE/$wheel"
+          set -euo pipefail
+          scratch=$(mktemp -d)
+          git archive HEAD | tar -x -C "$scratch"
+          cd "$scratch"
+          git init -q
+          sed -i 's/^## \[Unreleased\]$/## [Unreleased]\n\n- ci check/' CHANGELOG.md
+          v=$(node scripts/prepare-release.mjs --version 99.0.0)
+          [ "$v" = 99.0.0 ]
+          grep -q '^version = "99.0.0"' Cargo.toml
+          grep -q '^## \[99.0.0\] - ' CHANGELOG.md
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
 
-      - name: Smoke-test latest FastMCP in-process and over stdio
-        run: "$RUNNER_TEMP/mcp-venv/bin/python scripts/smoke_mcp.py"
-
-  build:
+  # The one required status check. A skipped job is a pass (a push to main
+  # skips the PR-only jobs); a failed or cancelled one is not.
+  ci-gate:
+    name: ci gate
+    needs: [rust, msrv, npm]
+    if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: uv sync --group dev --group mcp --python ${{ matrix.python-version }}
-
-      - name: Check versions (Cargo.toml is source of truth)
-        run: uv run python scripts/check_versions.py
-
-      - name: Run Clippy
-        if: matrix.python-version == '3.13'
-        run: cargo clippy -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --lib
-
-      - name: Build Rust extension
-        run: uv run maturin develop --release
-
-      - name: Run Python tests
-        run: uv run pytest -v
-
-      - name: Run Ruff lint checks
-        if: matrix.python-version == '3.13'
-        run: uv run ruff check pulsar tests demos
-
-      - name: Run Ruff formatting checks
-        if: matrix.python-version == '3.13'
-        run: uv run ruff format --check pulsar tests demos
-
-  # `pulsar install` hand-rolls Windows console access (CONIN$/CONOUT$, msvcrt,
-  # ENABLE_VIRTUAL_TERMINAL_PROCESSING) that no POSIX runner can reach. Windows
-  # wheels ship from release.yml, so without this job that code is shipped
-  # unverified. Needs the full Rust build because `pulsar.cli.main` imports
-  # `pulsar`, which imports the `pulsar._pulsar` extension.
-  windows-cli:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: uv sync --group dev --python 3.12
-
-      - name: Build Rust extension
-        run: uv run maturin develop --release
-
-      - name: Probe console detection
-        run: uv run python scripts/probe_console.py
-
-      - name: Run CLI install tests
-        run: uv run pytest tests/test_install_menu.py tests/test_install_harness.py -v
-
-  # Native macOS Intel (x86_64) smoke for the MCP packaging path users hit via
-  # `uvx --from "thema-pulsar[mcp]" pulsar-mcp`. Linux CI never exercises this ABI.
-  # Runner: macos-15-intel (GitHub's last hosted Intel image; retires ~Aug 2027).
-  macos-intel-mcp:
-    runs-on: macos-15-intel
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: uv sync --group dev --group mcp --python 3.12
-
-      - name: Build Rust extension
-        run: uv run maturin develop --release
-
-      - name: Smoke-test MCP import path
-        run: uv run python scripts/smoke_mcp.py
-
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: ${RESULTS}"
+          for r in ${RESULTS}; do
+            case "$r" in success|skipped) ;; *) echo "::error::a required job ended ${r}"; exit 1 ;; esac
+          done

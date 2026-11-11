@@ -1,0 +1,668 @@
+{
+ "n_rows": 60,
+ "n_columns": 20,
+ "columns": [
+  {
+   "name": "id",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 1,
+   "observed_min": 0.0,
+   "observed_max": 59.0,
+   "integer_valued": true,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 1.7034198966380236,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "a",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 1.6324677647006651,
+   "observed_max": 16.755776856690854,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.9169349322806895,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "b",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 1.4858910764893565,
+   "observed_max": 8.705701716128937,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.090966321983877,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "c_sum",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 7.022269496705718,
+   "observed_max": 23.529132514866244,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.3919768386532665,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "d_dup",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 1.6324677647006651,
+   "observed_max": 16.755776856690854,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.9169349322806895,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "e_corr",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 1.6109828855678825,
+   "observed_max": 13.599028550292328,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.7690464806803834,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "f",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 5,
+   "missing_fraction": 0.08333333333333333,
+   "n_unique": 55,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 1.029332278567205,
+   "observed_max": 8.943057483724925,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 2.0324060526744883,
+   "missing_group": "mg1",
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "g",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 5,
+   "missing_fraction": 0.08333333333333333,
+   "n_unique": 55,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 2.1210150493572035,
+   "observed_max": 7.901256786850482,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 1.8855131902045341,
+   "missing_group": "mg1",
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "h",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": -2.3517785718123663,
+   "observed_max": 3.380749507419593,
+   "integer_valued": false,
+   "nonnegative": false,
+   "minority_fraction": null,
+   "max_abs_z": 2.9286238208571094,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "flag",
+   "kind": "boolean",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 2,
+   "unique_ratio": 0.03333333333333333,
+   "is_constant": false,
+   "n_zero": 24,
+   "observed_min": 0.0,
+   "observed_max": 1.0,
+   "integer_valued": null,
+   "nonnegative": true,
+   "minority_fraction": 0.4,
+   "max_abs_z": 1.224744871391589,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "m1",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 24,
+   "missing_fraction": 0.4,
+   "n_unique": 36,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": 0,
+   "observed_min": 1.0868233896345747,
+   "observed_max": 3.991807617365264,
+   "integer_valued": false,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 1.7953153979410628,
+   "missing_group": null,
+   "mask_dependency": {
+    "column": "m1",
+    "partner": "flag",
+    "relation": "missing_when_partner_zero",
+    "n_other_partners": 0
+   },
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "cnt",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 6,
+   "unique_ratio": 0.1,
+   "is_constant": false,
+   "n_zero": 6,
+   "observed_min": 0.0,
+   "observed_max": 5.0,
+   "integer_valued": true,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": 1.6816030000289777,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "const",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 1,
+   "unique_ratio": 0.016666666666666666,
+   "is_constant": true,
+   "n_zero": 0,
+   "observed_min": 7.0,
+   "observed_max": 7.0,
+   "integer_valued": true,
+   "nonnegative": true,
+   "minority_fraction": null,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "cat2",
+   "kind": "text",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 2,
+   "unique_ratio": 0.03333333333333333,
+   "is_constant": false,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": 0.15,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "cat3",
+   "kind": "text",
+   "n_rows": 60,
+   "n_missing": 1,
+   "missing_fraction": 0.016666666666666666,
+   "n_unique": 3,
+   "unique_ratio": 0.05084745762711865,
+   "is_constant": false,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": null,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "money",
+   "kind": "numeric_text",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": null,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": [
+    [
+     "?",
+     1
+    ],
+    [
+     "tbd",
+     1
+    ]
+   ],
+   "n_non_numeric": 2
+  },
+  {
+   "name": "when",
+   "kind": "datetime_like",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 60,
+   "unique_ratio": 1.0,
+   "is_constant": false,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": null,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "is_ok",
+   "kind": "boolean",
+   "n_rows": 60,
+   "n_missing": 1,
+   "missing_fraction": 0.016666666666666666,
+   "n_unique": 2,
+   "unique_ratio": 0.03389830508474576,
+   "is_constant": false,
+   "n_zero": 28,
+   "observed_min": 0.0,
+   "observed_max": 1.0,
+   "integer_valued": null,
+   "nonnegative": true,
+   "minority_fraction": 0.4745762711864407,
+   "max_abs_z": 1.0522085616183028,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "allnan",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 60,
+   "missing_fraction": 1.0,
+   "n_unique": 0,
+   "unique_ratio": 0.0,
+   "is_constant": true,
+   "n_zero": null,
+   "observed_min": null,
+   "observed_max": null,
+   "integer_valued": null,
+   "nonnegative": null,
+   "minority_fraction": null,
+   "max_abs_z": null,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  },
+  {
+   "name": "neg",
+   "kind": "numeric",
+   "n_rows": 60,
+   "n_missing": 0,
+   "missing_fraction": 0.0,
+   "n_unique": 7,
+   "unique_ratio": 0.11666666666666667,
+   "is_constant": false,
+   "n_zero": 12,
+   "observed_min": -3.0,
+   "observed_max": 3.0,
+   "integer_valued": true,
+   "nonnegative": false,
+   "minority_fraction": null,
+   "max_abs_z": 1.684857798353289,
+   "missing_group": null,
+   "mask_dependency": null,
+   "non_numeric_values": null,
+   "n_non_numeric": null
+  }
+ ],
+ "missing_groups": [
+  {
+   "group_id": "mg1",
+   "columns": [
+    "f",
+    "g"
+   ],
+   "n_missing": 5,
+   "zero_free_columns": [
+    "f",
+    "g"
+   ]
+  }
+ ],
+ "mask_dependencies": [
+  {
+   "column": "m1",
+   "partner": "flag",
+   "relation": "missing_when_partner_zero",
+   "n_other_partners": 0
+  }
+ ],
+ "relations": [
+  {
+   "kind": "duplicate",
+   "target": "d_dup",
+   "sources": [
+    "a"
+   ],
+   "value": 0.0,
+   "rows_used": 60
+  },
+  {
+   "kind": "sum_of",
+   "target": "c_sum",
+   "sources": [
+    "a",
+    "b"
+   ],
+   "value": 3.552713678800501e-15,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "e_corr",
+   "sources": [
+    "a"
+   ],
+   "value": 0.9757794114065386,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "e_corr",
+   "sources": [
+    "d_dup"
+   ],
+   "value": 0.9757794114065386,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "d_dup",
+   "sources": [
+    "c_sum"
+   ],
+   "value": 0.8660883060142678,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "e_corr",
+   "sources": [
+    "c_sum"
+   ],
+   "value": 0.8435795303632911,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "m1",
+   "sources": [
+    "b"
+   ],
+   "value": 0.33052322630471304,
+   "rows_used": 36
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "f",
+   "sources": [
+    "c_sum"
+   ],
+   "value": 0.32335789320947605,
+   "rows_used": 55
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "is_ok",
+   "sources": [
+    "b"
+   ],
+   "value": 0.30888601185431885,
+   "rows_used": 59
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "f",
+   "sources": [
+    "e_corr"
+   ],
+   "value": 0.30644583346756415,
+   "rows_used": 55
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "f",
+   "sources": [
+    "a"
+   ],
+   "value": 0.29486495633830156,
+   "rows_used": 55
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "f",
+   "sources": [
+    "d_dup"
+   ],
+   "value": 0.29486495633830156,
+   "rows_used": 55
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "h",
+   "sources": [
+    "id"
+   ],
+   "value": 0.28222907249791995,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "m1",
+   "sources": [
+    "id"
+   ],
+   "value": 0.28135491201069657,
+   "rows_used": 36
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "is_ok",
+   "sources": [
+    "m1"
+   ],
+   "value": 0.24461528844806496,
+   "rows_used": 35
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "cnt",
+   "sources": [
+    "e_corr"
+   ],
+   "value": 0.2187412463031749,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "b",
+   "sources": [
+    "id"
+   ],
+   "value": 0.21812217332434125,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "neg",
+   "sources": [
+    "flag"
+   ],
+   "value": 0.21164317410844258,
+   "rows_used": 60
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "g",
+   "sources": [
+    "b"
+   ],
+   "value": 0.2007860626939953,
+   "rows_used": 55
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "h",
+   "sources": [
+    "f"
+   ],
+   "value": 0.18664767613628122,
+   "rows_used": 55
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "is_ok",
+   "sources": [
+    "c_sum"
+   ],
+   "value": 0.1858607313718854,
+   "rows_used": 59
+  },
+  {
+   "kind": "strong_correlation",
+   "target": "flag",
+   "sources": [
+    "id"
+   ],
+   "value": 0.1846590861864202,
+   "rows_used": 60
+  }
+ ],
+ "cost": {
+  "rows_sampled": 60,
+  "numeric_columns_considered": 16,
+  "steps_skipped": []
+ }
+}

@@ -16,4 +16,8 @@ ndarray = "0.16"
 parquet = { version = "57", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
 pulsar-config = { path = "../pulsar-config" }
 pulsar-core = { path = "../pulsar-core" }
+serde = "1"
 thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

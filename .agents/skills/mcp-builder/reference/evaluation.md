@@ -379,6 +379,8 @@ Remember to parallelize solving tasks to avoid running out of context, then accu
 
 After creating your evaluation file, you can use the provided evaluation harness to test your MCP server.
 
+> **Pulsar note:** this repository contains no Python, so the harness (`scripts/evaluation.py`, `scripts/requirements.txt`) is not vendored here. Use the upstream `mcp-builder` skill's copy if you need it.
+
 ## Setup
 
 1. **Install Dependencies**

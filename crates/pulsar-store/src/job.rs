@@ -256,7 +256,8 @@ impl JobHandle {
         }
     }
 
-    /// Write the run (record and sidecars), then mark the job `complete`.
+    /// Write the run (record and sidecars), mark the job `complete`, then
+    /// prune the dataset's runs beyond [`crate::StoreOptions::run_retention`].
     /// Allowed from `queued` as well, for synchronous callers.
     pub fn complete(&self, record: &RunRecord, artifacts: &RunArtifacts) -> Result<(), StoreError> {
         let mut live = self.lock();
@@ -272,7 +273,10 @@ impl JobHandle {
         live.record.stage = "complete".to_owned();
         live.record.progress = 1.0;
         live.record.finished_at = Some(now_seconds());
-        Self::write(&mut live, &self.inner.path, true)
+        Self::write(&mut live, &self.inner.path, true)?;
+        // Retention is housekeeping: the run is saved whether or not it works.
+        let _ = self.inner.store.prune_runs(record);
+        Ok(())
     }
 
     /// Mark the job `failed` with a stable code and a message.

@@ -1,218 +1,168 @@
 name: Release
 
+# Build the binary for every platform, assemble the npm packages and publish
+# them to npmjs.com (@krv-labs scope, public, with provenance). Authenticates
+# with npm trusted publishing (OIDC; each package trusts this file,
+# release.yml, in Krv-Labs/pulsar) or, until that is configured, the NPM_TOKEN
+# secret (needed for a package's first publish). The name is pulsar
+# (binary, @krv-labs/pulsar, @krv-labs/pulsar-<platform>); it must match
+# NAME in npm/scripts/build-packages.mjs and the pulsar-cli [[bin]] name.
+# Runs on version tags, and is dispatched on the new tag by release-tag.yml
+# when a release PR merges (a tag made with GITHUB_TOKEN starts no workflow; a
+# dispatch does). Publishing always runs from this file, so trusted publishing
+# has one workflow to trust. A manual workflow_dispatch on a branch builds
+# everything and runs a publish dry run. A real publish only ever runs from a v* tag (dispatch with
+# publish=true on any other ref fails), so the tag-vs-version check always runs.
+# A rerun after a partial failure skips packages already on npmjs.com.
+# Prerelease versions (with a '-') publish under the `next` dist-tag.
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Existing release tag to refresh (for example v0.4.0)
-        required: true
-        type: string
+      publish:
+        description: Publish to npmjs.com (otherwise dry run)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  NAME: pulsar
+
 jobs:
-  linux:
-    # Native hosts so we can install+smoke the wheel (aarch64 was previously
-    # cross-compiled on x86_64 and could not be executed there).
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+  build:
+    name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13
-          sccache: 'true'
-          manylinux: auto
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Smoke-test installed wheel + MCP
-        shell: bash
-        run: |
-          WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
-          test -n "$WHEEL"
-          python -m pip install --upgrade pip
-          python -m pip install "${WHEEL}[mcp]"
-          python scripts/smoke_mcp.py
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.target }}
-          path: dist
-
-  windows:
-    runs-on: windows-latest
     strategy:
+      # publish needs every build, so one failure still stops the release; with
+      # fail-fast off the other targets finish and "Re-run failed jobs" rebuilds
+      # only the broken one (a runner's apt mirror blip used to cancel all eight).
+      fail-fast: false
       matrix:
-        target: [x86_64-pc-windows-msvc]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          # windows-2025 no longer preinstalls 3.10/3.11/3.13 in the toolcache.
-          # maturin -i python3.10 then falls back to bundled sysconfig and
-          # refuses to build without a real interpreter.
-          # Last entry is the one left on PATH. The smoke step installs the
-          # cp312 wheel with `python`, so 3.12 must stay last.
-          python-version: |
-            3.10
-            3.11
-            3.13
-            3.12
-          architecture: x64
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13
-          sccache: 'true'
-
-      - name: Smoke-test installed wheel + MCP
-        shell: bash
-        run: |
-          WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
-          test -n "$WHEEL"
-          python -m pip install --upgrade pip
-          python -m pip install "${WHEEL}[mcp]"
-          python scripts/smoke_mcp.py
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows-${{ matrix.target }}
-          path: dist
-
-  macos:
-    # Build x86_64 wheels natively on Intel instead of cross-compiling from
-    # arm64 macos-latest — catches ABI issues that only show up on Mac Intel.
-    strategy:
-      matrix:
+        # Linux builds pin an Ubuntu release instead of ubuntu-latest: the glibc
+        # binaries need the oldest glibc we support (24.04's 2.39, the same on
+        # both arches), and ubuntu-latest (26.04) fetches musl-tools from a host
+        # its x86 runners cannot resolve.
         include:
-          - target: x86_64-apple-darwin
-            os: macos-15-intel
-          - target: aarch64-apple-darwin
-            os: macos-latest
-    runs-on: ${{ matrix.os }}
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          # Cross-compiled with the image's MSVC ARM64 tools (no ARM Windows
+          # runner for private repos); CI cannot execute this binary.
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          python-version: '3.12'
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
+          toolchain: stable   # required when pinned by SHA (the action reads it from the ref otherwise)
           targets: ${{ matrix.target }}
-
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
+      - if: matrix.musl
+        # Retried: the runner's apt mirrors fail to resolve now and then.
+        run: |
+          for try in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y musl-tools && break
+            echo "apt failed (attempt $try); retrying in 20 s"; sleep 20
+          done
+          command -v musl-gcc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13
-          sccache: 'true'
-
-      - name: Smoke-test installed wheel + MCP
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked -p pulsar-cli --target ${{ matrix.target }}
+      - name: Stage binary
         shell: bash
         run: |
-          WHEEL=$(ls dist/thema_pulsar-*-cp312-*.whl | head -1)
-          test -n "$WHEEL"
-          python -m pip install --upgrade pip
-          python -m pip install "${WHEEL}[mcp]"
-          python scripts/smoke_mcp.py
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
+          exe=$NAME; [ "${{ runner.os }}" = Windows ] && exe=$NAME.exe
+          mkdir -p stage/${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/$exe stage/${{ matrix.target }}/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: wheels-macos-${{ matrix.target }}
-          path: dist
+          name: bin-${{ matrix.target }}
+          path: stage/${{ matrix.target }}
+          if-no-files-found: error
 
-  sdist:
+  publish:
+    needs: build
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-
-      - name: Verify sdist license
-        run: tar -tzf dist/*.tar.gz | grep -E '/LICENSE$'
-
-      - name: Upload sdist
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: dist
-
-  release:
-    name: Release
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [linux, windows, macos, sdist]
     permissions:
-      id-token: write
-      contents: write
+      contents: read
+      id-token: write   # npm provenance
     steps:
-      - name: Download all wheels
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          path: dist
-          pattern: wheels-*
-          merge-multiple: true
-
-      - name: Verify requested release version
-        if: github.event_name == 'workflow_dispatch'
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          scope: '@krv-labs'
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
+      - run: npm install -g npm@^11.5.1 && npm --version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: bin-*
+          path: binaries
+      - name: Arrange binaries as <target>/<NAME>
         run: |
-          sdists=(dist/thema_pulsar-*.tar.gz)
-          test "${#sdists[@]}" -eq 1
-          filename="${sdists[0]##*/}"
-          version="${filename#thema_pulsar-}"
-          version="${version%.tar.gz}"
-          test "${{ inputs.release_tag }}" = "v${version}"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
-          files: dist/*
-          fail_on_unmatched_files: true
-          overwrite_files: true
-          generate_release_notes: true
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-          skip-existing: ${{ github.event_name == 'workflow_dispatch' || github.run_attempt > 1 }}
+          for d in binaries/bin-*; do mv "$d" "binaries/${d#binaries/bin-}"; done
+          ls -R binaries | head -30
+      - name: Check the tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="$(grep -m1 -A3 '^\[workspace.package\]' Cargo.toml | grep '^version' | cut -d'"' -f2)"
+          test "v$want" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != workspace version v$want"; exit 1; }
+      - name: Build npm packages (all eight platforms required)
+        run: node npm/scripts/build-packages.mjs --binaries binaries --out dist --require-all
+      - name: Publish (platform packages first, then the launcher)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Not `cond && '' || '--dry-run'`: '' is falsy in expressions, so that
+          # form always dry-ran, even on a tag. Use non-empty values.
+          MODE: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.publish) && 'publish' || 'dry-run' }}
+        run: |
+          echo "mode: $MODE"
+          case "$GITHUB_REF" in
+            refs/tags/v*) [ "$MODE" = publish ] || { echo "a tag run must publish, got mode $MODE"; exit 1; } ;;
+            *) if [ "$MODE" = publish ]; then echo "publishing is only allowed from a v* tag, not $GITHUB_REF"; exit 1; fi ;;
+          esac
+          if [ "$MODE" = publish ] && [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::no NPM_TOKEN secret: publishing with npm trusted publishing (OIDC). A package's first publish needs the token."
+          fi
+          version=$(node -p "require('./dist/$NAME/package.json').version")
+          ARGS=""; [ "$MODE" = publish ] || ARGS="--dry-run"
+          case "$version" in *-*) ARGS="$ARGS --tag next" ;; esac
+          publish() {
+            pkg=$(node -p "require('./$1/package.json').name")
+            if [ "$MODE" = publish ] && npm view "$pkg@$version" version >/dev/null 2>&1; then
+              echo "already published, skipping: $pkg@$version"; return
+            fi
+            (cd "$1" && npm publish $ARGS)
+          }
+          for d in dist/$NAME-*; do publish "$d"; done
+          publish "dist/$NAME"
+      - name: Verify the release on npmjs.com
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        run: |
+          version=$(node -p "require('./dist/$NAME/package.json').version")
+          # Every package resolves at this version (retry while the registry catches up).
+          for d in dist/$NAME dist/$NAME-*; do
+            pkg=$(node -p "require('./$d/package.json').name")
+            for try in 1 2 3 4 5 6; do
+              got=$(npm view "$pkg@$version" version 2>/dev/null || true)
+              [ "$got" = "$version" ] && break
+              sleep 10
+            done
+            [ "$got" = "$version" ] || { echo "not on npmjs.com: $pkg@$version"; exit 1; }
+            echo "published: $pkg@$version"
+          done
+          # A clean install from the registry runs.
+          fresh=$(mktemp -d) && cd "$fresh"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --loglevel=error "@krv-labs/$NAME@$version"
+          out=$(npx --no-install "$NAME" --version)
+          echo "installed: $out"
+          [ "$out" = "$NAME $version" ] || { echo "expected '$NAME $version'"; exit 1; }

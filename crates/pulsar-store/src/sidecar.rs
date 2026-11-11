@@ -14,7 +14,7 @@ use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use pulsar_pipeline::Graph;
 
-use crate::atomic::write_atomic;
+use crate::atomic::{stage_atomic, write_atomic, StagedFile};
 use crate::error::{io, StoreError};
 
 const META_N: &str = "pulsar.n";
@@ -117,12 +117,12 @@ pub(crate) fn read_edges(path: &Path) -> Result<Graph, StoreError> {
     Ok(Graph { n, edges })
 }
 
-/// Write a label vector as one `label: i64` column.
-pub(crate) fn write_labels(path: &Path, labels: &[i64]) -> Result<(), StoreError> {
+/// Stage a label vector as one `label: i64` column; the caller commits it.
+pub(crate) fn stage_labels(path: &Path, labels: &[i64]) -> Result<StagedFile, StoreError> {
     let schema = Schema::new(vec![Field::new("label", DataType::Int64, false)]);
     let columns: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(labels.to_vec()))];
     let bytes = encode(schema, columns, path, "label vector")?;
-    write_atomic(path, &bytes, true)
+    stage_atomic(path, &bytes, true)
 }
 
 pub(crate) fn read_labels(path: &Path) -> Result<Vec<i64>, StoreError> {
@@ -162,7 +162,7 @@ mod tests {
 
         let labels = vec![0, 0, 1, -1, 2];
         let lpath = root.path().join("labels.arrow");
-        write_labels(&lpath, &labels).unwrap();
+        stage_labels(&lpath, &labels).unwrap().commit().unwrap();
         assert_eq!(read_labels(&lpath).unwrap(), labels);
 
         std::fs::write(&lpath, b"not arrow").unwrap();
