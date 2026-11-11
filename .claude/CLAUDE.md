@@ -26,7 +26,10 @@ directory and the backup suffix (`*.pulsar.backup`); `@krv-labs/pulsar` (+
 `pulsar_install::NAME` and `launch::PACKAGE`, `fsops::BACKUP_SUFFIX`,
 `pulsar_store::APP_DIR`, the MCP `serverInfo` name, `NAME` in
 `npm/scripts/build-packages.mjs` (stamped into the launcher), `NAME` in
-`.github/workflows/release.yml`, `scripts/install.sh` and `scripts/test-install.sh`.
+`.github/workflows/release.yml`, `scripts/install.sh`, `scripts/test-install.sh`,
+and the Claude Code plugin (`.claude-plugin/marketplace.json`, `plugins/pulsar/`: its
+`plugin.json` version and the `@krv-labs/pulsar@X.Y.Z` that `.mcp.json` pins are stamped by
+`scripts/prepare-release.mjs`).
 
 ## Commands
 

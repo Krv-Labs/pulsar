@@ -1,0 +1,13 @@
+{
+  "name": "pulsar",
+  "version": "0.7.0",
+  "description": "Topological data analysis for tabular data: find the shape and groups in a CSV or Parquet file, with calibrated measurements and provenance.",
+  "author": {
+    "name": "Krv Labs",
+    "url": "https://github.com/Krv-Labs"
+  },
+  "homepage": "https://github.com/Krv-Labs/pulsar",
+  "repository": "https://github.com/Krv-Labs/pulsar",
+  "license": "BSD-3-Clause",
+  "keywords": ["topology", "tda", "clustering", "data-analysis", "mcp", "csv", "parquet"]
+}

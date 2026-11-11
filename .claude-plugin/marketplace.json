@@ -1,0 +1,17 @@
+{
+  "name": "krv-labs",
+  "owner": {
+    "name": "Krv Labs",
+    "url": "https://github.com/Krv-Labs"
+  },
+  "metadata": {
+    "description": "Plugins from Krv Labs."
+  },
+  "plugins": [
+    {
+      "name": "pulsar",
+      "source": "./plugins/pulsar",
+      "description": "Topological data analysis for tabular data: find the shape and groups in a CSV or Parquet file, with calibrated measurements and provenance."
+    }
+  ]
+}

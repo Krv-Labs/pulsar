@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pulsar": {
+      "command": "npx",
+      "args": ["-y", "@krv-labs/pulsar@0.7.0", "mcp"]
+    }
+  }
+}

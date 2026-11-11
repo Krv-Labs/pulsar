@@ -13,7 +13,9 @@
 // version in Cargo.toml. Writes the version into Cargo.toml's
 // [workspace.package] (every crate inherits it; release.yml checks the tag
 // against it) and into Cargo.lock's entries for the workspace's own crates,
-// and renames CHANGELOG.md's [Unreleased] section to [X.Y.Z] - <today> under a
+// stamps the Claude Code plugin (plugins/pulsar: plugin.json's version and
+// the @krv-labs/pulsar@X.Y.Z that .mcp.json launches; reviewers reject an
+// unpinned npx launcher), and renames CHANGELOG.md's [Unreleased] section to [X.Y.Z] - <today> under a
 // fresh, empty [Unreleased]. Refuses an empty [Unreleased]: a release says
 // what changed. Prints the version. No dependencies and no cargo, so it runs
 // before any install.
@@ -97,7 +99,18 @@ const newLock = lock
   .join("\n[[package]]\n");
 if (bumped === 0) fail("found no workspace crates in Cargo.lock");
 
+// The plugin pins the package it launches; both must name the new version.
+const PLUGIN = "plugins/pulsar/.claude-plugin/plugin.json";
+const PLUGIN_MCP = "plugins/pulsar/.mcp.json";
+const PIN = /@krv-labs\/pulsar@\d+\.\d+\.\d+/g;
+const pluginText = readFileSync(PLUGIN, "utf8");
+const pluginMcp = readFileSync(PLUGIN_MCP, "utf8");
+if (!/^\s*"version":\s*"[^"]*"/m.test(pluginText)) fail(`${PLUGIN} has no version`);
+if ((pluginMcp.match(PIN) || []).length !== 1) fail(`${PLUGIN_MCP} must launch exactly one pinned @krv-labs/pulsar@X.Y.Z`);
+
 writeFileSync("Cargo.toml", cargo.replace(WORKSPACE_VERSION, `$1${version}$3`));
+writeFileSync(PLUGIN, pluginText.replace(/^(\s*"version":\s*")[^"]*(")/m, `$1${version}$2`));
+writeFileSync(PLUGIN_MCP, pluginMcp.replace(PIN, `@krv-labs/pulsar@${version}`));
 writeFileSync("Cargo.lock", newLock);
 writeFileSync(
   "CHANGELOG.md",

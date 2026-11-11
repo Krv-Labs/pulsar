@@ -47,6 +47,11 @@ jobs:
           files="$(grep -m1 -A3 '^\[workspace.package\]' Cargo.toml | grep '^version' | cut -d'"' -f2)"
           [ "${files}" = "${version}" ] \
             || { echo "::error::branch says ${version}, Cargo.toml says ${files}"; exit 1; }
+          plugin="$(jq -r .version plugins/pulsar/.claude-plugin/plugin.json)"
+          [ "${plugin}" = "${version}" ] \
+            || { echo "::error::branch says ${version}, the plugin manifest says ${plugin}"; exit 1; }
+          grep -q "@krv-labs/pulsar@${version}\"" plugins/pulsar/.mcp.json \
+            || { echo "::error::plugins/pulsar/.mcp.json does not launch @krv-labs/pulsar@${version}"; exit 1; }
           grep -q "^## \[${version}\] - " CHANGELOG.md \
             || { echo "::error::CHANGELOG.md has no dated [${version}] section"; exit 1; }
           if existing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${version}" --jq .object.sha 2>/dev/null); then

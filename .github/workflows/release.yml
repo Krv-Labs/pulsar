@@ -148,13 +148,14 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
         run: |
           version=$(node -p "require('./dist/$NAME/package.json').version")
-          # Every package resolves at this version (retry while the registry catches up).
+          # Every package resolves at this version. npm processes a new version
+          # asynchronously ("may take a few minutes"), so wait up to 10 minutes each.
           for d in dist/$NAME dist/$NAME-*; do
             pkg=$(node -p "require('./$d/package.json').name")
-            for try in 1 2 3 4 5 6; do
+            for try in $(seq 1 40); do
               got=$(npm view "$pkg@$version" version 2>/dev/null || true)
               [ "$got" = "$version" ] && break
-              sleep 10
+              sleep 15
             done
             [ "$got" = "$version" ] || { echo "not on npmjs.com: $pkg@$version"; exit 1; }
             echo "published: $pkg@$version"

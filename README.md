@@ -26,6 +26,14 @@ Antigravity. Every config it edits is backed up first (`*.pulsar.backup`),
 files with comments it would drop are refused, and only Pulsar's own entries
 are ever changed. `pulsar uninstall` removes exactly what it added.
 
+In Claude Code you can install it as a plugin instead, which adds the MCP server and a
+skill that walks the agent through the analysis loop:
+
+```
+/plugin marketplace add Krv-Labs/pulsar
+/plugin install pulsar@krv-labs
+```
+
 Or point any MCP host at it directly:
 
 ```json
